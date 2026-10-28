@@ -584,11 +584,13 @@ pub(super) enum WorkerRootReset {
     /// state on a bare target, then make sure the worker root exists.
     FreshTarget,
     /// The environment is being kept and only the harness replaced. Stop the
-    /// live daemon, clear relay state, unlink the installed worker files, and
-    /// remove the previous per-session profile home. Runs on every locator.
+    /// live daemon and clear relay state. A compatible native Move keeps its
+    /// executable and native home; a full replacement removes them.
     InPlace {
         /// The per-session profile root the replaced harness ran from.
         previous_profile_root: String,
+        /// The compatible native conversation and executable already exist here.
+        retain_native: bool,
     },
 }
 
@@ -627,8 +629,8 @@ pub(super) struct RestoreIntoTarget<'a> {
 }
 
 impl Controller {
-    /// Install the worker, restore the archive into the target, start the
-    /// harness, and report the projection the destination answers with.
+    /// Prepare the destination worker, seed its relay, start the harness, and
+    /// report the projection the destination answers with.
     pub(super) async fn restore_into_target(
         &mut self,
         session_id: &str,
@@ -656,6 +658,13 @@ impl Controller {
             } = restore;
             let archive_manifest = &archive.manifest;
             let canonical_session = &archive.canonical_session;
+            let retain_native = matches!(
+                &worker_root_reset,
+                WorkerRootReset::InPlace {
+                    retain_native: true,
+                    ..
+                }
+            );
             // Sub-agents the suspend stopped: the model hears about them on its
             // first prompt, and the person in a conversation line. The list is
             // kept until the relay has the note, so a resume that fails tells
@@ -792,102 +801,129 @@ impl Controller {
                             )?,
                         )?;
                     }
-                    // The environment survives this restore, so the old
-                    // harness has to be taken out of it: its daemon, its relay
-                    // state, the installed worker files, and its profile home.
-                    // The same command recreates the worker root.
+                    // Stop the owning process before changing its files. A
+                    // native continuation needs only a fresh relay; a new
+                    // harness also replaces its executable and native home.
                     WorkerRootReset::InPlace {
                         previous_profile_root,
+                        retain_native,
                     } => {
-                        execute_checked(
-                            syncing,
+                        let reset = if *retain_native {
+                            targets::retained_native_worker_reset_plan(&backend, session_id)?
+                        } else {
                             targets::in_place_worker_reset_plan(
                                 &backend,
                                 session_id,
                                 previous_profile_root,
-                            )?,
-                        )?;
+                            )?
+                        };
+                        execute_checked(syncing, reset)?;
                     }
                 }
             }
-            let staging = tempfile::tempdir().context("create restore staging")?;
-            let local_spec = staging.path().join("restore-spec.json");
-            std::fs::write(&local_spec, serde_json::to_vec_pretty(&restore)?)?;
-            // Two independent lanes into the target. The checkpoint transfer
-            // needs nothing from the worker install, and the worker install
-            // is independent of archive upload, so both run concurrently.
-            let controller = &*self;
-            let backend_ref = &backend;
-            let worker_root_ref = worker_root.as_str();
-            let local_spec_ref = local_spec.as_path();
-            // The archive lands in the worker root and unpacks into the
-            // workspace and the harness home; each filesystem needs room.
-            crate::target_storage::ensure_room_for(
-                &backend,
-                [
-                    worker_root.as_str(),
-                    workspace_root.as_str(),
-                    harness_home.as_str(),
-                ],
-                || {
-                    Ok(std::fs::metadata(restored_archive)
-                        .with_context(|| format!("measure {}", restored_archive.display()))?
-                        .len())
-                },
-                "restore the checkpoint",
-            )?;
-            execute_concurrent_lanes(
-                || {
-                    let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-                    controller.prepare_worker_files(
-                        session_id,
-                        backend_ref,
-                        worker_root_ref,
-                        syncing,
-                    )?;
-                    super::provisioning::install_inherited_git_settings(
-                        syncing,
-                        backend_ref,
-                        session_id,
-                    )?;
-                    Ok(())
-                },
-                || {
-                    let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                    if should_upload_restore_archive(&backend) {
-                        upload_checkpoint_spec(
-                            restoring,
-                            backend_ref,
-                            session_id,
-                            restored_archive,
-                            &remote_archive,
-                        )?;
-                    }
-                    upload_checkpoint_spec(
-                        restoring,
-                        backend_ref,
-                        session_id,
-                        local_spec_ref,
-                        &remote_spec,
-                    )
-                },
-            )?;
-            {
-                let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                execute_checked(
-                    restoring,
-                    restore_command(&backend, session_id, &remote_spec)?,
-                )?;
-            }
-            if should_install_attached_resources {
+            if retain_native {
                 let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-                install_attached_resources(
-                    &self.state,
+                self.prepare_worker_files_for(
                     session_id,
                     &backend,
                     &worker_root,
                     syncing,
+                    super::worker_binary::WorkerFilePreparation::RefreshProfile,
                 )?;
+                let seed = mj_checkpoint::checkpoint::relay_seed_for_restore(
+                    canonical_session,
+                    true,
+                    queue_policy,
+                )?;
+                let staging = tempfile::tempdir().context("stage retained native relay seed")?;
+                let local_seed = staging
+                    .path()
+                    .join(mj_core::relay::RESTORED_RELAY_SEED_FILE);
+                mj_core::config::atomic_write(&local_seed, &serde_json::to_vec(&seed)?)?;
+                let remote_seed = mj_core::target_path::text(
+                    &mj_core::relay::restored_relay_seed_path(Path::new(&worker_root)),
+                );
+                upload_checkpoint_spec(syncing, &backend, session_id, &local_seed, &remote_seed)?;
+            } else {
+                let staging = tempfile::tempdir().context("create restore staging")?;
+                let local_spec = staging.path().join("restore-spec.json");
+                std::fs::write(&local_spec, serde_json::to_vec_pretty(&restore)?)?;
+                // Two independent lanes into the target. The checkpoint transfer
+                // needs nothing from the worker install, and the worker install
+                // is independent of archive upload, so both run concurrently.
+                let controller = &*self;
+                let backend_ref = &backend;
+                let worker_root_ref = worker_root.as_str();
+                let local_spec_ref = local_spec.as_path();
+                // The archive lands in the worker root and unpacks into the
+                // workspace and the harness home; each filesystem needs room.
+                crate::target_storage::ensure_room_for(
+                    &backend,
+                    [
+                        worker_root.as_str(),
+                        workspace_root.as_str(),
+                        harness_home.as_str(),
+                    ],
+                    || {
+                        Ok(std::fs::metadata(restored_archive)
+                            .with_context(|| format!("measure {}", restored_archive.display()))?
+                            .len())
+                    },
+                    "restore the checkpoint",
+                )?;
+                execute_concurrent_lanes(
+                    || {
+                        let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+                        controller.prepare_worker_files(
+                            session_id,
+                            backend_ref,
+                            worker_root_ref,
+                            syncing,
+                        )?;
+                        super::provisioning::install_inherited_git_settings(
+                            syncing,
+                            backend_ref,
+                            session_id,
+                        )?;
+                        Ok(())
+                    },
+                    || {
+                        let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
+                        if should_upload_restore_archive(&backend) {
+                            upload_checkpoint_spec(
+                                restoring,
+                                backend_ref,
+                                session_id,
+                                restored_archive,
+                                &remote_archive,
+                            )?;
+                        }
+                        upload_checkpoint_spec(
+                            restoring,
+                            backend_ref,
+                            session_id,
+                            local_spec_ref,
+                            &remote_spec,
+                        )
+                    },
+                )?;
+                {
+                    let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
+                    execute_checked(
+                        restoring,
+                        restore_command(&backend, session_id, &remote_spec)?,
+                    )?;
+                }
+                if should_install_attached_resources {
+                    let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+                    install_attached_resources(
+                        &self.state,
+                        session_id,
+                        &backend,
+                        &worker_root,
+                        syncing,
+                    )?;
+                }
             }
             match projection_build {
                 Some(build) => {

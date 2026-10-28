@@ -691,6 +691,13 @@ pub(super) fn link_legacy_mbx_configuration(
     }
 }
 
+pub(super) struct StagedWorkerProfile<'a> {
+    pub launch: &'a Path,
+    pub ownership: &'a Path,
+    pub profile: &'a Path,
+    pub shared_login: Option<&'a SharedLogin>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn install_worker_files(
     executor: &impl CommandExecutor,
@@ -707,6 +714,36 @@ pub(super) fn install_worker_files(
     if let Some(binary) = worker.host_binary() {
         verify_worker_build(binary)?;
     }
+    install_worker_profile_files(
+        executor,
+        locator,
+        session_id,
+        worker_root,
+        profile_home,
+        StagedWorkerProfile {
+            launch: launch_config,
+            ownership,
+            profile: profile_stage,
+            shared_login,
+        },
+    )?;
+    install_worker_binary(executor, locator, session_id, worker, "hel")
+}
+
+pub(super) fn install_worker_profile_files(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    worker_root: &str,
+    profile_home: &str,
+    staged: StagedWorkerProfile<'_>,
+) -> Result<()> {
+    let StagedWorkerProfile {
+        launch: launch_config,
+        ownership,
+        profile: profile_stage,
+        shared_login,
+    } = staged;
     match locator {
         targets::TargetLocator::LocalBare { .. } => {
             if profile_stage.is_dir() {
@@ -953,7 +990,64 @@ pub(super) fn install_worker_files(
             }
         }
     }
-    install_worker_binary(executor, locator, session_id, worker, "hel")
+    Ok(())
+}
+
+/// Refresh configuration without removing native history or skills the harness
+/// maintains itself. Absent destination settings must not inherit the source's.
+pub(super) fn clear_profile_configuration(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    home: &str,
+    harness: HarnessKind,
+) -> Result<()> {
+    let mut paths = profile_configuration_paths(harness);
+    paths.push(harness.credential_file_name());
+    match harness {
+        HarnessKind::Codex => paths.push(STAGED_CATALOG_FILE),
+        HarnessKind::Mimo => paths.push("config"),
+        _ => {}
+    }
+    paths.sort_unstable();
+    paths.dedup();
+    let mut script = String::from("set -eu\n");
+    for relative in paths {
+        let path = mj_core::target_path::join(Path::new(home), Path::new(relative));
+        let quoted = targets::posix_quote(&mj_core::target_path::text(&path));
+        let protected = harness
+            .harness_owned_skill_paths()
+            .iter()
+            .filter_map(|owned| {
+                Path::new(owned)
+                    .strip_prefix(relative)
+                    .ok()
+                    .and_then(|tail| tail.components().next())
+                    .map(|name| targets::posix_quote(&name.as_os_str().to_string_lossy()))
+            })
+            .collect::<Vec<_>>();
+        if protected.is_empty() {
+            script.push_str(&format!("rm -rf -- {quoted}\n"));
+        } else {
+            script.push_str(&format!(
+                "if [ -L {quoted} ]; then rm -f -- {quoted}; else\n\
+                 for entry in {quoted}/* {quoted}/.[!.]* {quoted}/..?*; do\n\
+                 case \"${{entry##*/}}\" in {}) continue ;; esac\n\
+                 rm -rf -- \"$entry\"\ndone\nfi\n",
+                protected.join("|"),
+            ));
+        }
+    }
+    execute_checked(
+        executor,
+        targets::command_on_locator(
+            locator,
+            session_id,
+            vec!["sh".into(), "-c".into(), script],
+            "replace profile configuration while retaining native state",
+        )?,
+    )?;
+    Ok(())
 }
 
 /// Install the session-private SSH metadata; binary installation is shared

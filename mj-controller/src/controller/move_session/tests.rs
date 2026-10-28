@@ -965,6 +965,7 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
 }
 
 #[cfg(unix)]
+// Hard-won: 6b51b56d6: Move preparation waited for a background checkpoint's mutation permit.
 #[test]
 fn move_preparation_can_refresh_a_dead_source_without_starting_its_harness() {
     let name = test_name("move_preparation_can_refresh_a_dead_source_without_starting_its_harness");
@@ -989,10 +990,21 @@ fn move_preparation_can_refresh_a_dead_source_without_starting_its_harness() {
                 project_memory: None,
             }])
             .unwrap();
-        let snapshot = super::refresh_move_source(&manager.control, MOVE_QUEUE_SESSION_ID)
-            .await
-            .unwrap();
+        let checkpoint_owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+            MOVE_QUEUE_SESSION_ID,
+            "background recovery checkpoint",
+        )
+        .unwrap()
+        .unwrap();
+        let snapshot = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            super::refresh_move_source(&manager.control, MOVE_QUEUE_SESSION_ID),
+        )
+        .await
+        .expect("preparation must not wait for checkpoint ownership")
+        .unwrap();
         assert!(snapshot.is_none());
+        drop(checkpoint_owner);
         manager.shutdown.shutdown().await.unwrap();
     });
 }
@@ -2388,6 +2400,9 @@ impl CommandExecutor for RecordingProcessExecutor {
 fn install_in_place_worker_script(worker_root: &Path, frontier: u64, digest: &str) {
     let script = format!(
         r#"case "${{2:-}}" in
+build-id)
+    if [ -f {root}/worker-build ]; then cat {root}/worker-build; else printf '%s\n' '{worker_build}'; fi
+    ;;
 proxy)
     unset {checkpoint_only} MJ_TEST_LATCH_RELAY_MAX_PROTOCOL
     {relay_root}={root}
@@ -2403,6 +2418,7 @@ esac
 exit 0
 "#,
         checkpoint_only = LATCH_CHECKPOINT_ONLY,
+        worker_build = mj_core::worker_build::WORKER_BUILD_ID,
         relay_root = LATCH_RELAY_ROOT,
         root = shell_literal(worker_root),
         binary = shell_literal(&std::env::current_exe().unwrap()),
@@ -2708,6 +2724,7 @@ fn start_source_relay_manager(
 /// environment it found: nothing is destroyed or created, the worker root and
 /// the workspace survive, and only the previous profile home is removed.
 #[cfg(unix)]
+// Hard-won: 6b51b56d6: unchanged native Moves ran provisioning checks and downloads.
 #[test]
 fn bare_move_preparation_normalizes_an_empty_resource_reset() {
     let name = test_name("bare_move_preparation_normalizes_an_empty_resource_reset");
@@ -2724,11 +2741,10 @@ fn bare_move_preparation_normalizes_an_empty_resource_reset() {
         .build()
         .unwrap();
     let prepared = runtime
-        .block_on(
-            fixture
-                .controller
-                .prepare_move_session_controlled(selection, &ProcessExecutor),
-        )
+        .block_on(fixture.controller.prepare_move_session_controlled(
+            selection,
+            &RefusingExecutor("profile-only Move needs no provisioning commands"),
+        ))
         .unwrap();
     assert!(prepared.in_place);
     assert!(!prepared.selection.clear_resource_allocation);
@@ -3218,9 +3234,10 @@ fn in_place_move_with_pre_v32_worker_stops_children_and_reports_fallback() {
 }
 
 #[cfg(unix)]
+// Hard-won: 6b51b56d6: profile-only Move deleted native state and provisioned the same worker again.
 #[test]
-fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
-    let name = test_name("in_place_move_reinstalls_the_harness_without_removing_the_worker_root");
+fn in_place_profile_move_retains_native_state_and_installed_worker() {
+    let name = test_name("in_place_profile_move_retains_native_state_and_installed_worker");
     if std::env::var_os(IN_PLACE_MOVE_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         IsolatedTest::new(name)
@@ -3244,6 +3261,22 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
         mut controller,
         ..
     } = fixture;
+    use std::os::unix::fs::MetadataExt;
+    let installed_worker_inode = fs::symlink_metadata(worker_root.join("hel")).unwrap().ino();
+    let profile = worker_root.join("profile");
+    fs::write(profile.join(".credentials.json"), b"source credentials").unwrap();
+    fs::create_dir_all(profile.join("skills/synced/account")).unwrap();
+    fs::write(
+        profile.join("skills/synced/account/SKILL.md"),
+        b"harness owned",
+    )
+    .unwrap();
+    fs::create_dir_all(profile.join("skills/old-profile")).unwrap();
+    fs::write(profile.join("skills/old-profile/SKILL.md"), b"source skill").unwrap();
+    fs::create_dir_all(profile.join("projects/retained")).unwrap();
+    let native_history = profile.join("projects/retained/native.jsonl");
+    fs::write(&native_history, b"native history stays on its target\n").unwrap();
+    let native_history_inode = fs::metadata(&native_history).unwrap().ino();
     let mut owned = managed_raw_session(mj_core::state::ManagedWorktreeTarget::Local)
         .managed_worktree
         .unwrap();
@@ -3320,7 +3353,11 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
                 && !lowered.contains("podman")
                 && !lowered.contains("docker")
                 && !lowered.contains("create the session worker root")
-                && !lowered.contains("clean"),
+                && !lowered.contains("clean")
+                && !lowered.contains("restore target checkpoint")
+                && !lowered.contains("install shared")
+                && !lowered.contains("prepare exact managed harness")
+                && !lowered.contains("inherit git setting"),
             "an in-place move must not rebuild anything, but it ran {purpose:?} \
              (all: {purposes:?})"
         );
@@ -3353,11 +3390,30 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
         fs::read(checkout.join("untracked.txt")).unwrap(),
         b"agent work"
     );
-    // Every local session owns a staged profile home, macOS included, so the
-    // move replaces it.
+    assert_eq!(
+        fs::read(profile.join("source-only.txt")).unwrap(),
+        b"old harness state"
+    );
+    assert_eq!(
+        fs::metadata(&native_history).unwrap().ino(),
+        native_history_inode
+    );
+    assert_eq!(
+        fs::read(&native_history).unwrap(),
+        b"native history stays on its target\n"
+    );
+    assert_eq!(
+        fs::symlink_metadata(worker_root.join("hel")).unwrap().ino(),
+        installed_worker_inode
+    );
     assert!(
-        !worker_root.join("profile").join("source-only.txt").exists(),
-        "the previous profile home must be gone"
+        !profile.join(".credentials.json").exists(),
+        "the destination has no credential file; do not keep the source's"
+    );
+    assert!(!profile.join("skills/old-profile").exists());
+    assert_eq!(
+        fs::read(profile.join("skills/synced/account/SKILL.md")).unwrap(),
+        b"harness owned"
     );
     let staged_settings: serde_json::Value = serde_json::from_slice(
         &fs::read(worker_root.join("profile").join("settings.json")).unwrap(),
@@ -3744,6 +3800,15 @@ fn in_place_move_to_another_local_bare_target_records_the_new_template() {
         mut controller,
         ..
     } = in_place_fixture(HarnessKind::Codex, HarnessKind::Codex);
+    // A worker retained across a daemon upgrade needs a newer executable,
+    // while its native session and environment can still stay in place.
+    use std::os::unix::fs::MetadataExt;
+    let previous_worker_inode = fs::symlink_metadata(worker_root.join("hel")).unwrap().ino();
+    fs::write(
+        worker_root.join("worker-build"),
+        format!("0.1.0+{}\n", "0".repeat(40)),
+    )
+    .unwrap();
     add_second_local_bare_target();
     controller.config = Config::load().unwrap();
     let source_target = controller.state.sessions[LATCH_RELAY_SESSION]
@@ -3764,6 +3829,14 @@ fn in_place_move_to_another_local_bare_target_records_the_new_template() {
     assert_eq!(moved.last_profile, IN_PLACE_DESTINATION_PROFILE);
     assert_eq!(moved.target_template_id, "local-bare-two");
     assert_eq!(moved.target, source_target, "the environment is kept");
+    assert_ne!(
+        fs::symlink_metadata(worker_root.join("hel")).unwrap().ino(),
+        previous_worker_inode
+    );
+    assert_eq!(
+        fs::read(worker_root.join("profile/source-only.txt")).unwrap(),
+        b"old harness state"
+    );
     assert_eq!(
         fs::read(worker_root.join("build-cache.txt")).unwrap(),
         b"warm cache"

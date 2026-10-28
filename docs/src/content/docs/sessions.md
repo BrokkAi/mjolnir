@@ -395,9 +395,14 @@ as staying the same: two local bare targets, or two SSH bare targets with the
 same connection, share one worker root and workspace, so the session keeps its
 environment, transfers no files, shows no **Choose files** page, and only
 records the new target. In place, the container or bare worker root, the
-workspace, untracked files, and build caches are kept, and only the old worker
-daemon and profile home are removed before the new profile is staged and the harness state
-is restored. The confirmation says so: "Only the harness and profile are
+workspace, untracked files, and build caches are kept. A compatible profile
+switch also keeps the installed worker and native conversation files: it
+replaces profile configuration and credentials, seeds the relay's continuation
+metadata, and restarts the harness. It does not upload or restore the handoff
+archive back onto the same target. An older installed worker is upgraded when
+necessary to read the new launch configuration. Switching to an incompatible harness or
+recovering a failed swap restores the verified handoff instead. The confirmation
+says so: "Only the harness and profile are
 replaced; the environment and workspace are kept." When the target changes to a different machine or runtime,
 Move tears the source down and rebuilds the environment from the checkpoint,
 which does not migrate a running process, installed packages, container layers,

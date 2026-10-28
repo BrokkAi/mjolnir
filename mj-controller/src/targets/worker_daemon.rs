@@ -291,13 +291,30 @@ pub fn in_place_worker_reset_plan(
     session_id: &str,
     previous_profile_root: &str,
 ) -> Result<CommandSpec> {
+    worker_reset_plan(locator, session_id, Some(previous_profile_root))
+}
+
+/// Reset only the relay for a native conversation that stays in its home.
+/// Stop its processes first; keep the executable, native files and caches.
+pub fn retained_native_worker_reset_plan(
+    locator: &TargetLocator,
+    session_id: &str,
+) -> Result<CommandSpec> {
+    worker_reset_plan(locator, session_id, None)
+}
+
+fn worker_reset_plan(
+    locator: &TargetLocator,
+    session_id: &str,
+    previous_profile_root: Option<&str>,
+) -> Result<CommandSpec> {
     verify_locator(locator, session_id)?;
     let session_worker_root = worker_root(locator, session_id)?;
     // A root that is a link left for a session an earlier release started
     // (`controller::local_profile_homes`) is unlinked, never followed: the path
     // carries no trailing slash, so `rm` removes the link itself.
-    let script = format!(
-        "{}\nrm -rf -- {} {}\nrm -f -- {} {} {}\nrm -rf -- {}\nmkdir -p -- {}\n",
+    let mut script = format!(
+        "{}\nrm -rf -- {} {}\n",
         stop_worker_daemon_script(&session_worker_root),
         posix_quote(&format!(
             "{session_worker_root}/{}",
@@ -307,12 +324,31 @@ pub fn in_place_worker_reset_plan(
             "{session_worker_root}/{}",
             mj_core::relay::RELAY_JOURNAL_DIR
         )),
-        posix_quote(&format!("{session_worker_root}/hel")),
-        posix_quote(&format!("{session_worker_root}/launch.json")),
-        posix_quote(&format!("{session_worker_root}/ownership.json")),
-        posix_quote(previous_profile_root.trim_end_matches('/')),
-        posix_quote(&session_worker_root),
     );
+    let mut metadata = vec!["launch.json", "ownership.json"];
+    if previous_profile_root.is_some() {
+        metadata.insert(0, "hel");
+    } else {
+        metadata.extend([
+            mj_core::relay::NATIVE_SESSION_IDENTITY_FILE,
+            mj_core::relay::RESTORED_RELAY_SEED_FILE,
+        ]);
+    }
+    script.push_str(&format!(
+        "rm -f -- {}\n",
+        metadata
+            .into_iter()
+            .map(|name| posix_quote(&format!("{session_worker_root}/{name}")))
+            .collect::<Vec<_>>()
+            .join(" ")
+    ));
+    if let Some(profile_root) = previous_profile_root {
+        script.push_str(&format!(
+            "rm -rf -- {}\nmkdir -p -- {}\n",
+            posix_quote(profile_root.trim_end_matches('/')),
+            posix_quote(&session_worker_root),
+        ));
+    }
     Ok(
         locator_command(locator, vec!["sh".into(), "-c".into(), script])
             .purpose("reset the worker root for an in-place harness replacement")

@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::controller) enum WorkerFilePreparation {
+    Install,
+    RefreshProfile,
+}
+
 fn disable_mbx_cache_shims(
     session_id: &str,
     backend: &targets::TargetLocator,
@@ -68,6 +74,23 @@ impl Controller {
         worker_root: &str,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
+        self.prepare_worker_files_for(
+            session_id,
+            backend,
+            worker_root,
+            executor,
+            WorkerFilePreparation::Install,
+        )
+    }
+
+    pub(in crate::controller) fn prepare_worker_files_for(
+        &self,
+        session_id: &str,
+        backend: &targets::TargetLocator,
+        worker_root: &str,
+        executor: &impl CommandExecutor,
+        preparation: WorkerFilePreparation,
+    ) -> Result<()> {
         let owner = crate::worker_lifecycle::require(session_id)?;
         let session = self
             .state
@@ -77,6 +100,34 @@ impl Controller {
         if let Some(target) = session.target.as_ref() {
             owner.verify_target(target)?;
         }
+        // A busy worker can outlive a daemon upgrade. Reusing its history
+        // does not imply that its executable can read this launch format.
+        let upgrade_retained_worker = if preparation == WorkerFilePreparation::RefreshProfile {
+            let executable = mj_core::target_path::join(Path::new(worker_root), Path::new("hel"));
+            let output = execute_checked(
+                executor,
+                targets::command_on_locator(
+                    backend,
+                    session_id,
+                    vec![
+                        mj_core::target_path::text(&executable),
+                        "worker".into(),
+                        "build-id".into(),
+                    ],
+                    "read retained worker build",
+                )?,
+            )?;
+            let build = std::str::from_utf8(&output.stdout)
+                .context("decode retained worker build")?
+                .trim();
+            ensure!(
+                mj_core::worker_build::is_worker_build(build),
+                "retained worker returned an invalid build identity"
+            );
+            build != WORKER_BUILD_ID
+        } else {
+            false
+        };
         let profile = self
             .config
             .profiles
@@ -190,8 +241,36 @@ impl Controller {
                 )?;
             }
         }
+        let shared_login = shared_profile_login(profile, backend);
+        if preparation == WorkerFilePreparation::RefreshProfile {
+            clear_profile_configuration(
+                executor,
+                backend,
+                session_id,
+                &target_profile_home,
+                profile.kind,
+            )?;
+            install_worker_profile_files(
+                executor,
+                backend,
+                session_id,
+                worker_root,
+                &target_profile_home,
+                StagedWorkerProfile {
+                    launch: &launch_path,
+                    ownership: &ownership_path,
+                    profile: &profile_stage,
+                    shared_login: shared_login.as_ref(),
+                },
+            )?;
+            if upgrade_retained_worker {
+                let worker = WorkerInstall::for_target(backend, executor)?;
+                install_worker_binary(executor, backend, session_id, &worker, "hel")?;
+                prepare_installed_managed_harness(executor, backend, worker_root, &launch)?;
+            }
+            return Ok(());
+        }
         let worker = WorkerInstall::for_target(backend, executor)?;
-
         install_worker_files(
             executor,
             backend,
@@ -202,7 +281,7 @@ impl Controller {
             &launch_path,
             &ownership_path,
             &profile_stage,
-            shared_profile_login(profile, backend).as_ref(),
+            shared_login.as_ref(),
         )?;
         if session.build_cache.is_some() {
             self.install_build_cache_shim(session, backend, &launch, executor)

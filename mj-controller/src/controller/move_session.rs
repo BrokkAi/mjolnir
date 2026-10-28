@@ -459,12 +459,17 @@ pub use mj_core::state::{MoveOutcome, MovePreparation, MoveSelection, MoveSessio
 use crate::targets::{CommandExecutor, ProvisionStage, ProvisionStageGuard};
 use mj_core::relay::RelayCommand;
 
-/// Refresh source state without turning a dead source harness into a Move prerequisite.
+/// Observe preparation state without taking the worker's mutation permit.
+/// Confirmed execution leases and refreshes the source before interruption.
 pub async fn refresh_move_source(
     manager: &SessionManagerControl,
     id: &str,
 ) -> Result<Option<mj_core::state::ManagedSessionSnapshot>> {
-    Ok(MoveSourceRelay::lease(manager, id).await?.snapshot())
+    Ok(manager
+        .wait_for_session(id, std::time::Duration::from_secs(5))
+        .await?
+        .view()
+        .snapshot)
 }
 
 /// A Move's hold on its source's relay connection, from the confirmation
@@ -1162,7 +1167,11 @@ impl Controller {
             "destination profile {profile_id:?} is disabled"
         );
         let policy = move_subagent_policy(source, &selection);
-        if policy.uses_mjolnir() || policy != source.subagents.clone().unwrap_or_default() {
+        // An unchanged delegation policy has already been admitted. Changing
+        // credentials for the same harness does not change its eligible models.
+        if profile.kind != source.harness_kind
+            || policy != source.subagents.clone().unwrap_or_default()
+        {
             super::profile_config::validate_session_subagent_policy(
                 &self.config,
                 profile_id,
@@ -1188,6 +1197,13 @@ impl Controller {
             target,
             selection.resource_allocation.as_ref(),
         )?;
+        let in_place = move_in_place_for_record(
+            source,
+            &selection,
+            &self.config.targets,
+            self.state.subagents.contains_key(&source.id),
+            previous.as_ref(),
+        );
         let mounts = selection.additional_mounts.as_deref().unwrap_or_default();
         ensure!(
             !matches!(
@@ -1202,17 +1218,18 @@ impl Controller {
             "attached resources are unsupported for this target; select compatible resources explicitly"
         );
         crate::targets::validate_additional_mounts(mounts)?;
-        for mount in mounts {
-            self.validate_mount_source(target_id, &mount.source, executor)?;
-        }
-        let planned_conversion =
-            self.validate_move_destination_paths(source, target_id, executor)?;
+        let planned_conversion = if in_place {
+            None
+        } else {
+            for mount in mounts {
+                self.validate_mount_source(target_id, &mount.source, executor)?;
+            }
+            self.validate_move_destination_paths(source, target_id, executor)?
+        };
         ensure!(
             profile.home.is_dir(),
             "destination profile home is unavailable; configure the profile before moving"
         );
-        super::worker_binary::preflight_worker_binary(target, executor)?;
-        super::backend::preflight_target(target, executor, super::backend::TargetCheck::Launch)?;
         let source_record = previous
             .as_ref()
             .filter(|operation| {
@@ -1225,6 +1242,16 @@ impl Controller {
             &source_record.last_profile,
             profile_id,
         )?;
+        // A compatible in-place Move already has its worker, mounts and
+        // runtime. Only reconstruction needs provisioning prerequisites.
+        if !in_place || cross_harness || retry {
+            super::worker_binary::preflight_worker_binary(target, executor)?;
+            super::backend::preflight_target(
+                target,
+                executor,
+                super::backend::TargetCheck::Launch,
+            )?;
+        }
         if cross_harness {
             let cancel = tokio_util::sync::CancellationToken::new();
             let resolve =
@@ -1260,13 +1287,6 @@ impl Controller {
             })
             .map(|operation| operation.operation_id.clone())
             .unwrap_or(new_command_id("move")?);
-        let in_place = move_in_place_for_record(
-            source,
-            &selection,
-            &self.config.targets,
-            self.state.subagents.contains_key(&source.id),
-            previous.as_ref(),
-        );
         let destination_has_parent_role =
             parent_tools_enabled(&move_subagent_policy(source, &selection), profile.kind);
         if in_place

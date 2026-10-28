@@ -150,15 +150,7 @@ fn node_or_downloader_preflight_script() -> String {
 
 pub(super) const MJ_CONTAINER_ENVIRONMENT: &str = "## Mjolnir disposable environment\n\nThis session runs in a disposable Mjolnir container. When the session closes, Mjolnir checkpoints everything in project workspace directories under `/workspace`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then removes the container.\n\nEverything outside `/workspace`, including installed packages, `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n";
 
-/// The profile's own files only. Outside this module, stage through
-/// [`stage_profile_with_catalog`].
-pub(super) fn stage_profile(
-    profile: &mj_core::config::HarnessProfile,
-    destination: &Path,
-) -> Result<()> {
-    let harness = profile.kind;
-    let source = profile.home.as_path();
-    std::fs::create_dir_all(destination)?;
+pub(super) fn profile_configuration_paths(harness: HarnessKind) -> Vec<&'static str> {
     // Only the files peculiar to a harness are listed per harness. The
     // instruction file and the synced skill directories are the same facts the
     // rest of Hel reads off `HarnessKind`, so they are appended from there
@@ -199,12 +191,24 @@ pub(super) fn stage_profile(
         // instruction file and skills tree below are staged.
         mj_core::config::HarnessKind::Dsh => &[],
     };
-    let allowlist: Vec<&str> = harness_files
+    harness_files
         .iter()
         .copied()
         .chain(std::iter::once(harness.agent_instructions_file()))
         .chain(harness.synced_skill_dirs().iter().copied())
-        .collect();
+        .collect()
+}
+
+/// The profile's own files only. Outside this module, stage through
+/// [`stage_profile_with_catalog`].
+pub(super) fn stage_profile(
+    profile: &mj_core::config::HarnessProfile,
+    destination: &Path,
+) -> Result<()> {
+    let harness = profile.kind;
+    let source = profile.home.as_path();
+    std::fs::create_dir_all(destination)?;
+    let allowlist = profile_configuration_paths(harness);
     // Allowlist entries (and, within each, a copied directory's children) are
     // independent of one another, so copying them concurrently shortens the
     // stage step for profiles with large skills/plugins trees.
