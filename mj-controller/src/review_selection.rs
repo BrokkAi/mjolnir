@@ -135,10 +135,16 @@ pub(crate) fn auto_profiles<'a>(
     auto
 }
 
+/// Usage-priced (API) profiles bill each request, so they come after every
+/// subscription profile. Then profiles the catalog confirms come first;
+/// unknown ones are tried only if they all fail.
 fn rank(candidates: &mut [Candidate]) {
+    let usage_priced = |candidate: &Candidate| candidate.quota == UtilityQuotaClass::UsagePriced;
     candidates.sort_by(|a, b| {
-        a.group
-            .cmp(&b.group)
+        usage_priced(a)
+            .cmp(&usage_priced(b))
+            .then_with(|| b.advertised.cmp(&a.advertised))
+            .then_with(|| a.group.cmp(&b.group))
             .then_with(|| b.quota.cmp(&a.quota))
             .then_with(|| a.provider.cmp(&b.provider))
             .then_with(|| b.score.cmp(&a.score))
@@ -233,8 +239,6 @@ pub(crate) async fn resolve(
             });
         }
         rank(&mut candidates);
-        // Profiles the catalog confirms come first; unknown ones only if they all fail.
-        candidates.sort_by_key(|candidate| !candidate.advertised);
         excluded
     };
     for candidate in candidates {
@@ -487,7 +491,7 @@ mod tests {
 
     // Hard-won: 3eefab64: Auto tried a failing unknown profile before the known profile that offered the pinned model
     #[test]
-    fn confirmed_profiles_are_tried_before_unknown_ones_whatever_their_rank() {
+    fn confirmed_profiles_are_tried_before_unknown_ones_and_api_profiles_last() {
         let mut candidates = vec![
             candidate(
                 "muse",
@@ -513,10 +517,22 @@ mod tests {
                 UtilityQuotaClass::Unknown,
                 0,
             ),
+            Candidate {
+                advertised: true,
+                ..candidate(
+                    "api",
+                    ReviewProvider::Other,
+                    0,
+                    UtilityQuotaClass::UsagePriced,
+                    100,
+                )
+            },
         ];
         rank(&mut candidates);
-        candidates.sort_by_key(|candidate| !candidate.advertised);
-        assert_eq!(candidates[0].id, "codex3");
+        assert_eq!(
+            candidates.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["codex3", "glm", "muse", "api"]
+        );
     }
 
     #[test]

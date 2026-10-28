@@ -365,7 +365,8 @@ form) remember choices. `mj acp`, sub-agents and archive restores do not.
 When `model` is supplied without `profile_id`, Mjolnir checks every enabled,
 usable profile and chooses the one offering the exact model and, when named,
 the exact effort. It ranks by quota headroom paced against each window's reset,
-using the saved default profile to break ties. If no configured profile
+using the saved default profile to break ties. Usage-priced (API key) profiles
+come after every subscription profile that has or may have quota left. If no configured profile
 supports that selection, the request fails without changing the requested
 model or effort. Supplying both
 `profile_id` and `model` pins the profile and validates the model and effort on
@@ -1126,7 +1127,8 @@ about the settings they actually accept.
 available values, after refreshing cached choices. With an omitted `profile_id`,
 the daemon uses the saved default profile as the eligibility anchor and ranks
 profiles that offer the requested selection by quota headroom paced against
-window reset times. Settings are applied
+window reset times, with usage-priced (API key) profiles after every
+subscription profile that has or may have quota left. Settings are applied
 model first, then effort using the model's updated choices. A later target-side
 configuration failure leaves the session available for repair and is reported
 by `wait`. It does not consume a prompt turn.

@@ -652,7 +652,7 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
         } else {
             let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
                 .await
-                .unwrap()
+                .unwrap_or_else(|_| panic!("{case}: no recovery request within 3 s"))
                 .unwrap();
             let RemoteSessionRequest::Submit {
                 command,

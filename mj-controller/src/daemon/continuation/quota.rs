@@ -48,7 +48,6 @@ pub(super) fn destinations(
             }
     });
     crate::server::api::rank_candidates(&mut candidates, None, model, now);
-    candidates.sort_by_key(|c| matches!(c.quota, CandidateQuota::UsagePriced));
     candidates
 }
 
