@@ -5,6 +5,22 @@ warning Host limits for target remote-podman: The login user on dev@docker.examp
 warning Host limits for target missing-ssh: Could not read the kernel keyring quota or sshd MaxStartups from dev@docker.example.test: ssh executable is unavailable
   remediation: Read them by hand on dev@docker.example.test: `cat /proc/key-users /proc/sys/kernel/keys/maxkeys` and `grep -ri maxstartups /etc/ssh/sshd_config /etc/ssh/sshd_config.d`.
 ready Sub-agent policy: Claude, Codex, and DSH sessions may opt in, up to 3 sub-agents at once per session. Sub-agents may use any enabled profile that offers the configured model and effort.
+fixable Git on this machine: git version 2.25.1 is older than the minimum required version 2.31; workspace moves and other Git operations require a newer Git.
+  remediation: Install or upgrade to Git 2.31 or newer on this machine, ensure it is the `git` found on PATH, then rerun `mj doctor`.
+fixable Git on this machine: git version 2.30.9 is older than the minimum required version 2.31; workspace moves and other Git operations require a newer Git.
+  remediation: Install or upgrade to Git 2.31 or newer on this machine, ensure it is the `git` found on PATH, then rerun `mj doctor`.
+ready Git on this machine: git version 2.31.0 meets the minimum required version 2.31.
+ready Git on this machine: git version 2.39.5 (Apple Git-154) meets the minimum required version 2.31.
+ready Git on this machine: git version 2.47.1.windows.1 meets the minimum required version 2.31.
+fixable Git on this machine: Could not determine the Git version from "unexpected version output"; Git 2.31 or newer is required.
+  remediation: Install or upgrade to Git 2.31 or newer on this machine, ensure it is the `git` found on PATH, then rerun `mj doctor`.
+fixable Git on this machine: `git --version` failed (exit 1): Git installation is broken
+  remediation: Install or upgrade to Git 2.31 or newer on this machine, ensure it is the `git` found on PATH, then rerun `mj doctor`.
+fixable Git on this machine: Could not run `git --version`: git executable is unavailable
+  remediation: Install or upgrade to Git 2.31 or newer on this machine, ensure it is the `git` found on PATH, then rerun `mj doctor`.
+ready Git on this machine: git version 2.43.0 meets the minimum required version 2.31.
+fixable Git on dev@example.test: git version 2.25.1 is older than the minimum required version 2.31; workspace moves and other Git operations require a newer Git.
+  remediation: Install or upgrade to Git 2.31 or newer on dev@example.test, ensure it is the `git` found on PATH, then rerun `mj doctor`.
 ready Harness profile bedrock: Claude Code; Amazon Bedrock usage billing; sub-agents may use it. The AWS credential chain is available; model access is checked by the harness.
 fixable Harness profile bedrock: Claude Code; Amazon Bedrock usage billing; sub-agents may use it. The AWS credential chain failed (exit 1): Unable to locate credentials
   remediation: Configure AWS credentials for this profile's AWS_PROFILE, renew its SSO login with `aws sso login --profile <AWS_PROFILE>`, or supply an authorized AWS role. Native harness login is not required.

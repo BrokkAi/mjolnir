@@ -30,11 +30,11 @@ fn git_text(root: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Where Git keeps `name` in the Git directory of the checkout at `root`.
-///
-/// Git 2.25 has no `--path-format=absolute`: it prints the option back and
-/// exits successfully. `--git-path` answers relative to `root`.
 fn git_path(root: &Path, name: &str) -> Result<PathBuf> {
-    let output = git_text(root, &["rev-parse", "--git-path", name])?;
+    let output = git_text(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-path", name],
+    )?;
     mj_core::local_git::resolve_git_path(root, &output)
 }
 

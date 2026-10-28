@@ -391,7 +391,11 @@ pub fn resolve_subagent_mcp_role(
 ) -> Option<crate::subagent::SubagentMcpRole> {
     subagents.parent_role().or_else(|| {
         if managed_subagent {
-            handback_tool.then_some(crate::subagent::SubagentMcpRole::Child)
+            Some(if handback_tool {
+                crate::subagent::SubagentMcpRole::Child
+            } else {
+                crate::subagent::SubagentMcpRole::FetchOnly
+            })
         } else {
             message_mcp_granted.then_some(crate::subagent::SubagentMcpRole::MessageOnly)
         }
@@ -620,6 +624,15 @@ mod tests {
                     .environment
                     .insert(SESSION_MANAGED_SUBAGENT_ENV.into(), "1".into());
                 assert!(!launch.review_gate());
+                assert_eq!(
+                    launch.subagent_mcp_role(),
+                    Some(crate::subagent::SubagentMcpRole::FetchOnly)
+                );
+                launch.handback_tool = true;
+                assert_eq!(
+                    launch.subagent_mcp_role(),
+                    Some(crate::subagent::SubagentMcpRole::Child)
+                );
             }
         }
     }

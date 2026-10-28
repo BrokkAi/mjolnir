@@ -38,6 +38,70 @@ fn mode_config(current: &str) -> Value {
     }])
 }
 
+#[tokio::test]
+async fn codex_yolo_suppresses_only_the_bundled_bubblewrap_startup_warning() {
+    let warning = "Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites: https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the bundled bubblewrap in the meantime.";
+    for (harness, policy, suppress_prerequisite) in [
+        (HarnessKind::Codex, ExecutionPolicy::Unconstrained, true),
+        (
+            HarnessKind::Codex,
+            ExecutionPolicy::ConfiguredApprovals,
+            false,
+        ),
+        (HarnessKind::Claude, ExecutionPolicy::Unconstrained, false),
+    ] {
+        let mut probe = PlanProbe::with_harness(policy, false, harness).await;
+        for (severity, title, details, suppressed) in [
+            ("warning", warning, None, suppress_prerequisite),
+            ("error", warning, None, false),
+            (
+                "warning",
+                warning,
+                Some("Additional sandbox failure"),
+                false,
+            ),
+            (
+                "warning",
+                "bubblewrap could not create a user namespace",
+                None,
+                false,
+            ),
+        ] {
+            let failure = json!({
+                "id": "startup-warning", "revision": 1, "category": "unknown",
+                "severity": severity, "title": title, "details": details, "actions": []
+            });
+            let mut update = json!({
+                "sessionUpdate": "session_info_update", "title": "Session title",
+                "_meta": {"jetbrains": {"air": {"version": 1, "sessionFailure": failure}}}
+            });
+            probe
+                .send(json!({
+                    "jsonrpc": "2.0", "method": "session/update",
+                    "params": {"sessionId": "plan-session", "update": update}
+                }))
+                .await;
+            let received = loop {
+                if let RuntimeEvent::SessionUpdate { update } = probe.event().await
+                    && update["title"] == "Session title"
+                {
+                    break update;
+                }
+            };
+            if suppressed {
+                update["_meta"]["jetbrains"]["air"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("sessionFailure");
+            }
+            assert_eq!(
+                received, update,
+                "{harness:?} {policy:?} {severity} {title}"
+            );
+        }
+    }
+}
+
 async fn set_claude_config_mode(probe: &mut PlanProbe, request_id: &str, mode: &str) {
     probe
         .commands
