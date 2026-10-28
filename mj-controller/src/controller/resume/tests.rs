@@ -79,13 +79,13 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
 
     let (context, notice) = super::load_in_place_subagent_prompt_data(parent_id).unwrap();
     assert!(context.unwrap().contains("fresh-child; running"));
-    assert!(notice.unwrap().contains("fresh-child; running"));
+    assert!(notice.unwrap().contains("kept 1 sub-agent attached"));
 
     child.state = SessionState::Parked;
     crate::database::save_session(&child).unwrap();
     let (context, notice) = super::load_in_place_subagent_prompt_data(parent_id).unwrap();
     assert!(context.unwrap().contains("fresh-child; parked"));
-    assert!(notice.unwrap().contains("fresh-child; parked"));
+    assert!(notice.unwrap().contains("kept 1 sub-agent attached"));
 }
 
 #[tokio::test]
