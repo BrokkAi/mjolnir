@@ -4073,6 +4073,7 @@ fn an_api_key_codex_launch_keeps_its_key_on_every_target() {
     }
 }
 
+// Hard-won: #1385: selecting AWS_PROFILE did not provision credentials into isolated workers.
 #[test]
 fn a_bedrock_codex_launch_passes_aws_settings_to_every_target() {
     let home = tempfile::tempdir().unwrap();
@@ -4129,6 +4130,36 @@ fn a_bedrock_codex_launch_passes_aws_settings_to_every_target() {
             mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT.map(str::to_owned),
             "{target}"
         );
+    }
+
+    // A profile without its own target credential source must use the
+    // controller-provisioned process provider in each isolated staged home.
+    for kind in [HarnessKind::Claude, HarnessKind::Codex] {
+        let mut profile = profile.clone();
+        profile.kind = kind;
+        profile.environment = BTreeMap::from([
+            ("AWS_PROFILE".into(), "bedrock".into()),
+            ("AWS_REGION".into(), "us-east-1".into()),
+            ("CLAUDE_CODE_USE_BEDROCK".into(), "1".into()),
+        ])
+        .into();
+        for (target, launch) in launches_on_every_target(&profile) {
+            let isolated = target != "localhost";
+            assert_eq!(
+                launch.environment.contains_key("AWS_CONFIG_FILE"),
+                isolated,
+                "{target}"
+            );
+            if isolated {
+                assert_eq!(
+                    launch.environment["AWS_CONFIG_FILE"],
+                    mj_core::target_path::text(&mj_core::target_path::join(
+                        &launch.harness_home,
+                        Path::new("aws-config")
+                    ))
+                );
+            }
+        }
     }
 }
 

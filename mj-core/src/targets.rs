@@ -132,6 +132,10 @@ pub struct CommandSpec {
     /// Replace ambient process variables with the explicitly supplied environment.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_env: bool,
+    /// Output carries credentials and must not be inspected by diagnostic
+    /// observers. Executor-local, never persisted in command plans.
+    #[serde(skip)]
+    pub sensitive_output: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<std::path::PathBuf>,
     pub purpose: String,
@@ -196,6 +200,7 @@ impl CommandSpec {
             args: args.into_iter().map(Into::into).collect(),
             env: BTreeMap::new(),
             clear_env: false,
+            sensitive_output: false,
             cwd: None,
             purpose: String::new(),
             stage: None,
@@ -783,7 +788,9 @@ fn finished_command(
         stdout,
         stderr,
     };
-    storage::observe_command_output(command, &output);
+    if !command.sensitive_output {
+        storage::observe_command_output(command, &output);
+    }
     output
 }
 

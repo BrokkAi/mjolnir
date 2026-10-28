@@ -423,6 +423,21 @@ pub(crate) fn apply_credential_request_at(
     };
 
     match request {
+        RelayRequest::AwsCredentialsState => Ok(credential_state_payload(
+            &mj_core::aws_credentials::state(&endpoint.home)?,
+        )),
+        RelayRequest::InstallAwsCredentials { data } => {
+            if data.len() > MAX_CREDENTIAL_BYTES * 2 {
+                bail!("AWS credential payload is above the {MAX_CREDENTIAL_BYTES} byte limit");
+            }
+            let bytes = BASE64
+                .decode(data.as_bytes())
+                .context("decode AWS credential payload")?;
+            let credentials = mj_core::aws_credentials::AwsCredentials::decode(&bytes)?;
+            Ok(credential_state_payload(
+                &credentials.install(&endpoint.home)?,
+            ))
+        }
         RelayRequest::CredentialState => {
             let (snapshot, _) = read_credential_file(endpoint.harness, &endpoint.marker)?;
             Ok(credential_state_payload(&snapshot))

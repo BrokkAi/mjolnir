@@ -1004,6 +1004,11 @@ pub(super) fn clear_profile_configuration(
 ) -> Result<()> {
     let mut paths = profile_configuration_paths(harness);
     paths.push(harness.credential_file_name());
+    paths.extend([
+        mj_core::aws_credentials::SHARED_CREDENTIALS_FILE,
+        "aws-config",
+        "aws-empty-credentials",
+    ]);
     match harness {
         HarnessKind::Codex => paths.push(STAGED_CATALOG_FILE),
         HarnessKind::Mimo => paths.push("config"),

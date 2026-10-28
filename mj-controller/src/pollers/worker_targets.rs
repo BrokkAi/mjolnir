@@ -128,11 +128,19 @@ pub(crate) fn credential_sync_targets_from_sources(
                 }
             };
             let sync_github_token = target_syncs_github_token(session.target.as_ref());
+            let aws_credentials = match controller.aws_credential_source(&session.id) {
+                Ok(source) => source,
+                Err(error) => {
+                    tracing::warn!(session_id = %session.id, "could not select AWS credential sync source: {error:#}");
+                    return None;
+                }
+            };
             Some(CredentialSyncTarget {
                 session_id: session.id.clone(),
                 profile_id: session.last_profile.clone(),
                 harness: profile.kind,
                 profile_home: profile.home.clone(),
+                aws_credentials,
                 skips_login_file_sync: *schemes.get(&session.last_profile)?
                     || crate::controller::local_profile_homes::session_shares_profile_login(
                         session,
