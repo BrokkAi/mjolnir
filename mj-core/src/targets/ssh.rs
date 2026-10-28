@@ -338,7 +338,10 @@ fn control_socket_name(ssh: &SshTarget, shard: usize) -> String {
 /// line". `%` starts a token expansion in `ControlPath` (and in the other
 /// filename options), so it is doubled. A path that needs neither is passed
 /// exactly as it always was.
-#[cfg(unix)]
+///
+/// This is not unix-gated: [`push_session_args`] reaches it on every platform,
+/// because a lease's options are compiled there too. Nothing else can produce
+/// a socket on Windows, so the Windows path never runs.
 fn control_path_option(socket: &Path) -> String {
     let path = socket.display().to_string().replace('%', "%%");
     let path = if path.contains(|character: char| {
