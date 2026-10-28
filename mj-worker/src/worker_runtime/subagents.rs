@@ -1620,7 +1620,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
             (settings, config, allow)
         };
 
-        // A child's only tool is handback.
+        // Children can hand back and fetch without asking the person.
         let root = profile();
         std::fs::write(
             root.path().join("profile/settings.json"),
@@ -1628,7 +1628,14 @@ print(sys.argv[sys.argv.index('--role') + 1])
         )
         .unwrap();
         let (settings, _, allow) = configure(&root, SubagentMcpRole::Child, true);
-        assert_eq!(allow, ["Bash(ls:*)", "mcp__mj-agents__handback"]);
+        assert_eq!(
+            allow,
+            [
+                "Bash(ls:*)",
+                "mcp__mj-agents__handback",
+                "mcp__mj-agents__fetch"
+            ]
+        );
         assert_eq!(
             settings["permissions"]["deny"],
             serde_json::json!(["WebFetch"])
@@ -1660,7 +1667,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
             1,
             "{allow:?}"
         );
-        for tool in ["spawn", "list_agents", "send_message", "close"] {
+        for tool in ["spawn", "list_agents", "send_message", "close", "fetch"] {
             assert!(
                 allow.contains(&format!("mcp__mj-agents__{tool}")),
                 "{tool}: {allow:?}"

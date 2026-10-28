@@ -11,7 +11,7 @@ Every newly launched session should be able to call `mj-agents.fetch` with `sess
 - [x] (2026-10-28) Trace CLI fetch, worker tool registration, durable delegation requests, and transfer limits.
 - [x] (2026-10-28) Add shared fetched-file storage and the target-side receive command.
 - [x] (2026-10-28) Add fetch requests, dispatch, and tool registration for every session role.
-- [ ] Extend MCP and transfer integration coverage; validate affected crates and workspace clippy.
+- [x] (2026-10-28) Extend MCP and transfer integration coverage; validate touched crates, the full isolated delegation scenario, and workspace clippy. Correct one outdated Claude permission expectation and rerun only the failing test.
 - [ ] Review, commit on the current branch, and push HEAD to origin/master.
 
 ## Surprises & Discoveries
@@ -28,7 +28,7 @@ Top-level sessions already receive the MessageOnly role. Managed children withou
 
 ## Outcomes & Retrospective
 
-Implementation is complete. Focused MCP tests pass; the 16 MiB worker transfer test, isolated delegation scenario, and final suites remain pending.
+Implementation is complete. All 33 focused MCP tests, the 16 MiB worker transfer/truncation regression, the complete isolated delegation scenario, workspace clippy, formatting, and Python syntax checks pass. The full touched-crate suites found only an outdated Claude permission assertion; it now includes fetch and its focused rerun passed. Worker clippy passed again after that test-only correction. The implementation is committed as a7e6f034a; upstream merged cleanly as 9f2686e2b. Publication is pending.
 
 ## Context and Orientation
 
@@ -44,7 +44,7 @@ The first milestone provides identical destination storage for CLI and worker. T
 
 ## Concrete Steps
 
-Work from the repository root. Use normal Cargo storage (the existing mbx-managed target link); never redirect it. Run focused tests while editing, then `cargo fmt --all -- --check`, `cargo test -p brokk-mj-checkpoint -p brokk-mj-core -p brokk-mj-worker -p brokk-mj-controller -p brokk-mj-cli`, `cargo clippy --all-targets -- -D warnings`, and `git diff --check`. All runtime tests retain isolated data directories or use `--instance session-fetch-tool`.
+Work from the repository root. Use normal Cargo storage (the existing mbx-managed target link); never redirect it. Run focused tests while editing, then `cargo fmt --all -- --check`, `cargo test -p brokk-mj-checkpoint -p brokk-mj-core -p brokk-mj-worker -p brokk-mj-controller -p brokk-mjolnir`, `cargo clippy --all-targets -- -D warnings`, and `git diff --check`. All runtime tests retain isolated data directories or use `--instance session-fetch-tool`.
 
 ## Validation and Acceptance
 
@@ -56,7 +56,7 @@ Fetch overwrites only its deterministic temporary copy, using atomic publication
 
 ## Artifacts and Notes
 
-The final commit and validation results will be recorded here.
+The complete delegation scenario passed in instance fetch-tool-20261028, including 16 MiB binary copies, zipped directories, listings, and source-boundary refusals from both none and native policies. The source checkpoint is a7e6f034a. The full suites passed except the outdated Claude expectation, corrected and verified by cargo test -p brokk-mj-worker the_claude_profile_allows_its_own_sub_agent_tools. Workspace clippy and the final worker clippy check both passed. Runtime evidence was disposable under /tmp/mj-fetch-e2e-artifacts.
 
 ## Interfaces and Dependencies
 
@@ -65,3 +65,7 @@ Use existing `FetchedPath`, `SessionListing`, `SubagentToolAction`, `worker_comm
 Initial plan written after tracing the source and transport limits.
 
 Progress update: completed the implementation and extended existing role/approval contracts and the isolated delegation scenario. Fetch execution is replayable across daemon handoff and does not hold upgrade admission while transferring.
+
+Validation update: the CLI package is named brokk-mjolnir. The first full-test command rejected the incorrect package selector before running tests; the corrected command is running.
+
+Validation update: the complete isolated delegation scenario passed. The only full-suite failure was an existing Claude child allow-list expectation omitting fetch; the corrected test passed on its focused rerun. Temporary copies are cleaned up by the scenario. A concurrent upstream Restart refactor arrived after the initial merge and will be merged before publication.

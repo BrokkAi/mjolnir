@@ -660,18 +660,21 @@ def main():
             assert Path(saved["path"]).read_bytes() == binary
             assert Path(saved["path"]) != large_source
             assert len(json.dumps(copied)) < 2048
+            Path(saved["path"]).unlink()
             archived = mcp_fetch(str(report_dir / "probes"))
             assert not archived["isError"], archived
             saved_zip = archived["structuredContent"]
             assert saved_zip["kind"] == "directory" and saved_zip["path"].endswith(".zip")
             with zipfile.ZipFile(saved_zip["path"]) as archive:
                 assert archive.read("probes/probe.log") == b"probe\n" * 20000
+            Path(saved_zip["path"]).unlink()
             listing = mcp_fetch(str(report_dir / "probes"), ls=True)
             assert not listing["isError"], listing
             assert listing["structuredContent"]["entries"] == entries
             refused = mcp_fetch("/etc/passwd")
             assert refused["isError"] and "outside the directories a session shares" in json.dumps(refused)
             cli("destroy", "--session", receiver)
+        large_source.unlink()
 
         legacy = tool(parent, "spawn", {
             "task_name": "legacy-accepted",
