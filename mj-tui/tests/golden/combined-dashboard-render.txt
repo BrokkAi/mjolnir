@@ -28,7 +28,7 @@
 │                                      ││> Type a draft · sending opens when the session is live   │
 │                                      ││                                                          │
 │                                      ││                                                          │
-│                                      │╰ ctrl+b shift+c to cancel resuming ───────────────────────╯
+│                                      │╰ ctrl+b shift+c to cancel resuming Enter  keeps the draft ╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                         │
 │                                      │╰──────────────────────────────────────────────────────────╯
@@ -172,7 +172,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x
 │                                      ││  e                                                       │
 │                                      ││  f                                                       │
 │                                      ││  g                                                       │
-│                                      │╰ ctrl+b shift+c to cancel starting ───────────────────────╯
+│                                      │╰ ctrl+b shift+c to cancel starting Enter  keeps the draft ╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                         │
 │                                      │╰──────────────────────────────────────────────────────────╯
@@ -217,7 +217,7 @@ standby prompt during suspension: false
 │                                      ││> first                                                   │
 │                                      ││  second                                                  │
 │                                      ││  third                                                   │
-│                                      │╰ ctrl+b shift+c to cancel starting ───────────────────────╯
+│                                      │╰ ctrl+b shift+c to cancel starting Enter  keeps the draft ╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                         │
 │                                      │╰──────────────────────────────────────────────────────────╯

@@ -242,6 +242,24 @@ pub(super) async fn reconcile_profile_guarded(
     let Some(first) = targets.first().cloned() else {
         return Vec::new();
     };
+    let aws_credentials = match targets
+        .iter()
+        .find_map(|target| target.aws_credentials.clone())
+    {
+        Some(source) => {
+            let exported = tokio::task::spawn_blocking(move || {
+                crate::aws_credentials::export(
+                    &source,
+                    &crate::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
+                )
+            })
+            .await
+            .context("AWS credential export task stopped")
+            .and_then(|result| result);
+            exported.map(Some)
+        }
+        None => Ok(None),
+    };
     // Targets share a profile but can differ in host CLI access. Collect off
     // scheduler threads once per wire format, then derive both scoped trees.
     let skills = Arc::new(
@@ -255,6 +273,23 @@ pub(super) async fn reconcile_profile_guarded(
     for pass in 0..2 {
         let mut pulled = false;
         for target in targets {
+            let aws_credentials = if target.aws_credentials.is_some() {
+                match &aws_credentials {
+                    Ok(credentials) => credentials.as_ref(),
+                    Err(error) => {
+                        outcomes.insert(
+                            target.session_id.clone(),
+                            CredentialSyncOutcome {
+                                session_id: target.session_id.clone(),
+                                outcome: Err(format!("{error:#}")),
+                            },
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let result = match gate {
                 Some(gate) => gate
                     .run_background(&target.session_id, async {
@@ -290,7 +325,14 @@ pub(super) async fn reconcile_profile_guarded(
                         } else {
                             None
                         };
-                        reconcile_session(relays, target, &skills, github_token.as_deref()).await
+                        reconcile_session(
+                            relays,
+                            target,
+                            &skills,
+                            github_token.as_deref(),
+                            aws_credentials,
+                        )
+                        .await
                     })
                     .await
                     .unwrap_or_else(|| Ok(None)),
@@ -306,8 +348,14 @@ pub(super) async fn reconcile_profile_guarded(
                     };
                     match github_token {
                         Ok(github_token) => {
-                            reconcile_session(relays, target, &skills, github_token.as_deref())
-                                .await
+                            reconcile_session(
+                                relays,
+                                target,
+                                &skills,
+                                github_token.as_deref(),
+                                aws_credentials,
+                            )
+                            .await
                         }
                         Err(error) => Err(error),
                     }
@@ -446,6 +494,7 @@ pub(super) struct SessionCanonical {
     pub(super) credential_bytes: Vec<u8>,
     pub(super) skills: Arc<CanonicalSkills>,
     pub(super) github_token: Option<String>,
+    pub(super) aws_credentials: Option<mj_core::aws_credentials::AwsCredentials>,
 }
 
 impl SessionCanonical {
@@ -471,6 +520,7 @@ impl SessionCanonical {
             credential_bytes,
             skills,
             github_token: github_token.map(ToOwned::to_owned),
+            aws_credentials: None,
         })
     }
 }
@@ -483,8 +533,10 @@ pub(super) async fn reconcile_session(
     target: &CredentialSyncTarget,
     skills: &Arc<CanonicalSkills>,
     github_token: Option<&str>,
+    aws_credentials: Option<&mj_core::aws_credentials::AwsCredentials>,
 ) -> Result<Option<Vec<CredentialSyncAction>>> {
-    let canonical = SessionCanonical::read(target, skills.clone(), github_token)?;
+    let mut canonical = SessionCanonical::read(target, skills.clone(), github_token)?;
+    canonical.aws_credentials = aws_credentials.cloned();
     match relays {
         SessionRelays::Actors(manager) => {
             let Some(handle) = manager.find_session(target.session_id.clone()).await? else {
@@ -539,19 +591,34 @@ pub(super) async fn reconcile_on(
     target: &CredentialSyncTarget,
     canonical: &SessionCanonical,
 ) -> Result<Vec<CredentialSyncAction>> {
+    let mut actions = Vec::new();
+    if let Some(credentials) = &canonical.aws_credentials {
+        let expected = mj_core::aws_credentials::snapshot(&credentials.encode()?);
+        if client.aws_credentials_state().await? != expected {
+            let installed = client.install_aws_credentials(credentials).await?;
+            anyhow::ensure!(
+                installed == expected,
+                "session AWS credentials do not match the controller after installation"
+            );
+            actions.push(CredentialSyncAction::Pushed);
+        }
+    }
     let skills = canonical
         .skills
         .for_format(client.skills_archive_format(), target.skills_scope)?;
-    reconcile_connected(
-        client,
-        target,
-        &canonical.credential_path,
-        &canonical.credential,
-        &canonical.credential_bytes,
-        skills,
-        canonical.github_token.as_deref(),
-    )
-    .await
+    actions.extend(
+        reconcile_connected(
+            client,
+            target,
+            &canonical.credential_path,
+            &canonical.credential,
+            &canonical.credential_bytes,
+            skills,
+            canonical.github_token.as_deref(),
+        )
+        .await?,
+    );
+    Ok(actions)
 }
 
 /// One session's reconciliation, run by its actor on the actor's connection.

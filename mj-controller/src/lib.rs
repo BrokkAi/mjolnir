@@ -1,6 +1,7 @@
 //! Hel's daemon-side controller: provisioning, session management, the web
 //! server, and the surrounding host-side services.
 
+mod aws_credentials;
 mod claude_usage;
 mod codex_usage;
 mod grok_usage;

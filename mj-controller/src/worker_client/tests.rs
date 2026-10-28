@@ -740,6 +740,7 @@ for line in sys.stdin:
         profile_id: "codex".into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: std::path::PathBuf::new(),
+        aws_credentials: None,
         skips_login_file_sync: true,
         sync_github_token: true,
         github_app_configured: false,
@@ -781,6 +782,7 @@ async fn publishing_new_targets_starts_reconciliation_without_waiting_for_the_ti
         profile_id: "work".into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: profile.path().to_path_buf(),
+        aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
         github_app_configured: false,
@@ -805,6 +807,7 @@ async fn publishing_changed_targets_reconciles_only_the_affected_profile() {
         profile_id: profile_id.into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: profile.path().to_path_buf(),
+        aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
         github_app_configured: false,
@@ -939,6 +942,7 @@ fn skills_sync_target(profile_home: &std::path::Path) -> CredentialSyncTarget {
         profile_id: "work".into(),
         harness: mj_core::config::HarnessKind::Claude,
         profile_home: profile_home.to_path_buf(),
+        aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
         github_app_configured: false,
@@ -1104,7 +1108,7 @@ async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
         .purpose("skills archive format fixture");
 
         let skills = Arc::new(CanonicalSkills::collect(&target));
-        let actions = reconcile_session(&SessionRelays::Direct, &target, &skills, None)
+        let actions = reconcile_session(&SessionRelays::Direct, &target, &skills, None, None)
             .await
             .unwrap();
 
@@ -1218,7 +1222,12 @@ for line in sys.stdin:
         payload = {"type": "credential_state", "data": {"present": True, "fingerprint": fingerprint, "freshness_epoch_ms": freshness}}
     elif method == "skills_state":
         payload = {"type": "skills_state", "data": {"present": True, "fingerprint": skills}}
-    elif method == "install_credentials":
+    elif method == "aws_credentials_state":
+        import pathlib
+        current = pathlib.Path(received)
+        data = current.read_bytes() if current.exists() else b""
+        payload = {"type": "credential_state", "data": {"present": bool(data), "fingerprint": hashlib.sha256(data).hexdigest() if data else "", "freshness_epoch_ms": None}}
+    elif method in ("install_credentials", "install_aws_credentials"):
         data = base64.b64decode(req["request"]["params"]["data"])
         with open(received, "wb") as out:
             out.write(data)
@@ -1254,6 +1263,7 @@ fn codex_sync_target(
         profile_id: "codex4".into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: home.to_path_buf(),
+        aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
         github_app_configured: false,
@@ -1283,6 +1293,87 @@ fn codex_sync_target(
     )
     .purpose("credential sync fixture");
     target
+}
+
+// Hard-won: #1385: AWS reconciliation skipped credentials, and local sessions can share the same profile.
+#[cfg(unix)]
+#[tokio::test]
+async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let bin = scratch.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let aws = bin.join("aws");
+    // Recorded AWS process-format exports; the normal executor drains this
+    // helper's output while the coordinator and relay run as in production.
+    std::fs::write(
+        &aws,
+        "#!/bin/sh\nexec /bin/cat \"$MJ_AWS_EXPORT_FIXTURE\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let source_file = scratch.path().join("export.json");
+    let local_received = scratch.path().join("local");
+    let remote_received = scratch.path().join("remote");
+    let mut local = codex_sync_target(
+        home.path(),
+        "local",
+        "2026-09-25T20:00:00Z",
+        &local_received,
+    );
+    local.skips_login_file_sync = true;
+    let mut remote = codex_sync_target(
+        home.path(),
+        "remote",
+        "2026-09-25T20:00:00Z",
+        &remote_received,
+    );
+    remote.skips_login_file_sync = true;
+    remote.aws_credentials = Some(mj_core::aws_credentials::AwsCredentialSource {
+        environment: BTreeMap::from([
+            ("PATH".into(), bin.to_string_lossy().into_owned()),
+            ("AWS_PROFILE".into(), "bedrock".into()),
+            (
+                "MJ_AWS_EXPORT_FIXTURE".into(),
+                source_file.to_string_lossy().into_owned(),
+            ),
+        ]),
+    });
+    let targets = [local, remote];
+    for generation in ["initial", "renewed"] {
+        std::fs::write(
+            &source_file,
+            serde_json::to_vec(&serde_json::json!({
+                "Version": 1, "AccessKeyId": format!("key-{generation}"),
+                "SecretAccessKey": format!("secret-{generation}"),
+                "SessionToken": "s".repeat(70_000), "Expiration": "2099-01-01T00:00:00Z",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let outcomes = reconcile_profile(&targets, None).await;
+        assert_eq!(
+            outcomes,
+            [CredentialSyncOutcome {
+                session_id: "remote".into(),
+                outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            }]
+        );
+        let received: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&remote_received).unwrap()).unwrap();
+        assert_eq!(received["AccessKeyId"], format!("key-{generation}"));
+        assert!(!local_received.exists());
+        assert!(reconcile_profile(&targets, None).await.is_empty());
+    }
+    // A failed AWS source reports only the isolated session; the local
+    // session still completes its ordinary reconciliation.
+    std::fs::remove_file(&source_file).unwrap();
+    let outcomes = reconcile_profile(&targets, None).await;
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].session_id, "remote");
+    assert!(outcomes[0].outcome.is_err());
 }
 
 /// #1160: a sync that a session's auth failure asked for says whether it
@@ -1376,6 +1467,7 @@ async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result()
         profile_id: "work".into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: profile.path().to_path_buf(),
+        aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
         github_app_configured: false,

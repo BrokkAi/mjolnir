@@ -213,6 +213,22 @@ impl RelayClient {
         credential_snapshot(self.call(RelayRequest::CredentialState).await?)
     }
 
+    pub async fn aws_credentials_state(&mut self) -> Result<CredentialSnapshot> {
+        credential_snapshot(self.call(RelayRequest::AwsCredentialsState).await?)
+    }
+
+    pub async fn install_aws_credentials(
+        &mut self,
+        credentials: &mj_core::aws_credentials::AwsCredentials,
+    ) -> Result<CredentialSnapshot> {
+        credential_snapshot(
+            self.call(RelayRequest::InstallAwsCredentials {
+                data: BASE64.encode(credentials.encode()?),
+            })
+            .await?,
+        )
+    }
+
     /// Read this session's credential file. Callers must keep these bytes out
     /// of durable relay observations, logs, and archives.
     pub async fn read_credentials(&mut self) -> Result<Vec<u8>> {
