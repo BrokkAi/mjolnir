@@ -12,7 +12,7 @@ Mjolnir must renew an expired Claude access token without requiring the user to 
 - [x] (2026-10-29) Implemented explicit exchange, coordination with Claude's refresh locks, and post-exchange credential verification.
 - [x] (2026-10-29) Extended isolated regressions for exchange, concurrency, failure, cancellation, and legacy-lock interoperability; all 19 Claude tests pass.
 - [x] (2026-10-29) Ran the complete controller suite and workspace Clippy; all tests pass after rerunning four unrelated readiness/resume timing failures serially.
-- [ ] Commit and push master, then run `scripts/install.sh`.
+- [x] (2026-10-29) Committed and pushed implementation `11b72d272` to origin/master, then successfully ran `scripts/install.sh`.
 
 ## Surprises & Discoveries
 
@@ -63,10 +63,12 @@ Use existing Tokio filesystem/background-task support and `CancellableProcessExe
 
 ## Outcomes & Retrospective
 
-The 19 Claude tests pass, including explicit exchange, failure, concurrency, cancellation, and legacy-lock coordination. The complete controller run passed 2,193 tests and ignored 18, with four unrelated worker readiness/resume timeouts; those four all passed on a serial rerun in 6.14 seconds. Workspace `cargo clippy --all-targets -- -D warnings`, rustfmt, and diff checks passed. Push and installation are pending.
+The 19 Claude tests pass, including explicit exchange, failure, concurrency, cancellation, and legacy-lock coordination. The complete controller run passed 2,193 tests and ignored 18, with four unrelated worker readiness/resume timeouts; those four all passed on a serial rerun in 6.14 seconds. Workspace `cargo clippy --all-targets -- -D warnings`, rustfmt, and diff checks passed. Implementation commit `11b72d272` was pushed to origin/master. `scripts/install.sh` completed successfully, installing `mj`, the native worker, the x86_64 Linux musl worker, and the voice worker under `/home/jonathan/.cargo/bin`; its version check reported `mj 2.61.2`. No implementation work remains.
 
 Plan created after verifying that the explicit CLI exchange needs external coordination with Claude's normal refresh path.
 
 Implementation update: extracted the Kimi directory-lock code, serialized heartbeat against release, and transferred lock ownership into the blocking child execution so cancellation cannot expose a second exchange. Focused tests passed in the dev profile.
 
 Validation update: completed the controller suite once and reran only its four failing timing tests serially. No unrelated source changes were needed. Workspace Clippy and formatting checks are clean.
+
+Delivery update: the implementation push and installer both succeeded. The installed binaries include the explicit Claude refresh-token exchange; the final host release build completed in 4m 05s.
