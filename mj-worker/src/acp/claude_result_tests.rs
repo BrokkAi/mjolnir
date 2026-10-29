@@ -569,6 +569,143 @@ fn steer_interruption() -> Value {
     })
 }
 
+// Hard-won: 53fdab4c1: Claude native sub-agent usage was discarded with the prompt response metadata.
+#[tokio::test]
+async fn claude_prompt_usage_includes_native_agents_without_recounting_the_parent() {
+    let mut probe = ClaudeProbe::new().await;
+    let prompt = probe.prompt("with-agents", "delegate to Sonnet").await;
+    probe.chunk("Done.").await;
+    probe
+        .result(
+            &prompt,
+            json!({
+                "stopReason":"end_turn",
+                "usage":{"totalTokens":1117,"inputTokens":100,"outputTokens":7,
+                    "cachedReadTokens":1000,"cachedWriteTokens":10},
+                "_meta":{"quota":{
+                    "token_count":{"totalTokens":1117,"inputTokens":100,"outputTokens":7,
+                        "cachedInputTokens":1000,"cachedWriteTokens":10,"reasoningOutputTokens":0},
+                    "model_usage":[
+                        {"model":"claude-opus-5-5","token_count":{"totalTokens":1117,
+                            "inputTokens":100,"outputTokens":7,"cachedInputTokens":1000,
+                            "cachedWriteTokens":10,"reasoningOutputTokens":0}},
+                        {"model":"claude-sonnet-5-5","token_count":{"totalTokens":2234,
+                            "inputTokens":200,"outputTokens":14,"cachedInputTokens":2000,
+                            "cachedWriteTokens":20,"reasoningOutputTokens":0}}
+                    ]}}
+            }),
+        )
+        .await;
+    let (_, usage) = probe.finished("with-agents").await;
+    let usage = usage.unwrap();
+    assert_eq!(usage.scope, mj_core::usage::UsageScope::Turn);
+    assert_eq!(
+        (usage.total_tokens, usage.input_tokens, usage.output_tokens),
+        (3351, 300, 21)
+    );
+    assert_eq!(
+        (usage.cached_read_tokens, usage.cached_write_tokens),
+        (Some(3000), Some(30))
+    );
+    let models = &usage.provider_details.as_ref().unwrap().model_usage;
+    assert_eq!(models["claude-opus-5-5"].total_tokens, 1117);
+    assert_eq!(models["claude-sonnet-5-5"].total_tokens, 2234);
+
+    // A partial breakdown must retain the known main-loop remainder instead
+    // of shrinking the total or assigning that remainder to the parent model.
+    let partial = probe.prompt("partial", "reply directly").await;
+    probe.chunk("Done.").await;
+    probe
+        .result(
+            &partial,
+            json!({"stopReason":"end_turn",
+                "usage":{"totalTokens":1117,"inputTokens":100,"outputTokens":7,
+                    "cachedReadTokens":1000,"cachedWriteTokens":10},
+                "_meta":{"quota":{"model_usage":[{"model":"claude-opus-5-5",
+                    "token_count":{"totalTokens":111,"inputTokens":10,"outputTokens":1,
+                        "cachedInputTokens":100,"cachedWriteTokens":0}}]}}
+            }),
+        )
+        .await;
+    let (_, usage) = probe.finished("partial").await;
+    let usage = usage.unwrap();
+    assert_eq!(usage.total_tokens, 1117);
+    assert_eq!(
+        usage.provider_details.unwrap().model_usage["claude-opus-5-5"].total_tokens,
+        111
+    );
+
+    // Older adapters and turns with no breakdown retain their flat usage,
+    // and never inherit the preceding turn's native-agent rows.
+    let next = probe.prompt("without-agents", "reply directly").await;
+    probe.chunk("Done.").await;
+    probe
+        .result(
+            &next,
+            json!({"stopReason":"end_turn",
+                "usage":{"totalTokens":11,"inputTokens":8,"outputTokens":3},
+                "_meta":{"quota":{"model_usage":[]}}
+            }),
+        )
+        .await;
+    let (_, usage) = probe.finished("without-agents").await;
+    let usage = usage.unwrap();
+    assert_eq!(usage.total_tokens, 11);
+    assert!(usage.provider_details.is_none());
+    probe.close().await;
+}
+
+#[tokio::test]
+async fn malformed_claude_model_accounting_reports_incomplete_usage() {
+    let mut probe = ClaudeProbe::new().await;
+    // Missing counters, inconsistent totals, duplicate rows and overflow must
+    // not silently become complete usage attributed to the selected model.
+    let valid = json!({"model":"claude-sonnet-5-5","token_count":{
+        "totalTokens":11,"inputTokens":8,"outputTokens":3,
+        "cachedInputTokens":0,"cachedWriteTokens":0}});
+    let mut inconsistent = valid.clone();
+    inconsistent["token_count"]["totalTokens"] = json!(12);
+    let mut overflow = valid.clone();
+    overflow["token_count"]["inputTokens"] = json!(u64::MAX);
+    for rows in [
+        json!([{"model":"claude-sonnet-5-5","token_count":{"totalTokens":11}}]),
+        json!([inconsistent]),
+        json!([valid.clone(), valid]),
+        json!([overflow]),
+    ] {
+        let prompt = probe.prompt("bad-accounting", "reply directly").await;
+        probe.chunk("Done.").await;
+        probe
+            .result(
+                &prompt,
+                json!({"stopReason":"end_turn",
+                    "usage":{"totalTokens":11,"inputTokens":8,"outputTokens":3},
+                    "_meta":{"quota":{"model_usage":rows}}
+                }),
+            )
+            .await;
+        loop {
+            match probe.event().await {
+                RuntimeEvent::Warning { message }
+                    if message.starts_with("Claude per-model usage") =>
+                {
+                    break;
+                }
+                RuntimeEvent::PromptFinished { .. } => {
+                    panic!("malformed accounting must report its failure")
+                }
+                _ => {}
+            }
+        }
+        let (_, usage) = probe.finished("bad-accounting").await;
+        let usage = usage.unwrap();
+        assert_eq!(usage.scope, mj_core::usage::UsageScope::Unspecified);
+        assert_eq!(usage.total_tokens, 11);
+        assert!(usage.provider_details.is_none());
+    }
+    probe.close().await;
+}
+
 // Hard-won: 65a7390: Claude prompts stayed running because the result from their answer cycle did not end them.
 #[tokio::test]
 async fn a_claude_prompt_ends_at_its_response_while_background_work_continues() {

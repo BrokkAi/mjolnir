@@ -957,6 +957,15 @@ pub(super) async fn serve_session(
                                 Ok(response) => {
                                     let usage_meta = response.usage.as_ref().and_then(|usage| usage.meta.clone());
                                     usage = response.usage.map(|usage| mj_core::usage::TokenUsage::from_acp(spec.harness, usage));
+                                    if spec.harness == HarnessKind::Claude
+                                        && let Some(usage) = usage.as_mut()
+                                        && let Err(error) = claude_usage::attach_provider_details(usage, response.meta.as_ref())
+                                    {
+                                        usage.scope = mj_core::usage::UsageScope::Unspecified;
+                                        emit_runtime_event(events, RuntimeEvent::Warning {
+                                            message: format!("Claude per-model usage could not be recorded; turn accounting is incomplete: {error:#}"),
+                                        }).await?;
+                                    }
                                     if spec.harness == HarnessKind::Muse {
                                         usage = usage.map(|usage| muse_usage::attach_provider_details(usage, usage_meta.as_ref()));
                                     }
