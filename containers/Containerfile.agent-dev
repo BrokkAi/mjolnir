@@ -210,6 +210,29 @@ ENV CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude
 # MiMo Code applies patch updates during normal startup unless this is set.
 ENV MIMOCODE_DISABLE_AUTOUPDATE=1
 
+# slopcop sends a session's change to the hosted SlopCop check service; the
+# skill synced into sessions tells agents to run it. Pinned release archive per
+# arch, like Go above: a fourteenth of the npm package, which carries every
+# platform's binary. 0.0.7 is the first release that reports which model wrote
+# each changed file.
+ARG SLOPCOP_VERSION=0.0.7
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "$ARCH" in \
+        amd64) SLOPCOP_SHA256=552e197f2d5c73fd43c7fc010a608c7560e0ecebd1a04a95e7901e83b0d95d3d ;; \
+        arm64) SLOPCOP_SHA256=5337403cd50fb99e9b53fef9dc01473ccbfd2a5e5a9643252d4e9e9b0a3f967a ;; \
+        *) echo "unsupported arch $ARCH" >&2; exit 1 ;; \
+    esac \
+    && SLOPCOP_ARCHIVE="slopcop_v${SLOPCOP_VERSION}_linux_${ARCH}.tar.gz" \
+    && curl --fail --location --silent --show-error \
+        "https://github.com/BrokkAi/slopcop/releases/download/v${SLOPCOP_VERSION}/${SLOPCOP_ARCHIVE}" \
+        --output "/tmp/${SLOPCOP_ARCHIVE}" \
+    && echo "${SLOPCOP_SHA256}  /tmp/${SLOPCOP_ARCHIVE}" | sha256sum --check --strict \
+    && install -d /usr/share/doc/slopcop \
+    && tar -xzf "/tmp/${SLOPCOP_ARCHIVE}" --no-same-owner -C /usr/local/bin slopcop \
+    && tar -xzf "/tmp/${SLOPCOP_ARCHIVE}" --no-same-owner -C /usr/share/doc/slopcop LICENSE \
+    && rm "/tmp/${SLOPCOP_ARCHIVE}" \
+    && [ "$(slopcop version)" = "slopcop version v${SLOPCOP_VERSION}" ]
+
 # Buildx sets TARGETARCH per platform; the dpkg fallback keeps a plain
 # single-arch `podman build` working.
 ARG CARGO_NEXTEST_VERSION=0.9.143
