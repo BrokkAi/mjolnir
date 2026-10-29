@@ -129,10 +129,9 @@ pub(super) fn render(
         )),
         Line::raw(""),
         Line::raw(format!(
-            "Not transferred: {} ignored files ({}) and {} credential files",
+            "Not transferred: {} ignored files ({})",
             assessment.ignored_files,
-            format_bytes(assessment.ignored_bytes),
-            assessment.credential_files
+            format_bytes(assessment.ignored_bytes)
         )),
         Line::raw(""),
         Line::raw(if wizard.files.selection.exclusions.is_empty() {

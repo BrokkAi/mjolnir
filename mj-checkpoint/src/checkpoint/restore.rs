@@ -215,10 +215,6 @@ pub fn restore_checkpoint_with_native_state(
                 &spec.harness_home,
             )?;
             validate_relative_path(&relative_path)?;
-            ensure!(
-                !is_secret_like_path(&relative_path),
-                "native artifact path is secret-like"
-            );
             write_private_file(
                 &spec.harness_home,
                 &relative_path,

@@ -1049,66 +1049,59 @@ fn claude_allowlist_collects_project_memory_for_the_session_slug_only() {
     );
 }
 
+// Hard-won: b63fedbf31: filename filtering discarded selected native artifacts and project memory.
 #[test]
-fn claude_project_memory_skips_secret_like_names() {
+fn claude_checkpoint_preserves_session_and_project_memory_filenames() {
     let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("projects/-workspace-app");
+    let (mut spec, _) = fixture(temp.path());
+    spec.session.harness_kind = HarnessKind::Claude;
+    spec.harness_home = temp.path().join("claude");
+    let project = spec.harness_home.join("projects/-workspace-app");
     fs::create_dir_all(project.join("memory")).unwrap();
+    fs::create_dir_all(project.join(NATIVE).join("credentials")).unwrap();
     fs::write(project.join(format!("{NATIVE}.jsonl")), b"transcript").unwrap();
-    fs::write(project.join("memory/settings.json"), b"secret config").unwrap();
-    fs::write(project.join("memory/.env"), b"TOKEN=1").unwrap();
-    fs::write(project.join("memory/keep.md"), b"safe memory").unwrap();
-
-    let artifacts =
-        collect_native_artifacts(HarnessKind::Claude, temp.path(), NATIVE, false).unwrap();
-    let paths: Vec<_> = artifacts
-        .iter()
-        .map(|artifact| artifact.relative_path.clone())
-        .collect();
-    assert!(paths.contains(&PathBuf::from("projects/-workspace-app/memory/keep.md")));
-    assert!(!paths.contains(&PathBuf::from(
-        "projects/-workspace-app/memory/settings.json"
-    )));
-    assert!(!paths.contains(&PathBuf::from("projects/-workspace-app/memory/.env")));
-}
-
-/// Collection and the archive gate read one shared rule set, so every
-/// credential name is dropped while walking the session subtree instead of
-/// failing the archive write afterwards.
-#[test]
-fn claude_allowlist_skips_credential_names_in_the_session_subtree() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("projects/-workspace-app");
-    let session = project.join(NATIVE);
-    fs::create_dir_all(&session).unwrap();
-    fs::write(project.join(format!("{NATIVE}.jsonl")), b"transcript").unwrap();
-    fs::write(session.join("notes.jsonl"), b"kept").unwrap();
-    for name in [
-        ".credentials.json",
-        "auth.toml",
-        "vendor-credentials.json",
-        "vendor_credentials.json",
-    ] {
-        fs::write(session.join(name), b"secret").unwrap();
-    }
-
-    let artifacts =
-        collect_native_artifacts(HarnessKind::Claude, temp.path(), NATIVE, false).unwrap();
-    let paths: Vec<_> = artifacts
-        .iter()
-        .map(|artifact| artifact.relative_path.clone())
-        .collect();
-    let expected = [
-        PathBuf::from(format!("projects/-workspace-app/{NATIVE}.jsonl")),
-        PathBuf::from(format!("projects/-workspace-app/{NATIVE}/notes.jsonl")),
+    let files = [
+        PathBuf::from("memory/settings.json"),
+        PathBuf::from("memory/.env"),
+        Path::new(NATIVE).join("config.json"),
+        Path::new(NATIVE).join(".credentials.json"),
+        Path::new(NATIVE).join("credentials/notes.txt"),
     ];
+    for relative in &files {
+        fs::write(project.join(relative), b"preserved contents").unwrap();
+    }
+    export_checkpoint(&spec).unwrap();
+
+    let harness_home = temp.path().join("restored-claude");
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            report_root: None,
+            archive_path: spec.output_path,
+            workspace_root: spec.workspace_root.clone(),
+            relay_root: temp.path().join("restored-claude-relay"),
+            harness_home: harness_home.clone(),
+            restore_repositories: false,
+            restore_native: true,
+            queue_policy: QueueRestorePolicy::Restore,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    let restored_project = harness_home
+        .join("projects")
+        .join(claude_project_slug(&spec.workspace_root.join("app")));
     assert_eq!(
-        paths.len(),
-        expected.len(),
-        "credential names leaked into the native artifacts: {paths:?}"
+        fs::read(restored_project.join(format!("{NATIVE}.jsonl"))).unwrap(),
+        b"transcript"
     );
-    for path in expected {
-        assert!(paths.contains(&path), "{path:?} was not collected");
+    for relative in files {
+        assert_eq!(
+            fs::read(restored_project.join(&relative)).unwrap(),
+            b"preserved contents",
+            "native artifact {} was not preserved",
+            relative.display()
+        );
     }
 }
 
@@ -3726,6 +3719,7 @@ fn parallel_repository_collection_preserves_manifest_order() {
 /// A child's report files sit beside the repositories, outside all of them, so
 /// no repository capture sees them. The checkpoint carries them itself and puts
 /// them back even when the harness history is not restored.
+// Hard-won: b63fedbf31: a report named config.json blocked Move during checkpoint export.
 #[test]
 fn checkpoint_carries_subagent_reports_and_restores_them_beside_the_repositories() {
     for explicit in [false, true] {
@@ -3756,6 +3750,8 @@ fn checkpoint_carries_subagent_reports_and_restores_them_beside_the_repositories
         fs::create_dir_all(reports.join("logs")).unwrap();
         fs::write(reports.join("findings.md"), b"full findings").unwrap();
         fs::write(reports.join("logs/test.log"), b"test output").unwrap();
+        fs::create_dir_all(reports.join("L4-flow")).unwrap();
+        fs::write(reports.join("L4-flow/config.json"), b"{\"flow\":4}").unwrap();
         export_checkpoint(&spec).unwrap();
         assert_eq!(
             read_archive_verified(&spec.output_path)
@@ -3802,6 +3798,10 @@ fn checkpoint_carries_subagent_reports_and_restores_them_beside_the_repositories
         assert_eq!(
             fs::read(restored.join("findings.md")).unwrap(),
             b"newer findings"
+        );
+        assert_eq!(
+            fs::read(restored.join("L4-flow/config.json")).unwrap(),
+            b"{\"flow\":4}"
         );
 
         #[cfg(unix)]
