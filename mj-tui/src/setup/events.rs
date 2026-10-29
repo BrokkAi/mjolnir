@@ -275,6 +275,13 @@ impl DashboardState {
             self.mode = Mode::Setup(dialog);
             return action;
         }
+        // The Detection results view owns its scroll keys and its way out;
+        // everything else (Tab to the footer, Enter) falls through to the form.
+        if dialog.report.is_some() && handle_report_event(&mut dialog, &event) {
+            self.last_event_consumed.set(true);
+            self.mode = Mode::Setup(dialog);
+            return DashboardAction::None;
+        }
         dialog.prepare();
         let field_focused = dialog.text_input_focused();
         let popup_open = dialog.combo.open_id().is_some()
@@ -295,17 +302,22 @@ impl DashboardState {
                         }))
                     }
                     // Every shortcut below is a bare key, so none of them may
-                    // fire while the search query has the keyboard.
+                    // fire while the search query has the keyboard or the
+                    // Detection results view is up.
                     KeyCode::Char('/')
                         if !field_focused
                             && !popup_open
                             && dialog.search.is_none()
+                            && dialog.report.is_none()
                             && key.modifiers.is_empty() =>
                     {
                         Some(Interaction::Activate(OpenSearch))
                     }
                     KeyCode::Backspace
-                        if !field_focused && !popup_open && dialog.search.is_none() =>
+                        if !field_focused
+                            && !popup_open
+                            && dialog.search.is_none()
+                            && dialog.report.is_none() =>
                     {
                         Some(Interaction::Activate(Back))
                     }
@@ -317,17 +329,26 @@ impl DashboardState {
                         if dialog.editor.is_none()
                             && !popup_open
                             && dialog.search.is_none()
+                            && dialog.report.is_none()
                             && !dialog.path.is_empty()
                             && key.modifiers.is_empty() =>
                     {
                         Some(Interaction::Activate(Back))
                     }
                     KeyCode::Char('a')
-                        if !field_focused && !popup_open && dialog.search.is_none() =>
+                        if !field_focused
+                            && !popup_open
+                            && dialog.search.is_none()
+                            && dialog.report.is_none() =>
                     {
                         Some(Interaction::Activate(Add))
                     }
-                    KeyCode::Delete if !field_focused && !popup_open && dialog.search.is_none() => {
+                    KeyCode::Delete
+                        if !field_focused
+                            && !popup_open
+                            && dialog.search.is_none()
+                            && dialog.report.is_none() =>
+                    {
                         Some(Interaction::Activate(Remove))
                     }
                     _ => None,
@@ -394,6 +415,18 @@ impl DashboardState {
                 if dialog.search.is_some() =>
             {
                 dialog.close_search();
+            }
+            // Esc and Backspace are the report's own; Back here is the footer
+            // button or Enter on it.
+            Some(Interaction::Cancel) | Some(Interaction::Activate(Back))
+                if dialog.report.is_some() =>
+            {
+                dialog.report = None;
+            }
+            Some(Interaction::Activate(DetectionResults))
+                if !dialog.detection_rejected.is_empty() =>
+            {
+                dialog.report = Some(ReportState::default());
             }
             Some(Interaction::Edit(Search, edit)) => {
                 if let Some(search) = &mut dialog.search

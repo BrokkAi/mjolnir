@@ -853,6 +853,28 @@ fn golden_machines_without_runtimes() {
     }
     assert!(dialog.draft["targets"].get("nas").is_none());
 
+    // Starting detection parks its button's activation while the button is
+    // disabled. A real key retires that, as it does for a person who moves on
+    // to the report button; Enter alone would replay the detect action.
+    dashboard.handle_key(key(KeyCode::Tab));
+    activate(&mut dashboard, SetupControl::DetectionResults);
+    append_setup_state(
+        &mut output,
+        "detection results lists each refusal and its fix",
+        &mut dashboard,
+        140,
+        34,
+    );
+    dashboard.handle_key(key(KeyCode::End));
+    dashboard.handle_key(key(KeyCode::Esc));
+    append_setup_state(
+        &mut output,
+        "esc from detection results returns to runtimes",
+        &mut dashboard,
+        140,
+        34,
+    );
+
     dashboard.handle_key(key(KeyCode::Esc));
     choose(&mut dashboard, "machines");
     append_setup_state(
