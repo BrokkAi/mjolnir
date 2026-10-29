@@ -545,6 +545,13 @@ fn probe_profile(
     }
     profile.ensure_ready(profile_id)?;
     let root = tempfile::tempdir().context("create private profile discovery directory")?;
+    // The staged home and the probe spec carry the profile's logins and
+    // environment.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
+    }
     // Muse and OpenCode read `$XDG_CONFIG_HOME/<id>`, so their staged home
     // must carry that leaf name or the harness never sees the staged login.
     let home = profile
@@ -567,7 +574,15 @@ fn probe_profile(
         },
         &executor,
     )?;
+    // Harnesses leave files in their temporary directory: OpenCode's Bun
+    // runtime extracts native libraries there on every start and never
+    // removes them. One inside the probe's root goes away with the probe.
+    let temporary = root.path().join("tmp");
+    std::fs::create_dir(&temporary)?;
     let mut environment = environment;
+    for name in ["TMPDIR", "TMP", "TEMP"] {
+        environment.insert(name.into(), temporary.to_string_lossy().into_owned());
+    }
     let excluded_environment = profile.exclude_harness_environment(&mut environment);
     let spec = ProfileProbeSpec {
         harness: profile.kind,

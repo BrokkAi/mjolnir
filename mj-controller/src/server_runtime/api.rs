@@ -2659,6 +2659,10 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
+    fn warm_profile_capabilities(&self, config: &mj_core::config::Config) {
+        self.profile_catalog.ensure(config);
+    }
+
     fn subagent_candidates(
         &self,
         _parent_profile: String,

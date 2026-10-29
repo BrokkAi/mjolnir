@@ -403,6 +403,12 @@ pub(crate) fn spawn_review_settings_discovery(
             request,
             worker_cancelled,
             progress_tx,
+            |selection| async move {
+                daemon::connect_existing()
+                    .await?
+                    .warm_profile_capabilities(selection)
+                    .await
+            },
         );
         tokio::pin!(discovery);
         let result = loop {

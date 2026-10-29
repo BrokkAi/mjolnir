@@ -492,8 +492,12 @@ pub fn materialized_chat_entry_with_diffstats(
                 entry.tool_input = call.raw_input.clone();
                 entry.tool_error = tool_error_detail(call.raw_output.as_ref());
                 let fallback_terminal = mj_core::acp::is_fallback_terminal_tool_call(&call);
-                entry.tool_content =
-                    tool_content_details(&call.content, terminal_outputs, call.raw_output.as_ref());
+                entry.tool_content = tool_content_details(
+                    &call.content,
+                    terminal_outputs,
+                    call.raw_output.as_ref(),
+                    tool_status(&call.status),
+                );
                 entry.tool_diffstats = exact_diffstats
                     .cloned()
                     .unwrap_or_else(|| tool_diff_paths(&call.content));

@@ -84,6 +84,9 @@ pub trait SubagentBackend: Send + Sync {
             profile, model, refresh,
         ))
     }
+    /// Start discovering what `config` selects, such as a Settings draft's
+    /// sub-agent models. Results arrive through the capability publication.
+    fn warm_profile_capabilities(&self, _config: &mj_core::config::Config) {}
     /// Every enabled profile a parent running on `parent_profile` may use for
     /// a sub-agent, with its discovered choices and remaining quota. It waits
     /// for pending discovery; a profile whose discovery fails is reported as

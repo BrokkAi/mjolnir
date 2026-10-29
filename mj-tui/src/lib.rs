@@ -906,6 +906,9 @@ pub struct DashboardState {
     pending_setup_login: Option<(u64, String)>,
     pub(crate) profile_hydration_requests: BTreeMap<String, BTreeSet<String>>,
     pub(crate) profile_hydration_errors: BTreeMap<String, String>,
+    /// The capability demand last sent for a Settings draft, so each draft
+    /// selection is warmed once rather than after every background reply.
+    pub(crate) profile_hydration_sent: Option<String>,
     /// The resolved `[keys]` bindings, refreshed whenever configuration is
     /// replaced so a `config.toml` edit takes effect without a restart.
     pub(crate) keybinds: mj_core::config::Keybinds,
@@ -1238,6 +1241,7 @@ impl DashboardState {
             pending_setup_login: None,
             profile_hydration_requests: Default::default(),
             profile_hydration_errors: Default::default(),
+            profile_hydration_sent: None,
             config: config.into(),
             state: state.into(),
             quotas,

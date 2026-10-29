@@ -1,10 +1,6 @@
 use super::*;
 use crate::controller::BranchDisposition;
 
-pub(super) fn phone_action_capacity_available(active_actions: usize) -> bool {
-    active_actions < MAX_CONCURRENT_PHONE_ACTIONS
-}
-
 /// Point the quota refresher at the profiles the configuration currently
 /// defines, alongside the worker-poll and credential-sync targets that are
 /// rebuilt from the same reload. A profile added to `config.toml` while the

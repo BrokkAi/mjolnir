@@ -2,7 +2,7 @@
 //! Entries belong to configured profile identities, never a shared generation.
 //! Every reader joins the owner's attempt; only its supervisor retries failures.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -28,6 +28,19 @@ type CacheKey = (String, Option<String>);
 /// How often ready entries are checked against the choice lifetime. An
 /// entry is probed again at most this long after it expires.
 const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// Delays before the owner of a failed entry tries again. Every attempt
+/// stages the profile and launches its harness, so a failure that persists,
+/// such as a full disk or a missing login, is retried rarely rather than
+/// every minute. A changed definition or a session's report starts sooner.
+const RETRY_DELAYS: [Duration; 6] = [
+    Duration::from_secs(1),
+    Duration::from_secs(5),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(15 * 60),
+];
 
 /// A failed attempt: its reason, and whether a later attempt could succeed.
 #[derive(Clone)]
@@ -80,6 +93,10 @@ struct Inner {
     publication: Option<mj_core::snapshot_map::SharedSnapshot<ProfileCapabilitiesSnapshot>>,
     definitions: BTreeMap<String, Definition>,
     entries: BTreeMap<CacheKey, Entry>,
+    /// Models a configuration selected, by profile identity, from every
+    /// configuration ensured, live or draft. Their efforts are discovered as
+    /// soon as the profile lists them; other models wait for a reader.
+    wanted: BTreeMap<String, BTreeSet<String>>,
     /// Probes replacing out-of-date ready entries, which stay served
     /// until a probe succeeds.
     refreshing: BTreeMap<CacheKey, Attempt>,
@@ -141,24 +158,25 @@ impl ProfileCatalog {
                         .entries
                         .get(&(identity.clone(), None))
                         .map_or(CapabilityState::Pending, Entry::state);
+                    // Only models whose efforts were claimed are listed.
                     let efforts = match &choices {
                         CapabilityState::Ready(choices) => choices
                             .models
                             .iter()
-                            .map(|model| {
+                            .filter_map(|model| {
                                 let state = match inner
                                     .entries
-                                    .get(&(identity.clone(), Some(model.value.clone())))
+                                    .get(&(identity.clone(), Some(model.value.clone())))?
                                 {
-                                    Some(Entry::Ready(choices)) => {
+                                    Entry::Ready(choices) => {
                                         CapabilityState::Ready(choices.efforts.clone())
                                     }
-                                    Some(Entry::Failed { error, .. }) => {
+                                    Entry::Failed { error, .. } => {
                                         CapabilityState::Failed(error.to_string())
                                     }
-                                    _ => CapabilityState::Pending,
+                                    Entry::Pending(_) => CapabilityState::Pending,
                                 };
-                                (model.value.clone(), state)
+                                Some((model.value.clone(), state))
                             })
                             .collect(),
                         _ => BTreeMap::new(),
@@ -201,8 +219,9 @@ impl ProfileCatalog {
         }
     }
 
-    /// Claim new definitions and default probes under one lock. A Settings
-    /// draft uses this same path without becoming the live configuration.
+    /// Claim new definitions, default probes and the efforts of the models
+    /// `config` selects under one lock. A Settings draft uses this same path
+    /// without becoming the live configuration.
     pub(crate) fn ensure(self: &Arc<Self>, config: &Config) {
         let config = Arc::new(config.clone());
         let mut started = Vec::new();
@@ -210,6 +229,11 @@ impl ProfileCatalog {
             let mut inner = self.lock();
             for (id, profile) in config.enabled_profiles() {
                 let identity = profile.capabilities_key(id);
+                inner
+                    .wanted
+                    .entry(identity.clone())
+                    .or_default()
+                    .extend(config.selected_models(id));
                 // Muse catalogues change server-side without a managed-pin
                 // bump, so a retained entry hides models and efforts people
                 // expect. Every warm pass re-probes a Muse profile instead of
@@ -220,6 +244,17 @@ impl ProfileCatalog {
                         // Keep successful entries and the in-flight attempt.
                         // A failed owner's next retry uses refreshed credentials.
                         definition.config = config.clone();
+                        let definition = definition.clone();
+                        if let Some(Entry::Ready(choices)) =
+                            inner.entries.get(&(identity.clone(), None)).cloned()
+                        {
+                            started.extend(self.claim_models(
+                                &mut inner,
+                                &definition,
+                                &identity,
+                                &choices,
+                            ));
+                        }
                         continue;
                     }
                     if !live {
@@ -319,8 +354,11 @@ impl ProfileCatalog {
         }
     }
 
-    /// Claim an entry for each model `choices` lists that has none. The
-    /// current model's efforts are already known; any other model is probed.
+    /// Claim an entry for the current model and each selected model `choices`
+    /// lists that has none. The current model's efforts are already known; a
+    /// selected model is probed. Every probe launches the harness, and
+    /// aggregating harnesses such as OpenCode advertise hundreds of models,
+    /// so a model nobody selected is probed only when a reader asks for it.
     fn claim_models(
         &self,
         inner: &mut Inner,
@@ -331,10 +369,16 @@ impl ProfileCatalog {
         let mut started = Vec::new();
         for model in &choices.models {
             let model_key = (identity.to_owned(), Some(model.value.clone()));
-            if inner.entries.contains_key(&model_key) {
+            let current = choices.model.as_ref() == Some(&model.value);
+            let selected = inner
+                .wanted
+                .get(identity)
+                .is_some_and(|wanted| wanted.contains(&model.value));
+            if inner.entries.contains_key(&model_key) || !(current || selected) {
                 continue;
             }
-            if choices.model.as_ref() == Some(&model.value) {
+            inner.publication = None;
+            if current {
                 inner
                     .entries
                     .insert(model_key, Entry::Ready(choices.clone()));
@@ -559,7 +603,7 @@ impl ProfileCatalog {
                 ) {
                     return;
                 }
-                let delay = Duration::from_secs([1, 5, 30, 60][failures.min(3) as usize]);
+                let delay = RETRY_DELAYS[(failures as usize).min(RETRY_DELAYS.len() - 1)];
                 failures = failures.saturating_add(1);
                 tokio::select! {
                     _ = cancellation.cancelled() => return,
@@ -983,9 +1027,6 @@ mod tests {
         );
         let mut config = test_config(&[("parent", HarnessKind::Codex)]);
         catalog.sync(&config);
-        assert_eq!(started.recv().await.as_deref(), Some("parent"));
-        assert!(catalog.snapshot().options(&config, None).is_some());
-        assert!(catalog.snapshot().options(&config, Some("other")).is_none());
         let reader = {
             let catalog = catalog.clone();
             let config = config.clone();
@@ -995,6 +1036,9 @@ mod tests {
                     .await
             })
         };
+        assert_eq!(started.recv().await.as_deref(), Some("parent"));
+        assert!(catalog.snapshot().options(&config, None).is_some());
+        assert!(catalog.snapshot().options(&config, Some("other")).is_none());
         // Adding a different profile must leave this model's pending owner intact.
         config.profiles.insert(
             "sibling".into(),
@@ -1004,9 +1048,8 @@ mod tests {
                 .unwrap(),
         );
         catalog.sync(&config);
-        assert_eq!(started.recv().await.as_deref(), Some("sibling"));
         assert!(!reader.is_finished());
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         release.send(true).unwrap();
         reader.await.unwrap().unwrap();
         catalog.sync_now(&config).await;
@@ -1031,6 +1074,85 @@ mod tests {
             .await
             .unwrap();
         assert!(held.ptr_eq(&catalog.snapshot()));
+    }
+
+    // Hard-won: #1380: warming launched one harness per advertised model.
+    #[tokio::test]
+    async fn only_selected_models_launch_effort_probes() {
+        let probed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let model_probe: Arc<ModelProbe> = {
+            let probed = probed.clone();
+            Arc::new(move |id, model| {
+                probed.lock().unwrap().push(model.clone());
+                Box::pin(async move {
+                    let mut choices = test_choices(&id);
+                    choices.model = Some(model);
+                    Ok(choices)
+                })
+            })
+        };
+        // An aggregating harness advertises hundreds of provider models.
+        let catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            Arc::new(|id| {
+                Box::pin(async move {
+                    let mut choices = test_choices(&id);
+                    choices
+                        .models
+                        .extend((0..300).map(|n| mj_core::acp::SessionConfigChoice {
+                            value: format!("provider/model-{n}"),
+                            name: format!("Model {n}"),
+                            description: None,
+                        }));
+                    Ok(choices)
+                })
+            }),
+            model_probe,
+        );
+        let mut config = test_config(&[("opencode", HarnessKind::OpenCode)]);
+        config.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+            model: "provider/model-7".into(),
+            effort: None,
+        });
+        catalog.sync(&config);
+        let settled = |model: &'static str| {
+            let catalog = catalog.clone();
+            let config = config.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while catalog.snapshot().options(&config, Some(model)).is_none() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("selected efforts are discovered");
+            }
+        };
+        settled("provider/model-7").await;
+        assert_eq!(*probed.lock().unwrap(), ["provider/model-7"]);
+
+        // A Settings draft selecting another model probes just that one, and
+        // only the models probed are published.
+        let mut draft = config.clone();
+        draft.subagents.subtle = Some(mj_core::config::SubagentChoice {
+            model: "provider/model-42".into(),
+            effort: None,
+        });
+        catalog.ensure(&draft);
+        settled("provider/model-42").await;
+        assert_eq!(
+            *probed.lock().unwrap(),
+            ["provider/model-7", "provider/model-42"]
+        );
+        let key = config.profiles["opencode"].capabilities_key("opencode");
+        assert_eq!(
+            catalog.snapshot().profiles[&key]
+                .efforts
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["opencode-model", "provider/model-42", "provider/model-7"]
+        );
     }
 
     /// Muse catalogues change server-side without a managed-pin bump, so a

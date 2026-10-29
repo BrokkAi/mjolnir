@@ -713,6 +713,7 @@ fn only_codex_receives_hidden_context_as_a_resource() {
     }
 }
 
+// Hard-won: c823ba502: metadata-only live terminal output was discarded before reaching the TUI.
 #[test]
 fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
     let live_tool_calls = Mutex::new(BTreeSet::new());
@@ -758,6 +759,33 @@ fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
         &live_tool_calls,
         "session-1"
     ));
+
+    for key in [
+        "terminal_output",
+        "terminal_output_delta",
+        "terminal_exit",
+        "private",
+    ] {
+        let update = SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new("live-tool", ToolCallUpdateFields::default()).meta(
+                serde_json::Map::from_iter([(
+                    key.into(),
+                    serde_json::json!({
+                        "terminal_id": "exec-1", "data": "command failed", "exit_code": 1
+                    }),
+                )]),
+            ),
+        );
+        assert_eq!(
+            session_update_is_relay_visible(&update, &live_tool_calls, "session-1"),
+            key != "private"
+        );
+        assert!(!session_update_is_relay_visible(
+            &metadata_only,
+            &live_tool_calls,
+            "session-1"
+        ));
+    }
 }
 
 /// Suppression follows the stored policy, including None without an MCP socket.

@@ -390,6 +390,96 @@ Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 
+=== streamed terminal output expanded while running (80x28) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running · 15:00                                                    ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │ Input arguments                                                           ▐│
+│ │ command:                                                                  ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │                                                                           ▐│
+│ │ cwd:                                                                      ▐│
+│ │ /home/jonathan/Projects/bifrost                                           ▐│
+│ │ From github.com:BrokkAi/bifrost                                           ▐│
+│ │ fatal: a branch named 'experiment-bbtree-performance' already exists      ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== failed terminal metadata expanded with exit code (80x28) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ × Tool · failed · 15:00                                                     ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │ Input arguments                                                           ▐│
+│ │ command:                                                                  ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │                                                                           ▐│
+│ │ cwd:                                                                      ▐│
+│ │ /home/jonathan/Projects/bifrost                                           ▐│
+│ │ From github.com:BrokkAi/bifrost                                           ▐│
+│ │ fatal: a branch named 'experiment-bbtree-performance' already exists      ▐│
+│ │                                                                           ▐│
+│ │ exited 128                                                                ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== failed terminal metadata reopened in raw mode (80x28) ===
+╭ Conversation · raw source ───────────────────────────────────────────────────╮
+│ × Tool · failed                                                             ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │ Input arguments                                                           ▐│
+│ │ {                                                                         ▐│
+│ │   "command": "git fetch origin master && git worktree add -b              ▐│
+│ │   experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance   ▐│
+│ │   origin/master",                                                         ▐│
+│ │   "cwd": "/home/jonathan/Projects/bifrost"                                ▐│
+│ │ }                                                                         ▐│
+│ │ From github.com:BrokkAi/bifrost                                           ▐│
+│ │ fatal: a branch named 'experiment-bbtree-performance' already exists      ▐│
+│ │                                                                           ▐│
+│ │ exited 128                                                                ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
 === raw-output failure pending expanded (80x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
 │ • Tool · waiting · 15:00                                                    ▐│

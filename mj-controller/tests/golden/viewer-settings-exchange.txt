@@ -317,6 +317,40 @@
         "notices": [
           "To sign this profile in, save it, then run `mj login --profile claude` in a terminal."
         ]
+      },
+      "subagent_options": {
+        "straightforward": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
+        },
+        "subtle": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
+        }
       }
     }
   },
@@ -486,6 +520,40 @@
           }
         ],
         "removable": false
+      },
+      "subagent_options": {
+        "straightforward": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
+        },
+        "subtle": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
+        }
       }
     }
   },
@@ -523,6 +591,40 @@
           }
         ],
         "removable": false
+      },
+      "subagent_options": {
+        "straightforward": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
+        },
+        "subtle": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
+        }
       }
     }
   },
@@ -751,6 +853,40 @@
           }
         ],
         "removable": false
+      },
+      "subagent_options": {
+        "straightforward": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
+        },
+        "subtle": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
+        }
       }
     }
   },
@@ -810,6 +946,40 @@
           }
         ],
         "removable": false
+      },
+      "subagent_options": {
+        "straightforward": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
+        },
+        "subtle": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
+        }
       }
     }
   },
@@ -964,6 +1134,40 @@
           }
         ],
         "removable": false
+      },
+      "subagent_options": {
+        "straightforward": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
+        },
+        "subtle": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
+        }
       }
     }
   },
