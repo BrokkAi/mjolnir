@@ -2481,8 +2481,8 @@ fn git_failure(action: &str, output: &GitOutput) -> anyhow::Error {
 /// checked and restored under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WorktreeTar {
-    /// Untracked files. Credential-like names are left out, a symbolic link
-    /// must point inside the checkout, and a restore never replaces a file.
+    /// Untracked files. A symbolic link must point inside the checkout, and a
+    /// restore never replaces a file.
     Untracked,
     /// The working-tree files of unmerged paths. They are tracked content and
     /// travel as exactly as the patches carry the rest of the tracked tree:
@@ -2516,11 +2516,6 @@ pub(super) fn build_untracked_tar(
         for (index, raw_path) in paths.into_iter().enumerate() {
             let relative = mj_core::path_input::from_git_bytes(raw_path)?;
             validate_worktree_relative_path(&relative)?;
-            // In addition to Git's ignore rules, skip conventional credential
-            // paths so they can never enter the untracked payload.
-            if ensure_not_secret_path(&relative).is_err() {
-                continue;
-            }
             progress(GitSnapshotProgress::UntrackedFile {
                 current: index + 1,
                 total,
@@ -2666,9 +2661,6 @@ fn validate_worktree_tar_reader(reader: impl Read, kind: WorktreeTar) -> Result<
             .path()
             .with_context(|| format!("read {label}-file tar path"))?;
         validate_worktree_relative_path(&relative)?;
-        if kind == WorktreeTar::Untracked {
-            ensure_not_secret_path(&relative)?;
-        }
         let entry_type = entry.header().entry_type();
         ensure!(
             entry_type.is_file() || entry_type.is_symlink(),

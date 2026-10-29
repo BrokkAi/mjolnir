@@ -7,6 +7,7 @@ mod codex_usage;
 mod grok_usage;
 mod kimi_auth;
 mod muse_usage;
+mod oauth_lock;
 mod zai_usage;
 
 pub mod compaction;

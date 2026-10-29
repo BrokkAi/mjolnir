@@ -1,9 +1,9 @@
 {
-  "version": "2.3.2",
+  "version": "2.4.0",
   "platforms": {
-    "linux-x86_64": {"filename":"kimi-code-linux-x64","sha256":"1cc5979fca0ea8c01c0a4d53806df8e65573cfbe7daf17ccff86db392807e4fa"},
-    "linux-aarch64": {"filename":"kimi-code-linux-arm64","sha256":"393102dcd646738087a3b1ad2234daad5d8dd564eac87141b60bf07f04d618de"},
-    "macos-x86_64": {"filename":"kimi-code-darwin-x64","sha256":"abac72e63dbed9a70ed27a358451c690b6c1ff11e70b04d419a40da103407d0e"},
-    "macos-aarch64": {"filename":"kimi-code-darwin-arm64","sha256":"d84a94c7d73405283a279348d2de78abbf31d2b1f7c92a8d739eeb40cf2a2f9f"}
+    "linux-x86_64": {"filename":"kimi-code-linux-x64","sha256":"8221a22f3417656a247cfe26240e73a6bcfba2456d6b2927e7209fe995f1da68"},
+    "linux-aarch64": {"filename":"kimi-code-linux-arm64","sha256":"2a5ca238d496b2f952bfeeba63d291fd2bbcfefb657f450433d7896e1e6bd1f4"},
+    "macos-x86_64": {"filename":"kimi-code-darwin-x64","sha256":"2e809e7cbca5cd68df689a4150ab8e6b0a365445db466532ef180e7b3cb849c2"},
+    "macos-aarch64": {"filename":"kimi-code-darwin-arm64","sha256":"39ebd6b434447574876bc66b05ae409c8e99b239494b3fef62b3a34ecceb9fd8"}
   }
 }

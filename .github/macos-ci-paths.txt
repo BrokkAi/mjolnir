@@ -76,5 +76,9 @@ mj-controller/src/targets/container_upgrade.rs
 # Shared target worker installation uses Darwin checksum and filesystem tools.
 mj-controller/src/controller/worker_binary/store.rs
 
+# Managed harness installs unpack per-platform release artifacts; MiMo Code's
+# macOS release is a zip archive, which only macOS installs extract.
+mj-core/src/harness_install.rs
+
 # Move transfers must remain compatible with stock macOS rsync.
 mj-controller/src/controller/move_session/transfer.rs

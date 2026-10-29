@@ -1,8 +1,8 @@
 //! Versioned, verified checkpoint archives for Hel sessions.
 //!
 //! This module deliberately accepts native harness artifacts one file at a
-//! time.  Harness adapters must use a versioned allowlist; recursively copying
-//! a profile home would risk archiving credentials and configuration.
+//! time. Harness adapters select the session's artifacts; the archive preserves
+//! their contents and filenames without guessing which names belong.
 
 use mj_core::hex::lower_hex;
 use std::borrow::Cow;
@@ -613,7 +613,6 @@ fn prepare_archive_view_with_part_size(
 
     for artifact in input.native_artifacts {
         validate_archive_relative_path(&artifact.relative_path)?;
-        ensure_not_secret_path(&artifact.relative_path)?;
         let archive_path = format!("native/{}", slash_path(&artifact.relative_path)?);
         push_payload(
             &mut payloads,
@@ -1555,7 +1554,6 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         validate_payload_parts(descriptor, &mut paths)?;
         if let PayloadRole::NativeArtifact { relative_path } = &descriptor.role {
             validate_archive_relative_path(relative_path)?;
-            ensure_not_secret_path(relative_path)?;
             ensure!(
                 descriptor.path == format!("native/{}", slash_path(relative_path)?),
                 "native artifact path does not match its role"
@@ -1900,62 +1898,6 @@ pub fn validate_component(value: &str, label: &str) -> Result<()> {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
         "invalid {label} '{value}'"
     );
-    Ok(())
-}
-
-/// The single interpretation of "this name holds credentials or harness
-/// configuration". Everything that decides whether a path may be archived,
-/// collected, or restored asks this, so a name blocked in one place is blocked
-/// everywhere.
-fn is_secret_like_component(component: &str) -> bool {
-    let component = component.to_ascii_lowercase();
-    component == ".env"
-        || component.starts_with(".env.")
-        || matches!(
-            component.as_str(),
-            ".git-credentials"
-                | "auth.json"
-                | "auth.toml"
-                | "config.json"
-                | "config.toml"
-                | "credentials"
-                | "settings.json"
-                | "token"
-                | "token.json"
-        )
-        || is_credentials_json(&component)
-}
-
-/// `credentials.json` on its own, or carrying that name behind a separator:
-/// `.credentials.json` (Claude's canonical credential file), and the
-/// `<vendor>_credentials.json` / `<vendor>-credentials.json` conventions.
-fn is_credentials_json(component: &str) -> bool {
-    component
-        .strip_suffix("credentials.json")
-        .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with(['.', '-', '_']))
-}
-
-/// A path is secret-like when any component is. A component that is not a
-/// plain name (`..`, a root, a prefix) cannot be interpreted, so it counts as
-/// secret-like and every caller refuses it.
-pub fn is_secret_like_path(path: &Path) -> bool {
-    path.components().any(|component| match component {
-        Component::Normal(component) => is_secret_like_component(&component.to_string_lossy()),
-        _ => true,
-    })
-}
-
-fn ensure_not_secret_path(path: &Path) -> Result<()> {
-    for component in path.components() {
-        let Component::Normal(component) = component else {
-            bail!("unsafe artifact path '{}'", path.display());
-        };
-        ensure!(
-            !is_secret_like_component(&component.to_string_lossy()),
-            "refusing to archive credential/config path '{}'",
-            path.display()
-        );
-    }
     Ok(())
 }
 

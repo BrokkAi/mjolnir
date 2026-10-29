@@ -2153,7 +2153,7 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
 #[test]
 fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     use mj_core::harness_runtime::{
-        CLAUDE_CLI_VERSION, DSH_ACP_PACKAGE, DSH_ACP_VERSION, MIMO_CLI_VERSION, MUSE_ACP_PACKAGE,
+        CLAUDE_CLI_VERSION, DSH_ACP_PACKAGE, DSH_ACP_VERSION, MIMO_VERSION, MUSE_ACP_PACKAGE,
         MUSE_ACP_VERSION,
     };
 
@@ -2197,11 +2197,16 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
         "containers/Containerfile.agent-dev must check the installed adapter is \
              {MUSE_ACP_VERSION}; a stale check fails only when the image is published"
     );
-    let mimo = format!("@mimo-ai/cli@{MIMO_CLI_VERSION}");
+    // The image installs MiMo Code from the managed runtime's own metadata, so
+    // both run the pinned release with the pinned digest.
     assert!(
-        CONTAINERFILE.contains(&mimo),
-        "containers/Containerfile.agent-dev must install {mimo}"
+        CONTAINERFILE.contains("COPY mj-core/assets/mimo/runtime.json")
+            && CONTAINERFILE.contains("install-mimo.py"),
+        "containers/Containerfile.agent-dev must install MiMo Code from mj-core/assets/mimo/runtime.json"
     );
+    let mimo: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../mj-core/assets/mimo/runtime.json")).unwrap();
+    assert_eq!(mimo["version"], MIMO_VERSION);
     assert!(CONTAINERFILE.contains("ENV MIMOCODE_DISABLE_AUTOUPDATE=1"));
 
     // DSH has no managed installation or image layer; its only launch path is
@@ -2235,24 +2240,6 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
             version
         );
     }
-
-    let package: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../mj-core/assets/harnesses/mimo/package.json"
-    ))
-    .unwrap();
-    let lock: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../mj-core/assets/harnesses/mimo/package-lock.json"
-    ))
-    .unwrap();
-    assert_eq!(package["dependencies"]["@mimo-ai/cli"], MIMO_CLI_VERSION);
-    assert_eq!(
-        lock["packages"][""]["dependencies"]["@mimo-ai/cli"],
-        MIMO_CLI_VERSION
-    );
-    assert_eq!(
-        lock["packages"]["node_modules/@mimo-ai/cli"]["version"],
-        MIMO_CLI_VERSION
-    );
 }
 
 /// Runs a default bridge script with `launcher` in the target's home and no

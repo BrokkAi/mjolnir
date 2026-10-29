@@ -366,12 +366,22 @@ impl DashboardState {
                     for probe in &machines {
                         let crate::MachineFinding::Answered { runtimes, rejected } = &probe.finding
                         else {
-                            rejected_runtimes.push(RejectedRuntime {
-                                kind: String::new(),
-                                label: probe.machine_id.clone(),
-                                detail: crate::availability::finding_reason(&probe.finding),
-                                remediation: None,
-                            });
+                            // The machine's own reason and fix stay separate
+                            // fields here: `finding_reason` writes a sentence
+                            // that follows a machine name and folds the fix
+                            // back in, and the report shows each alone.
+                            if let crate::MachineFinding::Unreachable {
+                                detail,
+                                remediation,
+                            } = &probe.finding
+                            {
+                                rejected_runtimes.push(RejectedRuntime {
+                                    kind: String::new(),
+                                    label: probe.machine_id.clone(),
+                                    detail: detail.clone(),
+                                    remediation: Some(remediation.clone()),
+                                });
+                            }
                             continue;
                         };
                         found_on_machines |= !runtimes.is_empty();
@@ -418,6 +428,12 @@ impl DashboardState {
                     &added,
                     &rejected_runtimes,
                 ));
+                // A runtimes run replaces the Detection results view's blocks;
+                // a profiles run says nothing about runtimes, so it leaves the
+                // last report alone until Settings closes.
+                if scope == DetectScope::Runtimes {
+                    dialog.detection_rejected = rejected_runtimes;
+                }
             }
             Err(error) => dialog.notice = Some(format!("Detection failed: {error}")),
         }
@@ -462,9 +478,10 @@ pub(super) fn machine_without_runtime_note(
 }
 
 /// What the Settings screen says after a detection run: the entries it added
-/// by name, and for runtimes the ones it turned down and why. When it added
-/// nothing, it says whether it found nothing at all or found only what
-/// Settings already lists (launch finding R13-4).
+/// by name, and for runtimes how many it turned down, pointing at the
+/// Detection results view for each reason and fix. When it added nothing, it
+/// says whether it found nothing at all or found only what Settings already
+/// lists (launch finding R13-4).
 pub(super) fn detection_notice(
     scope: DetectScope,
     found_any: bool,
@@ -494,19 +511,13 @@ pub(super) fn detection_notice(
             DetectScope::Runtimes => format!("Added runtimes: {names}."),
         });
     }
-    for runtime in rejected {
-        let mut reason = format!("Skipped {}: {}", runtime.label, runtime.detail.trim());
-        if !reason.ends_with('.') {
-            reason.push('.');
-        }
-        if let Some(remediation) = &runtime.remediation {
-            reason.push(' ');
-            reason.push_str(remediation.trim());
-            if !reason.ends_with('.') {
-                reason.push('.');
-            }
-        }
-        sentences.push(reason);
+    // Each refusal is a block in the Detection results view, never a sentence
+    // here: a status band truncates, and the fix is the part that must survive.
+    if !rejected.is_empty() {
+        sentences.push(format!(
+            "{} left out; Detection results says why.",
+            counted(rejected.len(), "was", "were")
+        ));
     }
     if !added.is_empty() {
         sentences.push("Review them, then Save.".to_owned());

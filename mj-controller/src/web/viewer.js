@@ -513,7 +513,17 @@ const settingsState = {
   /// field someone is typing in survives.
   contentVersion: 0,
   queue: Promise.resolve(),
+  /// The draft's discovered sub-agent choices as last rendered, the pending
+  /// re-render while they are still being discovered, and when that gives up.
+  subagentOptions: null,
+  discoveryTimer: null,
+  discoveryUntil: 0,
 };
+
+/// How often, and for how long after an edit, the open page is rendered
+/// again while a selected model's choices are still being discovered.
+const SETTINGS_DISCOVERY_POLL_MS = 2000;
+const SETTINGS_DISCOVERY_WAIT_MS = 2 * 60 * 1000;
 
 function settingsKey(path) {
   return JSON.stringify(path || []);
@@ -548,14 +558,45 @@ function enqueueSettings(work) {
     .finally(() => {
       settingsState.pending -= 1;
       settingsChanged(true);
+      scheduleSettingsDiscovery();
     });
   return settingsState.queue;
+}
+
+/// Whether the draft's sub-agent choices are still being discovered: a task
+/// whose models are not known yet, or a selected model whose efforts are not.
+function settingsDiscovering() {
+  const options = settingsState.subagentOptions;
+  if (!options || typeof options !== 'object') return false;
+  return ['straightforward', 'subtle']
+    .some(task => options[task] === null || options[task]?.efforts_pending === true);
+}
+
+/// The daemon discovers a model's efforts once it is selected, so render the
+/// open page again until they arrive rather than waiting for another edit.
+function scheduleSettingsDiscovery() {
+  if (settingsState.discoveryTimer || route.name !== 'settings' || !settingsDiscovering()
+    || Date.now() > settingsState.discoveryUntil) return;
+  settingsState.discoveryTimer = setTimeout(() => {
+    settingsState.discoveryTimer = null;
+    if (route.name !== 'settings' || !settingsState.page || !settingsDiscovering()) return;
+    enqueueSettings(async () => {
+      const reply = await request('/api/settings/page', {
+        method: 'POST',
+        body: JSON.stringify({ draft: settingsState.draft, path: settingsState.page.path }),
+      });
+      settingsState.page = reply.page;
+      settingsState.subagentOptions = reply.subagent_options ?? null;
+    });
+  }, SETTINGS_DISCOVERY_POLL_MS);
 }
 
 function adoptSettingsDocument(document) {
   settingsState.original = document.original;
   settingsState.draft = document.draft;
   settingsState.page = document.page;
+  settingsState.subagentOptions = document.draft?._subagent_options ?? null;
+  settingsState.discoveryUntil = Date.now() + SETTINGS_DISCOVERY_WAIT_MS;
   settingsState.dirty = false;
   settingsState.refused.clear();
   settingsState.error = '';
@@ -566,6 +607,7 @@ function forgetSettings() {
   settingsState.original = null;
   settingsState.draft = null;
   settingsState.page = null;
+  settingsState.subagentOptions = null;
   settingsState.dirty = false;
   settingsState.refused.clear();
   settingsState.status = '';
@@ -587,6 +629,8 @@ function syncSettingsRoute() {
       body: JSON.stringify({ draft: settingsState.draft, path: route.path || [] }),
     });
     settingsState.page = reply.page;
+    settingsState.subagentOptions = reply.subagent_options ?? null;
+    settingsState.discoveryUntil = Date.now() + SETTINGS_DISCOVERY_WAIT_MS;
     settingsState.error = '';
   });
 }
@@ -600,6 +644,8 @@ function editSettings(pagePath, edit) {
     });
     settingsState.draft = reply.draft;
     settingsState.page = reply.page;
+    settingsState.subagentOptions = reply.draft?._subagent_options ?? null;
+    settingsState.discoveryUntil = Date.now() + SETTINGS_DISCOVERY_WAIT_MS;
     const fieldEdit = edit.kind === 'set' || edit.kind === 'toggle';
     if (reply.error) {
       if (fieldEdit) settingsState.refused.set(settingsKey(edit.path), { message: reply.error, text: edit.text });

@@ -758,6 +758,117 @@ for line in sys.stdin:
     assert_eq!(action, Some(CredentialSyncAction::GithubTokenPushed));
 }
 
+/// Plays a worker that speaks the protocol in its first argument and keeps
+/// the slopcop login it is sent at the path in its third. Any request it does
+/// not expect fails the exchange.
+#[cfg(unix)]
+const SLOPCOP_LOGIN_RELAY: &str = r#"
+import base64, hashlib, json, os, sys
+protocol, session, stored = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+def state():
+    if not os.path.exists(stored):
+        return {"present": False, "fingerprint": "", "freshness_epoch_ms": None}
+    with open(stored, "rb") as copy:
+        return {"present": True, "fingerprint": hashlib.sha256(copy.read()).hexdigest(), "freshness_epoch_ms": None}
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req["request"]["method"]
+    if method == "hello":
+        payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "slopcop-login-fixture", "session_id": session}}
+    elif method == "slopcop_login_state":
+        payload = {"type": "credential_state", "data": state()}
+    elif method == "install_slopcop_login":
+        with open(stored, "wb") as copy:
+            copy.write(base64.b64decode(req["request"]["params"]["data"]))
+        payload = {"type": "credential_state", "data": state()}
+    elif method == "remove_slopcop_login":
+        os.remove(stored)
+        payload = {"type": "credential_state", "data": state()}
+    else:
+        raise AssertionError(method)
+    print(json.dumps({"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}), flush=True)
+"#;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn slopcop_login_sync_converges_current_workers_and_never_asks_older_ones() {
+    use credential_sync::HostSlopcopLogin::{SignedIn, SignedOut, Unknown};
+    use mj_core::skills::SkillsScope;
+    use mj_core::slopcop::SlopcopLogin;
+
+    let scratch = tempfile::tempdir().unwrap();
+    let stored = scratch.path().join("slopcop-login");
+    let connect = |protocol: u32| {
+        let spec = CommandSpec::new(
+            "python3",
+            [
+                "-c".to_owned(),
+                SLOPCOP_LOGIN_RELAY.to_owned(),
+                protocol.to_string(),
+                SESSION_ID.to_owned(),
+                stored.to_string_lossy().into_owned(),
+            ],
+        )
+        .purpose("slopcop login sync test relay");
+        let mut target = skills_sync_target(scratch.path());
+        target.skills_scope = SkillsScope::Isolated;
+        target.spec = spec.clone();
+        async move {
+            let client =
+                RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10))
+                    .await
+                    .expect("test worker relay connects");
+            (client, target)
+        }
+    };
+    let login = SlopcopLogin::new("first-token", Some("https://slopcop.example")).unwrap();
+    let rotated = SlopcopLogin::new("rotated-token", None).unwrap();
+
+    // A worker from before the login requests cannot decode them, so it is
+    // never sent one; it gets the login once the current worker replaces it.
+    let (mut client, target) = connect(mj_core::relay::RELAY_SLOPCOP_LOGIN_PROTOCOL - 1).await;
+    let before = client.next_request;
+    let action =
+        credential_sync::reconcile_slopcop_login(&mut client, &target, &SignedIn(login.clone()))
+            .await
+            .unwrap();
+    assert_eq!(action, None);
+    assert_eq!(client.next_request, before);
+
+    let (mut client, target) = connect(RELAY_PROTOCOL_VERSION).await;
+    for (host, expected, copy) in [
+        (
+            SignedIn(login.clone()),
+            Some(CredentialSyncAction::SlopcopLoginPushed),
+            Some(&login),
+        ),
+        (SignedIn(login.clone()), None, Some(&login)),
+        (
+            SignedIn(rotated.clone()),
+            Some(CredentialSyncAction::SlopcopLoginPushed),
+            Some(&rotated),
+        ),
+        // An unreadable host login is not a signed-out one.
+        (Unknown, None, Some(&rotated)),
+        (
+            SignedOut,
+            Some(CredentialSyncAction::SlopcopLoginRemoved),
+            None,
+        ),
+        (SignedOut, None, None),
+    ] {
+        let action = credential_sync::reconcile_slopcop_login(&mut client, &target, &host)
+            .await
+            .unwrap();
+        assert_eq!(action, expected, "{host:?}");
+        assert_eq!(
+            std::fs::read(&stored).ok(),
+            copy.map(SlopcopLogin::encode),
+            "{host:?}"
+        );
+    }
+}
+
 #[test]
 fn an_unsupported_method_answer_still_reads_as_missing_skills_sync() {
     // Workers that predate skills sync answer the unknown method with an
@@ -1108,9 +1219,16 @@ async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
         .purpose("skills archive format fixture");
 
         let skills = Arc::new(CanonicalSkills::collect(&target));
-        let actions = reconcile_session(&SessionRelays::Direct, &target, &skills, None, None)
-            .await
-            .unwrap();
+        let actions = reconcile_session(
+            &SessionRelays::Direct,
+            &target,
+            &skills,
+            None,
+            None,
+            &credential_sync::HostSlopcopLogin::Unknown,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             actions,
@@ -1480,6 +1598,7 @@ async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result()
         Some(SESSION_ID),
         Some(&gate),
         None,
+        credential_sync::unknown_slopcop_login,
     )
     .await;
     assert!(

@@ -80,7 +80,7 @@ Alternatively, install an agent and sign in with its own CLI, then choose
 pointed at your own agent home; `mj login --cli` always uses the command on
 `PATH`.
 
-Codex, Claude Code, Muse Code, MiMo Code, and DSH reuse Node.js 22 or newer
+Codex, Claude Code, Muse Code, and DSH reuse Node.js 22 or newer
 with npm and npx when that stack is on `PATH`. Otherwise Mjolnir downloads its
 own pinned Node.js into the user cache over HTTPS. Harness artifacts are fetched
 by Mjolnir itself and verified by SHA-256; setup does not require `curl`, Bash,

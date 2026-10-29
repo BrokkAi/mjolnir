@@ -33,17 +33,32 @@ pub enum ReviewDiscoveryOutcome {
 }
 
 /// Wait for the selected profile's catalog entry, including model-specific efforts.
-/// No worker or reviewer is acquired by Settings.
-pub async fn discover_review_settings(
+/// A model's efforts are discovered once it is selected, so a chosen model is
+/// first handed to `warm` as the reviewer selection of the saved
+/// configuration. No worker or reviewer is acquired by Settings.
+pub async fn discover_review_settings<W, F>(
     mut catalog: watch::Receiver<ProfileCapabilitiesSnapshot>,
     request: ReviewDiscoveryRequest,
     cancelled: Arc<AtomicBool>,
     progress: UnboundedSender<ReviewCapabilityChoices>,
-) -> Result<ReviewDiscoveryOutcome, String> {
+    warm: W,
+) -> Result<ReviewDiscoveryOutcome, String>
+where
+    W: FnOnce(Config) -> F,
+    F: std::future::Future<Output = anyhow::Result<()>>,
+{
     let config = tokio::task::spawn_blocking(Config::load)
         .await
         .map_err(|error| format!("load review settings task failed: {error}"))?
         .map_err(|error| format!("load review settings: {error:#}"))?;
+    if request.model.is_some() {
+        let mut selection = config.clone();
+        selection.review.profile = Some(request.profile.clone());
+        selection.review.model = request.model.clone();
+        warm(selection)
+            .await
+            .map_err(|error| format!("request review effort choices: {error:#}"))?;
+    }
     discover_from_catalog(&config, &mut catalog, &request, &cancelled, &progress).await
 }
 

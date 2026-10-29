@@ -33,7 +33,9 @@ pub struct ProfileCapabilitiesSnapshot {
 
 impl ProfileCapabilitiesSnapshot {
     /// None means required hydration is still in flight, including effort
-    /// discovery. Successful empty choices and failures are terminal states.
+    /// discovery. A model's efforts are discovered only once it is selected
+    /// or asked for, so an absent entry is not yet discovered either.
+    /// Successful empty choices and failures are terminal states.
     pub fn options(&self, config: &Config, model: Option<&str>) -> Option<SubagentOptions> {
         let mut options = SubagentOptions::default();
         for (id, profile) in config.enabled_profiles() {

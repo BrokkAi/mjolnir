@@ -34,9 +34,8 @@ use crate::archive::{
     GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode, NativeArtifact, PayloadRole,
     RepositorySnapshot, SessionManifest, SystemGit, TargetManifest, collect_git_metadata_snapshot,
     collect_git_snapshot, collect_plain_directory_snapshot, ensure_no_symlink_ancestors,
-    has_origin_refs, is_secret_like_path, read_archive_verified, remote_workspace_base,
-    validate_component, verify_archive_streaming, write_archive_hashed,
-    write_archive_hashed_borrowed,
+    has_origin_refs, read_archive_verified, remote_workspace_base, validate_component,
+    verify_archive_streaming, write_archive_hashed, write_archive_hashed_borrowed,
 };
 use mj_core::config::HarnessKind;
 /// Native state whose storage format is owned by the target runtime.

@@ -272,6 +272,18 @@ impl CredentialSyncNotices {
                 "Removed the GitHub CLI token from {github_removed} session(s)."
             ));
         }
+        let slopcop_pushed = result.slopcop_login_pushed_sessions();
+        if slopcop_pushed > 0 {
+            parts.push(format!(
+                "Synced the slopcop login to {slopcop_pushed} session(s)."
+            ));
+        }
+        let slopcop_removed = result.slopcop_login_removed_sessions();
+        if slopcop_removed > 0 {
+            parts.push(format!(
+                "Removed the slopcop login from {slopcop_removed} session(s)."
+            ));
+        }
         (!parts.is_empty()).then(|| CredentialNotice {
             text: parts.join(" "),
             routine: true,

@@ -42,6 +42,10 @@ impl RelayClient {
         RelayRequest::ProjectMemorySnapshot.supported_at(self.protocol_version)
     }
 
+    pub fn supports_slopcop_login_sync(&self) -> bool {
+        RelayRequest::SlopcopLoginState.supported_at(self.protocol_version)
+    }
+
     /// The skills archive format this session's worker reads. A worker from
     /// before `RELAY_GZIP_SKILLS_PROTOCOL` reads only the uncompressed format.
     pub fn skills_archive_format(&self) -> mj_core::skills::SkillsArchiveFormat {
@@ -249,6 +253,26 @@ impl RelayClient {
             })
             .await?,
         )
+    }
+
+    pub async fn slopcop_login_state(&mut self) -> Result<CredentialSnapshot> {
+        credential_snapshot(self.call(RelayRequest::SlopcopLoginState).await?)
+    }
+
+    pub async fn install_slopcop_login(
+        &mut self,
+        login: &mj_core::slopcop::SlopcopLogin,
+    ) -> Result<CredentialSnapshot> {
+        credential_snapshot(
+            self.call(RelayRequest::InstallSlopcopLogin {
+                data: BASE64.encode(login.encode()),
+            })
+            .await?,
+        )
+    }
+
+    pub async fn remove_slopcop_login(&mut self) -> Result<CredentialSnapshot> {
+        credential_snapshot(self.call(RelayRequest::RemoveSlopcopLogin).await?)
     }
 
     pub async fn github_token_state(

@@ -1,9 +1,9 @@
 {
-  "version": "1.0.40",
+  "version": "1.0.70",
   "platforms": {
-    "linux-x86_64": {"target":"linux-x86_64","sha256":"19575cd675624210b8b1e20ba9ebe3a3a8f2e800bc695512684eb156fd1f11ba"},
-    "linux-aarch64": {"target":"linux-aarch64","sha256":"8ed2cfd34e8524dc65395b1fbb9c9f7a6840d7644f8ea8763967a9eddfa1dfa1"},
-    "macos-x86_64": {"target":"macos-x86_64","sha256":"bd3217011b45b19248bb618dad9c80461787244a7389107f791b6f6ab2a23ee5"},
-    "macos-aarch64": {"target":"macos-aarch64","sha256":"6f01b20c93b1afbeda34a45c184d0a87a44026f9d14e003d696e26ba04d01783"}
+    "linux-x86_64": {"target":"linux-x86_64","sha256":"e751b614949d8458702367b0e0f333904c58258ad3e431a7226b14a42b74f847"},
+    "linux-aarch64": {"target":"linux-aarch64","sha256":"1c528d71c8abcc67d3b1eaa3715e0be512a582e79b2043dea75a0c951deec61c"},
+    "macos-x86_64": {"target":"macos-x86_64","sha256":"9b47b294f70df257e73536dcf1a52bfa034861961d47dec153980771f4f55506"},
+    "macos-aarch64": {"target":"macos-aarch64","sha256":"f6fbbc48d04fb7e99210cb597f44a5fb8150e770f363fcf70e3f537312e3dfcf"}
   }
 }

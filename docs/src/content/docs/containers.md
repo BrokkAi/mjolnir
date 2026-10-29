@@ -93,8 +93,9 @@ a native `mj-worker` for local bare sessions.
 
 Mjolnir ships a reference container image with everything a session needs
 pre-installed: Rust, Go, cargo-nextest, Node 24, OpenJDK 25, Python 3 with its
-native development headers and library, uv, Git, GitHub CLI, the Codex and
-Claude ACP bridges, Muse Code with `muse-acp`, and MiMo Code. Kimi, Grok,
+native development headers and library, uv, Git, GitHub CLI, the `slopcop`
+check CLI, the Codex and Claude ACP bridges, Muse Code with `muse-acp`, and
+MiMo Code. Kimi, Grok,
 OpenCode, and dsh-acp install on demand. It also carries
 Playwright's Chromium system libraries and the pre-installed Chromium headless
 shell in `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so headless browser tests need no
@@ -403,7 +404,9 @@ syncs its active GitHub token into every live non-local session. That includes
 managed containers, EC2, SSH Podman, and raw SSH targets, and lets `gh` and
 HTTPS Git pushes work without copying SSH keys. The token never goes into a
 recovery archive. Raw SSH targets are therefore inside the token's trust
-boundary; raw localhost sessions are deliberately excluded.
+boundary; raw localhost sessions are deliberately excluded. A slopcop login on
+that machine reaches the same sessions the same way, so an agent can run
+`slopcop` checks there without signing in again.
 
 If Mjolnir or the host crashes, containers it was managing can be orphaned —
 still running, but no longer tracked in Mjolnir's state. Use `mj recover` to

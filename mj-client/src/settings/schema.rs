@@ -366,7 +366,11 @@ pub fn null_label(path: &[String], draft: &Value) -> String {
             }
         }
         ["subagents", task, "effort"] if matches!(*task, "straightforward" | "subtle") => {
-            "Harness default".into()
+            if draft["_subagent_options"][task][super::discovery::EFFORTS_PENDING] == true {
+                "Discovering efforts…".into()
+            } else {
+                "Harness default".into()
+            }
         }
         ["subagents", "max_concurrent"] => format!(
             "{} (default)",

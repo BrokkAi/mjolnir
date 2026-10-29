@@ -57,14 +57,30 @@ enum RelayOrigin {
     RestoredSeed,
 }
 
-fn recover_missing_native_session(harness: &str, missing_error: &str, used: bool) {
+/// Codex's answer for a thread it never wrote: codex-acp wraps the reason in
+/// an internal error.
+fn codex_missing_thread(details: &str) -> serde_json::Value {
+    serde_json::json!({"code": -32603, "message": "Internal error", "data": {"details": details}})
+}
+
+/// claude-agent-acp 0.99's answer for a session with no transcript on disk.
+fn claude_missing_session() -> serde_json::Value {
+    serde_json::json!({
+        "code": -32002,
+        "message": "Resource not found",
+        "data": {"sessionId": "missing-thread"}
+    })
+}
+
+fn recover_missing_native_session(harness: &str, missing_error: serde_json::Value, used: bool) {
     recover_missing_native_session_from(RelayOrigin::Journal, harness, missing_error, used);
 }
 
+/// `missing_error` is the JSON-RPC error the bridge answers every reload with.
 fn recover_missing_native_session_from(
     origin: RelayOrigin,
     harness: &str,
-    missing_error: &str,
+    missing_error: serde_json::Value,
     used: bool,
 ) {
     let temp = tempfile::tempdir().unwrap();
@@ -76,7 +92,7 @@ fn recover_missing_native_session_from(
         format!(
             r#"import json, sys
 log = {log}
-error = {error}
+error = json.loads({error})
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
@@ -87,7 +103,7 @@ for line in sys.stdin:
         result = {{"protocolVersion": 1, "agentCapabilities": {{"loadSession": True}}}}
     elif method in ("session/load", "session/resume"):
         print(json.dumps({{"jsonrpc": "2.0", "id": ident,
-                          "error": {{"code": -32603, "message": error}}}}), flush=True)
+                          "error": error}}), flush=True)
         continue
     elif method == "session/new":
         result = {{"sessionId": "replacement", "modes": {{"currentModeId": "agent",
@@ -108,7 +124,7 @@ for line in sys.stdin:
         print(json.dumps({{"jsonrpc": "2.0", "id": ident, "result": result}}), flush=True)
 "#,
             log = serde_json::to_string(&log).unwrap(),
-            error = serde_json::to_string(missing_error).unwrap(),
+            error = serde_json::to_string(&missing_error.to_string()).unwrap(),
         ),
     )
     .unwrap();
@@ -347,32 +363,24 @@ for line in sys.stdin:
 fn codex_missing_unused_thread_recovers_after_worker_restart() {
     recover_missing_native_session(
         "codex",
-        r#"Internal error: {"details": "no rollout found for thread id missing-thread"}"#,
+        codex_missing_thread("no rollout found for thread id missing-thread"),
         false,
     );
 }
 
 #[test]
 fn claude_missing_unused_session_recovers_after_worker_restart() {
-    recover_missing_native_session(
-        "claude",
-        "Resource not found: missing-thread: {\n  \"uri\": \"missing-thread\"\n}",
-        false,
-    );
+    recover_missing_native_session("claude", claude_missing_session(), false);
 }
 
 #[test]
 fn used_native_history_is_not_replaced_after_worker_restart() {
     recover_missing_native_session(
         "codex",
-        r#"Internal error: {"details": "no rollout found for thread id missing-thread"}"#,
+        codex_missing_thread("no rollout found for thread id missing-thread"),
         true,
     );
-    recover_missing_native_session(
-        "claude",
-        "Resource not found: missing-thread: {\n  \"uri\": \"missing-thread\"\n}",
-        true,
-    );
+    recover_missing_native_session("claude", claude_missing_session(), true);
 }
 
 /// I2-7: resume after suspending a session that was never prompted. The
@@ -385,20 +393,20 @@ fn a_never_prompted_session_resumes_fresh_from_its_checkpoint() {
     recover_missing_native_session_from(
         RelayOrigin::RestoredSeed,
         "codex",
-        r#"Internal error: {"details": "thread not found: missing-thread"}"#,
+        codex_missing_thread("thread not found: missing-thread"),
         false,
     );
     recover_missing_native_session_from(
         RelayOrigin::RestoredSeed,
         "claude",
-        "Resource not found: missing-thread: {\n  \"uri\": \"missing-thread\"\n}",
+        claude_missing_session(),
         false,
     );
     // A checkpoint that cannot vouch for the session keeps it protected.
     recover_missing_native_session_from(
         RelayOrigin::RestoredSeed,
         "codex",
-        r#"Internal error: {"details": "thread not found: missing-thread"}"#,
+        codex_missing_thread("thread not found: missing-thread"),
         true,
     );
 }
