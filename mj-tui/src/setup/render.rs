@@ -103,6 +103,10 @@ pub(crate) fn render_setup(
         render_search(frame, popup, inner, dialog);
         return;
     }
+    if dialog.report.is_some() {
+        render_report(frame, popup, inner, dialog);
+        return;
+    }
     use SetupControl::*;
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
