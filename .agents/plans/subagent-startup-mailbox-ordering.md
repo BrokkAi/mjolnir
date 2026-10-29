@@ -24,7 +24,8 @@ one startup step at a time and waited between steps.
 - [x] (2026-10-29) Full core and worker suites, worker process tests and final workspace clippy pass.
 - [x] (2026-10-29) Corrected controller lock regression passes; all affected library suites are validated.
 - [x] (2026-10-29) Controller documentation tests pass; final local validation is complete.
-- [ ] Commit final validation notes, push and check image publication.
+- [x] (2026-10-29) Commit and push through 02fb709cd; issue #1394 closes and its in-progress label is removed.
+- [x] (2026-10-29) Image publication run 40916209742 succeeds for arm64, amd64 and the combined manifest.
 
 ## Surprises & Discoveries
 
@@ -71,7 +72,9 @@ the observable lock before checking legacy-lock exclusion. Core passes 553
 library tests and its auxiliary tests; worker passes 722 library tests and all
 binary/process tests. The corrected controller lock regression passes, as do
 workspace clippy, formatting, Python syntax checks and controller documentation
-tests. Remote publication remains. No live instance has been upgraded.
+tests. The fix is pushed to origin/master through 02fb709cd and issue #1394 is
+closed. Image publication run 40916209742 succeeds for both architectures and
+the combined manifest. No live instance has been upgraded.
 
 ## Context and Orientation
 
@@ -169,3 +172,6 @@ the daemon now observes receipts without resubmission.
 Final real scenario: final-e2e.log, instance issue-1394-final, artifacts under
 final-artifacts/delegation-seed-1171-2871009. Full-suite output is final-tests.log;
 the remainder and rerun use core-worker-tests.log and legacy-lock-regression.log.
+
+Remote publication: https://github.com/BrokkAi/mjolnir/actions/runs/40916209742
+completed successfully for commit 02fb709cdd5dba2471e810d37d4936a791f8bde6.
