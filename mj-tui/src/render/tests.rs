@@ -3338,7 +3338,7 @@ fn golden_dashboard_resource_panels() {
                     used: None,
                     limit: None,
                     resets: None,
-                    resets_at_epoch_seconds: Some(now + 2 * 24 * 60 * 60),
+                    resets_at_epoch_seconds: Some(now + 2 * 24 * 60 * 60 + 30),
                 },
                 QuotaWindow {
                     label: "5h".into(),
@@ -3348,7 +3348,7 @@ fn golden_dashboard_resource_panels() {
                     used: None,
                     limit: None,
                     resets: None,
-                    resets_at_epoch_seconds: Some(now + 60 * 60),
+                    resets_at_epoch_seconds: Some(now + 60 * 60 + 30),
                 },
             ])
             .collect(),
