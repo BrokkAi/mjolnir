@@ -53,6 +53,7 @@ pub mod repository;
 pub mod review;
 pub mod runtime;
 pub mod skills;
+pub mod slopcop;
 pub mod snapshot_map;
 pub mod state;
 pub mod storage;

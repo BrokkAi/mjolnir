@@ -906,7 +906,7 @@ Mjolnir release into `$XDG_CACHE_HOME/mjolnir/harnesses`, or
 only the resulting absolute path—never an arbitrary compatible executable from
 `PATH`. DSH is the exception and is never installed; see below.
 
-For Codex, Claude, Muse, MiMo, and DSH's npx fallback, Mjolnir uses Node.js 22
+For Codex, Claude, Muse, and DSH's npx fallback, Mjolnir uses Node.js 22
 or newer with npm and npx when the session `PATH` already provides that stack.
 Otherwise it downloads the pinned Node.js 24.22.1 distribution with its internal
 HTTPS client, verifies its published SHA-256 checksum, and installs it under
@@ -926,9 +926,11 @@ OpenCode downloads the pinned OpenCode 2 package for the platform from npm
 and verifies it in-process. Linux and macOS, on x86-64 and ARM64, are supported.
 The pinned installation disables OpenCode's self-update so a running session
 never replaces its own binary.
-MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
-launch disables automatic updates so a running session never replaces its own
-binary.
+MiMo Code installs from its pinned native release archive on GitHub, with
+Xiaomi's download mirror as a fallback, and verifies its pinned SHA-256
+checksum; it needs no Node.js runtime. Linux and macOS, on x86-64 and ARM64,
+are supported. Its managed launch disables automatic updates so a running
+session never replaces its own binary.
 DSH is never installed. A launch uses the target's own `dsh-acp` on `PATH` when
 it is 0.5.0 or newer, or fetches the pinned `@brokkai/dsh-acp@0.5.0` package
 through `npx`, using the compatible system runtime or the managed Node

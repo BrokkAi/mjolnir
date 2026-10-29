@@ -10,6 +10,7 @@ on:
       - 'containers/**'
       - '.dockerignore'
       - 'scripts/install-muse.py'
+      - 'scripts/install-mimo.py'
       - '.github/workflows/publish-agent-dev-image.yml'
       - 'Cargo.lock'
       - 'Cargo.toml'
