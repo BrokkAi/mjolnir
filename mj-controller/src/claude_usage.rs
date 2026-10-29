@@ -1153,6 +1153,7 @@ Last 7d · 5966 requests · 78 sessions
         .unwrap();
     }
 
+    // Hard-won: 85b96a6d5: full-suite load could delay lock acquisition past the test's 150ms wait.
     #[tokio::test]
     async fn a_legacy_claude_lock_delays_refresh_and_the_waiter_rereads_the_renewed_token() {
         let home = tempfile::tempdir().unwrap();
@@ -1176,13 +1177,26 @@ Last 7d · 5966 requests · 78 sessions
         let (url, state, server) = spawn_usage_server(false).await;
         let query = query_with(home.path().to_path_buf(), HashMap::new(), &url, executor);
         tokio::pin!(query);
+        let lock = home.path().join(".oauth_refresh.lock");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                _ = &mut query => panic!("quota reader finished while the legacy lock was held"),
+                () = async {
+                    while !lock.is_dir() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                } => {}
+            }
+        })
+        .await
+        .expect("quota reader did not acquire its first refresh lock");
         assert!(
             tokio::time::timeout(Duration::from_millis(150), &mut query)
                 .await
                 .is_err()
         );
         assert!(commands.lock().unwrap().is_empty());
-        assert!(home.path().join(".oauth_refresh.lock").is_dir());
+        assert!(lock.is_dir());
         std::fs::write(
             &path,
             serde_json::to_vec(&credentials(

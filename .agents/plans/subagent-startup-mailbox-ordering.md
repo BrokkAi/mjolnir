@@ -18,8 +18,13 @@ one startup step at a time and waited between steps.
 - [x] (2026-10-29) Persist startup with registration and seed ordinary worker commands before opening its socket.
 - [x] (2026-10-29) Add regressions for queue ordering, interrupted initialization and required configuration failure.
 - [x] (2026-10-29) Focused worker FIFO, parked receipt and legacy registration regressions pass.
-- [ ] Complete the real delegation scenario on the final receipt-only monitor build.
-- [ ] Run final affected suites, workspace clippy and formatting; commit and push.
+- [x] (2026-10-29) Complete the real delegation scenario on the final receipt-only monitor build.
+- [x] (2026-10-29) Merge origin/master and pass workspace clippy, formatting and checkpoint tests.
+- [x] (2026-10-29) Diagnose a credential-lock test's fixed-delay assumption and wait for observable acquisition instead.
+- [x] (2026-10-29) Full core and worker suites, worker process tests and final workspace clippy pass.
+- [x] (2026-10-29) Corrected controller lock regression passes; all affected library suites are validated.
+- [x] (2026-10-29) Controller documentation tests pass; final local validation is complete.
+- [ ] Commit final validation notes, push and check image publication.
 
 ## Surprises & Discoveries
 
@@ -54,11 +59,19 @@ reported in #1394. No new store schema or relay event format is introduced.
 
 ## Outcomes & Retrospective
 
-The worker FIFO and controller receipt/registration regressions pass. The real
-scenario passed FIFO ordering and daemon replacement but exposed a fast-child
-park racing duplicate daemon configuration; receipt-only monitoring now passes
-a real-journal regression for that case. Full final validation remains pending.
-No live instance has been upgraded.
+The worker FIFO and controller receipt/registration regressions pass. The final
+real delegation scenario passes startup ordering, once-only mail delivery,
+daemon replacement, child parking and wake, and report delivery. Its daemon
+handoff took 0.262 seconds. Receipt-only monitoring also passes the real-journal
+regression for a first turn that finishes and parks before startup bookkeeping.
+The checkpoint suite passes (164 tests); all but one of 2,200 controller tests
+passed on the first full run. That separate credential-lock test assumed its
+first acquisition completed within 150ms under suite load; it now waits for
+the observable lock before checking legacy-lock exclusion. Core passes 553
+library tests and its auxiliary tests; worker passes 722 library tests and all
+binary/process tests. The corrected controller lock regression passes, as do
+workspace clippy, formatting, Python syntax checks and controller documentation
+tests. Remote publication remains. No live instance has been upgraded.
 
 ## Context and Orientation
 
@@ -152,3 +165,7 @@ Validation update 2026-10-29: worker FIFO tests (2), parked first-turn receipt
 replay, and legacy registration recovery pass. The late subtle-child report
 failure in green-e2e-3.log showed why initial input must have only one producer;
 the daemon now observes receipts without resubmission.
+
+Final real scenario: final-e2e.log, instance issue-1394-final, artifacts under
+final-artifacts/delegation-seed-1171-2871009. Full-suite output is final-tests.log;
+the remainder and rerun use core-worker-tests.log and legacy-lock-regression.log.
