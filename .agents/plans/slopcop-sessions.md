@@ -14,9 +14,17 @@ To see it working at the end: start an isolated Mjolnir instance, create a Claud
 
 - [x] (2026-10-29) Verified what already works and what is missing (see `Surprises & Discoveries`). Filed #1397 for this work and #1398 to #1404 for the other harnesses.
 - [x] (2026-10-29) Milestone 1: installed the pinned slopcop 0.0.7 release in `containers/Containerfile.agent-dev` and listed it in `docs/src/content/docs/containers.md`. The `ARG`/`RUN` block, copied verbatim into a `debian:trixie-slim` build, passed its hash check and printed `slopcop version v0.0.7`, with the binary owned by root. The arm64 hash was checked against the downloaded archive; this machine cannot emulate arm64.
-- [ ] Milestone 1: confirm that the image publish workflow for the pushed commit succeeds on amd64 and arm64.
-- [ ] Milestone 2: synchronize the controller's slopcop login into every isolated session through a new credential-sync pair, a worker-held login file, and a `slopcop` wrapper on the session `PATH`.
-- [ ] Milestone 2 validation: relay compatibility test against an older worker, wrapper test, and an end-to-end Claude container session in an isolated `--instance`.
+- [x] (2026-10-29) Milestone 1: committed as aad2a247f and pushed. Publish run 40847450565 succeeded: arm64 built in 7m40s and amd64 in 10m48s, and the in-image `slopcop version` check passed on both.
+- [x] (2026-10-29) Milestone 2 code: `mj-core/src/slopcop.rs`; relay protocol 47 with `SlopcopLoginState`, `InstallSlopcopLogin` and `RemoveSlopcopLogin`; worker handling against `<harness home>/slopcop-login`; the `slopcop` wrapper; and the controller sync with `SlopcopLoginPushed` and `SlopcopLoginRemoved` notices.
+- [x] (2026-10-29) Milestone 2 targeted tests pass: 1 in mj-core, 3 in mj-worker and 80 in the mj-controller `worker_client` and `pollers` tests.
+- [x] (2026-10-29) Milestone 2 end to end: `tests/e2e/slopcop_login.py` passed in instance `slopcop-login`, against image `agent-dev:sha-aad2a24` with the portable worker built from this tree. The session's `slopcop whoami` matched the host's, including a non-default service URL. The login was usable 12 seconds after the viewer came up, including container provisioning.
+- [x] (2026-10-29) Milestone 2 final validation:
+  - `cargo fmt --check` and workspace clippy are clean.
+  - mj-core passes 553 tests plus its integration tests, and mj-worker passes 720 plus its integration tests.
+  - mj-controller passes 2,197 tests. One fails on this host: `installed_digest_matches_bytes_on_linux_and_darwin_with_quoted_paths` runs `shasum`, which is not installed here, and it predates this change (221e1343e).
+  - slopcop reports no new findings with the analysis complete.
+  - The end-to-end scenario passed again with `mj` and the worker rebuilt from the final tree.
+- [ ] Not done here: installing slopcop on raw SSH targets, which also receive the login but have no binary unless the person installed one, and the other harnesses (#1398 to #1404).
 - [ ] Outcomes & Retrospective.
 
 ## Surprises & Discoveries
@@ -30,6 +38,16 @@ To see it working at the end: start an isolated Mjolnir instance, create a Claud
 - Observation: the agent-dev image still compiles Bifrost 0.12.0 from source, and its comment says turn review depends on it. Nothing in Mjolnir runs that binary any more: commit b535fb8d2 removed it from turn review, and `mj-core/src/worker_launch.rs` drops the retired `bifrost_binary` launch field. This plan leaves it alone; removing it is a separate decision.
 
 - Observation: the slopcop npm package carries the binaries for all six platforms (51 MB unpacked), while one release archive is about 3.6 MB.
+
+- Observation: `CredentialSyncTarget.sync_github_token` and `CredentialSyncTarget.skills_scope` already record the same fact. Both come from whether the target is `LocalBare`: `target_syncs_github_token` in `mj-controller/src/pollers/worker_targets.rs`, and `TargetLocator::skills_scope` in `mj-core/src/state.rs`. Folding the GitHub flag into `skills_scope` was tried and reverted. The skills test `mixed_localhost_and_isolated_sessions_sync_different_skills_from_one_profile` then reached `controller_github_credential`, which runs `gh auth token`, so its outcome depended on whether the developer's machine is signed in to GitHub. Making that hermetic means restructuring how the GitHub token is resolved, which is outside this plan. slopcop takes its decision from `skills_scope` and adds no third copy.
+
+- Observation: three environment problems on a Fedora host stopped the end-to-end run before it reached slopcop. None is a defect in this change.
+  - `scripts/build-linux-worker.sh podman` fails with "could not find `Cargo.toml` in `/source`". SELinux is enforcing, and the bind-mounted checkout is labelled `user_home_t`. A copy of the script that adds `--security-opt label=disable` to the build container worked.
+  - Fedora packages `git daemon` separately. The container fixture in `tests/e2e/container_upgrades.py` serves the project with it, so the clone was refused. The slopcop driver serves a bare copy over Git's static HTTP protocol with `python3 -m http.server` instead.
+  - Creating a container session now requires `resource_allocation`. The driver sends 2 CPUs and 4 GiB.
+  Evidence: `git : 'daemon' n'est pas une commande git`, and `container sessions require an explicit CPU and RAM allocation`.
+
+- Observation: the slopcop service can briefly answer "could not complete this request right now", even for `whoami`. One run stopped at the host's own `slopcop whoami` and passed when run again a minute later.
 
 - Observation: the release archives store their files as uid 1001 (GitHub's `runner` user), and GNU tar running as root keeps stored owners. The install therefore extracts with `--no-same-owner`, so the binary belongs to root rather than to whatever account later gets uid 1001.
   Evidence: `tar -tvzf slopcop_v0.0.7_linux_amd64.tar.gz --numeric-owner` lists `1001/1001`. After the change, the test build lists `/usr/local/bin/slopcop` as `0 0`.
@@ -52,17 +70,39 @@ To see it working at the end: start an isolated Mjolnir instance, create a Claud
   Rationale: slopcop has no command that prints its token, the way `gh auth token` does for GitHub. Its README documents this precedence and the file's location as a contract. Asking the CLI would make slopcop the only reader of its own file, so a `slopcop auth token` command is worth adding upstream and switching to later. Until then, Mjolnir reads the file and never writes it.
   Date/Author: 2026-10-29 / Claude.
 
-- Decision: sync the slopcop login to every target except raw localhost (`TargetLocator::LocalBare`). The predicate is the same one the GitHub token uses: `target_syncs_github_token` in `mj-controller/src/pollers/worker_targets.rs`.
-  Rationale: a raw localhost session already reads the host's login directly, so a second copy would only add a writer. Muse and OpenCode are an exception on Linux: they redirect `XDG_CONFIG_HOME` and so hide the host file even on localhost. #1401 and #1402 track extending the sync to them.
+- Decision: only a session whose `skills_scope` is `Isolated` (every target except raw localhost, `TargetLocator::LocalBare`) gets a copy of the slopcop login, and it holds one exactly while the host is signed in. Sync never touches a localhost session's copy.
+  Rationale: `TargetLocator::skills_scope` already answers "can this session use the host's CLI and configuration", so slopcop asks it rather than adding another predicate. A localhost session's home is staged fresh, without a copy, and a move carries only the harness's native records, so a localhost session never acquires a copy to clean up. A first version also removed copies from localhost sessions. That sent one more relay request to every localhost session each minute, guarded against a case that cannot occur, and broke five fixture tests whose workers do not answer the request; it was dropped. Muse and OpenCode are an exception on Linux: they redirect `XDG_CONFIG_HOME` and so hide the host file even on localhost. #1401 and #1402 track that.
   Date/Author: 2026-10-29 / Claude.
 
-- Decision: the worker keeps the login in one file, `<worker root>/slopcop-login`, and a `slopcop` wrapper reads it on every invocation. The file holds the token on its first line and the service URL, if any, on its second. The wrapper sits in the same session `bin` directory as the existing `gh` wrapper, exports `SLOPCOP_TOKEN` (and `SLOPCOP_SERVICE` when present), and runs the real `slopcop`.
-  Rationale: this copies the GitHub token design (`mj-worker/src/worker_runtime/unix/git_env.rs`). A login changed on the host reaches running sessions without restarting the harness, and the token never sits in the harness process's own environment. One file keeps token and URL consistent with each other. Environment variables, unlike pointing slopcop at a different config directory, behave the same on Linux and macOS: Go's `os.UserConfigDir` ignores `XDG_CONFIG_HOME` on macOS.
+- Decision: the worker keeps the login in one file in the session's harness home, `<harness home>/slopcop-login`, and a `slopcop` wrapper reads it on every invocation. The file holds the token on its first line and the service URL, empty for slopcop's default, on its second. The wrapper sits in the same session `bin` directory as the existing `gh` wrapper, shares its `PATH` preamble, exports `SLOPCOP_TOKEN` and, when present, `SLOPCOP_SERVICE`, and runs the real `slopcop`.
+  Rationale: the copy is renewed like the GitHub token, so a login changed on the host reaches running sessions without restarting the harness, and the token never sits in the harness process's environment. It lives where the AWS credentials do, in the home that the worker's credential handler already owns, and the wrapper takes its path from the same `credential_endpoint` lookup, so one function decides where it is. One file keeps token and URL consistent with each other. Environment variables behave the same on Linux and macOS, unlike pointing slopcop at another config directory: Go's `os.UserConfigDir` ignores `XDG_CONFIG_HOME` on macOS.
+  Date/Author: 2026-10-29 / Claude.
+
+- Decision: credential sync is the only writer of the session copy. Nothing is written at launch.
+  Rationale: the coordinator reconciles a profile as soon as a new session's target is published (`publishing_new_targets_starts_reconciliation_without_waiting_for_the_tick`), so a new session gets the login within moments of starting. Writing it at launch as well would give the copy a second writer, and it would make launch code, which tests exercise, read the developer's own slopcop login.
+  Date/Author: 2026-10-29 / Claude.
+
+- Decision: the coordinator reads the host login once per profile reconciliation, on a blocking task, and only when a session needs a copy. The reader is a function parameter (`SlopcopLoginSource`): the daemon passes `mj_core::slopcop::host_login`, and tests pass `unknown_slopcop_login`. The result is one of `SignedIn`, `SignedOut` or `Unknown`. `Unknown` means the configuration exists but cannot be read; session copies are then left alone and a warning is logged, rather than failing the session's whole credential sync.
+  Rationale: an unreadable file is not a sign-out, and treating it as one would sign every session out. The parameter keeps tests from ever reading `~/.config/slopcop`.
   Date/Author: 2026-10-29 / Claude.
 
 ## Outcomes & Retrospective
 
-Not started.
+Both milestones are done for Claude sessions. Milestone 1 (aad2a247f) puts slopcop 0.0.7 in the agent-dev image. Milestone 2 gives every isolated session the host's slopcop login through credential sync and a `slopcop` wrapper. An agent in a container session can now follow the slopcop skill end to end: the skill arrives through skills sync, the binary is in the image, the login arrives through the sync, and model attribution already worked.
+
+The change was checked with slopcop itself before committing. The first check reported five new findings:
+- The scheme check's `"http://"` literal led to dropping that check, so slopcop alone decides which service URLs are valid.
+- Three missing docstrings in the end-to-end driver were added.
+- An inheritance-inference finding on the driver was ignored as a false positive, twice, because adding a docstring moved the class and gave it a new id. The analyzer cannot follow `from container_upgrades import Regression`, a sibling script resolved through `sys.path`.
+
+The second check reported "No new findings | Analysis complete".
+
+What remains is outside this plan:
+- Raw SSH targets receive the login but have no slopcop unless the person installed it there.
+- The other harnesses are tracked in #1398 to #1404: Codex's two writers of the skill, Muse's and OpenCode's redirected `XDG_CONFIG_HOME`, skill delivery for Kimi, Grok and MiMo, DSH's missing skills support, and model attribution for each.
+- The duplicate GitHub predicate noted under `Surprises & Discoveries`.
+
+Lessons: read the code that already answers a question before adding a field. `skills_scope` was the owner of "isolated", and launch-time staging would have made launch tests read the developer's own login.
 
 ## Context and Orientation
 
@@ -90,15 +130,13 @@ At the end of this milestone, a container session can run `slopcop`. It is not s
 
 ### Milestone 2: the controller's slopcop login in isolated sessions
 
-Start with a small module, `mj-core/src/slopcop.rs`, that owns Mjolnir's whole reading of a slopcop login. It holds a `SlopcopLogin { token, service_url }` type and resolves it from an environment map and a configuration directory, in slopcop's documented order. It also encodes the login into the two-line worker file and decodes it back, validating both values: each must be one line of printable text within a size bound, and the URL must be `http` or `https`. Reuse the opaque-token validation and the owner-only, no-symlink file helpers in `mj-core/src/credentials.rs` rather than writing new ones.
+Start with a small module, `mj-core/src/slopcop.rs`, that owns Mjolnir's whole reading of a slopcop login. It holds a `SlopcopLogin { token, service_url }` type and resolves it from an environment map and a configuration directory, in slopcop's documented order. It also encodes the login into the two-line worker file and decodes it back, validating both values: each must be one line of printable text within a size bound. Whether the URL names a usable service is left to slopcop, which accepts any `--service`; an earlier `http`/`https` scheme check was removed after a slopcop check flagged its `"http://"` literal, because it was a second, stricter opinion about URL validity than slopcop's own. Reuse the opaque-token validation and the owner-only, no-symlink file helpers in `mj-core/src/credentials.rs` rather than writing new ones.
 
 Next, extend the relay. Add `SlopcopLoginState`, `InstallSlopcopLogin { data }` and `RemoveSlopcopLogin` to `RelayRequest`, answered with the existing credential-state payload, with `minimum_protocol` 47. Define `RELAY_SLOPCOP_LOGIN_PROTOCOL = 47` and make it `RELAY_PROTOCOL_VERSION`. List the three requests as connection-only in `mj-worker/src/relay/requests.rs`.
 
-On the worker, handle the three requests in `apply_credential_request_at` against `<worker root>/slopcop-login`. Beside the `gh` wrapper, write a `slopcop` wrapper. It removes its own directory from `PATH`. When the login file exists, it reads the token and the optional URL and exports them as `SLOPCOP_TOKEN` and `SLOPCOP_SERVICE`. It then runs `slopcop`, or, when no `slopcop` remains on `PATH`, says so on stderr and exits 127.
+On the worker, handle the three requests in `apply_credential_request_at` against `<harness home>/slopcop-login`. In `mj-worker/src/worker_runtime/unix/git_env.rs`, `configure_slopcop_cli` writes a `slopcop` wrapper beside the `gh` wrapper, and worker preparation in `unix.rs` calls it right after `configure_github_cli`, with the path from `credential_endpoint`. The wrapper removes its own directory from `PATH`. When the login file exists, it reads the token and the optional URL and exports them as `SLOPCOP_TOKEN` and `SLOPCOP_SERVICE`. It then runs `slopcop`, or, when no `slopcop` remains on `PATH`, says so on stderr and exits 127.
 
-On the controller, add `sync_slopcop_login` to `CredentialSyncTarget`, set from the same predicate as `sync_github_token`. Resolve the login once per sync cycle on a blocking task, because it reads a file and the daemon's event loop must never block, and carry it in `SessionCanonical`. Add `reconcile_slopcop_login`, which mirrors `reconcile_github_token` and records new `CredentialSyncAction` variants. It skips a worker whose protocol is below 47 quietly; such a worker is replaced when its session is idle.
-
-Finally, check whether the first credential sync of a new container session can happen after its first turn starts. If it can, seed the login at container creation, the way `seed_container_github_token` in `git_env.rs` seeds the GitHub token.
+On the controller, in `mj-controller/src/worker_client/credential_sync.rs`, `reconcile_profile_guarded` reads the host login through its `SlopcopLoginSource` parameter, once, on a blocking task, and only when some session in the profile is isolated, because it reads a file and the daemon's event loop must never block. It carries the result in `SessionCanonical.slopcop_login`. `reconcile_on` calls `reconcile_slopcop_login`, which converges the session copy, records `SlopcopLoginPushed` or `SlopcopLoginRemoved`, and quietly skips a worker whose protocol is below 47; such a worker is replaced when its session is idle. `mj-controller/src/pollers/credential_sync.rs` turns those actions into the routine notice "Synced the slopcop login to N session(s)."
 
 ## Concrete Steps
 
@@ -112,6 +150,16 @@ It must print `slopcop version v0.0.7`. Then commit, push to `origin/master`, an
 
     gh run list --workflow publish-agent-dev-image.yml --limit 1
     gh run watch <run id> --exit-status
+
+Milestone 2 end to end, from the repository root, with the host signed in to slopcop and an image that has it:
+
+    cargo build -p brokk-mjolnir --features test-hooks
+    scripts/build-linux-worker.sh podman
+    python3 tests/e2e/slopcop_login.py --mj target/debug/mj \
+        --worker target/worker/x86_64-unknown-linux-musl/debug/mj-worker \
+        --image ghcr.io/brokkai/mjolnir/agent-dev:latest --instance slopcop-login
+
+It prints a JSON line with `"result": "passed"`.
 
 Milestone 2, after each round of changes:
 
@@ -132,7 +180,11 @@ Milestone 1 is accepted when the install step prints `slopcop version v0.0.7` in
 
 Milestone 2 is accepted when, in an isolated instance (`mj --instance slopcop-test ...`), a Claude session on a container target can run `slopcop whoami` and print the host's account and workspace. A later `slopcop logout` on the host must make the session answer `auth_required` within one sync cycle.
 
-Three tests protect this. An integration test shows that the controller skips slopcop sync for a worker that speaks protocol 46 and pushes it to one that speaks 47. A worker relay test installs, reads and removes the login over a real relay connection, in the style of the AWS tests in `mj-worker/src/worker_runtime/relay_tests.rs`. A wrapper test shows that the next invocation picks up a rotated login file, and that a symlinked login file is refused.
+Four tests protect this:
+- `slopcop_login_sync_converges_current_workers_and_never_asks_older_ones` in `mj-controller/src/worker_client/tests.rs`: a protocol-46 worker is never sent a slopcop request, while a protocol-47 worker gets the login pushed, rotated, kept on `Unknown`, and removed on sign-out.
+- `credential_exchange_stays_on_the_connection_and_out_of_relay_state` in `mj-worker/src/worker_runtime/relay_tests.rs`, now also covering slopcop: the login is installed owner-only, read back and removed over a real worker connection, and never reaches persisted relay state.
+- `slopcop_wrapper_exports_each_live_login`: every invocation reads the current login file.
+- `host_login_follows_slopcop_and_reports_an_unreadable_configuration_as_unknown` in `mj-core/src/slopcop.rs`: slopcop's own file format and precedence, and an unreadable file reported as unknown rather than signed out.
 
 ## Idempotence and Recovery
 

@@ -154,6 +154,9 @@ impl DurableRelay {
             | RelayRequest::CredentialState
             | RelayRequest::AwsCredentialsState
             | RelayRequest::InstallAwsCredentials { .. }
+            | RelayRequest::SlopcopLoginState
+            | RelayRequest::InstallSlopcopLogin { .. }
+            | RelayRequest::RemoveSlopcopLogin
             | RelayRequest::ReadCredentials
             | RelayRequest::InstallCredentials { .. }
             | RelayRequest::SkillsState

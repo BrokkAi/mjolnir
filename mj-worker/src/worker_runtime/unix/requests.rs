@@ -422,10 +422,35 @@ pub(crate) fn apply_credential_request_at(
         MAX_SKILLS_ARCHIVE_BYTES, SkillsArchive, collect_skills, install_skills,
     };
 
+    let slopcop_login_path = endpoint.home.join(mj_core::slopcop::LOGIN_FILE);
     match request {
         RelayRequest::AwsCredentialsState => Ok(credential_state_payload(
             &mj_core::aws_credentials::state(&endpoint.home)?,
         )),
+        RelayRequest::SlopcopLoginState => Ok(credential_state_payload(
+            &mj_core::slopcop::read_login(&slopcop_login_path)?.0,
+        )),
+        RelayRequest::InstallSlopcopLogin { data } => {
+            if data.len() > mj_core::slopcop::MAX_LOGIN_BYTES * 2 {
+                bail!(
+                    "slopcop login is above the {} byte limit",
+                    mj_core::slopcop::MAX_LOGIN_BYTES
+                );
+            }
+            let bytes = BASE64
+                .decode(data.as_bytes())
+                .context("decode slopcop login payload")?;
+            Ok(credential_state_payload(&mj_core::slopcop::write_login(
+                &slopcop_login_path,
+                &bytes,
+            )?))
+        }
+        RelayRequest::RemoveSlopcopLogin => {
+            mj_core::slopcop::remove_login(&slopcop_login_path)?;
+            Ok(credential_state_payload(
+                &mj_core::credentials::CredentialSnapshot::absent(),
+            ))
+        }
         RelayRequest::InstallAwsCredentials { data } => {
             if data.len() > MAX_CREDENTIAL_BYTES * 2 {
                 bail!("AWS credential payload is above the {MAX_CREDENTIAL_BYTES} byte limit");
