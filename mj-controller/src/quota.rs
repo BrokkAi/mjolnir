@@ -1101,18 +1101,11 @@ fn required_string<'a>(payload: &'a Value, key: &str, context: &str) -> Result<&
 /// the same directory the same way, so its refresh and the CLI's never spend
 /// the same single-use refresh token.
 struct KimiRefreshLock {
-    path: std::path::PathBuf,
-    heartbeat: tokio::task::JoinHandle<()>,
+    _lock: crate::oauth_lock::OAuthRefreshLock,
 }
 
-/// How often a holder republishes the lock's modification time. It fits inside
-/// the CLI's 5 second stale window several times over.
 const KIMI_LOCK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
-/// How long a lock's modification time must be still before Mjolnir removes
-/// it as abandoned. Longer than the CLI's own 5 seconds, so Mjolnir never
-/// breaks a lock the CLI would still consider live.
 const KIMI_LOCK_STALE_AFTER: Duration = Duration::from_secs(10);
-const KIMI_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const KIMI_LOCK_WAIT: Duration = Duration::from_secs(60);
 
 impl KimiRefreshLock {
@@ -1128,116 +1121,20 @@ impl KimiRefreshLock {
             .open(oauth_dir.join("kimi-code"))
             .await
             .context("prepare Kimi Code OAuth lock sentinel")?;
-        let path = oauth_dir.join("kimi-code.lock");
-        let deadline = tokio::time::Instant::now() + wait;
-        loop {
-            match tokio::fs::create_dir(&path).await {
-                Ok(()) => return Ok(Self::held(path)),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if tokio::time::Instant::now() >= deadline {
-                        bail!(
-                            "timed out waiting for Kimi Code OAuth refresh lock {}",
-                            path.display()
-                        );
-                    }
-                    if !break_stale_kimi_lock(&path).await {
-                        tokio::time::sleep(KIMI_LOCK_RETRY_INTERVAL).await;
-                    }
-                }
-                Err(error) => return Err(error).context("acquire Kimi Code OAuth refresh lock"),
-            }
-        }
-    }
-
-    fn held(path: std::path::PathBuf) -> Self {
-        let heartbeat_path = path.clone();
-        let heartbeat = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(KIMI_LOCK_HEARTBEAT_INTERVAL).await;
-                if let Err(error) = touch_kimi_lock(&heartbeat_path, SystemTime::now()) {
-                    tracing::debug!(path = %heartbeat_path.display(), %error, "heartbeat Kimi Code OAuth refresh lock");
-                }
-            }
-        });
-        Self { path, heartbeat }
+        Ok(Self {
+            _lock: crate::oauth_lock::OAuthRefreshLock::acquire(
+                oauth_dir.join("kimi-code.lock"),
+                wait,
+                KIMI_LOCK_STALE_AFTER,
+                KIMI_LOCK_HEARTBEAT_INTERVAL,
+            )
+            .await?,
+        })
     }
 }
 
-impl Drop for KimiRefreshLock {
-    fn drop(&mut self) {
-        self.heartbeat.abort();
-        match std::fs::remove_dir(&self.path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                tracing::warn!(path = %self.path.display(), %error, "release Kimi Code OAuth refresh lock");
-            }
-        }
-    }
-}
-
-/// The lock directory's modification time, or `None` when it is gone.
-fn kimi_lock_mtime(path: &Path) -> std::io::Result<Option<SystemTime>> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => metadata.modified().map(Some),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-/// Publish a lock directory's modification time. Windows opens a directory
-/// handle only under backup semantics.
-fn touch_kimi_lock(path: &Path, modified: SystemTime) -> std::io::Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
-    }
-    options
-        .open(path)?
-        .set_times(std::fs::FileTimes::new().set_modified(modified))
-}
-
-/// Remove a lock whose holder stopped heartbeating, so a holder killed
-/// mid-refresh cannot block every later refresh. Returns whether the caller
-/// should retry the create at once.
-async fn break_stale_kimi_lock(path: &Path) -> bool {
-    let modified = match kimi_lock_mtime(path) {
-        Ok(Some(modified)) => modified,
-        Ok(None) => return true,
-        Err(error) => {
-            tracing::warn!(path = %path.display(), %error, "inspect Kimi Code OAuth refresh lock");
-            return false;
-        }
-    };
-    // A modification time in the future (the CLI rounds its writes up) is not
-    // stale.
-    let Some(age) = SystemTime::now()
-        .duration_since(modified)
-        .ok()
-        .filter(|age| *age >= KIMI_LOCK_STALE_AFTER)
-    else {
-        return false;
-    };
-    match tokio::fs::remove_dir(path).await {
-        Ok(()) => {
-            tracing::warn!(
-                path = %path.display(),
-                age_seconds = age.as_secs(),
-                "removed a Kimi Code OAuth refresh lock whose holder stopped heartbeating"
-            );
-            true
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-        Err(error) => {
-            tracing::warn!(path = %path.display(), %error, "remove stale Kimi Code OAuth refresh lock");
-            false
-        }
-    }
-}
+#[cfg(test)]
+use crate::oauth_lock::{mtime as kimi_lock_mtime, touch as touch_kimi_lock};
 
 fn parse_kimi_usage(payload: &Value) -> (Vec<QuotaWindow>, Option<String>) {
     let mut windows = Vec::new();
