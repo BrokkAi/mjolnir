@@ -4571,6 +4571,105 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
 }
 
 #[test]
+fn container_attachment_guidance_matches_engine_permissions_and_harness_instruction_files() {
+    struct MountExecutor;
+    impl CommandExecutor for MountExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.purpose, "inspect session container storage");
+            assert!(command.args.iter().any(|arg| arg == "{{json .Mounts}}"));
+            Ok(CommandOutput {
+                status: 0,
+                // Recorded from a disposable Podman container with ro/O/rw
+                // mounts; only host paths have been normalized.
+                stdout: include_bytes!("../../../tests/fixtures/container-attachment-mounts.json")
+                    .to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let attachments = [
+        ("/reference", targets::MountAccess::Ro),
+        ("/scratch", targets::MountAccess::Cow),
+        ("/shared", targets::MountAccess::Rw),
+    ]
+    .map(|(destination, access)| targets::AdditionalMount {
+        source: "/host/external".into(),
+        destination: destination.into(),
+        access,
+    });
+    let mut output = String::new();
+    for (name, target, attachments) in [
+        (
+            "Podman",
+            targets::TargetLocator::LocalPodman {
+                borrowed_from: None,
+                container_id: "container".into(),
+                workspace_storage: Default::default(),
+            },
+            attachments.to_vec(),
+        ),
+        (
+            "Docker with a downgraded overlay",
+            targets::TargetLocator::LocalDocker {
+                borrowed_from: None,
+                container_id: "container".into(),
+            },
+            vec![targets::AdditionalMount {
+                access: targets::MountAccess::Cow,
+                ..attachments[0].clone()
+            }],
+        ),
+        (
+            "Apple container",
+            targets::TargetLocator::AppleContainer {
+                borrowed_from: None,
+                container_id: "container".into(),
+            },
+            attachments.to_vec(),
+        ),
+        (
+            "Container without external attachments",
+            targets::TargetLocator::LocalDocker {
+                borrowed_from: None,
+                container_id: "container".into(),
+            },
+            Vec::new(),
+        ),
+    ] {
+        let storage =
+            targets::inspect_container_storage(&target, &attachments, &MountExecutor).unwrap();
+        let mut expected = None;
+        for harness in HarnessKind::ALL {
+            let staged = tempfile::tempdir().unwrap();
+            append_hel_target_environment(harness, staged.path(), &target).unwrap();
+            append_container_storage_guidance(
+                harness,
+                staged.path(),
+                &target,
+                None,
+                storage.managed_temporary_volume,
+                &storage.attachments,
+            )
+            .unwrap();
+            let text =
+                std::fs::read_to_string(staged.path().join(harness.agent_instructions_file()))
+                    .unwrap();
+            if let Some(expected) = &expected {
+                assert_eq!(&text, expected, "{harness:?}");
+            } else {
+                output.push_str(&format!("=== {name} ===\n{text}\n"));
+                expected = Some(text);
+            }
+        }
+    }
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "container-attachment-instructions",
+        &output,
+    );
+}
+
+#[test]
 fn project_memory_replicas_are_session_private() {
     let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     assert_eq!(

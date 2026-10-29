@@ -50,7 +50,7 @@ mod bootstrap;
 pub use bootstrap::*;
 mod container;
 mod container_upgrade;
-pub(crate) use container::has_managed_temporary_volume;
+pub(crate) use container::inspect_container_storage;
 use container::*;
 #[cfg(test)]
 pub(crate) use container_upgrade::container_upgrade_test_plan;

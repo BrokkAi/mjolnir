@@ -30,6 +30,7 @@ pub(super) fn append_container_storage_guidance(
     target: &targets::TargetLocator,
     workspace: Option<&Path>,
     native_temporary_storage: bool,
+    attachments: &[targets::AdditionalMount],
 ) -> Result<()> {
     let podman_workspace = match target {
         targets::TargetLocator::LocalPodman {
@@ -41,6 +42,8 @@ pub(super) fn append_container_storage_guidance(
         targets::TargetLocator::LocalDocker { .. } | targets::TargetLocator::SshDocker { .. } => {
             None
         }
+        targets::TargetLocator::AppleContainer { .. }
+        | targets::TargetLocator::SshAppleContainer { .. } => None,
         _ => return Ok(()),
     };
     let heading = "## Mjolnir container storage\n\n";
@@ -62,8 +65,33 @@ pub(super) fn append_container_storage_guidance(
         }
         guidance.push_str("Keep durable results inside the project repository directories; arbitrary files elsewhere on the workspace volume are not checkpointed.\n");
     }
-    if guidance == heading {
+    if guidance != heading {
+        append_staged_instructions(harness, destination, &guidance)?;
+    }
+    if attachments.is_empty() {
         return Ok(());
+    }
+    let mut guidance = String::from(
+        "## Mjolnir external attachments\n\nThese host directories are attached at the container paths listed below. External attachments are not included in project workspace checkpoints.\n\n",
+    );
+    for attachment in attachments {
+        let behavior = match attachment.access {
+            targets::MountAccess::Ro => {
+                "read-only; you can read these files but cannot change them"
+            }
+            targets::MountAccess::Cow => {
+                "copy-on-write; changes are private to this container, never change the host directory, and are lost when the container is removed or recreated"
+            }
+            targets::MountAccess::Rw => {
+                "read-write; changes write directly to the host directory and persist after the container is removed"
+            }
+        };
+        guidance.push_str(&format!(
+            "- Container `{}` from host `{}`: `{}` ({behavior}).\n",
+            attachment.destination.display(),
+            attachment.source.display(),
+            attachment.access.label(),
+        ));
     }
     append_staged_instructions(harness, destination, &guidance)
 }

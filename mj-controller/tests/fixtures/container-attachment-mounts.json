@@ -1,0 +1,41 @@
+[
+  {
+    "Type": "bind",
+    "Source": "/host/external",
+    "Destination": "/shared",
+    "Driver": "",
+    "Mode": "",
+    "Options": [
+      "rbind"
+    ],
+    "RW": true,
+    "Propagation": "rprivate"
+  },
+  {
+    "Type": "bind",
+    "Source": "/host/external",
+    "Destination": "/reference",
+    "Driver": "",
+    "Mode": "",
+    "Options": [
+      "rbind"
+    ],
+    "RW": false,
+    "Propagation": "rprivate"
+  },
+  {
+    "Type": "bind",
+    "Source": "/host/external",
+    "Destination": "/scratch",
+    "Driver": "",
+    "Mode": "",
+    "Options": [
+      "lowerdir=/host/external",
+      "upperdir=/containers/session/overlay/upper",
+      "workdir=/containers/session/overlay/work",
+      "userxattr"
+    ],
+    "RW": true,
+    "Propagation": "private"
+  }
+]
