@@ -1889,6 +1889,7 @@ fn a_wait_entry_bounds_its_output_and_names_the_report_directory() {
 /// record running, or fails with the given reason and leaves it parked.
 struct ParkingExports {
     records: std::sync::Mutex<BTreeMap<String, SessionRecord>>,
+    close_requests: std::sync::Mutex<Vec<(String, String, String)>>,
     unparks: std::sync::atomic::AtomicUsize,
     unpark_failure: Option<String>,
     defer_unpark: std::sync::atomic::AtomicBool,
@@ -1913,6 +1914,7 @@ impl ParkingExports {
             .collect();
         Arc::new(Self {
             records: std::sync::Mutex::new(records),
+            close_requests: Default::default(),
             unparks: Default::default(),
             unpark_failure: unpark_failure.map(str::to_owned),
             defer_unpark: Default::default(),
@@ -1939,6 +1941,10 @@ impl ParkingExports {
 
     fn unparks(&self) -> usize {
         self.unparks.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn close_requests(&self) -> Vec<(String, String, String)> {
+        self.close_requests.lock().unwrap().clone()
     }
 }
 
@@ -1977,6 +1983,18 @@ impl ExportRuntime for ParkingExports {
             }
             Ok(())
         })
+    }
+    fn close_subagent_request(
+        self: Arc<Self>,
+        session_id: String,
+        parent: String,
+        request: String,
+    ) -> BoxFuture<'static, Result<()>> {
+        self.close_requests
+            .lock()
+            .unwrap()
+            .push((session_id, parent, request));
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -2802,6 +2820,50 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
         format!("{ambiguous:#}").contains("ambiguous"),
         "{ambiguous:#}"
     );
+}
+
+// Hard-won: #1349: close compared a unique child prefix with full session IDs and refused an owned child.
+#[tokio::test]
+async fn close_resolves_an_owned_child_prefix_and_persists_the_full_id() {
+    if !isolated_parked_test("close_resolves_an_owned_child_prefix_and_persists_the_full_id") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    const CHILD: &str = "84296e42d46364080fb92a03e559d111";
+    store_parent_and_child(CHILD);
+    let exports = ParkingExports::new(SessionState::Running, None);
+    let (backend, _) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "close-prefix".into(),
+        created_at_ms: mj_core::clock::epoch_millis(),
+        action: mj_core::subagent::SubagentToolAction::CloseAgent {
+            child_session_id: "84296E42".into(),
+        },
+    };
+
+    let result = backend
+        .execute_subagent_tool_durable("parent-1".into(), request)
+        .await
+        .unwrap()
+        .result;
+    assert!(!result.is_error, "{}", result.message);
+    let response: serde_json::Value = serde_json::from_str(&result.message).unwrap();
+    assert_eq!(response["child_session_id"], CHILD);
+    assert_eq!(response["closed"], true);
+    assert_eq!(
+        exports.close_requests(),
+        vec![(CHILD.into(), "parent-1".into(), "close-prefix".into())]
+    );
+
+    let (prepared, _) = crate::database::load_delegation("parent-1", "close-prefix")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        prepared.request.action,
+        mj_core::subagent::SubagentToolAction::CloseAgent { child_session_id }
+            if child_session_id == CHILD
+    ));
 }
 
 #[tokio::test]

@@ -854,7 +854,17 @@ fn tool_definitions_with_options(
     _harness: Option<HarnessKind>,
     options: ParentTools,
 ) -> Vec<Value> {
-    let child = json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false});
+    let child = json!({
+        "type":"object",
+        "properties":{
+            "child_session_id":{
+                "type":"string",
+                "description":"Full child session ID or a unique case-insensitive hexadecimal prefix of at least 8 characters."
+            }
+        },
+        "required":["child_session_id"],
+        "additionalProperties":false
+    });
     let mut tools = vec![
         spawn_tool(options.subtle_subagents),
         read_only(tool(
@@ -865,7 +875,7 @@ fn tool_definitions_with_options(
         send_message_tool(),
         tool(
             "close",
-            "Stop one child session and retain its conversation. Closing a child keeps its report directory; only destroying the child or its parent removes it. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
+            "Stop one child session identified by its full ID or a unique hexadecimal prefix of at least 8 characters, and retain its conversation. Closing a child keeps its report directory; only destroying the child or its parent removes it. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished and contains the resolved full child session ID; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
             child,
         ),
         fetch_tool(),
