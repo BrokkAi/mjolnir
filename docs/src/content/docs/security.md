@@ -170,6 +170,13 @@ the authority granted to that GitHub account, so a remote target receiving it
 belongs inside the token's trust boundary. Raw local sessions do not receive
 this synchronized GitHub token.
 
+The slopcop login travels the same way. When the machine running Mjolnir is
+signed in to slopcop (`SLOPCOP_TOKEN`, or the login `slopcop login` stored),
+Mjolnir keeps a copy of that token, and of a non-default service URL, in every
+live non-local session. The session's `slopcop` command exports it on each run.
+Checks run from a session bill the workspace that login belongs to. Raw local
+sessions read the host's own login instead.
+
 Rotating OAuth grants can race when several live copies refresh at once.
 Mjolnir refreshes Codex credentials ahead of expiry and distributes the newer
 copy. For Claude Code, use a long-lived setup token when running concurrent or

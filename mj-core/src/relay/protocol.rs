@@ -192,6 +192,13 @@ pub enum RelayRequest {
     InstallAwsCredentials {
         data: String,
     },
+    /// The host's slopcop login, like the GitHub token, stays on the control
+    /// connection, outside the journal.
+    SlopcopLoginState,
+    InstallSlopcopLogin {
+        data: String,
+    },
+    RemoveSlopcopLogin,
     /// Resolve one in-flight form. Only its rendered, masked reply is journaled.
     RespondElicitation {
         elicitation_id: String,
@@ -379,6 +386,9 @@ impl RelayRequest {
             Self::RemoveGithubToken => "remove_github_token",
             Self::AwsCredentialsState => "aws_credentials_state",
             Self::InstallAwsCredentials { .. } => "install_aws_credentials",
+            Self::SlopcopLoginState => "slopcop_login_state",
+            Self::InstallSlopcopLogin { .. } => "install_slopcop_login",
+            Self::RemoveSlopcopLogin => "remove_slopcop_login",
             Self::RespondElicitation { .. } => "respond_elicitation",
             Self::StopBackgroundTask { .. } => "stop_background_task",
             Self::SubagentRequests => "subagent_requests",
@@ -403,6 +413,9 @@ impl RelayRequest {
             Self::AwsCredentialsState | Self::InstallAwsCredentials { .. } => {
                 super::RELAY_AWS_CREDENTIALS_PROTOCOL
             }
+            Self::SlopcopLoginState
+            | Self::InstallSlopcopLogin { .. }
+            | Self::RemoveSlopcopLogin => super::RELAY_SLOPCOP_LOGIN_PROTOCOL,
             Self::CpuUsage => super::RELAY_CPU_USAGE_PROTOCOL,
             Self::DrainMailbox { .. } | Self::AckMailbox { .. } => 33,
             Self::ReserveIdle { .. } => 21,

@@ -70,7 +70,11 @@ impl GithubTokenSnapshot {
 
 /// One reading of an opaque single-line secret, shared by every token file Hel
 /// stores so the limits and the rejections cannot drift apart.
-fn validate_opaque_token<'a>(label: &str, limit: usize, bytes: &'a [u8]) -> Result<&'a str> {
+pub(crate) fn validate_opaque_token<'a>(
+    label: &str,
+    limit: usize,
+    bytes: &'a [u8],
+) -> Result<&'a str> {
     if bytes.is_empty() {
         bail!("{label} is empty");
     }
@@ -88,7 +92,7 @@ fn validate_opaque_token<'a>(label: &str, limit: usize, bytes: &'a [u8]) -> Resu
 
 /// A token file must be a real file. Following a symbolic link would let
 /// whatever created it choose where the secret is read from or written to.
-fn refuse_symlinked_token(label: &str, path: &Path) -> Result<()> {
+pub(crate) fn refuse_symlinked_token(label: &str, path: &Path) -> Result<()> {
     if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         bail!("{label} destination {} is a symbolic link", path.display());
     }
@@ -714,6 +718,10 @@ pub enum CredentialSyncAction {
     GithubTokenPushed,
     /// A stale session token was removed because the controller has none.
     GithubTokenRemoved,
+    /// The host's slopcop login replaced the session copy.
+    SlopcopLoginPushed,
+    /// The session copy was removed because the host is signed out.
+    SlopcopLoginRemoved,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -791,6 +799,14 @@ impl CredentialSyncResult {
 
     pub fn github_token_removed_sessions(&self) -> usize {
         self.count_actions(|action| action == CredentialSyncAction::GithubTokenRemoved)
+    }
+
+    pub fn slopcop_login_pushed_sessions(&self) -> usize {
+        self.count_actions(|action| action == CredentialSyncAction::SlopcopLoginPushed)
+    }
+
+    pub fn slopcop_login_removed_sessions(&self) -> usize {
+        self.count_actions(|action| action == CredentialSyncAction::SlopcopLoginRemoved)
     }
 
     fn count_actions(&self, wanted: impl Fn(CredentialSyncAction) -> bool) -> usize {

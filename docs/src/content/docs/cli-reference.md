@@ -686,6 +686,7 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `DEEPSEEK_API_KEY` | DSH's API key, passed to DSH sessions when DSH's own credentials hold none. It outranks the profile's `environment`. |
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | Muse configuration and external native session storage roots, respectively. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | GitHub token available for syncing into every live target except a bare runtime on this machine. |
+| `SLOPCOP_TOKEN` / `SLOPCOP_SERVICE` | slopcop login synced into every live target except a bare runtime on this machine. They outrank the login `slopcop login` stored, as they do for slopcop itself. |
 | `GIT_SSH_COMMAND` | SSH command used by checkpoint/archive Git operations. |
 | `RUST_LOG` | Controller logging filter. |
 

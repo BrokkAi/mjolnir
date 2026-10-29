@@ -1546,6 +1546,9 @@ async fn prepare_and_start_harness(
     explicit_environment.remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
     explicit_environment.remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
     let base_environment_for_filter = base_environment.clone();
+    // Credential sync installs the session's slopcop login in its harness home.
+    let slopcop_login = super::credential_endpoint(&config)
+        .map(|endpoint| endpoint.home.join(mj_core::slopcop::LOGIN_FILE));
     session_environment =
         bounded_blocking_preparation_step(&login_budget, cancel, move |step_cancel| {
             if step_cancel.is_cancelled() {
@@ -1557,6 +1560,12 @@ async fn prepare_and_start_harness(
                 github_home.as_deref(),
                 git_config_include.as_deref(),
             )?;
+            match &slopcop_login {
+                Ok(login) => configure_slopcop_cli(&github_root, login)?,
+                Err(error) => {
+                    tracing::warn!("slopcop wrapper not installed: {error}");
+                }
+            }
             session_environment.retain(|name, value| {
                 explicit_environment.contains_key(name)
                     || base_environment_for_filter.get(name) != Some(value)
@@ -2159,6 +2168,9 @@ pub(super) async fn serve_client_with_memory(
                 RelayRequest::CredentialState
                     | RelayRequest::AwsCredentialsState
                     | RelayRequest::InstallAwsCredentials { .. }
+                    | RelayRequest::SlopcopLoginState
+                    | RelayRequest::InstallSlopcopLogin { .. }
+                    | RelayRequest::RemoveSlopcopLogin
                     | RelayRequest::ReadCredentials
                     | RelayRequest::InstallCredentials { .. }
                     | RelayRequest::SkillsState
