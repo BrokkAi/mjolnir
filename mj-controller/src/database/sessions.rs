@@ -88,6 +88,16 @@ pub fn save_subagent_session(
     session: &SessionRecord,
     subagent: &mj_core::subagent::SubagentRecord,
 ) -> Result<()> {
+    register_subagent_with_startup(session, subagent, Vec::new())
+}
+
+/// Publish the child and its complete initial input in the same transaction.
+/// Recovery must never find a newly registered worker without its first brief.
+pub(crate) fn register_subagent_with_startup(
+    session: &SessionRecord,
+    subagent: &mj_core::subagent::SubagentRecord,
+    startup: Vec<super::startup::StartupDelivery>,
+) -> Result<()> {
     let session = session.clone();
     let subagent = subagent.clone();
     submit_database_write("save_subagent_session", move |_| {
@@ -110,6 +120,7 @@ pub fn save_subagent_session(
                 serde_json::to_string(&subagent)?,
             ],
         )?;
+        super::startup::enqueue_startup_deliveries_with(&tx, startup)?;
         tx.commit()?;
         Ok(())
     })

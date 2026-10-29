@@ -134,6 +134,11 @@ pub enum WorkerRunMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerLaunchConfig {
+    /// Ordered input journaled before this worker accepts external commands.
+    /// Kept in the launch description so a crash during initialization can
+    /// finish the same prefix under its original command IDs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_commands: Vec<InitialWorkerCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer_launch: Option<ReviewerLaunchConfig>,
     /// Unique intent for a user-requested Resume/Restart; recovery preserves it in the relay.
@@ -240,6 +245,16 @@ pub struct WorkerLaunchConfig {
         deserialize_with = "deserialize_execution_policy"
     )]
     pub execution_policy: ExecutionPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitialWorkerCommand {
+    pub command_id: String,
+    pub command: crate::relay::RelayCommand,
+    /// Optional configuration may be refused without abandoning the brief.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
 }
 
 fn deserialize_execution_policy<'de, D>(deserializer: D) -> Result<ExecutionPolicy, D::Error>

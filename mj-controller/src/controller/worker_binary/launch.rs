@@ -617,6 +617,46 @@ impl Controller {
         // The child's harness opens on its spawn model instead of switching
         // to it from the profile default before the first turn (issue 1217).
         launch.initial_model = subagent.as_ref().and_then(|child| child.model.clone());
+        if let Some(child) = subagent
+            .as_ref()
+            .filter(|child| child.kind == mj_core::subagent::SubagentKind::Worker)
+        {
+            launch.initial_commands = crate::database::load_startup_group(
+                session_id,
+                &format!("subagent-spawn-{}", child.request_key),
+            )?
+            .into_iter()
+            .map(|step| {
+                let (command, optional) =
+                    match serde_json::from_str::<crate::daemon::StartupStep>(&step.step_json)? {
+                        crate::daemon::StartupStep::Configure {
+                            key,
+                            value,
+                            optional,
+                        } => (
+                            mj_core::relay::RelayCommand::SetConfig { key, value },
+                            optional,
+                        ),
+                        crate::daemon::StartupStep::ApiPrompt { text } => (
+                            mj_core::relay::RelayCommand::Prompt {
+                                prompt: vec![
+                                    agent_client_protocol::schema::v1::ContentBlock::Text(
+                                        agent_client_protocol::schema::v1::TextContent::new(text),
+                                    ),
+                                ],
+                            },
+                            false,
+                        ),
+                        _ => anyhow::bail!("sub-agent startup contains a non-input step"),
+                    };
+                Ok(mj_core::worker_launch::InitialWorkerCommand {
+                    command_id: step.command_id,
+                    command,
+                    optional,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        }
         // Capturing the working tree is only ever useful to a turn review, so
         // it is spent only on a session a review can run for: one whose
         // review configuration, with the session's own choice applied, has an
@@ -1113,6 +1153,7 @@ pub(super) fn worker_launch_config_with_checkout(
     }
     Ok((
         WorkerLaunchConfig {
+            initial_commands: Vec::new(),
             reviewer_launch: None,
             goal_resume_request: None,
             target_environment,

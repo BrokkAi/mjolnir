@@ -1779,6 +1779,7 @@ impl DurableRelay {
                 message: message.into(),
             },
         )?;
+        self.ensure_initial_commands_succeeded()?;
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
             self.return_boundary_steer_after_turn_end(command_id)?;
@@ -1806,6 +1807,7 @@ impl DurableRelay {
                 message: message.into(),
             },
         )?;
+        self.ensure_initial_commands_succeeded()?;
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
             self.return_boundary_steer_after_turn_end(command_id)?;

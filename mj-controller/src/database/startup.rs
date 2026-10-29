@@ -16,67 +16,75 @@ pub fn enqueue_startup_deliveries(
 ) -> Result<Vec<StartupDelivery>> {
     submit_database_write("enqueue startup delivery", move |connection| {
         let tx = connection.transaction()?;
-        if let Some(group_id) = deliveries
-            .first()
-            .and_then(|delivery| delivery.group_id.as_ref())
-        {
-            ensure!(
-                deliveries
-                    .iter()
-                    .all(|delivery| delivery.group_id.as_ref() == Some(group_id)),
-                "startup batch has mixed group IDs"
-            );
-            let mut statement = tx.prepare("SELECT session_id,command_id,step_json FROM startup_steps WHERE group_id=?1 ORDER BY sequence")?;
-            let existing = statement
-                .query_map([group_id], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            if !existing.is_empty() {
-                let requested = deliveries
-                    .iter()
-                    .map(|delivery| {
-                        (
-                            delivery.session_id.clone(),
-                            delivery.command_id.clone(),
-                            delivery.step_json.clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                ensure!(
-                    existing == requested,
-                    "startup group ID was reused with a different ordered payload"
-                );
-                return Ok(Vec::new());
-            }
-        }
-        let mut inserted = Vec::new();
-        for delivery in deliveries {
-            let changed = tx.execute(
-                "INSERT INTO startup_steps(session_id,command_id,step_json,phase,group_id) VALUES(?1,?2,?3,'pending',?4) ON CONFLICT(command_id) DO NOTHING",
-                params![delivery.session_id, delivery.command_id, delivery.step_json, delivery.group_id],
-            )?;
-            if changed != 0 {
-                inserted.push(delivery);
-            } else {
-                let existing: (String, String, Option<String>) = tx.query_row(
-                    "SELECT session_id,step_json,group_id FROM startup_steps WHERE command_id=?1",
-                    [&delivery.command_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )?;
-                ensure!(
-                    existing == (delivery.session_id, delivery.step_json, delivery.group_id),
-                    mj_client::daemon::StartupPromptIdentityConflict
-                );
-            }
-        }
+        let inserted = enqueue_startup_deliveries_with(&tx, deliveries)?;
         tx.commit()?;
         Ok(inserted)
     })
+}
+
+pub(super) fn enqueue_startup_deliveries_with(
+    connection: &Connection,
+    deliveries: Vec<StartupDelivery>,
+) -> Result<Vec<StartupDelivery>> {
+    if let Some(group_id) = deliveries
+        .first()
+        .and_then(|delivery| delivery.group_id.as_ref())
+    {
+        ensure!(
+            deliveries
+                .iter()
+                .all(|delivery| delivery.group_id.as_ref() == Some(group_id)),
+            "startup batch has mixed group IDs"
+        );
+        let mut statement = connection.prepare("SELECT session_id,command_id,step_json FROM startup_steps WHERE group_id=?1 ORDER BY sequence")?;
+        let existing = statement
+            .query_map([group_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !existing.is_empty() {
+            let requested = deliveries
+                .iter()
+                .map(|delivery| {
+                    (
+                        delivery.session_id.clone(),
+                        delivery.command_id.clone(),
+                        delivery.step_json.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            ensure!(
+                existing == requested,
+                "startup group ID was reused with a different ordered payload"
+            );
+            return Ok(Vec::new());
+        }
+    }
+    let mut inserted = Vec::new();
+    for delivery in deliveries {
+        let changed = connection.execute(
+            "INSERT INTO startup_steps(session_id,command_id,step_json,phase,group_id) VALUES(?1,?2,?3,'pending',?4) ON CONFLICT(command_id) DO NOTHING",
+            params![delivery.session_id, delivery.command_id, delivery.step_json, delivery.group_id],
+        )?;
+        if changed != 0 {
+            inserted.push(delivery);
+        } else {
+            let existing: (String, String, Option<String>) = connection.query_row(
+                "SELECT session_id,step_json,group_id FROM startup_steps WHERE command_id=?1",
+                [&delivery.command_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            ensure!(
+                existing == (delivery.session_id, delivery.step_json, delivery.group_id),
+                mj_client::daemon::StartupPromptIdentityConflict
+            );
+        }
+    }
+    Ok(inserted)
 }
 
 pub fn prepare_startup_delivery(command_id: &str, step_json: String) -> Result<()> {
@@ -374,19 +382,31 @@ pub fn load_latest_startup_group(session_id: &str) -> Result<Vec<StartupDelivery
     load_latest_startup_group_with(&*open_reader(&database_path())?, session_id)
 }
 
+pub(crate) fn load_startup_group(session_id: &str, group_id: &str) -> Result<Vec<StartupDelivery>> {
+    load_startup_group_with(&*open_reader(&database_path())?, session_id, Some(group_id))
+}
+
 pub(super) fn load_latest_startup_group_with(
     connection: &Connection,
     session_id: &str,
 ) -> Result<Vec<StartupDelivery>> {
+    load_startup_group_with(connection, session_id, None)
+}
+
+fn load_startup_group_with(
+    connection: &Connection,
+    session_id: &str,
+    group_id: Option<&str>,
+) -> Result<Vec<StartupDelivery>> {
     let mut statement = connection.prepare_cached(
         "SELECT session_id,command_id,step_json,phase,group_id,accepted_ordinal,error
-         FROM startup_steps WHERE session_id=?1 AND group_id=(
+         FROM startup_steps WHERE session_id=?1 AND group_id=coalesce(?2, (
             SELECT group_id FROM startup_steps WHERE session_id=?1 AND group_id IS NOT NULL
             ORDER BY sequence DESC LIMIT 1
-         ) ORDER BY sequence",
+         )) ORDER BY sequence",
     )?;
     statement
-        .query_map([session_id], |row| {
+        .query_map(params![session_id, group_id], |row| {
             Ok(StartupDelivery {
                 session_id: row.get(0)?,
                 command_id: row.get(1)?,

@@ -1124,7 +1124,22 @@ impl RuntimeState {
             // A step that is accepted, cancelling or rejecting only needs its
             // final phase written, so it settles even after its session is gone.
             let delivers = !matches!(step.phase.as_str(), "accepted" | "cancelling" | "rejecting");
-            let ready = if !delivers {
+            // Initial worker input is already in the worker's FIFO. This
+            // daemon owns only its durable receipt monitoring, including after
+            // a fast first turn has finished and the child has parked.
+            let worker_initial = delivers
+                && self
+                    .owner()
+                    .controller()
+                    .state
+                    .subagents
+                    .get(session_id)
+                    .is_some_and(|child| {
+                        child.kind == mj_core::subagent::SubagentKind::Worker
+                            && step.group_id.as_deref()
+                                == Some(format!("subagent-spawn-{}", child.request_key).as_str())
+                    });
+            let ready = if !delivers || worker_initial {
                 None
             } else {
                 tokio::select! {
@@ -1227,7 +1242,7 @@ impl RuntimeState {
                     return;
                 }
             }
-            if let Some(handle) = &handle {
+            if handle.is_some() || worker_initial {
                 let persisted_id = command_id.clone();
                 match blocking(move || crate::database::claim_startup_delivery(&persisted_id)).await
                 {
@@ -1247,17 +1262,24 @@ impl RuntimeState {
                 let unsupported_image = step.phase == "pending"
                     && matches!(&decoded, StartupStep::Prompt { prompt: Some(prompt), .. }
                         if prompt.iter().any(|block| matches!(block, ContentBlock::Image(_))))
-                    && !handle
-                        .view()
-                        .snapshot
-                        .is_some_and(|snapshot| snapshot.operational.accepts_prompt_images());
-                let outcome = if unsupported_image {
+                    && handle.as_ref().is_some_and(|handle| {
+                        !handle
+                            .view()
+                            .snapshot
+                            .is_some_and(|snapshot| snapshot.operational.accepts_prompt_images())
+                    });
+                let outcome = if worker_initial {
+                    tokio::select! {
+                        () = cancel.cancelled() => return,
+                        result = self.observe_worker_startup_step(session_id, &decoded, &command_id) => result,
+                    }
+                } else if unsupported_image {
                     Err(anyhow::Error::new(mj_client::session::Refused)
                         .context("the destination harness does not support image prompts"))
                 } else {
                     tokio::select! {
                         () = cancel.cancelled() => Err(anyhow!("the daemon stopped before startup delivery settled")),
-                        result = self.run_startup_step(session_id, handle, &decoded, &command_id) => result,
+                        result = self.run_startup_step(session_id, handle.as_ref().expect("live startup step"), &decoded, &command_id) => result,
                     }
                 };
                 let ordinal = match outcome {
@@ -1362,6 +1384,123 @@ impl RuntimeState {
         }
     }
 
+    /// Observe the worker-owned initial queue without resubmitting its input.
+    /// Receipts remain available after a completed child parks or a daemon
+    /// restarts, so bookkeeping never requires restarting that child.
+    async fn observe_worker_startup_step(
+        &self,
+        session_id: &str,
+        step: &StartupStep,
+        command_id: &str,
+    ) -> Result<Option<u64>> {
+        let (key, value) = match step {
+            StartupStep::Configure { key, value, .. } => (key.as_str(), value.as_str()),
+            StartupStep::ApiPrompt { .. } => ("prompt", "original brief"),
+            _ => bail!("worker initial input contains a non-input step"),
+        };
+        let failure = |reason: String| {
+            anyhow::Error::new(super::startup_followup::StartupRejected(format!(
+                "{}: {reason}",
+                self.startup_configuration_context(session_id, key, value)
+            )))
+        };
+        let mut deadline = None;
+        loop {
+            let id = session_id.to_owned();
+            let command = command_id.to_owned();
+            match step {
+                StartupStep::Configure { optional, .. } => {
+                    if let Some(result) =
+                        blocking(move || crate::database::load_config_result(&id, &command)).await?
+                    {
+                        if let Some(error) = result {
+                            if !optional {
+                                return Err(failure(error));
+                            }
+                            tracing::warn!(
+                                session_id,
+                                key,
+                                value,
+                                error,
+                                "optional initial worker configuration was rejected"
+                            );
+                        }
+                        return Ok(None);
+                    }
+                }
+                StartupStep::ApiPrompt { .. } => {
+                    if let Some(ordinal) =
+                        blocking(move || crate::database::load_prompt_acceptance(&id, &command))
+                            .await?
+                    {
+                        let id = session_id.to_owned();
+                        blocking(move || crate::database::record_subagent_prompt(&id, ordinal))
+                            .await?;
+                        return Ok(Some(ordinal));
+                    }
+                }
+                _ => unreachable!("validated worker input"),
+            }
+            match self.session_state(session_id) {
+                Some(SessionState::Running | SessionState::Disconnected) => {
+                    // Provisioning marks Running only after native readiness.
+                    // Bound receipt delivery even after a lost connection,
+                    // without timing downloads or other provisioning work.
+                    deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + Duration::from_secs(60)
+                    });
+                }
+                Some(SessionState::Provisioning | SessionState::Checkpointing) => {}
+                state => {
+                    let reason = self
+                        .owner()
+                        .controller()
+                        .state
+                        .sessions
+                        .get(session_id)
+                        .and_then(|record| record.last_error.clone())
+                        .unwrap_or_else(|| {
+                            format!("session is {state:?} before its worker receipt")
+                        });
+                    return Err(failure(reason));
+                }
+            }
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                return Err(failure(
+                    "the worker did not complete this initial input within 60 seconds".into(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn startup_configuration_context(&self, session_id: &str, key: &str, value: &str) -> String {
+        let location = self
+            .owner()
+            .controller()
+            .state
+            .sessions
+            .get(session_id)
+            .map(|record| {
+                let host = record.target.as_ref().map(|target| {
+                    mj_core::targets::storage::session_storage_paths(
+                        target,
+                        session_id,
+                        record.project_directory.as_deref(),
+                    )
+                    .host
+                });
+                match host {
+                    Some(host) => format!("target {} on {host}", record.target_template_id),
+                    None => format!("target {}", record.target_template_id),
+                }
+            });
+        format!(
+            "startup configuration {key}={value} for session {session_id} ({}) failed",
+            location.as_deref().unwrap_or("target no longer registered")
+        )
+    }
+
     async fn run_startup_step(
         &self,
         session_id: &str,
@@ -1399,16 +1538,15 @@ impl RuntimeState {
                 key,
                 value,
                 optional,
-            } => {
-                super::startup_followup::configure_startup(
-                    &handle.client(),
-                    command_id,
-                    key,
-                    value,
-                    *optional,
-                )
-                .await
-            }
+            } => super::startup_followup::configure_startup(
+                &handle.client(),
+                command_id,
+                key,
+                value,
+                *optional,
+            )
+            .await
+            .with_context(|| self.startup_configuration_context(session_id, key, value)),
             StartupStep::ApiPrompt { text } => {
                 let ordinal = self
                     .submit_startup_prompt(session_id, handle, text, None, None, command_id)

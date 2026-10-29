@@ -8327,6 +8327,149 @@ async fn api_startup_persists_the_entire_ordered_followup_before_acknowledging()
 }
 
 #[tokio::test]
+async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked() {
+    const NAME: &str = "initial_worker_receipts_settle_after_the_first_turn_has_already_parked";
+    const CHILD: &str = "child-initial";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayCommand, RelayCommandOutcome};
+    use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
+    let parent = runtime_test_session(
+        "parent-initial",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    crate::database::save_session(&parent).unwrap();
+    let child = runtime_test_session(
+        CHILD,
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Parked,
+    );
+    let mut relation = runtime_test_subagent(CHILD, &parent.id);
+    relation.model = Some("chosen-model".into());
+    let group_id = format!("subagent-spawn-{}", relation.request_key);
+    let steps = super::startup_followup::api_followup_steps(
+        &group_id,
+        crate::server::api::StartFollowup {
+            model: relation.model.clone(),
+            effort: None,
+            fast_mode: false,
+            prompt: Some(relation.initial_prompt.clone()),
+        },
+    );
+    let rows = steps
+        .into_iter()
+        .map(|(command_id, step)| crate::database::StartupDelivery {
+            session_id: CHILD.into(),
+            command_id,
+            step_json: serde_json::to_string(&step).unwrap(),
+            phase: "pending".into(),
+            group_id: Some(group_id.clone()),
+            accepted_ordinal: None,
+            error: None,
+        })
+        .collect();
+    crate::database::register_subagent_with_startup(&child, &relation, rows).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let model_id = format!("{group_id}-model");
+    let prompt_id = format!("{group_id}-prompt");
+    let input = vec![
+        mj_core::worker_launch::InitialWorkerCommand {
+            command_id: model_id.clone(),
+            command: RelayCommand::SetConfig {
+                key: "model".into(),
+                value: "chosen-model".into(),
+            },
+            optional: false,
+        },
+        mj_core::worker_launch::InitialWorkerCommand {
+            command_id: prompt_id.clone(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::Text(TextContent::new(
+                    relation.initial_prompt.clone(),
+                ))],
+            },
+            optional: false,
+        },
+    ];
+    let mut relay = mj_worker::relay::DurableRelay::open_for_harness(
+        root.path(),
+        CHILD,
+        "test",
+        mj_core::config::HarnessKind::Codex,
+        &input,
+    )
+    .unwrap();
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(&model_id, RelayCommandOutcome::Configured)
+        .unwrap();
+    let prompt = relay.claim_pending_commands(true).unwrap().remove(0);
+    relay
+        .record_command_completed(
+            &prompt_id,
+            RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    // Replay the actual worker journal through the controller's storage
+    // boundary before attaching any daemon startup monitor.
+    let events = relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
+    crate::database::apply_projection_page(CHILD, move |page| {
+        let mut current = mj_core::state::MaterializedSession::empty(CHILD);
+        for event in events {
+            let mutation = project_relay_event(&current, &event)?.mutation;
+            page.apply(
+                event.ordinal,
+                &event.previous_digest,
+                &event.digest,
+                &mutation,
+            )?;
+            apply_committed_projection_event(&mut current, &event, mutation)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    let first = crate::database::next_startup_delivery(CHILD)
+        .unwrap()
+        .unwrap();
+    state.start_persisted_startup_delivery(first, &CancellationToken::new());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if crate::database::load_startup_group(CHILD, &group_id)
+                .unwrap()
+                .iter()
+                .all(|step| step.phase == "done")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("parked worker receipts must settle without reconnecting");
+    assert_eq!(
+        crate::database::load_subagent_report(CHILD)
+            .unwrap()
+            .awaited_ordinal,
+        Some(prompt.accepted_ordinal)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), manager.requests.recv())
+            .await
+            .is_err(),
+        "receipt monitoring must not contact or restart the parked worker"
+    );
+    state.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+#[tokio::test]
 async fn cancelled_api_startup_is_not_submitted_after_daemon_reconstruction() {
     let Some(_writer) = startup_prompt_test_store(
         "cancelled_api_startup_is_not_submitted_after_daemon_reconstruction",

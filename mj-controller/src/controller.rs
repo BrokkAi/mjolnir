@@ -30,6 +30,7 @@ pub use subagent_park::ParkOutcome;
 pub(crate) use subagent_park::{FAILED_STARTUP_CLEANUP_TIMEOUT, failed_launch_cleanup_executor};
 mod subagents;
 pub(crate) use subagents::SubagentReportCleanup;
+pub(crate) use subagents::recover_registered_subagent_startup;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod update;

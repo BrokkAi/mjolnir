@@ -927,25 +927,13 @@ impl ApiBackend {
                         profile_id: selection.profile_id,
                         model: Some(selection.model.clone()),
                         effort: selection.effort.clone(),
+                        fast_mode: selection.fast_mode,
                         working_directory: working_directory.clone(),
                         initial_prompt: selection.prompt,
                         request_key: request.request_id.clone(),
                         report_root: None,
                     })
                     .await?;
-                // Registration completes the first prompt (it names the
-                // handback tool when the child gets one), so send what it kept.
-                self.start_followup_with_id(
-                    relation.child_session_id.clone(),
-                    crate::server::api::StartFollowup {
-                        model: Some(selection.model),
-                        effort: selection.effort,
-                        prompt: Some(relation.initial_prompt.clone()),
-                        fast_mode: selection.fast_mode,
-                    },
-                    format!("subagent-spawn-{}", request.request_id),
-                )
-                .await?;
                 let report_dir = blocking("load sub-agent report directory", {
                     let child_id = relation.child_session_id.clone();
                     move || crate::database::load_subagent_report(&child_id)

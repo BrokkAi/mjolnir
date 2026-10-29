@@ -26,35 +26,7 @@ impl RuntimeState {
         group_id: String,
         followup: crate::server::api::StartFollowup,
     ) -> Result<()> {
-        let mut steps = Vec::new();
-        for (key, value) in [("model", followup.model), ("effort", followup.effort)] {
-            if let Some(value) = value {
-                steps.push((
-                    startup_step_id(&group_id, key),
-                    StartupStep::Configure {
-                        key: key.to_owned(),
-                        value,
-                        optional: false,
-                    },
-                ));
-            }
-        }
-        if followup.fast_mode {
-            steps.push((
-                startup_step_id(&group_id, "fast-mode"),
-                StartupStep::Configure {
-                    key: "fast-mode".to_owned(),
-                    value: "on".to_owned(),
-                    optional: true,
-                },
-            ));
-        }
-        if let Some(text) = followup.prompt {
-            steps.push((
-                startup_step_id(&group_id, "prompt"),
-                StartupStep::ApiPrompt { text },
-            ));
-        }
+        let steps = api_followup_steps(&group_id, followup);
         // The daemon's startup owner cancels and joins every drain during
         // handoff. Waiting for readiness is resumable and holds no admission.
         self.queue_startup_steps_with_ids(
@@ -106,6 +78,42 @@ impl RuntimeState {
         }
         Ok(())
     }
+}
+
+pub(crate) fn api_followup_steps(
+    group_id: &str,
+    followup: crate::server::api::StartFollowup,
+) -> Vec<(String, StartupStep)> {
+    let mut steps = Vec::new();
+    for (key, value) in [("model", followup.model), ("effort", followup.effort)] {
+        if let Some(value) = value {
+            steps.push((
+                startup_step_id(group_id, key),
+                StartupStep::Configure {
+                    key: key.to_owned(),
+                    value,
+                    optional: false,
+                },
+            ));
+        }
+    }
+    if followup.fast_mode {
+        steps.push((
+            startup_step_id(group_id, "fast-mode"),
+            StartupStep::Configure {
+                key: "fast-mode".to_owned(),
+                value: "on".to_owned(),
+                optional: true,
+            },
+        ));
+    }
+    if let Some(text) = followup.prompt {
+        steps.push((
+            startup_step_id(group_id, "prompt"),
+            StartupStep::ApiPrompt { text },
+        ));
+    }
+    steps
 }
 
 pub(crate) async fn configure_startup(

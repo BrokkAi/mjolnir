@@ -807,6 +807,7 @@ pub async fn run_daemon_owned(
             &config.session_id,
             env!("CARGO_PKG_VERSION"),
             config.harness,
+            &config.initial_commands,
         )?
     };
     // Only Claude Code's adapter marks the end of a turn it started on its
