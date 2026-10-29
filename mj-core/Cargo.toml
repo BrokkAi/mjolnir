@@ -31,6 +31,7 @@ include = [
     "assets/harnesses/**",
     "assets/grok/runtime.json",
     "assets/kimi/runtime.json",
+    "assets/mimo/runtime.json",
     "assets/muse/runtime.json",
     "assets/node/runtime.json",
     "assets/opencode/runtime.json",
