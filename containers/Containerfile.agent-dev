@@ -183,19 +183,18 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
 
 # Keep these in lockstep with mj-core/src/harness_runtime.rs (see "Harness
 # pins" in AGENTS.md). Kimi, Grok, and dsh-acp are not in the image; they
-# install on demand. Muse installs below from its runtime.json file.
+# install on demand. Muse and MiMo Code install below from their runtime.json
+# files.
 RUN npm install --global --no-audit --no-fund \
         @brokkai/codex-acp@1.15.0 \
-        @agentclientprotocol/claude-agent-acp@0.97.0 \
+        @agentclientprotocol/claude-agent-acp@0.99.0 \
         @anthropic-ai/claude-code@2.1.308 \
         @brokkai/muse-acp@0.18.0 \
-        @openai/codex@0.164.0 \
-        @mimo-ai/cli@0.1.15 \
+        @openai/codex@0.165.0 \
     && npm cache clean --force \
     && codex --version \
     && codex-acp --version \
     && claude --version \
-    && mimo --version \
     && [ "$(node -p "require('/usr/local/lib/node_modules/@brokkai/muse-acp/package.json').version")" = "0.18.0" ]
 
 # The bridge prefers CODEX_PATH over its bundled Codex binary. Select the
@@ -209,6 +208,29 @@ ENV CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude
 
 # MiMo Code applies patch updates during normal startup unless this is set.
 ENV MIMOCODE_DISABLE_AUTOUPDATE=1
+
+# slopcop sends a session's change to the hosted SlopCop check service; the
+# skill synced into sessions tells agents to run it. Pinned release archive per
+# arch, like Go above: a fourteenth of the npm package, which carries every
+# platform's binary. 0.0.7 is the first release that reports which model wrote
+# each changed file.
+ARG SLOPCOP_VERSION=0.0.7
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "$ARCH" in \
+        amd64) SLOPCOP_SHA256=552e197f2d5c73fd43c7fc010a608c7560e0ecebd1a04a95e7901e83b0d95d3d ;; \
+        arm64) SLOPCOP_SHA256=5337403cd50fb99e9b53fef9dc01473ccbfd2a5e5a9643252d4e9e9b0a3f967a ;; \
+        *) echo "unsupported arch $ARCH" >&2; exit 1 ;; \
+    esac \
+    && SLOPCOP_ARCHIVE="slopcop_v${SLOPCOP_VERSION}_linux_${ARCH}.tar.gz" \
+    && curl --fail --location --silent --show-error \
+        "https://github.com/BrokkAi/slopcop/releases/download/v${SLOPCOP_VERSION}/${SLOPCOP_ARCHIVE}" \
+        --output "/tmp/${SLOPCOP_ARCHIVE}" \
+    && echo "${SLOPCOP_SHA256}  /tmp/${SLOPCOP_ARCHIVE}" | sha256sum --check --strict \
+    && install -d /usr/share/doc/slopcop \
+    && tar -xzf "/tmp/${SLOPCOP_ARCHIVE}" --no-same-owner -C /usr/local/bin slopcop \
+    && tar -xzf "/tmp/${SLOPCOP_ARCHIVE}" --no-same-owner -C /usr/share/doc/slopcop LICENSE \
+    && rm "/tmp/${SLOPCOP_ARCHIVE}" \
+    && [ "$(slopcop version)" = "slopcop version v${SLOPCOP_VERSION}" ]
 
 # Buildx sets TARGETARCH per platform; the dpkg fallback keeps a plain
 # single-arch `podman build` working.
@@ -314,6 +336,11 @@ COPY mj-core/assets/muse/runtime.json /opt/mjolnir/muse-runtime.json
 COPY scripts/install-muse.py /opt/mjolnir/install-muse.py
 RUN python3 /opt/mjolnir/install-muse.py /opt/mjolnir/muse-runtime.json /usr/local/bin
 ENV MUSE_CLI=/usr/local/bin/muse
+
+COPY mj-core/assets/mimo/runtime.json /opt/mjolnir/mimo-runtime.json
+COPY scripts/install-mimo.py /opt/mjolnir/install-mimo.py
+RUN python3 /opt/mjolnir/install-mimo.py /opt/mjolnir/mimo-runtime.json /usr/local/bin \
+    && mimo --version
 
 # Session workers construct a clean login environment instead of inheriting
 # the container exec environment. Keep image tool settings in that login too.

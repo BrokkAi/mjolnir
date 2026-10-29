@@ -81,6 +81,7 @@ pub(crate) enum SetupControl {
     Apply,
     DetectProfiles,
     DetectRuntimes,
+    DetectionResults,
     ManagedSetup,
     ManagedContinue,
     SignIn,
@@ -266,6 +267,12 @@ pub(crate) struct SetupDialog {
     /// Where the notice was first shown. A status line belongs to the page
     /// or prompt that set it and goes when the dialog is no longer there.
     notice_anchor: Option<NoticeAnchor>,
+    /// Runtimes the last runtimes detection turned down. Stays until Settings
+    /// closes so the Detection results view can be read again without
+    /// re-probing every machine.
+    detection_rejected: Vec<RejectedRuntime>,
+    /// The open Detection results view and its scroll offset.
+    report: Option<ReportState>,
     /// One owner for each machine's cache resolution, retained across navigation.
     /// Each result is guarded by the settings it was requested for.
     build_cache_previews: BTreeMap<String, BuildCachePreviewState>,
@@ -387,6 +394,8 @@ impl SetupDialog {
             login_statuses,
             notice: None,
             notice_anchor: None,
+            detection_rejected: Vec::new(),
+            report: None,
             build_cache_previews: BTreeMap::new(),
             archive_space_preview: None,
             mbx_install: None,
@@ -405,6 +414,7 @@ mod page;
 mod paths;
 mod previews;
 mod render;
+mod report;
 mod results;
 
 use draft::*;
@@ -412,6 +422,7 @@ use page::*;
 use previews::*;
 pub(crate) use render::render_setup;
 use render::*;
+use report::*;
 use results::*;
 
 #[cfg(test)]

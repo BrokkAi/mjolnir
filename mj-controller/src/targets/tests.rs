@@ -3778,13 +3778,21 @@ fn temporary_storage_guidance_uses_the_actual_container_mount() {
         workspace_storage: Default::default(),
     };
     for (mount, expected) in [
-        (format!("{name}-tmp\n"), true),
-        (String::new(), false),
-        ("custom-volume\n".to_owned(), false),
+        (
+            serde_json::json!([{"Name": format!("{name}-tmp"), "Destination": "/tmp", "RW": true}]),
+            true,
+        ),
+        (serde_json::json!([]), false),
+        (
+            serde_json::json!([{"Name": "custom-volume", "Destination": "/tmp", "RW": true}]),
+            false,
+        ),
     ] {
-        let executor = PodmanPreflightExecutor::with_outputs([podman_output(&mount)]);
+        let executor = PodmanPreflightExecutor::with_outputs([podman_output(mount.to_string())]);
         assert_eq!(
-            has_managed_temporary_volume(&locator, &executor).unwrap(),
+            inspect_container_storage(&locator, &[], &executor)
+                .unwrap()
+                .managed_temporary_volume,
             expected
         );
     }
@@ -3794,7 +3802,7 @@ fn temporary_storage_guidance_uses_the_actual_container_mount() {
         stderr: b"container unavailable".to_vec(),
     }]);
     assert!(
-        has_managed_temporary_volume(&locator, &executor)
+        inspect_container_storage(&locator, &[], &executor)
             .unwrap_err()
             .to_string()
             .contains("container unavailable")
@@ -4087,7 +4095,8 @@ fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace()
                 &with_runtime(container_exec("podman", &name, ["sh", "-c", script])),
             )?;
             ensure!(
-                has_managed_temporary_volume(&locator, &ProcessExecutor)?,
+                inspect_container_storage(&locator, &[], &ProcessExecutor)?
+                    .managed_temporary_volume,
                 "managed temporary mount is missing"
             );
             Ok(())

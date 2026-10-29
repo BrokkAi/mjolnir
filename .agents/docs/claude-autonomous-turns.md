@@ -16,7 +16,7 @@ checkpoint barrier, the recovery boundary — is right without further changes.
 
 ## The adapter contract
 
-The current bridge pin is `@agentclientprotocol/claude-agent-acp@0.97.0`
+The current bridge pin is `@agentclientprotocol/claude-agent-acp@0.99.0`
 with Claude Code 2.1.308, using ACP v1. Both Claude and Codex declare AIR
 `asyncTasks`, `nativeSubagentSessions`, and `sessionFailure`; Claude also
 declares `backgroundSubagents`.

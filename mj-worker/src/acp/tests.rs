@@ -6037,9 +6037,12 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
     )
     .context("resume ACP session native");
     // The ACP standard resource error as claude-agent-acp answers it.
-    let missing_transcript =
-        anyhow::anyhow!("Resource not found: native: {{\n  \"uri\": \"native\"\n}}")
-            .context("resume ACP session native");
+    let missing_transcript = Err::<(), _>(
+        agent_client_protocol::Error::new(-32002, "Resource not found")
+            .data(serde_json::json!({"sessionId": "native"})),
+    )
+    .context("resume ACP session native")
+    .unwrap_err();
     assert!(harness_reports_missing_native_session(
         &spec(HarnessKind::Codex),
         &missing_thread
@@ -6074,15 +6077,18 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
 }
 
 /// A fake ACP bridge that refuses every reload of `missing-thread` with
-/// `reload_error`, the text the harness under test really answers, and opens a
-/// fresh session for `session/new`.
+/// `reload_error`, the JSON-RPC error the harness under test really answers,
+/// and opens a fresh session for `session/new`.
 #[cfg(unix)]
-fn missing_native_session_script(directory: &Path, reload_error: &str) -> std::path::PathBuf {
+fn missing_native_session_script(
+    directory: &Path,
+    reload_error: &serde_json::Value,
+) -> std::path::PathBuf {
     let script = directory.join("missing_native_session.py");
     let source = r#"
 import json, sys
 
-RELOAD_ERROR = __RELOAD_ERROR__
+RELOAD_ERROR = json.loads(__RELOAD_ERROR__)
 
 for line in sys.stdin:
     request = json.loads(line)
@@ -6092,7 +6098,7 @@ for line in sys.stdin:
         result = {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}}
     elif method in ("session/load", "session/resume"):
         print(json.dumps({"jsonrpc": "2.0", "id": ident,
-                          "error": {"code": -32603, "message": RELOAD_ERROR}}),
+                          "error": RELOAD_ERROR}),
               flush=True)
         continue
     elif method == "session/new":
@@ -6108,13 +6114,13 @@ for line in sys.stdin:
     if ident is not None:
         print(json.dumps({"jsonrpc": "2.0", "id": ident, "result": result}), flush=True)
 "#;
-    // A JSON string literal is also a Python string literal, so the error text
+    // A JSON string literal is also a Python string literal, so the error
     // reaches the script exactly as the harness would send it.
     std::fs::write(
         &script,
         source.replace(
             "__RELOAD_ERROR__",
-            &serde_json::to_string(reload_error).unwrap(),
+            &serde_json::to_string(&reload_error.to_string()).unwrap(),
         ),
     )
     .unwrap();
@@ -6123,13 +6129,24 @@ for line in sys.stdin:
 
 /// Codex's wrapped refusal for a thread whose rollout was never written.
 #[cfg(unix)]
-const MISSING_CODEX_THREAD_ERROR: &str =
-    r#"Internal error: {"details": "no rollout found for thread id missing-thread"}"#;
+fn missing_codex_thread_error() -> serde_json::Value {
+    serde_json::json!({
+        "code": -32603,
+        "message": "Internal error",
+        "data": {"details": "no rollout found for thread id missing-thread"}
+    })
+}
 
-/// Claude Code's ACP resource error for a session with no transcript on disk.
+/// claude-agent-acp's ACP resource error for a session with no transcript on
+/// disk, as 0.99 sends it.
 #[cfg(unix)]
-const MISSING_CLAUDE_SESSION_ERROR: &str =
-    "Resource not found: missing-thread: {\n  \"uri\": \"missing-thread\"\n}";
+fn missing_claude_session_error() -> serde_json::Value {
+    serde_json::json!({
+        "code": -32002,
+        "message": "Resource not found",
+        "data": {"sessionId": "missing-thread"}
+    })
+}
 
 #[cfg(unix)]
 fn missing_native_session_spec(
@@ -6177,9 +6194,12 @@ fn missing_native_session_spec(
 /// Mjolnir's state showing the native session was never used, and prove the
 /// queued work finishes on a replacement session in the same Mjolnir session.
 #[cfg(unix)]
-async fn assert_unused_native_session_is_replaced(harness: HarnessKind, reload_error: &str) {
+async fn assert_unused_native_session_is_replaced(
+    harness: HarnessKind,
+    reload_error: serde_json::Value,
+) {
     let temp = tempfile::tempdir().unwrap();
-    let script = missing_native_session_script(temp.path(), reload_error);
+    let script = missing_native_session_script(temp.path(), &reload_error);
     // An installed worker upgrades a snapshot whose original opening is
     // already behind its saved frontier, before ACP attempts native resume.
     let root = temp.path().join("legacy-relay");
@@ -6268,13 +6288,14 @@ async fn assert_unused_native_session_is_replaced(harness: HarnessKind, reload_e
 #[cfg(unix)]
 #[tokio::test]
 async fn an_unused_codex_thread_is_replaced_in_the_same_session_after_upgrade() {
-    assert_unused_native_session_is_replaced(HarnessKind::Codex, MISSING_CODEX_THREAD_ERROR).await;
+    assert_unused_native_session_is_replaced(HarnessKind::Codex, missing_codex_thread_error())
+        .await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn an_unused_claude_session_is_replaced_in_the_same_session_after_upgrade() {
-    assert_unused_native_session_is_replaced(HarnessKind::Claude, MISSING_CLAUDE_SESSION_ERROR)
+    assert_unused_native_session_is_replaced(HarnessKind::Claude, missing_claude_session_error())
         .await;
 }
 
@@ -6282,7 +6303,7 @@ async fn an_unused_claude_session_is_replaced_in_the_same_session_after_upgrade(
 #[tokio::test]
 async fn a_used_codex_thread_codex_cannot_find_fails_instead_of_starting_over() {
     let temp = tempfile::tempdir().unwrap();
-    let script = missing_native_session_script(temp.path(), MISSING_CODEX_THREAD_ERROR);
+    let script = missing_native_session_script(temp.path(), &missing_codex_thread_error());
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let runtime = tokio::spawn(run(

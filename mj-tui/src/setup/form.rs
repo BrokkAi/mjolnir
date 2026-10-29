@@ -14,6 +14,14 @@ impl SetupDialog {
                 (Save, self.save_label(), !self.saving),
             ];
         }
+        // The Detection results view reads its blocks, not the page; Back
+        // here means "leave the report".
+        if self.report.is_some() {
+            return vec![
+                (Back, "Back", true),
+                (Save, self.save_label(), !self.saving),
+            ];
+        }
         if self.managed_setup.is_some() {
             return vec![
                 (Back, "Back", true),
@@ -65,6 +73,15 @@ impl SetupDialog {
                 control,
                 label,
                 interactive && !self.discovering && !self.saving,
+            ));
+        }
+        // The report of what a runtimes detection turned down stays readable
+        // from its page until Settings closes.
+        if self.path == ["targets"] && !self.detection_rejected.is_empty() {
+            actions.push((
+                DetectionResults,
+                "Detection results",
+                interactive && !self.saving,
             ));
         }
         if self.path == ["profiles"] {
@@ -188,6 +205,18 @@ impl SetupDialog {
                 form.declare_with_enabled(id, ControlKind::Button, enabled);
             }
             form.end_frame(Search);
+            return;
+        }
+        if self.report.is_some() {
+            // Only the footer actions belong to the report; the page's
+            // controls stay undeclared so focus cannot land on them.
+            let actions = self.actions();
+            let form = self.form.get_mut();
+            form.begin_update();
+            for (id, _, enabled) in actions {
+                form.declare_with_enabled(id, ControlKind::Button, enabled);
+            }
+            form.end_frame(Back);
             return;
         }
         self.reconcile_controls();

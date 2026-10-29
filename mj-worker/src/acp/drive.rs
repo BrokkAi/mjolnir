@@ -1880,11 +1880,7 @@ pub(super) fn harness_reports_missing_native_session(
     let Some(existing) = spec.resume_session.as_deref() else {
         return false;
     };
-    mj_core::acp::error_reports_missing_native_session(
-        spec.harness,
-        existing,
-        &format!("{error:#}"),
-    )
+    mj_core::acp::error_reports_missing_native_session(spec.harness, existing, error)
 }
 
 /// The original ACP responder closes the form; no later RPC can cancel a reused id.

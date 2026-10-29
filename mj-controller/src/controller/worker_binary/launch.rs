@@ -218,12 +218,23 @@ impl Controller {
                 .skills_scope(),
         )?;
         append_hel_target_environment(profile.kind, &profile_stage, backend)?;
+        // Edits to attachment settings apply on the next container creation;
+        // describe this container's creation snapshot while it is retained.
+        let attachments = session
+            .target_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.container_settings.as_ref())
+            .map_or(session.additional_mounts.as_slice(), |settings| {
+                settings.additional_mounts.as_slice()
+            });
+        let storage = targets::inspect_container_storage(backend, attachments, executor)?;
         append_container_storage_guidance(
             profile.kind,
             &profile_stage,
             backend,
             session.container_workspace.as_deref(),
-            targets::has_managed_temporary_volume(backend, executor)?,
+            storage.managed_temporary_volume,
+            &storage.attachments,
         )?;
         append_subagent_policy(
             profile.kind,

@@ -750,7 +750,7 @@ impl HarnessKind {
             }
             Self::Claude => "Install it with `npm install -g @anthropic-ai/claude-code`".to_owned(),
             Self::Mimo => {
-                "Install it with `npm install -g @mimo-ai/cli` (Node.js 22 or newer)".to_owned()
+                "Install it with `curl -fsSL https://mimo.xiaomi.com/install | bash`".to_owned()
             }
             Self::Dsh => "Install it with `npm install -g @brokkai/dsh-acp` (Node.js 22 or newer), or from a release archive at https://github.com/BrokkAi/dsh-acp/releases".to_owned(),
             other => format!("Install the {} CLI", other.display_name()),

@@ -91,7 +91,9 @@ pub const RELAY_COMPRESSED_PROJECT_MEMORY_PROTOCOL: u32 = 44;
 pub const RELAY_OPERATOR_AWAY_PROTOCOL: u32 = 45;
 /// 46 adds connection-only AWS credential provisioning and renewal.
 pub const RELAY_AWS_CREDENTIALS_PROTOCOL: u32 = 46;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_AWS_CREDENTIALS_PROTOCOL;
+/// 47 adds connection-only sync of the host's slopcop login.
+pub const RELAY_SLOPCOP_LOGIN_PROTOCOL: u32 = 47;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_SLOPCOP_LOGIN_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

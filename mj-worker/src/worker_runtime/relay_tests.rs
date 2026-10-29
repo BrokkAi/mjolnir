@@ -388,6 +388,65 @@ fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
     assert_eq!(invoke(None), "unset|unset\n");
 }
 
+#[test]
+fn slopcop_wrapper_exports_each_live_login() {
+    use mj_core::slopcop::SlopcopLogin;
+
+    let worker = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let real = tempfile::tempdir().unwrap();
+    let real_bin = real.path().join("bin");
+    std::fs::create_dir(&real_bin).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &real_bin,
+        "slopcop",
+        "#!/bin/sh\nprintf '%s|%s|%s\\n' \"${SLOPCOP_TOKEN-unset}\" \"${SLOPCOP_SERVICE-unset}\" \"$*\"\n",
+    );
+    let mut environment = BTreeMap::from([(
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", real_bin.display()),
+    )]);
+    unix::configure_github_cli(worker.path(), &mut environment, None, None).unwrap();
+    let login_path = home.path().join(mj_core::slopcop::LOGIN_FILE);
+    unix::configure_slopcop_cli(worker.path(), &login_path).unwrap();
+
+    let invoke = || {
+        let mut command = std::process::Command::new(worker.path().join("bin/slopcop"));
+        command
+            .args(["check", "--format", "json"])
+            .env_clear()
+            .env("PATH", environment.get("PATH").unwrap())
+            .env("SLOPCOP_TOKEN", "session-token");
+        let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    // With no synced login, the session's own environment applies.
+    assert_eq!(invoke(), "session-token|unset|check --format json\n");
+    // Credential sync replaces the file under a running session; every
+    // invocation reads the current one.
+    for (login, expected) in [
+        (
+            SlopcopLogin::new("first-token", Some("https://slopcop.example")).unwrap(),
+            "first-token|https://slopcop.example|check --format json\n",
+        ),
+        (
+            SlopcopLogin::new("rotated-token", None).unwrap(),
+            "rotated-token|unset|check --format json\n",
+        ),
+    ] {
+        mj_core::slopcop::write_login(&login_path, &login.encode()).unwrap();
+        assert_eq!(invoke(), expected);
+    }
+    mj_core::slopcop::remove_login(&login_path).unwrap();
+    assert_eq!(invoke(), "session-token|unset|check --format json\n");
+}
+
 // Hard-won: 50963cae: a harness scrubbed credential-shaped Git config names and broke every Git command.
 #[test]
 fn git_helpers_survive_harness_login_shells_and_credential_shaped_name_scrubs() {
@@ -814,6 +873,45 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
         }
     }
 
+    // The host's slopcop login takes the same connection-only route.
+    let login =
+        mj_core::slopcop::SlopcopLogin::new("slopcop-secret", Some("https://slopcop.example"))
+            .unwrap();
+    let installed = delegation_exchange(
+        &mut lines,
+        &mut writer,
+        RelayRequest::InstallSlopcopLogin {
+            data: base64::engine::general_purpose::STANDARD.encode(login.encode()),
+        },
+    )
+    .await;
+    let state = delegation_exchange(&mut lines, &mut writer, RelayRequest::SlopcopLoginState).await;
+    assert_eq!(installed, state);
+    assert_eq!(
+        state,
+        RelayResponsePayload::CredentialState {
+            present: true,
+            fingerprint: login.snapshot().fingerprint,
+            freshness_epoch_ms: None,
+        }
+    );
+    let login_path = temp.path().join(mj_core::slopcop::LOGIN_FILE);
+    assert_eq!(std::fs::read(&login_path).unwrap(), login.encode());
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&login_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let removed =
+        delegation_exchange(&mut lines, &mut writer, RelayRequest::RemoveSlopcopLogin).await;
+    assert!(matches!(
+        removed,
+        RelayResponsePayload::CredentialState { present: false, .. }
+    ));
+    assert!(!login_path.exists());
+
     {
         let relay = relay.lock().unwrap();
         assert_eq!(relay.latest_ordinal(), 0);
@@ -827,6 +925,7 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
         assert!(!persisted.contains(&request.request_id));
         assert!(!persisted.contains("aws-initial"));
         assert!(!persisted.contains("secret-renewed"));
+        assert!(!persisted.contains("slopcop-secret"));
     }
 
     drop(writer);

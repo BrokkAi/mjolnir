@@ -35,6 +35,8 @@ class ScenarioFailure(RuntimeError):
 
 
 class SteerLab:
+    """One live steering run: its isolated instance, profile homes, and artifacts."""
+
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.repo_root = Path(__file__).resolve().parents[2]
@@ -243,7 +245,7 @@ class SteerLab:
             [str(wrapper), "--version"], capture_output=True, text=True,
             timeout=15, env=self.env,
         )
-        if result.returncode or "0.164.0" not in result.stdout:
+        if result.returncode or "0.165.0" not in result.stdout:
             raise ScenarioFailure(
                 "isolated Codex wrapper did not launch the pinned CLI: "
                 f"status={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"

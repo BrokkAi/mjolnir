@@ -92,6 +92,59 @@ pub fn attach_session_git_environment(
     Ok(())
 }
 
+/// The start of every wrapper in the session's `bin` directory: drop that
+/// directory from `PATH`, so the wrapper runs the target's own command.
+const WRAPPER_PREAMBLE: &str = r#"#!/bin/sh
+set -eu
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+clean_path=
+old_ifs=$IFS
+IFS=:
+for entry in $PATH; do
+    if [ "$entry" != "$script_dir" ]; then
+        if [ -z "$clean_path" ]; then clean_path=$entry; else clean_path=$clean_path:$entry; fi
+    fi
+done
+IFS=$old_ifs
+PATH=$clean_path
+export PATH
+"#;
+
+/// Install the session's `slopcop` wrapper beside the GitHub wrapper, after
+/// [`configure_github_cli`] has put their directory first on `PATH`.
+///
+/// When `login` exists, the wrapper exports the controller's slopcop login
+/// from it on every invocation, so a login that credential sync replaces
+/// reaches the running session; otherwise the session's own environment and
+/// slopcop configuration apply, as on a raw localhost target.
+pub fn configure_slopcop_cli(root: &std::path::Path, login: &std::path::Path) -> Result<()> {
+    let wrapper = GithubCliPaths::new(root).bin.join("slopcop");
+    if std::fs::symlink_metadata(&wrapper).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        bail!("slopcop wrapper {} is a symbolic link", wrapper.display());
+    }
+    let login = mj_core::targets::posix_quote(&login.to_string_lossy());
+    let body = format!(
+        r#"login_file={login}
+if [ -f "$login_file" ]; then
+    SLOPCOP_TOKEN=
+    SLOPCOP_SERVICE=
+    {{ IFS= read -r SLOPCOP_TOKEN || :; IFS= read -r SLOPCOP_SERVICE || :; }} < "$login_file"
+    export SLOPCOP_TOKEN
+    if [ -n "$SLOPCOP_SERVICE" ]; then export SLOPCOP_SERVICE; else unset SLOPCOP_SERVICE; fi
+fi
+if ! command -v slopcop >/dev/null 2>&1; then
+    echo "slopcop is not installed where this session runs" >&2
+    exit 127
+fi
+exec slopcop "$@"
+"#
+    );
+    crate::worker_runtime::shell_environment::write_executable(
+        &wrapper,
+        &format!("{WRAPPER_PREAMBLE}{body}"),
+    )
+}
+
 /// Install the session-owned GitHub wrapper and Git configuration at startup.
 pub fn configure_github_cli(
     root: &std::path::Path,
@@ -120,21 +173,7 @@ pub fn configure_github_cli(
             wrapper.display()
         );
     }
-    const WRAPPER: &str = r#"#!/bin/sh
-set -eu
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-clean_path=
-old_ifs=$IFS
-IFS=:
-for entry in $PATH; do
-    if [ "$entry" != "$script_dir" ]; then
-        if [ -z "$clean_path" ]; then clean_path=$entry; else clean_path=$clean_path:$entry; fi
-    fi
-done
-IFS=$old_ifs
-PATH=$clean_path
-export PATH
-token_file=$script_dir/../github-token
+    const WRAPPER: &str = r#"token_file=$script_dir/../github-token
 if [ -f "$token_file" ]; then
     IFS= read -r GH_TOKEN < "$token_file"
     export GH_TOKEN
@@ -144,7 +183,10 @@ else
 fi
 exec gh "$@"
 "#;
-    crate::worker_runtime::shell_environment::write_executable(wrapper, WRAPPER)?;
+    crate::worker_runtime::shell_environment::write_executable(
+        wrapper,
+        &format!("{WRAPPER_PREAMBLE}{WRAPPER}"),
+    )?;
 
     prepend_github_cli_path(bin, environment)?;
     environment.insert(
