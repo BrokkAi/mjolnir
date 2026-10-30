@@ -14,7 +14,8 @@ Users can set `[github] session_token_path = "~/.secrets/gh_agents_pat"` to give
 - [x] (2026-10-30) Inspect credential selection, worker wrappers, provisioning, resume, and periodic reconciliation; claim #1432.
 - [x] (2026-10-30) Implement configuration, authoritative credential selection, startup installation, and reconciliation on every target.
 - [x] (2026-10-30) Extend configuration and credential integration regressions; focused tests, complete core/controller suites, workspace clippy, and touched-crate formatting pass.
-- [ ] Commit and push the validated change; install and configure the user's token if the installed version can safely be updated.
+- [x] (2026-10-30) Commit and push the feature, install matching controller/workers, and configure the user’s PAT path; initial startup/restart/rotation smoke passes.
+- [x] (2026-10-30) Install the validated override-removal follow-up and run the expanded smoke test; default daemon handoff and configured path confirmed.
 
 ## Surprises & Discoveries
 
@@ -28,13 +29,15 @@ Local bare sessions already use the worker-owned `gh` wrapper, but periodic GitH
   Rationale: A file supports rotation without putting credentials in serialized configuration; an explicit setting must never silently fall back to a broader credential.
   Date/Author: 2026-10-30 / Codex.
 - Decision: Reconcile GitHub credentials for every target with an override and publish the GitHub configuration with each credential target, replacing the App-configured flag.
-  Rationale: The controller owns credential selection, and a target's configuration snapshot also makes reload invalidate obsolete background work. Local bare targets participate when PAT or App credentials are configured; their ordinary host-login behavior stays unchanged otherwise.
+  Rationale: The controller owns credential selection, and a target's configuration snapshot also makes reload invalidate obsolete background work. Every staged target participates in normal GitHub sync, including local bare. This also restores the host/App source after an override is removed, rather than leaving a stale PAT in the local worker.
   Date/Author: 2026-10-30 / Codex.
 
 ## Outcomes & Retrospective
 
 
-Configuration and startup/sync integration are implemented. Focused PAT tests and complete core/controller suites pass (553 core and 2,204 controller tests); workspace clippy passes with `--all-targets -- -D warnings`. The user approved implementation after narrowing rollout scope: preserve container environment delivery, allow ordinary periodic sync to adopt new credentials, and guarantee the latest configured PAT on every worker start. No migration, source pinning, live conversion mechanism, or container recreation is included.
+The feature is committed as `2c54f66cd`, with the local override-removal fix in `42e8f7d4f`. After a clean upstream merge, matching controller and native/musl workers were installed from `1eb015722`. The local daemon runs `2.63.1+1eb01572` and the host’s `~/.config/mjolnir/config.toml` contains `github.session_token_path = "~/.secrets/gh_agents_pat"`. Its configuration diagnostic is ready. Ordinary sync delivered the configured PAT to this running session; verification compared bytes without printing them. The named `pat-1432-smoke` instance passed real worker startup, restart with changed token contents, and periodic rotation, under a private tmux server with fake harness credentials and dummy PATs.
+
+A final inspection caught an override-removal defect: excluding an unconfigured local target from sync left its old PAT in place. Local targets now follow the same normal sync rule as other targets. The affected 44 tests, complete 2,204-test controller suite, workspace clippy, formatting, and diff checks pass for this follow-up. Core’s 553-test suite passed in the initial full validation; its code is unchanged in the follow-up. The expanded real-worker smoke also passed startup, restart, periodic rotation, and removing the override. The test ran in `pat-1432-smoke` under tmux using an empty ambient home, isolated config/data/profile/cache directories, a deterministic harness, and dummy credentials. No default-instance test sessions were created. Existing doctor findings are a missing Mac worker and review residue; the PAT configuration introduced no new diagnostic failure.
 
 ## Context and Orientation
 
@@ -83,3 +86,7 @@ Plan revised 2026-10-30 to incorporate the user’s approved scope; container en
 Implementation note 2026-10-30: refresh the override in the shared worker-start helper and automatic recovery, covering restart, resume, upgrades, and parked-child wake. App-only export renewal skips PAT overrides. The host configuration currently has no GitHub App; the user explicitly authorized setting the PAT path after installation.
 
 Validation update 2026-10-30: the complete core and controller suites pass without failures. Formatting and diff checks pass for touched crates. The documentation sync script passes; the docs npm checker is unavailable because dependencies are not installed. An isolated native-worker/TUI smoke driver is prepared at `/mnt/optane/tmp/mj-pat-1432/smoke.py` for startup, restart, and ordinary rotation.
+
+Follow-up 2026-10-30: normal sync must continue after removing the optional path, otherwise local workers retain the old PAT. Fixed the target-selection rule and marked its regression as hard-won. The source file, container environment delivery, worker protocol, and database schema are unchanged.
+
+Completion evidence 2026-10-30: installation completed from `1eb015722`; the final named-instance result is `/mnt/optane/tmp/mj-pat-1432/artifacts/session-pat-seed-1432-2954362/pat-result.json`, with all four checks true. Default daemon PID 3014865 reports `2.63.1+1eb01572`; its PAT setting is confirmed without printing the token. The incoming upstream checkpoint and native gh-approval changes merged without conflicts; their recorded full validation was reused, and the final live smoke exercises the composed worker. No implementation work remains. This final plan-only update records deployment evidence and does not require reinstalling matching binaries.
