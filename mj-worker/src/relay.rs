@@ -290,7 +290,7 @@ impl DurableRelay {
         let root = root.into();
         let session_id = session_id.into();
         validate_identifier(&session_id, "session ID")?;
-        fs::create_dir_all(root.join(RELAY_JOURNAL_DIR))
+        mj_core::config::create_owner_only_directory(&root.join(RELAY_JOURNAL_DIR))
             .with_context(|| format!("create relay state directory {}", root.display()))?;
 
         let state_path = root.join(RELAY_STATE_FILE);

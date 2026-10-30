@@ -1645,6 +1645,20 @@ fn controller_store_lock_excludes_a_second_process_owner() {
     drop(first);
     run_controller_lock_probe(directory.path(), false);
 }
+
+// The data store holds every session record; it must not be traversable by
+// other local users (#1409).
+#[cfg(unix)]
+#[test]
+fn a_new_controller_data_directory_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = tempfile::tempdir().unwrap();
+    let directory = parent.path().join("store");
+    let _guard = ControllerStoreGuard::acquire_at(&directory).unwrap();
+    let mode = std::fs::metadata(&directory).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+}
 fn run_controller_lock_probe(directory: &Path, expect_locked: bool) {
     IsolatedTest::new("controller::tests::controller_store_lock_subprocess_probe")
         .env("MJ_CONTROLLER_LOCK_PROBE", directory)
