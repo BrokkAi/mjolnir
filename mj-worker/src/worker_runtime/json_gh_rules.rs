@@ -26,6 +26,28 @@ pub(super) fn configure_json_gh_rules(
         return Ok(());
     }
     match harness {
+        HarnessKind::Muse => {
+            let mut prefixes: Vec<Vec<String>> = environment
+                .get("MUSE_ACP_ALLOW_COMMAND_PREFIXES")
+                .map(|value| serde_json::from_str(value))
+                .transpose()
+                .context("parse Muse native command prefixes")?
+                .unwrap_or_default();
+            ensure!(
+                prefixes
+                    .iter()
+                    .all(|prefix| !prefix.is_empty() && prefix.iter().all(|word| !word.is_empty())),
+                "Muse native command prefixes must contain nonempty argv words"
+            );
+            if !prefixes.iter().any(|prefix| prefix.as_slice() == ["gh"]) {
+                prefixes.push(vec!["gh".into()]);
+            }
+            environment.insert(
+                "MUSE_ACP_ALLOW_COMMAND_PREFIXES".into(),
+                serde_json::to_string(&prefixes)?,
+            );
+            Ok(())
+        }
         HarnessKind::OpenCode => configure_opencode(environment),
         HarnessKind::Mimo if super::subagents::private_staged_home(root, session_id, home) => {
             configure_mimo(home)

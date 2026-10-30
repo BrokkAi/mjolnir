@@ -1580,7 +1580,11 @@ async fn prepare_and_start_harness(
     if config.execution_policy == ExecutionPolicy::ConfiguredApprovals
         && matches!(
             config.harness,
-            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::OpenCode | HarnessKind::Mimo
+            HarnessKind::Kimi
+                | HarnessKind::Grok
+                | HarnessKind::OpenCode
+                | HarnessKind::Mimo
+                | HarnessKind::Muse
         )
     {
         let budget = preparation_step(
