@@ -735,6 +735,8 @@ for line in sys.stdin:
     let mut relay = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10))
         .await
         .expect("test worker relay connects");
+    let source = tempfile::tempdir().unwrap();
+    let token_path = source.path().join("agent-pat");
     let target = CredentialSyncTarget {
         session_id: SESSION_ID.into(),
         profile_id: "codex".into(),
@@ -743,19 +745,29 @@ for line in sys.stdin:
         aws_credentials: None,
         skips_login_file_sync: true,
         sync_github_token: true,
-        github_app_configured: false,
+        github: mj_core::config::GithubConfig {
+            session_token_path: Some(token_path.clone()),
+            ..Default::default()
+        },
         skills_scope: mj_core::skills::SkillsScope::Isolated,
         spec,
     };
 
-    let action = credential_sync::reconcile_github_token(
-        &mut relay,
-        &target,
-        Some("refreshed-installation-token"),
-    )
-    .await
-    .unwrap();
-    assert_eq!(action, Some(CredentialSyncAction::GithubTokenPushed));
+    for token in ["initial-session-pat", "rotated-session-pat"] {
+        std::fs::write(&token_path, token).unwrap();
+        let selected = crate::controller::github_token_for_session(
+            target.session_id.clone(),
+            target.github.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.as_deref(), Some(token));
+        let action =
+            credential_sync::reconcile_github_token(&mut relay, &target, selected.as_deref())
+                .await
+                .unwrap();
+        assert_eq!(action, Some(CredentialSyncAction::GithubTokenPushed));
+    }
 }
 
 /// Plays a worker that speaks the protocol in its first argument and keeps
@@ -896,7 +908,7 @@ async fn publishing_new_targets_starts_reconciliation_without_waiting_for_the_ti
         aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
-        github_app_configured: false,
+        github: Default::default(),
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     }]);
@@ -921,7 +933,7 @@ async fn publishing_changed_targets_reconciles_only_the_affected_profile() {
         aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
-        github_app_configured: false,
+        github: Default::default(),
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     };
@@ -1056,7 +1068,7 @@ fn skills_sync_target(profile_home: &std::path::Path) -> CredentialSyncTarget {
         aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
-        github_app_configured: false,
+        github: Default::default(),
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     }
@@ -1384,7 +1396,7 @@ fn codex_sync_target(
         aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
-        github_app_configured: false,
+        github: Default::default(),
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     };
@@ -1588,7 +1600,7 @@ async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result()
         aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
-        github_app_configured: false,
+        github: Default::default(),
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("must-not-start-a-proxy", Vec::<String>::new()),
     };

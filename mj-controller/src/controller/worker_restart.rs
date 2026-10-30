@@ -261,9 +261,16 @@ impl Controller {
                     )?;
                     stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
                         .context(RESTART_FOR_UPGRADE.stop)?;
-                    start_worker_durably(&owner, target, executor, &backend, &worker_root)
-                        .context(RESTART_FOR_UPGRADE.start)
-                        .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
+                    start_worker_durably(
+                        &owner,
+                        target,
+                        executor,
+                        &backend,
+                        &worker_root,
+                        &self.config.github,
+                    )
+                    .context(RESTART_FOR_UPGRADE.start)
+                    .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
                 }
                 // The process now owns boot/journal recovery. Waiting for its socket
                 // is resumable, and must not hold daemon replacement for minutes.
@@ -439,10 +446,17 @@ impl Controller {
                     }
                 }
                 let started = match target {
-                    Some(target) => {
-                        start_worker_durably(&owner, target, executor, backend, worker_root)
+                    Some(target) => start_worker_durably(
+                        &owner,
+                        target,
+                        executor,
+                        backend,
+                        worker_root,
+                        &self.config.github,
+                    ),
+                    None => {
+                        start_worker(&owner, executor, backend, worker_root, &self.config.github)
                     }
-                    None => start_worker(&owner, executor, backend, worker_root),
                 };
                 started.context(messages.start)?;
                 Ok::<_, anyhow::Error>(())

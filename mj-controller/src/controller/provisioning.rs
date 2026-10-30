@@ -972,6 +972,7 @@ impl Controller {
                         executor,
                         backend,
                         worker_root,
+                        &self.config.github,
                     )?;
                     connect_started_worker(reconnect, session_id, executor, backend, worker_root)
                         .await?

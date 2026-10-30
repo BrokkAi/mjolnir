@@ -94,11 +94,18 @@ pub(in crate::controller) fn start_worker(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
+    github: &mj_core::config::GithubConfig,
 ) -> Result<()> {
     ensure!(
         targets::worker_root(locator, owner.session_id())? == worker_root,
         "worker owner does not cover the selected root"
     );
+    super::super::github_app::install_configured_session_github_token(
+        github,
+        executor,
+        locator,
+        worker_root,
+    )?;
     execute_checked(executor, start_worker_command(locator, worker_root))?;
     Ok(())
 }
@@ -111,6 +118,7 @@ pub(in crate::controller) fn start_worker_durably(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
+    github: &mj_core::config::GithubConfig,
 ) -> Result<()> {
     owner.verify_target(target)?;
     let id = owner.session_id();
@@ -147,7 +155,7 @@ pub(in crate::controller) fn start_worker_durably(
             == Some(crate::database::WorkerRestartPhase::Swapping),
         "worker replacement has already launched"
     );
-    start_worker(owner, executor, locator, worker_root)?;
+    start_worker(owner, executor, locator, worker_root, github)?;
     crate::database::advance_worker_restart(
         id,
         owner.operation_id(),

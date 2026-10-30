@@ -680,11 +680,11 @@ pub struct CredentialSyncTarget {
     pub skips_login_file_sync: bool,
     /// Host AWS chain provisioned into this isolated session, when selected.
     pub aws_credentials: Option<crate::aws_credentials::AwsCredentialSource>,
-    /// GitHub CLI credentials are pushed to every target except raw localhost.
+    /// Local sessions use their host login unless a session credential is configured.
     pub sync_github_token: bool,
-    /// The controller has GitHub App configuration and should resolve a
-    /// session-scoped installation token for this target.
-    pub github_app_configured: bool,
+    /// Controller-owned source for this session's GitHub credential. Included
+    /// in target identity so a reload invalidates obsolete reconciliation.
+    pub github: crate::config::GithubConfig,
     /// Target-derived availability of the host CLI skill.
     pub skills_scope: crate::skills::SkillsScope,
     /// Reconnect command for the session's worker proxy.

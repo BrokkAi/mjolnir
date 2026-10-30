@@ -88,7 +88,8 @@ pub(crate) use backend::{
 };
 pub use github_app::GithubBundleSelectionError;
 pub(crate) use github_app::{
-    GithubAppTokenProvider, github_app_token_for_session, github_token_for_session,
+    GithubAppTokenProvider, github_token_for_session, install_configured_session_github_token,
+    renew_session_github_app_token,
 };
 pub use mbx::install::{
     MbxInstallKind, MbxInstallResult, install_kind as mbx_install_kind, install_mbx,
