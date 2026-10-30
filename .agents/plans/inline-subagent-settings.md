@@ -17,7 +17,7 @@ Settings > Sub-agents should contain Maximum concurrent, Straightforward model, 
 - [x] (2026-10-30) Review the integrated UI and persistence boundary; run focused affected cases. Independent source review found no actionable defects.
 - [x] (2026-10-30) Run full touched-crate suites: client 43 passed, Controller 2205 passed/18 ignored, TUI 563 passed/2 ignored; doctests passed. Existing core four-combination matrix passed.
 - [x] (2026-10-30) Finish workspace Clippy after its three traversal/helper cleanup findings; affected focused goldens/search and the failed check passed, along with formatting/diff checks.
-- [ ] Commit on the current master branch and push to origin/master.
+- [x] (2026-10-30) Commit implementation as 25a64476a on the current master branch and push to origin/master; push succeeded directly from f21531f61.
 
 ## Surprises & Discoveries
 
@@ -41,7 +41,7 @@ Shared client files and TUI files are owned by separate children. The parent ret
 
 ## Outcomes & Retrospective
 
-The real settings endpoint accepts inline edits and rejects Subtle-only saves without a file write. Its focused golden test passed with one test and no failures; the captured exchange shows None-first models and conditional effort rows on Sub-agents. The TUI golden captures the retained draft and save error on the main page; focused search and single-click dropdown tests passed. The browser strict replay and rendered golden passed both update and verification runs. Independent source review found no actionable navigation or discovery defects. All 2811 tests in the touched crates passed, with 20 ignored; doctests and the focused existing core matrix passed. Clippy, formatting, and diff checks passed after traversal/helper cleanup. Git delivery remains.
+The feature is implemented and pushed to origin/master as 25a64476a. The real settings endpoint accepts inline edits and rejects Subtle-only saves without a file write. Its focused golden test passed with one test and no failures; the captured exchange shows None-first models and conditional effort rows on Sub-agents. The TUI golden captures the retained draft and save error on the main page; focused search and single-click dropdown tests passed. The browser strict replay and rendered golden passed both update and verification runs. Independent source review found no actionable navigation or discovery defects. All 2811 tests in the touched crates passed, with 20 ignored; doctests and the focused existing core matrix passed. Clippy, formatting, and diff checks passed after traversal/helper cleanup. No implementation work remains. Keeping full stored paths separate from their display page preserved ordinary collection navigation while allowing one shared projection for terminal and browser settings.
 
 ## Context and Orientation
 
@@ -86,3 +86,5 @@ Initial checkout was clean at f21531f61. No matching issue was identified in the
 The new shared helpers are `visible_paths(path: &[String], value: &serde_json::Value) -> Vec<Vec<String>>` and `row_page(path: &[String]) -> &[String]`. Other pages preserve their existing visible keys and object/collection semantics. Reuse the existing schema labels/options, edit operation, asynchronous capability hydration, `save_at`, and TUI save result handling. Add no dependencies, crates, persisted synthetic fields, or independent copies of the Subtle/Straightforward validation rule.
 
 Revision note (2026-10-30): Initial implementation record for the approved inline Subagents plan, including shared ownership, integrated acceptance cases, and required final checks.
+
+Completion note (2026-10-30): Recorded passing acceptance/full-suite validation, Clippy cleanup, and successful implementation push. The final record changes only this plan.
