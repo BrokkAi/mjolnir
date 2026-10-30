@@ -329,6 +329,12 @@ pub fn field_label(path: &[String]) -> String {
         .as_slice()
     {
         ["github"] => "GitHub events".to_owned(),
+        ["subagents", task, field]
+            if ["straightforward", "subtle"].contains(task)
+                && ["model", "effort"].contains(field) =>
+        {
+            format!("{} {}", label(task), field)
+        }
         ["machines", _, "build_cache", "scheduler", "cpus"] => {
             "Concurrent compile permits".to_owned()
         }
@@ -346,6 +352,7 @@ pub fn field_label(path: &[String]) -> String {
 pub fn null_label(path: &[String], draft: &Value) -> String {
     let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
     match parts.as_slice() {
+        ["subagents", _, "model"] => "None".to_owned(),
         ["machines", _, "build_cache", "tools_directory"] => {
             "~/.cache/mjolnir/build on the machine".to_owned()
         }
@@ -358,13 +365,6 @@ pub fn null_label(path: &[String], draft: &Value) -> String {
             "{} (default)",
             mj_core::config::NotifyConfig::default().delay_seconds
         ),
-        ["subagents", task, "model"] if matches!(*task, "straightforward" | "subtle") => {
-            if draft["_subagent_options"][task].is_null() {
-                "Discovering models…".into()
-            } else {
-                "Not set".into()
-            }
-        }
         ["subagents", task, "effort"] if matches!(*task, "straightforward" | "subtle") => {
             if draft["_subagent_options"][task][super::discovery::EFFORTS_PENDING] == true {
                 "Discovering efforts…".into()
@@ -654,6 +654,10 @@ pub fn option_label(path: &[String], value: &Value, draft: &Value) -> String {
             _ => "Off",
         }
         .to_owned()
+    } else if value.is_null()
+        && matches!(path, [section, _, field] if section == "subagents" && field == "model")
+    {
+        "None".to_owned()
     } else if value.is_null() {
         format!(
             "Default ({})",
@@ -786,6 +790,14 @@ pub fn page_help(path: &[String], draft: &Value) -> &'static str {
 /// own falls back to.
 pub fn page_specific_help(path: &[String], draft: &Value) -> Option<&'static str> {
     Some(match path {
+        [section]
+            if section == "subagents"
+                && (["straightforward", "subtle"]
+                    .iter()
+                    .any(|task| draft["_subagent_options"][task].is_null())) =>
+        {
+            "Discovering available subagent models. Unset models remain None until you choose one."
+        }
         [section] if section == "continuation" && !jev_enabled(draft) => {
             "Off because Jev is off: continuation needs Jev to judge each reply. Turn Jev on under Privacy to use it."
         }

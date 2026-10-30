@@ -3,30 +3,37 @@ use super::*;
 pub(super) const SETTING_GUTTER: &str = "  ";
 
 pub(super) fn preferred_size(draft: &Value) -> SetupSize {
-    fn walk(path: &mut Vec<String>, draft: &Value, max_width: &mut usize, max_height: &mut u16) {
+    fn walk(path: &[String], draft: &Value, max_width: &mut usize, max_height: &mut u16) {
         let Some(value) = draft.pointer(&pointer(path)) else {
             return;
         };
-        let keys = visible_keys(path, value);
+        let paths = visible_paths(path, value);
+        let keys = paths
+            .iter()
+            .filter_map(|p| p.last().cloned())
+            .collect::<Vec<_>>();
         *max_width = (*max_width).max(Line::raw(breadcrumb(path, draft)).width());
         *max_height = (*max_height).max(
             u16::try_from(page_plan(path, &keys).len())
                 .unwrap_or(u16::MAX)
                 .saturating_add(10),
         );
-        for key in keys {
-            let parent = path.clone();
-            path.push(key.clone());
-            let Some(child) = draft.pointer(&pointer(path)) else {
-                path.pop();
+        for child_path in paths {
+            let key = child_path.last().cloned().unwrap_or_default();
+            let parent = child_path
+                .get(..child_path.len().saturating_sub(1))
+                .unwrap_or_default()
+                .to_vec();
+            let Some(child) = draft.pointer(&pointer(&child_path)) else {
                 continue;
             };
-            let name = row_label(&parent, value, &key, Some(child));
+            let parent_value = draft.pointer(&pointer(&parent)).unwrap_or(value);
+            let name = row_label(&parent, parent_value, &key, Some(child));
             let mut summary = row_summary(&parent, &key, child, draft, None);
             if !child.is_object()
                 && !child.is_array()
                 && !child.is_boolean()
-                && schema::choices(&storage_path(path), draft).is_empty()
+                && schema::choices(&storage_path(&child_path), draft).is_empty()
             {
                 summary = summary.chars().take(24).collect();
             }
@@ -36,16 +43,15 @@ pub(super) fn preferred_size(draft: &Value) -> SetupSize {
             *max_width = (*max_width).max(Line::raw(line).width());
             // `interface` resolves to the draft root, which holds most of the
             // settings its page gathers; the prefix has its own nested mapping.
-            if (child.is_object() || child.is_array()) && path.as_slice() != ["review"] {
-                walk(path, draft, max_width, max_height);
+            if (child.is_object() || child.is_array()) && child_path.as_slice() != ["review"] {
+                walk(&child_path, draft, max_width, max_height);
             }
-            path.pop();
         }
     }
 
     let mut max_width = 0usize;
     let mut max_height = 20;
-    walk(&mut Vec::new(), draft, &mut max_width, &mut max_height);
+    walk(&[], draft, &mut max_width, &mut max_height);
     // The page's own actions stack in a column at its right edge, so the
     // dialog is as wide as the widest page body plus that column. Back and the
     // commit sit in the footer row instead and take no width here.

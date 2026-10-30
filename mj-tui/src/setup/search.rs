@@ -5,7 +5,7 @@
 //! row addressable by what it is called, what it does, and what it is set to,
 //! so the dialog can jump straight to one.
 
-use super::{machine_build_cache_summary, pointer, row_label, row_summary, schema, visible_keys};
+use super::{machine_build_cache_summary, pointer, row_label, row_summary, schema, visible_paths};
 use crate::widgets::counted;
 use mj_chat::theme;
 use ratatui::text::{Line, Span};
@@ -31,43 +31,48 @@ pub(super) struct SearchEntry {
 /// Every page and value in `draft`, in the order the pages list them.
 pub(super) fn index(draft: &Value) -> Vec<SearchEntry> {
     let mut entries = Vec::new();
-    walk(draft, &mut Vec::new(), "", &mut entries);
+    walk(draft, &[], "", &mut entries);
     entries
 }
 
-fn walk(draft: &Value, path: &mut Vec<String>, trail: &str, entries: &mut Vec<SearchEntry>) {
+fn walk(draft: &Value, path: &[String], trail: &str, entries: &mut Vec<SearchEntry>) {
     let Some(current) = draft.pointer(&pointer(path)) else {
         return;
     };
-    for key in visible_keys(path, current) {
-        let parent = path.clone();
-        path.push(key.clone());
-        let Some(value) = draft.pointer(&pointer(path)) else {
-            path.pop();
+    for item_path in visible_paths(path, current) {
+        let key = item_path.last().cloned().unwrap_or_default();
+        let parent = item_path
+            .get(..item_path.len().saturating_sub(1))
+            .unwrap_or_default()
+            .to_vec();
+        let Some(value) = draft.pointer(&pointer(&item_path)) else {
             continue;
         };
-        let label = row_label(&parent, current, &key, Some(value));
-        let summary = page_summary(path, value, draft)
+        let parent_value = draft.pointer(&pointer(&parent)).unwrap_or(current);
+        let label = row_label(&parent, parent_value, &key, Some(value));
+        let summary = page_summary(&item_path, value, draft)
             .unwrap_or_else(|| row_summary(&parent, &key, value, draft, None));
         entries.push(SearchEntry {
-            haystack: format!("{label} {trail} {key} {summary} {}", schema::help(path))
-                .to_lowercase(),
-            path: path.clone(),
+            haystack: format!(
+                "{label} {trail} {key} {summary} {}",
+                schema::help(&item_path)
+            )
+            .to_lowercase(),
+            path: item_path.clone(),
             label: label.clone(),
             trail: trail.to_owned(),
             value: summary,
         });
         // Code Review is edited by its own dialog, so its values are not
         // reachable as a page of the tree and must not be indexed as one.
-        if (value.is_object() || value.is_array()) && path.as_slice() != ["review"] {
+        if (value.is_object() || value.is_array()) && item_path.as_slice() != ["review"] {
             let nested = if trail.is_empty() {
                 label
             } else {
                 format!("{trail} › {label}")
             };
-            walk(draft, path, &nested, entries);
+            walk(draft, &item_path, &nested, entries);
         }
-        path.pop();
     }
 }
 
@@ -87,7 +92,7 @@ fn page_summary(path: &[String], value: &Value, draft: &Value) -> Option<String>
     if let Some(summary) = machine_build_cache_summary(path, value, None) {
         return Some(summary);
     }
-    let count = visible_keys(path, value).len();
+    let count = visible_paths(path, value).len();
     Some(if value.is_array() {
         format!("{}  \u{203a}", counted(count, "entry", "entries"))
     } else {

@@ -40,13 +40,12 @@ fn one_click_opens_a_page_and_a_real_dropdown() {
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     assert_eq!(dialog.path, ["interface"], "one click opens a page");
 
-    for (section, task) in [("interface", None), ("subagents", Some("straightforward"))] {
+    for (section, label) in [
+        ("interface", "Theme"),
+        ("subagents", "Straightforward model"),
+    ] {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.begin_settings_section(section, None);
-        if let Some(task) = task {
-            choose(&mut dashboard, task);
-        }
-        let label = if task.is_some() { "Model" } else { "Theme" };
         let lines = drawn(&mut dashboard, 140, 40);
         let (_, row) = point(&lines, label);
         let column = cell_column(&lines[usize::from(row)], "▾");
@@ -67,6 +66,10 @@ fn one_click_opens_a_page_and_a_real_dropdown() {
             dialog.combo.open_id().is_some(),
             "one click opens the dropdown"
         );
+        if section == "subagents" {
+            let control = dialog.descriptor(dialog.combo.open_id().unwrap()).unwrap();
+            assert_eq!(control.path, ["subagents", "straightforward", "model"]);
+        }
     }
 }
 

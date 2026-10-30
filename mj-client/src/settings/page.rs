@@ -125,6 +125,56 @@ pub fn visible_keys(path: &[String], value: &Value) -> Vec<String> {
     }
 }
 
+/// Full setting paths shown on a page. Most pages list each visible child;
+/// the global subagent page presents task model and effort fields inline.
+pub fn visible_paths(path: &[String], value: &Value) -> Vec<Vec<String>> {
+    let keys = visible_keys(path, value);
+    if path == ["subagents"] {
+        let mut fields = vec![vec!["subagents".to_owned(), "max_concurrent".to_owned()]];
+        for task in ["straightforward", "subtle"] {
+            fields.push(vec![
+                "subagents".to_owned(),
+                task.to_owned(),
+                "model".to_owned(),
+            ]);
+            let model = value[task]["model"].as_str().unwrap_or_default();
+            if !model.is_empty() {
+                fields.push(vec![
+                    "subagents".to_owned(),
+                    task.to_owned(),
+                    "effort".to_owned(),
+                ]);
+            }
+        }
+        let extras = visible_keys(path, value)
+            .into_iter()
+            .filter(|child| {
+                child != "max_concurrent"
+                    && !["straightforward", "subtle"].contains(&child.as_str())
+            })
+            .map(|child| vec!["subagents".to_owned(), child])
+            .collect::<Vec<_>>();
+        fields.extend(extras);
+        return fields;
+    }
+    if path.is_empty() {
+        return keys.into_iter().map(|key| vec![key]).collect();
+    }
+    keys.into_iter()
+        .map(|key| path.iter().cloned().chain([key]).collect())
+        .collect()
+}
+
+/// Page that owns the row for a full setting path.
+pub fn row_page(path: &[String]) -> &[String] {
+    if matches!(path, [section, task, field] if section == "subagents" && ["straightforward", "subtle"].contains(&task.as_str()) && ["model", "effort"].contains(&field.as_str()))
+    {
+        &path[..1]
+    } else {
+        path.get(..path.len().saturating_sub(1)).unwrap_or_default()
+    }
+}
+
 /// Settings that exist in the stored shape but have no meaning on this entry,
 /// so showing them would invite a value that does nothing.
 pub fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {

@@ -21,8 +21,13 @@ impl SetupDialog {
             .expect("settings path exists")
     }
 
+    #[cfg(test)]
     pub(super) fn keys(&self) -> Vec<String> {
         visible_keys(&self.path, self.current())
+    }
+
+    pub(super) fn paths(&self) -> Vec<Vec<String>> {
+        visible_paths(&self.path, self.current())
     }
 
     /// Whether the draft still describes the profile that is saved on disk.
@@ -123,18 +128,18 @@ impl SetupDialog {
         if path == ["review"] {
             return Jump::OpenReview;
         }
-        if self
+        let target_is_page = self
             .draft
             .pointer(&pointer(path))
-            .is_some_and(|v| v.is_object() || v.is_array())
-            || self
-                .draft
-                .pointer(&pointer(parent))
-                .is_some_and(|v| is_collection(parent, v))
-        {
+            .is_some_and(|v| v.is_object() || v.is_array());
+        let target_is_collection_item = self
+            .draft
+            .pointer(&pointer(parent))
+            .is_some_and(|v| is_collection(parent, v));
+        if target_is_page || target_is_collection_item {
             self.open_page(path.to_vec());
         } else {
-            self.open_page(parent.to_vec());
+            self.open_page(row_page(path).to_vec());
             self.focus_path(path);
         }
         Jump::Done

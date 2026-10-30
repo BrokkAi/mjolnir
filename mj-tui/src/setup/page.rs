@@ -1,7 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+pub(super) use mj_client::settings::page::visible_keys;
 pub(super) use mj_client::settings::page::{
-    PageRow, RowKind, breadcrumb, is_collection, page_plan, row_label, visible_keys,
+    PageRow, RowKind, breadcrumb, is_collection, page_plan, row_label, row_page, visible_paths,
 };
 
 /// A size string as the whole number of GB the field is measured in, or the

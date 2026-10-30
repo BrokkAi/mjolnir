@@ -414,14 +414,7 @@ impl SetupDialog {
             ))
         });
         let paths = if self.current().is_object() || self.current().is_array() {
-            self.keys()
-                .into_iter()
-                .map(|key| {
-                    let mut path = self.path.clone();
-                    path.push(key);
-                    path
-                })
-                .collect::<Vec<_>>()
+            self.paths()
         } else {
             vec![self.path.clone()]
         };

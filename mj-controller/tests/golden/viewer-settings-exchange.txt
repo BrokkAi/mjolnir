@@ -925,22 +925,50 @@
               {
                 "path": [
                   "subagents",
-                  "straightforward"
+                  "straightforward",
+                  "model"
                 ],
-                "label": "Straightforward",
-                "help": "Work with a clear method. Choose a model and its effort.",
-                "control": "page",
-                "summary": "2 settings"
+                "label": "Straightforward model",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
               },
               {
                 "path": [
                   "subagents",
-                  "subtle"
+                  "subtle",
+                  "model"
                 ],
-                "label": "Subtle",
-                "help": "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.",
-                "control": "page",
-                "summary": "2 settings"
+                "label": "Subtle model",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
               }
             ]
           }
@@ -1041,68 +1069,16 @@
               {
                 "path": [
                   "subagents",
-                  "straightforward"
-                ],
-                "label": "Straightforward",
-                "help": "Work with a clear method. Choose a model and its effort.",
-                "control": "page",
-                "summary": "2 settings"
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle"
-                ],
-                "label": "Subtle",
-                "help": "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.",
-                "control": "page",
-                "summary": "2 settings"
-              }
-            ]
-          }
-        ],
-        "removable": false
-      },
-      "error": "Enter a whole number from 1 to 64."
-    }
-  },
-  {
-    "uri": "/api/settings/page",
-    "request": {
-      "path": [
-        "subagents",
-        "straightforward"
-      ]
-    },
-    "status": 200,
-    "response": {
-      "page": {
-        "path": [
-          "subagents",
-          "straightforward"
-        ],
-        "breadcrumb": [
-          "Settings",
-          "Sub-agents",
-          "Straightforward"
-        ],
-        "help": "Work with a clear method. Choose a model and its effort.",
-        "groups": [
-          {
-            "rows": [
-              {
-                "path": [
-                  "subagents",
                   "straightforward",
                   "model"
                 ],
-                "label": "Model",
+                "label": "Straightforward model",
                 "control": "choice",
                 "value": null,
                 "choices": [
                   {
                     "value": null,
-                    "label": "Default (Not set)"
+                    "label": "None"
                   },
                   {
                     "value": "opus",
@@ -1117,16 +1093,24 @@
               {
                 "path": [
                   "subagents",
-                  "straightforward",
-                  "effort"
+                  "subtle",
+                  "model"
                 ],
-                "label": "Effort",
+                "label": "Subtle model",
                 "control": "choice",
                 "value": null,
                 "choices": [
                   {
                     "value": null,
-                    "label": "Default (Harness default)"
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
                   }
                 ]
               }
@@ -1135,48 +1119,161 @@
         ],
         "removable": false
       },
-      "subagent_options": {
-        "straightforward": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        },
-        "subtle": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        }
-      }
+      "error": "Enter a whole number from 1 to 64."
     }
   },
   {
     "uri": "/api/settings/edit",
     "request": {
       "page": [
-        "subagents",
-        "straightforward"
+        "subagents"
+      ],
+      "edit": {
+        "kind": "set",
+        "path": [
+          "subagents",
+          "subtle",
+          "model"
+        ],
+        "choice": "opus"
+      }
+    },
+    "status": 200,
+    "response": {
+      "draft_environments": {
+        "profiles.claude": {
+          "ANTHROPIC_API_KEY": {
+            "mj_hidden_value": true
+          },
+          "PROXY_TOKEN": {
+            "from_secret": "PROXY_TOKEN"
+          }
+        },
+        "targets.lab": {
+          "LAB_TOKEN": {
+            "mj_hidden_value": true
+          }
+        }
+      },
+      "page": {
+        "path": [
+          "subagents"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Sub-agents"
+        ],
+        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "subagents",
+                  "max_concurrent"
+                ],
+                "label": "Maximum concurrent children",
+                "control": "text",
+                "value": "6",
+                "placeholder": "6 (default)",
+                "number": true
+              },
+              {
+                "path": [
+                  "subagents",
+                  "straightforward",
+                  "model"
+                ],
+                "label": "Straightforward model",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "subtle",
+                  "model"
+                ],
+                "label": "Subtle model",
+                "control": "choice",
+                "value": "opus",
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "subtle",
+                  "effort"
+                ],
+                "label": "Subtle effort",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "Default (Harness default)"
+                  },
+                  {
+                    "value": "high",
+                    "label": "high"
+                  },
+                  {
+                    "value": "max",
+                    "label": "max"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/save",
+    "request": {
+      "page": [
+        "subagents"
+      ]
+    },
+    "status": 400,
+    "response": {
+      "error": "[subagents.subtle] requires [subagents.straightforward]; configure straightforward alone or both"
+    }
+  },
+  {
+    "uri": "/api/settings/edit",
+    "request": {
+      "page": [
+        "subagents"
       ],
       "edit": {
         "kind": "set",
@@ -1207,31 +1304,40 @@
       },
       "page": {
         "path": [
-          "subagents",
-          "straightforward"
+          "subagents"
         ],
         "breadcrumb": [
           "Settings",
-          "Sub-agents",
-          "Straightforward"
+          "Sub-agents"
         ],
-        "help": "Work with a clear method. Choose a model and its effort.",
+        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
         "groups": [
           {
             "rows": [
               {
                 "path": [
                   "subagents",
+                  "max_concurrent"
+                ],
+                "label": "Maximum concurrent children",
+                "control": "text",
+                "value": "6",
+                "placeholder": "6 (default)",
+                "number": true
+              },
+              {
+                "path": [
+                  "subagents",
                   "straightforward",
                   "model"
                 ],
-                "label": "Model",
+                "label": "Straightforward model",
                 "control": "choice",
                 "value": "opus",
                 "choices": [
                   {
                     "value": null,
-                    "label": "Default (Not set)"
+                    "label": "None"
                   },
                   {
                     "value": "opus",
@@ -1249,7 +1355,214 @@
                   "straightforward",
                   "effort"
                 ],
-                "label": "Effort",
+                "label": "Straightforward effort",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "Default (Harness default)"
+                  },
+                  {
+                    "value": "high",
+                    "label": "high"
+                  },
+                  {
+                    "value": "max",
+                    "label": "max"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "subtle",
+                  "model"
+                ],
+                "label": "Subtle model",
+                "control": "choice",
+                "value": "opus",
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "subtle",
+                  "effort"
+                ],
+                "label": "Subtle effort",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "Default (Harness default)"
+                  },
+                  {
+                    "value": "high",
+                    "label": "high"
+                  },
+                  {
+                    "value": "max",
+                    "label": "max"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "removable": false
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/edit",
+    "request": {
+      "page": [
+        "subagents"
+      ],
+      "edit": {
+        "kind": "set",
+        "path": [
+          "subagents",
+          "straightforward",
+          "effort"
+        ],
+        "choice": "high"
+      }
+    },
+    "status": 200,
+    "response": {
+      "draft_environments": {
+        "profiles.claude": {
+          "ANTHROPIC_API_KEY": {
+            "mj_hidden_value": true
+          },
+          "PROXY_TOKEN": {
+            "from_secret": "PROXY_TOKEN"
+          }
+        },
+        "targets.lab": {
+          "LAB_TOKEN": {
+            "mj_hidden_value": true
+          }
+        }
+      },
+      "page": {
+        "path": [
+          "subagents"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Sub-agents"
+        ],
+        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "subagents",
+                  "max_concurrent"
+                ],
+                "label": "Maximum concurrent children",
+                "control": "text",
+                "value": "6",
+                "placeholder": "6 (default)",
+                "number": true
+              },
+              {
+                "path": [
+                  "subagents",
+                  "straightforward",
+                  "model"
+                ],
+                "label": "Straightforward model",
+                "control": "choice",
+                "value": "opus",
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "straightforward",
+                  "effort"
+                ],
+                "label": "Straightforward effort",
+                "control": "choice",
+                "value": "high",
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "Default (Harness default)"
+                  },
+                  {
+                    "value": "high",
+                    "label": "high"
+                  },
+                  {
+                    "value": "max",
+                    "label": "max"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "subtle",
+                  "model"
+                ],
+                "label": "Subtle model",
+                "control": "choice",
+                "value": "opus",
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "subtle",
+                  "effort"
+                ],
+                "label": "Subtle effort",
                 "control": "choice",
                 "value": null,
                 "choices": [
@@ -1278,8 +1591,7 @@
     "uri": "/api/settings/save",
     "request": {
       "page": [
-        "subagents",
-        "straightforward"
+        "subagents"
       ]
     },
     "status": 200,
@@ -1316,31 +1628,40 @@
       },
       "page": {
         "path": [
-          "subagents",
-          "straightforward"
+          "subagents"
         ],
         "breadcrumb": [
           "Settings",
-          "Sub-agents",
-          "Straightforward"
+          "Sub-agents"
         ],
-        "help": "Work with a clear method. Choose a model and its effort.",
+        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
         "groups": [
           {
             "rows": [
               {
                 "path": [
                   "subagents",
+                  "max_concurrent"
+                ],
+                "label": "Maximum concurrent children",
+                "control": "text",
+                "value": "6",
+                "placeholder": "6 (default)",
+                "number": true
+              },
+              {
+                "path": [
+                  "subagents",
                   "straightforward",
                   "model"
                 ],
-                "label": "Model",
+                "label": "Straightforward model",
                 "control": "choice",
                 "value": "opus",
                 "choices": [
                   {
                     "value": null,
-                    "label": "Default (Not set)"
+                    "label": "None"
                   },
                   {
                     "value": "opus",
@@ -1358,7 +1679,55 @@
                   "straightforward",
                   "effort"
                 ],
-                "label": "Effort",
+                "label": "Straightforward effort",
+                "control": "choice",
+                "value": "high",
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "Default (Harness default)"
+                  },
+                  {
+                    "value": "high",
+                    "label": "high"
+                  },
+                  {
+                    "value": "max",
+                    "label": "max"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "subtle",
+                  "model"
+                ],
+                "label": "Subtle model",
+                "control": "choice",
+                "value": "opus",
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "subtle",
+                  "effort"
+                ],
+                "label": "Subtle effort",
                 "control": "choice",
                 "value": null,
                 "choices": [

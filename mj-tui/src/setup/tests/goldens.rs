@@ -1002,9 +1002,25 @@ fn golden_global_subagent_discovery_and_save() {
     assert!(!setup_dialog_mut(&mut dashboard.mode).unwrap().is_dirty());
     let mut output = String::new();
     append_setup_state(&mut output, "global task choices", &mut dashboard, 140, 40);
+    for task in ["straightforward", "subtle"] {
+        assert!(
+            setup_dialog_mut(&mut dashboard.mode).unwrap().draft["subagents"][task]["model"]
+                .is_null()
+        );
+    }
+    assert!(setup_dialog_mut(&mut dashboard.mode).unwrap().draft["subagents"]["straightforward"]["effort"].is_null());
+    assert!(
+        setup_dialog_mut(&mut dashboard.mode).unwrap().draft["subagents"]["subtle"]["effort"]
+            .is_null()
+    );
     for (task, model) in [("straightforward", "shared"), ("subtle", "smarter")] {
-        choose(&mut dashboard, task);
-        choose(&mut dashboard, "model");
+        let model_path = vec!["subagents".into(), task.into(), "model".into()];
+        {
+            let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+            dialog.prepare();
+            dialog.focus_path(&model_path);
+        }
+        dashboard.handle_key(key(KeyCode::Enter));
         let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
         assert_eq!(
             open_choices(dialog)
@@ -1016,10 +1032,13 @@ fn golden_global_subagent_discovery_and_save() {
         );
         select_choice(&mut dashboard, model);
         dashboard.take_setup_subagent_choices();
-        choose(&mut dashboard, "effort");
+        let effort_path = vec!["subagents".into(), task.into(), "effort".into()];
+        setup_dialog_mut(&mut dashboard.mode)
+            .unwrap()
+            .focus_path(&effort_path);
+        dashboard.handle_key(key(KeyCode::Enter));
         select_choice(&mut dashboard, "high");
         append_setup_state(&mut output, task, &mut dashboard, 140, 40);
-        setup_dialog_mut(&mut dashboard.mode).unwrap().path.pop();
     }
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     let DashboardAction::SaveSetup { updated, .. } = dialog.save(&Default::default()) else {
@@ -1029,27 +1048,77 @@ fn golden_global_subagent_discovery_and_save() {
     assert!(saved.subagents.is_configured());
     assert_eq!(saved.subagents.subtle.unwrap().model, "smarter");
     dialog.saving = false;
-    dialog.path = vec!["subagents".into(), "straightforward".into()];
+    dialog.path = vec!["subagents".into()];
     // Discovery arriving while the picker is open must retain a saved selection.
     dashboard.profile_capabilities = Default::default();
     dashboard.take_setup_subagent_choices();
-    choose(&mut dashboard, "effort");
+    let effort_path = vec![
+        "subagents".into(),
+        "straightforward".into(),
+        "effort".into(),
+    ];
+    setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .focus_path(&effort_path);
+    dashboard.handle_key(key(KeyCode::Enter));
     dashboard.set_profile_capabilities(snapshot);
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     let (values, selected) = open_choices(dialog);
     assert_eq!(values[selected], "high");
     dashboard.handle_key(key(KeyCode::Enter));
-    choose(&mut dashboard, "model");
+    let model_path = vec!["subagents".into(), "straightforward".into(), "model".into()];
+    setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .focus_path(&model_path);
+    dashboard.handle_key(key(KeyCode::Enter));
     select_choice(&mut dashboard, "smarter");
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     assert!(dialog.draft["subagents"]["straightforward"]["effort"].is_null());
-    choose(&mut dashboard, "model");
+    setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .focus_path(&model_path);
+    dashboard.handle_key(key(KeyCode::Enter));
     select_value(&mut dashboard, &Value::Null);
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     let config = config_from_draft(dialog.draft.clone()).unwrap();
     assert!(config.subagents.straightforward.is_none());
     assert!(!config.subagents.is_configured());
     assert!(dialog.draft["subagents"]["straightforward"]["effort"].is_null());
+    let before_rejected_save = dialog.draft.clone();
+    let _ = dialog;
     append_setup_state(&mut output, "cleared choice", &mut dashboard, 140, 40);
+
+    let action = setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .save(&Default::default());
+    let DashboardAction::SaveSetup {
+        generation,
+        updated,
+        ..
+    } = action
+    else {
+        panic!("expected background validation save");
+    };
+    let invalid: Config = serde_json::from_str(&updated).unwrap();
+    let validation_error = invalid.validate().unwrap_err().to_string();
+    dashboard.setup_saved(generation, Err(validation_error));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(dialog.path, ["subagents"]);
+    assert_eq!(dialog.draft, before_rejected_save);
+    assert!(!dialog.saving);
+    assert!(
+        dialog
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.starts_with("Could not save:"))
+    );
+    assert!(dashboard.config.subagents.straightforward.is_none());
+    append_setup_state(
+        &mut output,
+        "invalid save keeps draft and reports validation",
+        &mut dashboard,
+        140,
+        40,
+    );
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "global-subagents", &output);
 }

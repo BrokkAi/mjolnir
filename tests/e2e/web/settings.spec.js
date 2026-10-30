@@ -153,11 +153,31 @@ test('golden_viewer_settings', async ({ page }) => {
   await expect(page.locator('#settings .error')).toHaveText('Enter a whole number from 1 to 64.');
   await capture('a refused edit keeps what was typed beside the reason');
 
-  await page.locator('.settings-link', { hasText: 'Straightforward' }).click();
-  await expect(page.locator('#settings-heading')).toHaveText('Straightforward');
-  await page.locator('#settings').getByLabel('Model').selectOption({ label: 'opus' });
-  await expect(page.locator('#settings').getByLabel('Effort')).toContainText('high');
-  await capture('a discovered model offers its own efforts');
+  const subtleModel = page.getByRole('combobox', { name: 'Subtle model', exact: true });
+  const straightforwardModel = page.getByRole('combobox', { name: 'Straightforward model', exact: true });
+  const straightforwardEffort = page.getByRole('combobox', { name: 'Straightforward effort', exact: true });
+  await expect(page.locator('#settings-heading')).toHaveText('Sub-agents');
+  await expect(subtleModel.locator('option:checked')).toHaveText('None');
+  await expect(straightforwardModel.locator('option:checked')).toHaveText('None');
+  await expect(page.getByRole('combobox', { name: 'Subtle effort', exact: true })).toBeHidden();
+  await expect(subtleModel.locator('option').first()).toHaveText('None');
+  await expect(straightforwardModel.locator('option').first()).toHaveText('None');
+  await expect(straightforwardEffort).toBeHidden();
+  await capture('inline task models start unset and efforts are hidden');
+
+  await subtleModel.selectOption({ label: 'opus' });
+  await expect(subtleModel.locator('option:checked')).toHaveText('opus');
+  await capture('Subtle model is edited inline');
+
+  await page.locator('#settings-save').click();
+  await expect(page.locator('#settings-error')).toContainText('[subagents.subtle] requires [subagents.straightforward]');
+  await expect(page.locator('#settings')).toContainText('Subtle model');
+  await expect(page.locator('#settings')).toContainText('opus');
+  await capture('a refused save keeps the Subtle model in the draft');
+
+  await straightforwardModel.selectOption({ label: 'opus' });
+  await expect(straightforwardEffort).toBeVisible();
+  await straightforwardEffort.selectOption({ label: 'high' });
 
   await page.locator('#settings-save').click();
   await expect(page.locator('#settings-status')).toHaveText('Saved.');

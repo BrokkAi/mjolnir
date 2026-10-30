@@ -192,7 +192,9 @@ fn row(
     let value = draft
         .pointer(&pointer(&path))
         .expect("a listed setting exists");
-    let label = page::row_label(page_path, parent, key, Some(value));
+    let field_parent_path = path.get(..path.len().saturating_sub(1)).unwrap_or_default();
+    let field_parent = draft.pointer(&pointer(field_parent_path)).unwrap_or(parent);
+    let label = page::row_label(field_parent_path, field_parent, key, Some(value));
     let help = schema::specific_help(&path).unwrap_or_default().to_owned();
     let control = if hidden::is_marker(value) {
         if path == page_path {
@@ -254,8 +256,14 @@ pub fn render_page(draft: &Value, path: &[String]) -> Result<SettingsPage, Strin
         .ok_or_else(|| "This settings page no longer exists.".to_owned())?;
     let mut groups: Vec<SettingsGroup> = Vec::new();
     if (current.is_object() && !hidden::is_marker(current)) || current.is_array() {
-        let keys = page::visible_keys(path, current);
-        for entry in page::page_plan(path, &keys) {
+        let paths = page::visible_paths(path, current);
+        for entry in page::page_plan(
+            path,
+            &paths
+                .iter()
+                .map(|p| p.last().cloned().unwrap_or_default())
+                .collect::<Vec<_>>(),
+        ) {
             match entry {
                 PageRow::Heading(heading) => groups.push(SettingsGroup {
                     heading: Some(heading.to_owned()),
@@ -263,9 +271,8 @@ pub fn render_page(draft: &Value, path: &[String]) -> Result<SettingsPage, Strin
                 }),
                 PageRow::Gap => {}
                 PageRow::Setting(index) => {
-                    let key = &keys[index];
-                    let mut child = path.to_vec();
-                    child.push(key.clone());
+                    let child = &paths[index];
+                    let key = child.last().map(String::as_str).unwrap_or_default();
                     if groups.is_empty() {
                         groups.push(SettingsGroup {
                             heading: None,
@@ -273,7 +280,11 @@ pub fn render_page(draft: &Value, path: &[String]) -> Result<SettingsPage, Strin
                         });
                     }
                     let group = groups.last_mut().expect("a group was just ensured");
-                    group.rows.push(row(draft, path, current, key, child));
+                    let parent_path = page::row_page(child);
+                    let parent = draft.pointer(&pointer(parent_path)).unwrap_or(current);
+                    group
+                        .rows
+                        .push(row(draft, path, parent, key, child.clone()));
                 }
             }
         }

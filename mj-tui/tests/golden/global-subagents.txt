@@ -8,8 +8,8 @@
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
 │  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
-│  │                  │   Straightforward                 2 settings  ›                                              │                     │
-│                     │   Subtle                          2 settings  ›                                              │                     │
+│  │                  │ Straightforward model             None ▾                                                     │                     │
+│                     │ Subtle model                      None ▾                                                     │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -45,14 +45,14 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│ Create   Open   Fi  │ Settings › Sub-agents › Straightforward                                                      │                     │
-│hel ───────────────  │ Work with a clear method. Choose a model and its effort.                                     │                     │
+│ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
+│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Model                             shared ▾                                                   │                     │
-│  │                  │ Effort                            high ▾                                                     │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
+│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
+│  │                  │ Straightforward model             shared ▾                                                   │                     │
+│                     │ Straightforward effort            high ▾                                                     │                     │
+│                     │ Subtle model                      None ▾                                                     │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -87,15 +87,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│ Create   Open   Fi  │ Settings › Sub-agents › Subtle                                                               │                     │
-│hel ───────────────  │ Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.  │                     │
+│ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
+│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Model                             smarter ▾                                                  │                     │
-│  │                  │ Effort                            high ▾                                                     │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
+│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
+│  │                  │ Straightforward model             shared ▾                                                   │                     │
+│                     │ Straightforward effort            high ▾                                                     │                     │
+│                     │ Subtle model                      smarter ▾                                                  │                     │
+│                     │ Subtle effort                     high ▾                                                     │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -129,14 +129,14 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│ Create   Open   Fi  │ Settings › Sub-agents › Straightforward                                                      │                     │
-│hel ───────────────  │ Work with a clear method. Choose a model and its effort.                                     │                     │
+│ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
+│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Model                             Default (Not set) ▾                                        │                     │
-│  │                  │ Effort                            Default (Harness default) ▾                                │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
+│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
+│  │                  │ Straightforward model             None ▾                                                     │                     │
+│                     │ Subtle model                      smarter ▾                                                  │                     │
+│                     │ Subtle effort                     high ▾                                                     │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -159,6 +159,48 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │   Back     Save and Close                                                                    │                     │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
+│                                                                                                                                          │
+│                                                                                                                                          │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
+
+=== invalid save keeps draft and reports validation (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰───────────────────                                                                                                                       │
+╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
+│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.                        │                     │
+│› ■ ACP pretty name  │                                                                                              │                     │
+│  Stopped  podman    │                                                                                              │                     │
+│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
+│  │                  │ Straightforward model             None ▾                                                     │                     │
+│                     │ Subtle model                      smarter ▾                                                  │                     │
+│                     │ Subtle effort                     high ▾                                                     │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ───────────────────╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │ Could not save: [subagents.subtle] requires [subagents.straightforward]; configure           │  ───────────────────╯
+│                     │ straightforward alone or both                                                                │  ──────────── ▁   ▄ ╮
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 │                                                                                                                                          │

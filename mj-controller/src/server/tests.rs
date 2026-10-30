@@ -4832,6 +4832,7 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     let opened = record("/api/settings", serde_json::Value::Null, status, &body);
     let original = opened["original"].clone();
     let mut draft = opened["draft"].clone();
+    let original_file = std::fs::read(&path).unwrap();
 
     // The requests a browser makes, in its order: open a page, then edit on
     // it, and save from the page it is on. Each sends the draft the
@@ -4861,16 +4862,24 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
             serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "max_concurrent"], "text": "99"}}),
         ),
         (
-            "/api/settings/page",
-            serde_json::json!({"path": ["subagents", "straightforward"]}),
-        ),
-        (
             "/api/settings/edit",
-            serde_json::json!({"page": ["subagents", "straightforward"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "model"], "choice": "opus"}}),
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "subtle", "model"], "choice": "opus"}}),
         ),
         (
             "/api/settings/save",
-            serde_json::json!({"page": ["subagents", "straightforward"]}),
+            serde_json::json!({"page": ["subagents"]}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "model"], "choice": "opus"}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "effort"], "choice": "high"}}),
+        ),
+        (
+            "/api/settings/save",
+            serde_json::json!({"page": ["subagents"]}),
         ),
     ];
     for (uri, sent) in steps {
@@ -4880,7 +4889,14 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
             request["original"] = original.clone();
         }
         let (status, body) = settings_request(&app, &cookie, uri, Some(&request)).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
+        let subtle_only_save =
+            uri == "/api/settings/save" && draft["subagents"]["straightforward"]["model"].is_null();
+        if subtle_only_save {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(std::fs::read(&path).unwrap(), original_file);
+        } else {
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
         let answer = record(uri, sent, status, &body);
         if let Some(next) = answer.get("draft") {
             draft = next.clone();
@@ -4904,6 +4920,14 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     assert!(!saved.continuation.enabled);
     assert_eq!(
         serde_json::to_value(&saved.subagents).unwrap()["straightforward"]["model"],
+        "opus"
+    );
+    assert_eq!(
+        serde_json::to_value(&saved.subagents).unwrap()["straightforward"]["effort"],
+        "high"
+    );
+    assert_eq!(
+        serde_json::to_value(&saved.subagents).unwrap()["subtle"]["model"],
         "opus"
     );
 

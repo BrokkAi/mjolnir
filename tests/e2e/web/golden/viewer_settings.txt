@@ -96,34 +96,69 @@ Maximum concurrent children
 
 Enter a whole number from 1 to 64.
 
-Straightforward
-2 settings
-
-Work with a clear method. Choose a model and its effort.
-
-Subtle
-2 settings
-
-Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.
+Straightforward model
+None
+opus
+sonnet
+Subtle model
+None
+opus
+sonnet
 
 Unsaved changes. Save writes them to the configuration file.
 
 Discard
 Save
 control Maximum concurrent children: "99" (text, placeholder "6 (default)")
+control Straightforward model: None
+control Subtle model: None
 layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents"}
-=== a discovered model offers its own efforts (390x844) ===
+=== inline task models start unset and efforts are hidden (390x844) ===
 Settings
 Sub-agents
-Straightforward
 
-Work with a clear method. Choose a model and its effort.
+Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.
 
-Model
-Default (Not set)
+Maximum concurrent children
+
+Enter a whole number from 1 to 64.
+
+Straightforward model
+None
 opus
 sonnet
-Effort
+Subtle model
+None
+opus
+sonnet
+
+Unsaved changes. Save writes them to the configuration file.
+
+Discard
+Save
+control Maximum concurrent children: "99" (text, placeholder "6 (default)")
+control Straightforward model: None
+control Subtle model: None
+layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents"}
+=== Subtle model is edited inline (390x844) ===
+Settings
+Sub-agents
+
+Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.
+
+Maximum concurrent children
+
+Enter a whole number from 1 to 64.
+
+Straightforward model
+None
+opus
+sonnet
+Subtle model
+None
+opus
+sonnet
+Subtle effort
 Default (Harness default)
 high
 max
@@ -132,21 +167,65 @@ Unsaved changes. Save writes them to the configuration file.
 
 Discard
 Save
-control Model: opus
-control Effort: Default (Harness default)
-layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents/straightforward"}
+control Maximum concurrent children: "99" (text, placeholder "6 (default)")
+control Straightforward model: None
+control Subtle model: opus
+control Subtle effort: Default (Harness default)
+layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents"}
+=== a refused save keeps the Subtle model in the draft (390x844) ===
+Settings
+Sub-agents
+
+Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.
+
+Maximum concurrent children
+
+Enter a whole number from 1 to 64.
+
+Straightforward model
+None
+opus
+sonnet
+Subtle model
+None
+opus
+sonnet
+Subtle effort
+Default (Harness default)
+high
+max
+
+[subagents.subtle] requires [subagents.straightforward]; configure straightforward alone or both
+
+Unsaved changes. Save writes them to the configuration file.
+
+Discard
+Save
+control Maximum concurrent children: "99" (text, placeholder "6 (default)")
+control Straightforward model: None
+control Subtle model: opus
+control Subtle effort: Default (Harness default)
+layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents"}
 === saving returns the saved draft (390x844) ===
 Settings
 Sub-agents
-Straightforward
 
-Work with a clear method. Choose a model and its effort.
+Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.
 
-Model
-Default (Not set)
+Maximum concurrent children
+Straightforward model
+None
 opus
 sonnet
-Effort
+Straightforward effort
+Default (Harness default)
+high
+max
+Subtle model
+None
+opus
+sonnet
+Subtle effort
 Default (Harness default)
 high
 max
@@ -155,6 +234,9 @@ Saved.
 
 Discard
 Save
-control Model: opus
-control Effort: Default (Harness default)
-layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":false,"menu":"Settings","hash":"#settings/subagents/straightforward"}
+control Maximum concurrent children: "6" (text, placeholder "6 (default)")
+control Straightforward model: opus
+control Straightforward effort: high
+control Subtle model: opus
+control Subtle effort: Default (Harness default)
+layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":false,"menu":"Settings","hash":"#settings/subagents"}
