@@ -568,6 +568,7 @@ impl Controller {
         let exported: Result<CheckpointArtifact> = async {
             let target_files = target_files.get_or_insert_with(own_target_files);
             let spec = CheckpointExportSpec {
+                ignore_nested_repositories: export_policy == CheckpointExportPolicy::IgnoreNestedRepositories,
                 protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
                 session: session_manifest(&native_session_id),
                 target: target_manifest,

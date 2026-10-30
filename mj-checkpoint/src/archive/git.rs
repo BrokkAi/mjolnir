@@ -101,19 +101,29 @@ pub enum GitSnapshotProgress {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UntrackedFiles {
+    Include,
+    Exclude,
+    /// Explicit user consent to omit untracked nested Git repositories.
+    IgnoreNestedRepositories,
+}
+
 pub fn collect_git_snapshot(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     spec: &GitCollectionSpec,
 ) -> Result<RepositorySnapshot> {
-    collect_git_snapshot_with_progress(runner, repository, spec, true, &|_| Ok(()))
+    collect_git_snapshot_with_progress(runner, repository, spec, UntrackedFiles::Include, &|_| {
+        Ok(())
+    })
 }
 
 pub fn collect_git_snapshot_with_progress(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     spec: &GitCollectionSpec,
-    include_untracked: bool,
+    untracked_files: UntrackedFiles,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
 ) -> Result<RepositorySnapshot> {
     validate_component(&spec.id, "repository id")?;
@@ -152,7 +162,7 @@ pub fn collect_git_snapshot_with_progress(
         identity,
         history,
         &unmerged_paths,
-        include_untracked,
+        untracked_files,
         progress,
     );
     if let Some(state) = clone_state {
@@ -1805,7 +1815,7 @@ fn collect_git_contents(
     identity: CollectedGitIdentity,
     history: GitHistorySelection,
     unmerged_paths: &[PathBuf],
-    include_untracked: bool,
+    untracked_files: UntrackedFiles,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
 ) -> Result<RepositorySnapshot> {
     let repository = checkout.top_level.as_path();
@@ -1867,7 +1877,7 @@ fn collect_git_contents(
                     )
                 },
                 || {
-                    if !include_untracked {
+                    if untracked_files == UntrackedFiles::Exclude {
                         return Ok(Vec::new());
                     }
                     let untracked = git_bytes(
@@ -1877,7 +1887,7 @@ fn collect_git_contents(
                         &[],
                         "list nonignored untracked files",
                     )?;
-                    build_untracked_tar(repository, &untracked, progress)
+                    build_untracked_tar(repository, &untracked, untracked_files, progress)
                 },
             )
         },
@@ -2503,6 +2513,7 @@ impl WorktreeTar {
 pub(super) fn build_untracked_tar(
     repository: &Path,
     nul_paths: &[u8],
+    policy: UntrackedFiles,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
 ) -> Result<Vec<u8>> {
     let paths = nul_paths
@@ -2525,6 +2536,11 @@ pub(super) fn build_untracked_tar(
             ensure_no_symlink_ancestors(repository, &relative)?;
             let metadata = fs::symlink_metadata(&source)
                 .with_context(|| format!("stat untracked path {}", source.display()))?;
+            if policy == UntrackedFiles::IgnoreNestedRepositories
+                && is_nested_repository(&source, &metadata)?
+            {
+                continue;
+            }
             append_worktree_entry(
                 &mut builder,
                 repository,
@@ -2576,6 +2592,16 @@ pub(super) fn build_conflicted_worktree_tar(
     Ok((output, missing))
 }
 
+fn is_nested_repository(source: &Path, metadata: &fs::Metadata) -> Result<bool> {
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    source
+        .join(".git")
+        .try_exists()
+        .with_context(|| format!("inspect nested repository directory {}", source.display()))
+}
+
 fn append_worktree_entry(
     builder: &mut tar::Builder<&mut Vec<u8>>,
     repository: &Path,
@@ -2605,13 +2631,9 @@ fn append_worktree_entry(
             .with_context(|| format!("open {} file {}", kind.label(), source.display()))?;
         builder.append_data(&mut header, relative, &mut file)?;
     } else if metadata.is_dir() {
-        if kind == WorktreeTar::Untracked
-            && source.join(".git").try_exists().with_context(|| {
-                format!("inspect nested repository directory {}", source.display())
-            })?
-        {
+        if kind == WorktreeTar::Untracked && is_nested_repository(&source, metadata)? {
             bail!(
-                "cannot checkpoint nested Git repository directory at {}: \
+                "{NESTED_REPOSITORY_CHECKPOINT_ERROR}{}: \
                  for a disposable scratch worktree, exclude this path using the outer \
                  repository's .git/info/exclude; otherwise preserve its work separately",
                 source.display()

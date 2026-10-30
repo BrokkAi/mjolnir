@@ -410,6 +410,67 @@ fn write_modern_rollout(path: &Path, id: &str, session_id: &str) {
 }
 
 #[test]
+fn ignore_nested_repositories_exports_outer_work_without_persisting_the_omission() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    let repository = spec.workspace_root.join("app");
+    let nested = ".scratch/ü landing/master-check";
+    git(
+        &repository,
+        &["worktree", "add", "--detach", nested, "HEAD"],
+    );
+    fs::write(
+        repository.join(nested).join("valuable.txt"),
+        b"nested work\n",
+    )
+    .unwrap();
+    git(
+        &repository,
+        &["clone", "--no-hardlinks", ".", ".scratch/independent"],
+    );
+    fs::write(
+        repository.join(".scratch/independent/valuable.txt"),
+        b"clone work\n",
+    )
+    .unwrap();
+    fs::write(repository.join("README.md"), b"staged\n").unwrap();
+    git(&repository, &["add", "README.md"]);
+    fs::write(repository.join("README.md"), b"unstaged\n").unwrap();
+    fs::write(repository.join("keep.txt"), b"untracked\n").unwrap();
+    let exclude = fs::read(repository.join(".git/info/exclude")).unwrap();
+
+    let error = export_checkpoint(&spec).unwrap_err();
+    assert!(format!("{error:#}").contains(mj_core::archive::NESTED_REPOSITORY_CHECKPOINT_ERROR));
+    assert!(!spec.output_path.exists());
+    spec.ignore_nested_repositories = true;
+    // Exercise the controller/target JSON contract as well as archive restore.
+    let request: CheckpointExportSpec =
+        serde_json::from_slice(&serde_json::to_vec(&spec).unwrap()).unwrap();
+    export_checkpoint(&request).unwrap();
+    verify_archive_streaming(&spec.output_path).unwrap();
+    let restored = temp.path().join("restored");
+    fs::create_dir(&restored).unwrap();
+    git(&restored, &["clone", repository.to_str().unwrap(), "app"]);
+    restore_repositories(&spec.output_path, &restored, &SystemGit).unwrap();
+    let checkout = restored.join("app");
+    assert_eq!(fs::read(checkout.join("README.md")).unwrap(), b"unstaged\n");
+    assert_eq!(git(&checkout, &["show", ":README.md"]), "staged");
+    assert_eq!(fs::read(checkout.join("keep.txt")).unwrap(), b"untracked\n");
+    assert!(!checkout.join(".scratch").exists());
+    assert_eq!(
+        fs::read(repository.join(".git/info/exclude")).unwrap(),
+        exclude
+    );
+    assert_eq!(
+        fs::read(repository.join(nested).join("valuable.txt")).unwrap(),
+        b"nested work\n"
+    );
+    spec.ignore_nested_repositories = false;
+    let error = export_checkpoint(&spec).unwrap_err();
+    assert!(format!("{error:#}").contains(mj_core::archive::NESTED_REPOSITORY_CHECKPOINT_ERROR));
+}
+
+#[test]
 fn codex_collection_keeps_only_the_root_thread_from_a_session_tree() {
     let temp = tempfile::tempdir().unwrap();
     let archived_root = temp
@@ -1297,6 +1358,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
     let output = worker_root.join("source.hel.zip");
     (
         CheckpointExportSpec {
+            ignore_nested_repositories: false,
             report_directories: None,
             protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
             session: SessionManifest {

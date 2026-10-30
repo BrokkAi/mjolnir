@@ -43,6 +43,9 @@ pub const ARCHIVE_SCHEMA_VERSION_REVIEW_REFS: u32 = 10;
 /// Mjolnir's private Git refs: review baselines, review points and reviewed
 /// trees. They are bookkeeping, never pushed, and some name a bare tree.
 pub const MJOLNIR_REF_NAMESPACE: &str = "refs/mj/";
+/// Shared diagnostic identity across the target export's stderr boundary.
+pub const NESTED_REPOSITORY_CHECKPOINT_ERROR: &str =
+    "cannot checkpoint nested Git repository directory at ";
 pub const ARCHIVE_FORMAT: &str = "hel-session";
 pub const EVENT_FRONTIER_GENESIS_DIGEST: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";

@@ -1963,7 +1963,7 @@ impl Controller {
             "retained Move source cannot be proven; refusing target teardown"
         );
         // A move's source stop was admitted by the move itself.
-        self.recover_interrupted_close_managed(&id, executor, manager, true, None)
+        self.recover_interrupted_close_managed(&id, executor, manager, true, false, None)
             .await?;
         Ok(())
     }
