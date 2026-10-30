@@ -30,6 +30,7 @@ pub use subagent_park::ParkOutcome;
 pub(crate) use subagent_park::{FAILED_STARTUP_CLEANUP_TIMEOUT, failed_launch_cleanup_executor};
 mod subagents;
 pub(crate) use subagents::SubagentReportCleanup;
+pub(crate) use subagents::recover_registered_subagent_startup;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod update;
@@ -163,7 +164,7 @@ impl ControllerStoreGuard {
     fn try_acquire_at(directory: &Path) -> Result<Option<Self>> {
         // The lock holder starts the database writer, which migrates the store.
         mj_core::config::ensure_may_control_store(directory, "own this data store")?;
-        std::fs::create_dir_all(directory)
+        mj_core::config::create_owner_only_directory(directory)
             .with_context(|| format!("create controller data directory {}", directory.display()))?;
         let path = directory.join("controller.lock");
         let mut options = OpenOptions::new();

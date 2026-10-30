@@ -112,7 +112,11 @@ def main():
         )
         script = script.replace(
             '        report_execution("running")',
-            '        report_execution("running")\n        with open(os.path.join(os.environ["CODEX_HOME"], "fixture-prompt.txt"), "a") as marker:\n            marker.write(text + "\\n")',
+            '        report_execution("running")\n'
+            '        with open(os.path.join(os.environ["CODEX_HOME"], "fixture-prompt.jsonl"), "a") as marker:\n'
+            '            marker.write(json.dumps(blocks) + "\\n")\n'
+            '        with open(os.path.join(os.environ["CODEX_HOME"], "fixture-prompt.txt"), "a") as marker:\n'
+            '            marker.write(text + "\\n")',
         )
         # A held prompt ends with end_turn once `release` writes its file into
         # the session's private CODEX_HOME, or as cancelled on session/cancel.
@@ -139,6 +143,19 @@ def main():
         )
         assert script.count("def wait_for_prompt_cancel():\n") == 1
         script = script.replace("def wait_for_prompt_cancel():\n", held)
+        model_gate = lab.runtime_root / "hold-startup-model"
+        script = script.replace(
+            '        params = message["params"]\n',
+            '        params = message["params"]\n'
+            f'        gate = {str(model_gate)!r}\n'
+            '        if params["configId"] == "model" and os.path.exists(gate):\n'
+            '            open(os.path.join(os.environ["CODEX_HOME"], "fixture-model-pending"), "w").close()\n'
+            '            deadline = time.monotonic() + 120\n'
+            '            while os.path.exists(gate):\n'
+            '                if time.monotonic() >= deadline:\n'
+            '                    raise RuntimeError("startup model response was not released")\n'
+            '                time.sleep(0.05)\n',
+        )
         compile(script, str(bridge), "exec")
         bridge.write_text(script)
         env = lab.environment()
@@ -335,6 +352,7 @@ def main():
         cli("daemon", "restart")
         assert "disabled" in cli("daemon", "status").lower()
         tool(parent, "list_agents")
+        model_gate.touch()
         spawned = tool(
             parent,
             "spawn",
@@ -395,7 +413,66 @@ def main():
                 time.sleep(0.1)
             raise RuntimeError(f"report was not acknowledged in the outbox: {session}, {finished_child}, {rows}")
 
-        wait_prompt(child, "Return a short fixture report.")
+        # Hard-won: #1394: a parent message started the child between model and effort, before its brief.
+        deadline = time.monotonic() + WAIT_SECONDS
+        while not any(
+            child in marker.parts
+            for marker in lab.runtime_root.rglob("fixture-model-pending")
+        ):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("child never reached the held startup configuration")
+            time.sleep(0.05)
+        early_message = tool(parent, "send_message", {
+            "child_session_id": child, "message": "Follow-up after the original brief.",
+        })
+        with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+            key, payload = database.execute(
+                "SELECT event_key, event_json FROM mailbox_outbox WHERE target_session_id=?",
+                (child,),
+            ).fetchone()
+            initial_prompt_id = database.execute(
+                "SELECT command_id FROM startup_steps WHERE session_id=? "
+                "AND json_type(step_json, '$.ApiPrompt')='object' ORDER BY sequence LIMIT 1",
+                (child,),
+            ).fetchone()[0]
+        # Force a delivery attempt through the normal serialized actor instead
+        # of relying on the scheduling of the background outbox sweep.
+        lab.daemon_request({
+            "action": "submit_session_command",
+            "arguments": {"session_id": child, "command_id": "early-child-mailbox-regression",
+                          "command": {"type": "deliver_mailbox_event", "data": {"event": json.loads(payload)}}},
+        }, timeout=WAIT_SECONDS)
+        held_status = worker_status(child)
+        assert held_status["active_prompt"] is None, held_status
+        assert any(
+            queued["command_id"] == initial_prompt_id
+            for queued in held_status["queued_prompts"]
+        ), "the worker FIFO does not contain the original brief before accepting messages"
+        model_gate.unlink()
+        prompt_marker = wait_prompt(child, "Return a short fixture report.")
+        first_prompt = prompt_marker.read_text()
+        assert "You are a Mjolnir sub-agent" in first_prompt, first_prompt
+        assert worker_status(child)["config"]["effort"] == "high"
+        deadline = time.monotonic() + WAIT_SECONDS
+        while True:
+            with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                accepted = database.execute(
+                    "SELECT accepted_at FROM mailbox_outbox WHERE event_key=?", (key,),
+                ).fetchone()[0]
+            if accepted is not None:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("parent message stayed queued after the initial prompt")
+            time.sleep(0.05)
+        hook = run_mailbox_hook(child)
+        # Pending mail may join the original prompt's hidden context or arrive
+        # at its next tool boundary. In either case the brief starts the turn.
+        first_blocks = prompt_marker.with_name("fixture-prompt.jsonl").read_text().splitlines()[0]
+        delivered = first_blocks + hook.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert delivered.count("Follow-up after the original brief.") == 1, delivered
+        hook = run_mailbox_hook(child)
+        assert "Follow-up after the original brief." not in hook.get("hookSpecificOutput", {}).get("additionalContext", ""), hook
+        assert early_message["status"] == "queued", early_message
         # Hard-won: 8ba3d377e: queued settings prevented steering a parent's user input.
         # Drive the real daemon and worker; the child must retain its own turn.
         def submit_parent(command_id, command):

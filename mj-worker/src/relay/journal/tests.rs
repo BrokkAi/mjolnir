@@ -1242,6 +1242,38 @@ fn a_truncated_event_can_be_read_back_after_reopening() {
     assert_eq!(reopened.latest_ordinal(), 1);
 }
 
+// The journal holds the full session transcript, so every file and directory
+// it creates must be owner-only (#1409).
+#[cfg(unix)]
+#[test]
+fn relay_journal_files_and_directories_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::Warning {
+            message: "transcript content".into(),
+        })
+        .unwrap();
+
+    let journal = temp.path().join(RELAY_JOURNAL_DIR);
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&journal), 0o700);
+    assert_eq!(mode(&journal.join(RELAY_ACTIVE_SEGMENT)), 0o600);
+    assert_eq!(mode(&temp.path().join(RELAY_STATE_FILE)), 0o600);
+
+    let mut metadata = relay
+        .journal_spans
+        .iter()
+        .find(|span| span.path.ends_with(RELAY_ACTIVE_SEGMENT))
+        .unwrap()
+        .clone();
+    seal_active_relay_segment(&journal, &mut metadata).unwrap();
+    assert_eq!(mode(&metadata.path), 0o600);
+    assert_eq!(mode(&journal.join(RELAY_ACTIVE_SEGMENT)), 0o600);
+}
+
 #[test]
 fn sealed_relay_segments_replay_and_are_removed_after_checkpointed_ack() {
     let temp = tempfile::tempdir().unwrap();

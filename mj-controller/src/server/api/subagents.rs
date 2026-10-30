@@ -43,6 +43,7 @@ pub(super) async fn spawn_subagent(
             profile_id: selection.profile_id,
             model: Some(selection.model.clone()),
             effort: selection.effort.clone(),
+            fast_mode: selection.fast_mode,
             working_directory: request.working_directory.unwrap_or_default(),
             initial_prompt,
             // Every request is its own spawn; the key only lets Mjolnir
@@ -53,19 +54,6 @@ pub(super) async fn spawn_subagent(
         })
         .await
         .map_err(|error| ApiFailure::conflict(format!("sub-agent creation failed: {error:#}")))?;
-    backend
-        .start_followup(
-            relation.child_session_id.clone(),
-            // Registration completes the first prompt (it names the handback
-            // tool when the child gets one), so send what it kept.
-            StartFollowup {
-                model: Some(selection.model),
-                effort: selection.effort,
-                prompt: Some(relation.initial_prompt.clone()),
-                fast_mode: selection.fast_mode,
-            },
-        )
-        .await?;
     let session = await_session_record(&state, &relation.child_session_id).await?;
     Ok((
         StatusCode::CREATED,

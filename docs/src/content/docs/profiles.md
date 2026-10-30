@@ -38,6 +38,11 @@ usage by model and estimated API cost, including its Mjolnir sub-agents. Rows
 are sorted by total cost, highest first. Accounting retained for destroyed
 sub-agents still contributes to their parent.
 
+Claude's native sub-agent usage also contributes when the bridge reports a
+per-model breakdown. These counts include internal calls such as compaction.
+Earlier recorded turns that discarded this breakdown cannot be split by model
+retroactively.
+
 The profile dropdown starts on **All**. Choosing a profile counts only the
 turns that ran on that profile, wherever they are in a parent's sub-agent
 tree, and still shows them under the parent. For example, a Claude session

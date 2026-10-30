@@ -5,6 +5,150 @@ use mj_core::config::HarnessKind;
 use super::background::{CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX, agent_chunk_text};
 use super::*;
 
+fn initial_fifo_commands() -> Vec<mj_core::worker_launch::InitialWorkerCommand> {
+    [
+        ("initial-model", set_config("model", "chosen-model"), false),
+        ("initial-effort", set_config("effort", "medium"), false),
+        ("initial-fast-mode", set_config("fast-mode", "on"), true),
+        (
+            "initial-brief",
+            prompt("Original task and constraints."),
+            false,
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(id, command, optional)| mj_core::worker_launch::InitialWorkerCommand {
+            command_id: id.into(),
+            command,
+            optional,
+        },
+    )
+    .collect()
+}
+
+// Hard-won: #1394: a mailbox wake ran between startup selectors without the child's original brief.
+#[test]
+fn initial_fifo_completes_a_crashed_prefix_and_keeps_mail_after_the_brief() {
+    let temp = tempfile::tempdir().unwrap();
+    let commands = initial_fifo_commands();
+    // Crash halfway through initialization, before any endpoint is published.
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let model_ordinal = submit_relay(
+        &mut relay,
+        &commands[0].command_id,
+        commands[0].command.clone(),
+    );
+    drop(relay);
+    let relay =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex, &commands)
+            .unwrap();
+    assert_eq!(
+        relay.snapshot.handled_commands["initial-model"].accepted_ordinal,
+        model_ordinal
+    );
+    let brief_ordinal = relay.snapshot.handled_commands["initial-brief"].accepted_ordinal;
+    drop(relay);
+    let mut relay =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex, &commands)
+            .unwrap();
+    assert_eq!(
+        relay.snapshot.handled_commands["initial-brief"].accepted_ordinal,
+        brief_ordinal
+    );
+    submit_relay(
+        &mut relay,
+        "early-addendum",
+        RelayCommand::DeliverMailboxEvent {
+            event: mailbox_fixture_event("early-addendum", true),
+        },
+    );
+    for expected in ["initial-model", "initial-effort", "initial-fast-mode"] {
+        let claimed = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1, "{claimed:?}");
+        assert_eq!(claimed[0].command_id, expected);
+        assert!(relay.snapshot.active_prompt.is_none());
+        if expected == "initial-fast-mode" {
+            relay
+                .record_command_rejected(
+                    expected,
+                    mj_core::event_outcome::OutcomeReason::CommandFailed,
+                    "fast mode is not offered",
+                )
+                .unwrap();
+        } else {
+            relay
+                .record_command_completed(expected, RelayCommandOutcome::Configured)
+                .unwrap();
+        }
+    }
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1, "{claimed:?}");
+    assert_eq!(claimed[0].command_id, "initial-brief");
+    assert_eq!(claimed[0].command, commands.last().unwrap().command);
+    assert!(
+        claimed[0]
+            .hidden_prompt_context
+            .as_deref()
+            .unwrap()
+            .contains("early-addendum")
+    );
+    assert!(relay.snapshot.pending_mailbox_events.is_empty());
+    // Once the brief ran, a normal turn interruption must not make it an
+    // initialization failure or cause it to be seeded again on recovery.
+    relay
+        .record_command_interrupted(
+            "initial-brief",
+            mj_core::event_outcome::OutcomeReason::WorkerRestarted,
+            "worker stopped during its first turn",
+        )
+        .unwrap();
+    drop(relay);
+    let mut relay =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex, &commands)
+            .unwrap();
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+}
+
+#[test]
+fn initial_fifo_does_not_release_the_brief_after_required_configuration_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let commands = initial_fifo_commands();
+    let mut relay =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex, &commands)
+            .unwrap();
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed[0].command_id, "initial-model");
+    let error = relay
+        .record_command_rejected(
+            "initial-model",
+            mj_core::event_outcome::OutcomeReason::CommandFailed,
+            "provider refused the selected model",
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("provider refused the selected model")
+    );
+    assert_eq!(
+        relay.snapshot.dispatches["initial-brief"].state,
+        RelayDispatchState::Queued
+    );
+    drop(relay);
+    let error =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex, &commands)
+            .err()
+            .expect("failed startup must not run the brief after restart");
+    assert!(
+        error
+            .to_string()
+            .contains("provider refused the selected model")
+    );
+    // Checkpoint recovery still owns and can preserve this failed worker's data.
+    DurableRelay::open_for_checkpoint(temp.path(), SESSION, "test").unwrap();
+}
+
 #[test]
 fn idle_upgrade_reservation_defers_without_delaying_steering() {
     let temp = tempfile::tempdir().unwrap();
@@ -383,7 +527,7 @@ fn relay_steering_automatically(root: &std::path::Path) -> DurableRelay {
 
 fn running_claude_turn(root: &std::path::Path, hook_available: bool) -> DurableRelay {
     let mut relay =
-        DurableRelay::open_for_harness(root, SESSION, "test", HarnessKind::Claude).unwrap();
+        DurableRelay::open_for_harness(root, SESSION, "test", HarnessKind::Claude, &[]).unwrap();
     relay.set_turn_verdict_harness(HarnessKind::Claude);
     relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
     relay.set_steering_delivery_mode(HarnessKind::Claude, hook_available);
@@ -548,7 +692,8 @@ fn claude_automatic_steer_is_delivered_and_completed_by_post_tool_batch() {
 
     drop(relay);
     let mut replayed =
-        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Claude).unwrap();
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Claude, &[])
+            .unwrap();
     assert_eq!(
         replayed.operational_state().steering.unwrap().status,
         SteeringStatus::Applied
@@ -636,6 +781,53 @@ fn admitted_claude_steer_returns_if_its_boundary_hook_becomes_unavailable() {
     assert!(next.steering_prompt.is_none());
 }
 
+// Hard-won: d3fde1066: a tool boundary during the interrupt fed the steer to the dying turn.
+#[test]
+fn interrupting_a_pending_claude_steer_runs_its_prompt_next() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = running_claude_turn(temp.path(), true);
+    relay.set_automatic_steering(true);
+    queue_prompt(&mut relay, "prompt-second", "Please change direction.");
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+
+    let controls = relay.operational_state().turn_controls.unwrap();
+    assert_eq!(controls.status, mj_core::relay::TurnControlStatus::Pending);
+    let interrupt = controls
+        .interrupt
+        .expect("a pending steer stays interruptible");
+    submit_relay(&mut relay, "interrupt", interrupt);
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    let [cancel] = claimed.as_slice() else {
+        panic!("the interrupt must reach the running turn, got {claimed:?}");
+    };
+    assert_eq!(cancel.command_id, "interrupt");
+
+    assert_eq!(drain_post_tool_batch(&mut relay).1, 0);
+    relay
+        .record_command_completed("interrupt", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    relay
+        .record_command_completed(
+            "prompt-first",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "Cancelled".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        relay.operational_state().steering.unwrap().status,
+        SteeringStatus::Resolved
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    let [next] = claimed.as_slice() else {
+        panic!("the returned prompt must run next, got {claimed:?}");
+    };
+    assert_eq!(next.command_id, "prompt-second");
+}
+
 #[test]
 fn claude_attachment_steer_is_left_for_the_next_normal_prompt() {
     let temp = tempfile::tempdir().unwrap();
@@ -702,7 +894,8 @@ fn claude_attachment_steer_is_left_for_the_next_normal_prompt() {
 fn codex_steer_still_claims_an_acp_steering_prompt() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay =
-        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex).unwrap();
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex, &[])
+            .unwrap();
     relay.set_turn_verdict_harness(HarnessKind::Codex);
     relay.set_steering_delivery_mode(HarnessKind::Codex, false);
     submit_relay(&mut relay, "prompt-first", prompt("work"));
@@ -785,7 +978,8 @@ fn boundary_steer_lease_timeout_then_ack_replay_does_not_deliver_twice() {
 
     drop(relay);
     let mut replayed =
-        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Claude).unwrap();
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Claude, &[])
+            .unwrap();
     assert_eq!(
         replayed.operational_state().steering.unwrap().status,
         SteeringStatus::Applied

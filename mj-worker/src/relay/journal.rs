@@ -33,6 +33,18 @@ use super::{
     RELAY_STATE_FILE, RestoredRelaySeed, restored_relay_seed_path,
 };
 
+/// Journal segments hold the full session transcript; create them owner-only
+/// the way credentials and checkpoint archives are created.
+fn owner_only_create_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RelayJournalSpan {
     pub(crate) path: PathBuf,
@@ -310,7 +322,7 @@ fn seal_active_relay_segment(journal: &Path, metadata: &mut RelayJournalSpan) ->
     );
     let temporary = journal.join(format!("{sealed_name}.new"));
     let destination = journal.join(sealed_name);
-    let file = OpenOptions::new()
+    let file = owner_only_create_options()
         .create(true)
         .truncate(true)
         .write(true)
@@ -328,7 +340,7 @@ fn seal_active_relay_segment(journal: &Path, metadata: &mut RelayJournalSpan) ->
     sync_directory(journal)?;
 
     let replacement = journal.join("active.jsonl.new");
-    let file = OpenOptions::new()
+    let file = owner_only_create_options()
         .create(true)
         .truncate(true)
         .write(true)
@@ -630,7 +642,7 @@ fn archive_stale_active_relay_journal(
     sync_directory(journal)?;
 
     let replacement = journal.join("active.jsonl.new");
-    let file = OpenOptions::new()
+    let file = owner_only_create_options()
         .create(true)
         .truncate(true)
         .write(true)
@@ -721,7 +733,7 @@ impl DurableRelay {
         let journal = self.root.join(RELAY_JOURNAL_DIR);
         let path = journal.join(RELAY_ACTIVE_SEGMENT);
         let created_active_segment = !path.exists();
-        let mut file = OpenOptions::new()
+        let mut file = owner_only_create_options()
             .create(true)
             .append(true)
             .open(&path)
@@ -910,9 +922,9 @@ impl DurableRelay {
         // Rewriting replaces the active segment and deletes every sealed one.
         self.invalidate_replay_plans();
         let journal = self.root.join(RELAY_JOURNAL_DIR);
-        fs::create_dir_all(&journal)?;
+        mj_core::config::create_owner_only_directory(&journal)?;
         let replacement = journal.join("active.jsonl.new");
-        let mut file = OpenOptions::new()
+        let mut file = owner_only_create_options()
             .create(true)
             .truncate(true)
             .write(true)

@@ -18,6 +18,7 @@ pub struct RegisterSubagentRequest {
     pub profile_id: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub fast_mode: bool,
     /// Empty means the parent's working directory. An absolute path is used
     /// as-is; a relative path is resolved against the parent's working
     /// directory. The path is interpreted on the parent's target and must
@@ -532,7 +533,8 @@ impl Controller {
             reported_finish: None,
             handback_tool,
         };
-        crate::database::save_subagent_session(&session, &relation)?;
+        let startup = initial_startup_deliveries(&relation, request.fast_mode)?;
+        crate::database::register_subagent_with_startup(&session, &relation, startup)?;
         if let Some(report_dir) = &report_dir {
             crate::database::record_subagent_report_dir(&child_id, report_dir)?;
         }
@@ -574,6 +576,59 @@ impl Controller {
         ensure!(live.len() < maximum, "{}", slot_refusal(&live, maximum));
         Ok(())
     }
+}
+
+/// Older daemons registered children before saving their initial input. A
+/// replay of a still-provisioning registration completes that old transaction
+/// boundary before any worker can start. Existing groups retain their payload.
+pub(crate) fn recover_registered_subagent_startup(
+    relation: &SubagentRecord,
+    fast_mode: bool,
+) -> Result<()> {
+    if relation.kind == mj_core::subagent::SubagentKind::Worker
+        && crate::database::load_startup_group(
+            &relation.child_session_id,
+            &format!("subagent-spawn-{}", relation.request_key),
+        )?
+        .is_empty()
+    {
+        crate::database::enqueue_startup_deliveries(initial_startup_deliveries(
+            relation, fast_mode,
+        )?)?;
+    }
+    Ok(())
+}
+
+fn initial_startup_deliveries(
+    relation: &SubagentRecord,
+    fast_mode: bool,
+) -> Result<Vec<crate::database::StartupDelivery>> {
+    if relation.kind != mj_core::subagent::SubagentKind::Worker {
+        return Ok(Vec::new());
+    }
+    let group_id = format!("subagent-spawn-{}", relation.request_key);
+    crate::daemon::startup_followup::api_followup_steps(
+        &group_id,
+        crate::server::api::StartFollowup {
+            model: relation.model.clone(),
+            effort: relation.effort.clone(),
+            fast_mode,
+            prompt: Some(relation.initial_prompt.clone()),
+        },
+    )
+    .into_iter()
+    .map(|(command_id, step)| {
+        Ok(crate::database::StartupDelivery {
+            session_id: relation.child_session_id.clone(),
+            command_id,
+            step_json: serde_json::to_string(&step)?,
+            phase: "pending".into(),
+            group_id: Some(group_id.clone()),
+            accepted_ordinal: None,
+            error: None,
+        })
+    })
+    .collect()
 }
 
 /// One child that holds processes on its parent's target, as a cap refusal

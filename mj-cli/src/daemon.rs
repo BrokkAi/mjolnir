@@ -106,7 +106,7 @@ async fn acquire_start_lock(path: PathBuf, shared: bool) -> Result<StartLock> {
         let path = path.clone();
         let guard = tokio::task::spawn_blocking(move || -> Result<Option<StartLock>> {
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
+                mj_core::config::create_owner_only_directory(parent)?;
             }
             let mut options = OpenOptions::new();
             options.create(true).read(true).write(true);

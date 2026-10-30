@@ -234,6 +234,7 @@ impl ReviewEnvironment for ControllerEnvironment {
                 profile_id: reviewer.profile.clone(),
                 model: reviewer.main.model.clone(),
                 effort: reviewer.main.effort.clone(),
+                fast_mode: reviewer.main.fast_mode,
                 working_directory: Default::default(),
                 initial_prompt: prompt,
                 request_key,

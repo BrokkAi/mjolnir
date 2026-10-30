@@ -121,7 +121,7 @@ pub const CLAUDE_CLI_VERSION: &str = "2.1.308";
 pub const KIMI_VERSION: &str = "2.4.0";
 pub const GROK_VERSION: &str = "1.0.70";
 pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
-pub const MUSE_ACP_VERSION: &str = "0.18.0";
+pub const MUSE_ACP_VERSION: &str = "0.19.0";
 pub const MUSE_VERSION: &str = "1.4.14-R7309.1";
 pub const OPENCODE_VERSION: &str = "2.2.1";
 pub const MIMO_VERSION: &str = "0.1.16";
@@ -464,8 +464,8 @@ pub struct HarnessPin {
 pub const fn pin(kind: HarnessKind) -> HarnessPin {
     match kind {
         HarnessKind::Muse => HarnessPin {
-            install_id: "muse-acp-0.18.0_muse-1.4.14-R7309.1",
-            display_version: "muse-acp 0.18.0 + Muse Code 1.4.14-R7309.1",
+            install_id: "muse-acp-0.19.0_muse-1.4.14-R7309.1",
+            display_version: "muse-acp 0.19.0 + Muse Code 1.4.14-R7309.1",
             entrypoint: "bin/muse",
             cli_entrypoint: "bin/muse",
         },

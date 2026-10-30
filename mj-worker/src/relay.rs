@@ -103,6 +103,9 @@ pub enum BackgroundWorkPolicy {
 /// observations newer than the last frontier covered by both a durable
 /// controller acknowledgement and a verified checkpoint.
 pub struct DurableRelay {
+    /// Immutable input supplied when this worker was created; execution and
+    /// completion live exclusively in the ordinary durable command queue.
+    initial_commands: Vec<mj_core::worker_launch::InitialWorkerCommand>,
     // Only the Unix worker runtime updates this from SetOperatorAway.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) operator_away: crate::acp::OperatorAway,
@@ -240,7 +243,7 @@ impl DurableRelay {
         session_id: impl Into<String>,
         relay_version: impl Into<String>,
     ) -> Result<Self> {
-        Self::open_with_harness(root, session_id, relay_version, false, None)
+        Self::open_with_harness(root, session_id, relay_version, false, None, &[])
     }
 
     /// Open a live relay with its harness delivery mode established before
@@ -250,8 +253,16 @@ impl DurableRelay {
         session_id: impl Into<String>,
         relay_version: impl Into<String>,
         harness: mj_core::config::HarnessKind,
+        initial_commands: &[mj_core::worker_launch::InitialWorkerCommand],
     ) -> Result<Self> {
-        Self::open_with_harness(root, session_id, relay_version, false, Some(harness))
+        Self::open_with_harness(
+            root,
+            session_id,
+            relay_version,
+            false,
+            Some(harness),
+            initial_commands,
+        )
     }
 
     /// Open existing durable state without promoting work onto a harness.
@@ -265,7 +276,7 @@ impl DurableRelay {
             root.join(RELAY_STATE_FILE).is_file(),
             "checkpoint recovery requires existing relay state"
         );
-        Self::open_with_harness(root, session_id, relay_version, true, None)
+        Self::open_with_harness(root, session_id, relay_version, true, None, &[])
     }
 
     fn open_with_harness(
@@ -274,11 +285,12 @@ impl DurableRelay {
         relay_version: impl Into<String>,
         checkpoint_only: bool,
         harness: Option<mj_core::config::HarnessKind>,
+        initial_commands: &[mj_core::worker_launch::InitialWorkerCommand],
     ) -> Result<Self> {
         let root = root.into();
         let session_id = session_id.into();
         validate_identifier(&session_id, "session ID")?;
-        fs::create_dir_all(root.join(RELAY_JOURNAL_DIR))
+        mj_core::config::create_owner_only_directory(&root.join(RELAY_JOURNAL_DIR))
             .with_context(|| format!("create relay state directory {}", root.display()))?;
 
         let state_path = root.join(RELAY_STATE_FILE);
@@ -477,6 +489,7 @@ impl DurableRelay {
             reviewer_admissions: BTreeMap::new(),
             next_reviewer_admission: 0,
             steering_supported: None,
+            initial_commands: initial_commands.to_vec(),
             automatic_steering: false,
             steering_delivery_mode: match harness {
                 Some(mj_core::config::HarnessKind::Claude) => SteeringDeliveryMode::ClaudeTurnEnd,
@@ -595,9 +608,72 @@ impl DurableRelay {
             relay.persist_snapshot()?;
         }
         relay.adopt_unqueued_queue_commands()?;
+        relay.seed_initial_commands()?;
         relay.recover_nonterminal_commands()?;
+        relay.ensure_initial_commands_succeeded()?;
         relay.promote_next_queued_command()?;
         Ok(relay)
+    }
+
+    /// Complete the creation prefix before publishing any control endpoint.
+    /// The final prompt's receipt proves the entire prefix was journaled. Once
+    /// a turn has run, receipt compaction must never cause initialization again.
+    fn seed_initial_commands(&mut self) -> Result<()> {
+        self.ensure_initial_commands_succeeded()?;
+        let Some(last) = self.initial_commands.last() else {
+            return Ok(());
+        };
+        if self.snapshot.native_session_used
+            || self
+                .snapshot
+                .handled_commands
+                .contains_key(&last.command_id)
+        {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            matches!(last.command, RelayCommand::Prompt { .. }) && !last.optional,
+            "initial input must end with the original prompt"
+        );
+        let commands = self.initial_commands.clone();
+        for (position, initial) in commands.iter().enumerate() {
+            anyhow::ensure!(
+                position + 1 == commands.len()
+                    || matches!(initial.command, RelayCommand::SetConfig { .. }),
+                "initial input before the brief must be configuration"
+            );
+            self.submit_command(&initial.command_id, initial.command.clone())?
+                .map_err(|error| {
+                    anyhow!(
+                        "initialize worker command {}: {}",
+                        initial.command_id,
+                        error.message
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    /// A failed required creation command cannot release the original brief
+    /// or any follow-up. Its journaled failure also stops a restarted worker.
+    fn ensure_initial_commands_succeeded(&self) -> Result<()> {
+        for initial in self.initial_commands.iter().filter(|initial| {
+            !initial.optional && matches!(initial.command, RelayCommand::SetConfig { .. })
+        }) {
+            if let Some(failure) = self
+                .snapshot
+                .handled_commands
+                .get(&initial.command_id)
+                .and_then(|receipt| receipt.failure.as_deref())
+            {
+                anyhow::bail!(
+                    "initial worker command {} ({:?}) failed: {failure}",
+                    initial.command_id,
+                    initial.command.kind()
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Adopt queueable commands that an earlier relay format accepted outside

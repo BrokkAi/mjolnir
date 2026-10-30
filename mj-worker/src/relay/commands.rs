@@ -1779,6 +1779,7 @@ impl DurableRelay {
                 message: message.into(),
             },
         )?;
+        self.ensure_initial_commands_succeeded()?;
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
             self.return_boundary_steer_after_turn_end(command_id)?;
@@ -1806,6 +1807,7 @@ impl DurableRelay {
                 message: message.into(),
             },
         )?;
+        self.ensure_initial_commands_succeeded()?;
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
             self.return_boundary_steer_after_turn_end(command_id)?;
@@ -2035,6 +2037,8 @@ impl DurableRelay {
     fn pending_hook_steering(&self, hook_event: &str) -> Option<(MailboxHookSteering, &str)> {
         if hook_event != "PostToolBatch"
             || self.steering_delivery_mode != SteeringDeliveryMode::ClaudePostToolBatch
+            // A turn being interrupted discards its input; the prompt runs next.
+            || self.turn_cancellation_pending()
         {
             return None;
         }

@@ -28,6 +28,7 @@ pub use verdict_client::VerdictSource;
 
 use mj_core::acp::dialect::grok;
 pub use mj_core::acp::*;
+mod claude_usage;
 mod goal;
 mod grok_usage;
 #[cfg(test)]

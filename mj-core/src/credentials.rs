@@ -177,24 +177,10 @@ pub fn write_claude_oauth_token(path: &Path, bytes: &[u8]) -> Result<()> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .context("Claude setup token path has no directory")?;
-    create_owner_only_directory(directory)?;
+    crate::config::create_owner_only_directory(directory)?;
     let mut body = token.as_bytes().to_vec();
     body.push(b'\n');
     crate::config::atomic_write_existing(path, &body)
-}
-
-/// Create `directory` and any missing parent reachable only by its owner.
-fn create_owner_only_directory(directory: &Path) -> Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder
-        .create(directory)
-        .with_context(|| format!("create {}", directory.display()))
 }
 
 /// Epoch milliseconds describing how current a credential copy is. Higher wins

@@ -1645,6 +1645,20 @@ fn controller_store_lock_excludes_a_second_process_owner() {
     drop(first);
     run_controller_lock_probe(directory.path(), false);
 }
+
+// The data store holds every session record; it must not be traversable by
+// other local users (#1409).
+#[cfg(unix)]
+#[test]
+fn a_new_controller_data_directory_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = tempfile::tempdir().unwrap();
+    let directory = parent.path().join("store");
+    let _guard = ControllerStoreGuard::acquire_at(&directory).unwrap();
+    let mode = std::fs::metadata(&directory).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+}
 fn run_controller_lock_probe(directory: &Path, expect_locked: bool) {
     IsolatedTest::new("controller::tests::controller_store_lock_subprocess_probe")
         .env("MJ_CONTROLLER_LOCK_PROBE", directory)
@@ -1784,13 +1798,37 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
             profile_id: "codex".into(),
             model: None,
             effort: None,
+            fast_mode: false,
             working_directory: PathBuf::new(),
             initial_prompt: "Review calc.py".into(),
             request_key: "review-calc".into(),
             report_root: Some("/reports".into()),
         })
         .unwrap();
-    let child_id = child.child_session_id;
+    let child_id = child.child_session_id.clone();
+    let group_id = format!("subagent-spawn-{}", child.request_key);
+    let initial = crate::database::load_startup_group(&child_id, &group_id).unwrap();
+    assert!(matches!(
+        serde_json::from_str::<crate::daemon::StartupStep>(&initial.last().unwrap().step_json).unwrap(),
+        crate::daemon::StartupStep::ApiPrompt { text } if text == child.initial_prompt
+    ));
+    // A previous daemon could have committed registration but crashed before
+    // writing input. Recovery restores the same brief without rewriting a
+    // group that a retry already supplied, even if defaults changed meanwhile.
+    rusqlite::Connection::open(crate::database::database_path())
+        .unwrap()
+        .execute("DELETE FROM startup_steps WHERE session_id=?1", [&child_id])
+        .unwrap();
+    super::recover_registered_subagent_startup(&child, false).unwrap();
+    assert_eq!(
+        crate::database::load_startup_group(&child_id, &group_id).unwrap(),
+        initial
+    );
+    super::recover_registered_subagent_startup(&child, true).unwrap();
+    assert_eq!(
+        crate::database::load_startup_group(&child_id, &group_id).unwrap(),
+        initial
+    );
     // The child is told its own directory under the parent's report root, and
     // the store remembers it for the parent's wait.
     let report_dir = format!("/reports/{child_id}");
@@ -1909,6 +1947,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
             profile_id: "codex".into(),
             model: None,
             effort: None,
+            fast_mode: false,
             working_directory: PathBuf::new(),
             initial_prompt: "Review calc.py".into(),
             request_key: "review-calc".into(),
@@ -2294,6 +2333,7 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
             profile_id: "codex".into(),
             model: None,
             effort: None,
+            fast_mode: false,
             working_directory: "/workspace/project".into(),
             initial_prompt: "test child".into(),
             request_key: "durable-child".into(),
@@ -2732,6 +2772,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         profile_id: "resolved-reviewer".into(),
         model: launch.model.clone(),
         effort: launch.effort.clone(),
+        fast_mode: false,
         working_directory: Default::default(),
         initial_prompt: "Review and hand back JSON".into(),
         request_key: "same-request".into(),
@@ -2808,6 +2849,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             profile_id: "codex".into(),
             model: None,
             effort: None,
+            fast_mode: false,
             working_directory: Default::default(),
             initial_prompt: "work".into(),
             request_key: "same-request".into(),

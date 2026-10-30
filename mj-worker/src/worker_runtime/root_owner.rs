@@ -15,7 +15,7 @@ pub struct WorkerRootOwner {
 
 impl WorkerRootOwner {
     pub fn acquire(root: &Path) -> Result<Self> {
-        std::fs::create_dir_all(root)
+        mj_core::config::create_owner_only_directory(root)
             .with_context(|| format!("create worker root {}", root.display()))?;
         let root = std::fs::canonicalize(root)?;
         let file = OpenOptions::new()
@@ -192,6 +192,20 @@ impl ForkedPreExecChild {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The worker root holds the session transcript and harness homes; it must
+    // never be traversable by other local users (#1409).
+    #[cfg(unix)]
+    #[test]
+    fn acquired_worker_root_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("worker-root");
+        let _owner = WorkerRootOwner::acquire(&root).unwrap();
+        let mode = std::fs::metadata(&root).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
 
     // Hard-won: #1257: a forked pre-exec child keeps the flock after the Rust owner drops.
     #[test]

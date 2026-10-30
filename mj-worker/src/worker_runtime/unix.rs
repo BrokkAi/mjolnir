@@ -777,7 +777,7 @@ pub async fn run_daemon_owned(
             .map(|endpoint| endpoint.home.clone())
             .map_err(Clone::clone)
     });
-    std::fs::create_dir_all(&root)
+    mj_core::config::create_owner_only_directory(&root)
         .with_context(|| format!("create worker root {}", root.display()))?;
     let socket = root.join("control.sock");
     // Refuse a second daemon before touching durable state: opening the
@@ -807,6 +807,7 @@ pub async fn run_daemon_owned(
             &config.session_id,
             env!("CARGO_PKG_VERSION"),
             config.harness,
+            &config.initial_commands,
         )?
     };
     // Only Claude Code's adapter marks the end of a turn it started on its

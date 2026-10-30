@@ -36,6 +36,12 @@ impl RuntimeState {
                     .is_some_and(|record| {
                         record.state == mj_core::state::SessionState::Provisioning
                     });
+                if needs_provisioning {
+                    crate::controller::recover_registered_subagent_startup(
+                        &existing,
+                        request.fast_mode,
+                    )?;
+                }
                 return Ok((existing, needs_provisioning));
             }
             let mut request = request;
@@ -55,6 +61,15 @@ impl RuntimeState {
                 .map(|relation| (relation, true))
         })
         .await?;
+        self.reload_controller().await?;
+        if relation.kind == mj_core::subagent::SubagentKind::Worker {
+            let id = relation.child_session_id.clone();
+            if let Some(delivery) =
+                blocking(move || crate::database::next_startup_delivery(&id)).await?
+            {
+                self.start_persisted_startup_delivery(delivery, &CancellationToken::new());
+            }
+        }
         if !needs_provisioning {
             return Ok(relation);
         }
@@ -148,6 +163,7 @@ impl RuntimeState {
             profile_id: relation.profile_id.clone(),
             model: relation.model.clone(),
             effort: relation.effort.clone(),
+            fast_mode: launch.fast_mode.unwrap_or(false),
             working_directory: relation.working_directory.clone(),
             initial_prompt: relation.initial_prompt.clone(),
             request_key: relation.request_key.clone(),
@@ -795,6 +811,7 @@ mod delegation_replay_tests {
                     profile_id: "missing-profile".into(),
                     model: None,
                     effort: None,
+                    fast_mode: false,
                     working_directory: Default::default(),
                     initial_prompt: "must not resend".into(),
                     request_key: relation.request_key.clone(),

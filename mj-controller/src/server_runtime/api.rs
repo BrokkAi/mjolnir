@@ -604,7 +604,7 @@ impl ApiBackend {
             prepared
         } else {
             let mut request = request;
-            self.canonicalize_message_target(&parent, &mut request)
+            self.canonicalize_subagent_target(&parent, &mut request)
                 .await?;
             let turn_target = if matches!(
                 request.action,
@@ -654,9 +654,9 @@ impl ApiBackend {
         Ok(stored_result)
     }
 
-    /// Store a resolved recipient in durable MCP requests so a replay does not
+    /// Store a resolved target in durable MCP requests so a replay does not
     /// reinterpret a prefix after the session set changes.
-    async fn canonicalize_message_target(
+    async fn canonicalize_subagent_target(
         &self,
         parent_session_id: &str,
         request: &mut mj_core::subagent::SubagentToolRequest,
@@ -665,27 +665,29 @@ impl ApiBackend {
             mj_core::subagent::SubagentToolAction::SendMessage {
                 child_session_id, ..
             } => Some(child_session_id.clone()),
+            mj_core::subagent::SubagentToolAction::CloseAgent { child_session_id } => {
+                Some(child_session_id.clone())
+            }
             _ => None,
         }) else {
             return Ok(());
         };
         let parent_session_id = parent_session_id.to_owned();
-        let resolved = blocking("resolve durable session message target", move || {
+        let resolved = blocking("resolve durable sub-agent target", move || {
             let state = Controller::load()?.state;
-            subagent_input::resolve_session_message_target(
-                &state,
-                Some(&parent_session_id),
-                &requested_id,
-            )
+            subagent_input::resolve_session_target(&state, Some(&parent_session_id), &requested_id)
         })
         .await;
         match resolved {
             Ok(resolved_id) => {
-                if let mj_core::subagent::SubagentToolAction::SendMessage {
-                    child_session_id, ..
-                } = &mut request.action
-                {
-                    *child_session_id = resolved_id;
+                match &mut request.action {
+                    mj_core::subagent::SubagentToolAction::SendMessage {
+                        child_session_id, ..
+                    }
+                    | mj_core::subagent::SubagentToolAction::CloseAgent { child_session_id } => {
+                        *child_session_id = resolved_id;
+                    }
+                    _ => unreachable!("only target-bearing actions are canonicalized"),
                 }
                 Ok(())
             }
@@ -927,25 +929,13 @@ impl ApiBackend {
                         profile_id: selection.profile_id,
                         model: Some(selection.model.clone()),
                         effort: selection.effort.clone(),
+                        fast_mode: selection.fast_mode,
                         working_directory: working_directory.clone(),
                         initial_prompt: selection.prompt,
                         request_key: request.request_id.clone(),
                         report_root: None,
                     })
                     .await?;
-                // Registration completes the first prompt (it names the
-                // handback tool when the child gets one), so send what it kept.
-                self.start_followup_with_id(
-                    relation.child_session_id.clone(),
-                    crate::server::api::StartFollowup {
-                        model: Some(selection.model),
-                        effort: selection.effort,
-                        prompt: Some(relation.initial_prompt.clone()),
-                        fast_mode: selection.fast_mode,
-                    },
-                    format!("subagent-spawn-{}", request.request_id),
-                )
-                .await?;
                 let report_dir = blocking("load sub-agent report directory", {
                     let child_id = relation.child_session_id.clone();
                     move || crate::database::load_subagent_report(&child_id)
@@ -1102,7 +1092,8 @@ impl ApiBackend {
                 bail!("the legacy interrupt action is no longer supported; use send_message")
             }
             SubagentToolAction::CloseAgent { child_session_id } => {
-                self.require_owned_child(parent_session_id, child_session_id)
+                let child_session_id = self
+                    .resolve_owned_child(parent_session_id, child_session_id)
                     .await?;
                 if prepared.is_some() {
                     Arc::clone(&self.exports)
@@ -1520,6 +1511,25 @@ impl ApiBackend {
             "session {child_id} does not belong to parent {parent_id}"
         );
         Ok(())
+    }
+
+    async fn resolve_owned_child(&self, parent_id: &str, requested_id: &str) -> Result<String> {
+        let parent_id = parent_id.to_owned();
+        let requested_id = requested_id.to_owned();
+        blocking("resolve sub-agent close target", move || {
+            let state = Controller::load()?.state;
+            let child_id =
+                subagent_input::resolve_session_target(&state, Some(&parent_id), &requested_id)?;
+            anyhow::ensure!(
+                state
+                    .subagents
+                    .get(&child_id)
+                    .is_some_and(|relation| { relation.parent_session_id == parent_id }),
+                "session {requested_id} does not belong to parent {parent_id}"
+            );
+            Ok(child_id)
+        })
+        .await
     }
 
     /// Remind a child that ended its turn without handing back a report,
@@ -2798,7 +2808,7 @@ impl SubagentBackend for ApiBackend {
     fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, Result<String>> {
         Box::pin(blocking("resolve the user's message target", move || {
             let state = Controller::load()?.state;
-            subagent_input::resolve_session_message_target(&state, None, &requested_id)
+            subagent_input::resolve_session_target(&state, None, &requested_id)
         }))
     }
 

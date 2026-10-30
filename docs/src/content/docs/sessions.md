@@ -91,7 +91,7 @@ The prompt surface also understands:
 - `/review` for an independent review of the completed turn; see [turn review](/turn-review/).
 - Agent-advertised slash commands, which appear in completion beside Mjolnir's local commands.
 
-Press `Esc` to cancel the active agent turn or shell command. This does not stop the worker, delete queued prompts, or detach the client. Use `prefix+shift+c` only for a lifecycle operation such as launch, resume, or stop.
+Press `Esc` to cancel the active agent turn or shell command. This does not stop the worker, delete queued prompts, or detach the client. A prompt still waiting to join the running turn stays queued and runs next, so `Esc` is also how you stop waiting for a long tool call. Use `prefix+shift+c` only for a lifecycle operation such as launch, resume, or stop.
 
 ### When a turn goes quiet
 
