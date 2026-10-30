@@ -12,8 +12,10 @@ When a nested Git repository prevents suspension, the TUI will replace Retry sus
 - [x] (2026-10-30) Implement the explicit suspension option through the existing lifecycle and target export.
 - [x] (2026-10-30) Add target export/restore coverage for nested linked worktrees and independent clones; the focused real-Git test passes.
 - [x] (2026-10-30) The dialog golden and isolated interrupted-close export-failure regression pass; reviewed both rendered layouts. Initial workspace Clippy and formatting pass.
-- [ ] Finish the full affected-crate suites (including old-exporter replacement) and final Clippy.
-- [ ] Review, commit on the current branch, and push to origin/master.
+- [x] (2026-10-30) Merge current upstream 2.63.1 without conflicts; final merged-source Clippy and formatting pass.
+- [x] (2026-10-30) Complete all affected-crate suites, remaining CLI integration checks, documentation checks, workspace Clippy, and formatting.
+- [x] (2026-10-30) Review and commit the implementation checkpoint on the current branch; merge upstream.
+- [ ] Push the final validated commits to origin/master.
 
 ## Surprises & Discoveries
 
@@ -30,7 +32,7 @@ Git reports an untracked nested repository as one directory ending in a slash. T
 
 ## Outcomes & Retrospective
 
-Implementation is complete. The target export/restore regression passes: both nested repository forms are omitted, staged/unstaged/untracked outer work restores, and Git ignore rules remain unchanged. The dialog golden and isolated close-gate regression also pass. Initial workspace Clippy and formatting pass. Final workspace Clippy also passes. The first complete-suite build was stopped before tests began after fetching concurrent upstream changes; merge upstream before running final suites. No live sessions have been changed.
+Implementation is complete. The target export/restore regression passes: both nested repository forms are omitted, staged/unstaged/untracked outer work restores, and Git ignore rules remain unchanged. The dialog golden and isolated close-gate regression also pass. Initial workspace Clippy and formatting pass. Upstream 2.63.1 has been merged without conflicts. Final merged-source Clippy and formatting pass; the only formatting correction was an upstream logging expression. All affected library suites, CLI unit cases, CLI integration suites, and documentation checks are complete. The full run encountered ETXTBSY while launching one existing CLI login fixture; exactly that case passed on isolated rerun without a source change. The remaining CLI integration binaries were executed from the same complete build with isolated MJ_DATA_DIR/MJ_CONFIG_DIR, rather than rebuilding a different Cargo feature combination. No checks remain pending; publication follows the final commit. No live sessions have been changed.
 
 ## Context and Orientation
 
@@ -69,3 +71,7 @@ Updated 2026-10-30 after implementation and passing target round-trip validation
 Updated 2026-10-30 after the dialog golden and isolated close-gate regression passed. Validation logs: `/tmp/mj-ignore-suspend-tests.log` (complete touched-crate suites), `/tmp/mj-ignore-suspend-final-clippy.log` (final Clippy), `/tmp/mj-ignore-suspend-controller.log` (close gate), and `/tmp/mj-ignore-suspend-tui.log` (golden).
 
 Updated 2026-10-30: focused target, dialog, and close-gate regressions, final workspace Clippy, and formatting pass. Upstream advanced from 2.62.0 to 2.63.1; stopped only this task's full-suite build before testing, and save the validated implementation as a checkpoint before merging upstream and running final suites.
+
+Updated 2026-10-30 after the clean upstream merge and merged-source Clippy/formatting passed. Confirmed existing managed-worktree teardown also removes explicit disposable nested clones/worktrees without an additional cleanup path. The full-suite log records the passing checkpoint/client suites, old-exporter replacement, and fresh-checkpoint close gate.
+
+Updated 2026-10-30 after validation completed. Full-suite results: checkpoint 165 passed, client 43 plus its integration test, controller 2203 passed, core 553 plus Jev scenarios, TUI 562 passed, worker 727 plus binary/integration tests, CLI 226 initial passes plus the isolated successful rerun. All uncompleted CLI integration suites then passed, including startup/upgrade/store/PTY regressions. Completion log: `/tmp/mj-ignore-suspend-cli-completion.log`; documentation log: `/tmp/mj-ignore-suspend-doctests.log`. Initial CLI failure was `Text file busy` for its temporary login bridge, not a suspension failure.
