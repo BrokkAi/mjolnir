@@ -23,6 +23,9 @@ test-hooks = ["mj-core/test-hooks"]
 workspace = true
 
 [dependencies]
+jsonc-parser = { version = "0.34", features = ["cst", "serde"] }
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25.1"
 reqwest = { workspace = true, features = ["json"] }
 rustls.workspace = true
 rusqlite.workspace = true

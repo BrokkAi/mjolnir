@@ -326,7 +326,11 @@ pub(crate) use mj_core::harness_install as harness;
 pub use mj_core::harness_install::ManagedHarness;
 
 #[cfg(unix)]
+mod gh_rules;
+#[cfg(unix)]
 mod harness_launch;
+#[cfg(unix)]
+mod json_gh_rules;
 #[cfg(unix)]
 mod shell_environment;
 #[cfg(unix)]

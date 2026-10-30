@@ -284,7 +284,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
 }
 
 #[test]
-fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
+fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
     use agent_client_protocol::schema::v1::{PermissionOption, ToolCallUpdateFields};
     use mj_core::worker_launch::ReviewMcpServer;
     // A DSH permission request, titled and offering options as dsh-acp 0.2.0
@@ -402,7 +402,8 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
                         );
                         let allowed = request.pointer("/_meta/claudeCode/options/allowedTools");
                         if guardian {
-                            let mut expected = vec!["mcp__mj-memory__*".to_owned()];
+                            let mut expected =
+                                vec!["Bash(gh:*)".to_owned(), "mcp__mj-memory__*".to_owned()];
                             expected.extend(
                                 role.tool_names()
                                     .iter()
@@ -460,18 +461,69 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
                 let without_memory =
                     serde_json::to_value(new_session_request(&spec, false)).unwrap();
                 assert!(without_memory["mcpServers"].as_array().unwrap().is_empty());
-                assert!(
-                    without_memory
-                        .pointer("/_meta/claudeCode/options/allowedTools")
-                        .is_none()
+                let expected = (harness == HarnessKind::Claude && guardian)
+                    .then(|| serde_json::json!(["Bash(gh:*)"]));
+                assert_eq!(
+                    without_memory.pointer("/_meta/claudeCode/options/allowedTools"),
+                    expected.as_ref(),
+                    "{without_memory}"
                 );
                 spec.project_memory = None;
                 let absent = serde_json::to_value(new_session_request(&spec, true)).unwrap();
                 assert!(absent["mcpServers"].as_array().unwrap().is_empty());
+                assert_eq!(
+                    absent.pointer("/_meta/claudeCode/options/allowedTools"),
+                    expected.as_ref(),
+                    "{absent}"
+                );
+            }
+        }
+    }
+
+    for policy in [
+        ExecutionPolicy::ConfiguredApprovals,
+        ExecutionPolicy::Unconstrained,
+    ] {
+        let mut spec = reload_fallback_spec(HarnessKind::Claude);
+        spec.execution_policy = policy;
+        spec.project_memory = None;
+        spec.subagent_mcp_socket = None;
+        spec.extra_mcp_servers.clear();
+        for (method, request) in [
+            (
+                "session/new",
+                serde_json::to_value(new_session_request(&spec, true)).unwrap(),
+            ),
+            (
+                "session/load",
+                serde_json::to_value(load_session_request(&spec, SessionId::from("native")))
+                    .unwrap(),
+            ),
+            (
+                "session/resume",
+                serde_json::to_value(resume_session_request(&spec, SessionId::from("native")))
+                    .unwrap(),
+            ),
+        ] {
+            // The protocol's optional field is serialized only when nonempty;
+            // no MCP servers is represented by either omission or an empty list.
+            assert!(
+                request
+                    .get("mcpServers")
+                    .is_none_or(|servers| servers.as_array().is_some_and(Vec::is_empty)),
+                "{method} unexpectedly registered MCP servers: {request}"
+            );
+            let allowed = request.pointer("/_meta/claudeCode/options/allowedTools");
+            if policy == ExecutionPolicy::ConfiguredApprovals {
+                assert_eq!(
+                    allowed,
+                    Some(&serde_json::json!(["Bash(gh:*)"])),
+                    "{method}: {request}"
+                );
+            } else {
                 assert!(
-                    absent
-                        .pointer("/_meta/claudeCode/options/allowedTools")
-                        .is_none()
+                    allowed.is_none(),
+                    "YOLO must not receive native allow rules for {method}: {request}"
                 );
             }
         }

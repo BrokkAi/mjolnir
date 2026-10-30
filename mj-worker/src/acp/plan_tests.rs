@@ -2297,3 +2297,146 @@ async fn operator_away_native_children_have_independent_refusal_memory() {
     assert_eq!(probe.finished().await, "EndTurn");
     probe.close().await;
 }
+
+#[tokio::test]
+async fn gh_execute_permission_is_approved_across_harnesses() {
+    for harness in HarnessKind::ALL {
+        let mut probe =
+            PlanProbe::with_harness(ExecutionPolicy::ConfiguredApprovals, false, harness).await;
+        probe
+            .commands
+            .send(CommandRequest::Prompt {
+                request_id: "gh-prompt".into(),
+                prompt: vec![ContentBlock::Text(TextContent::new("Check GitHub"))],
+            })
+            .await
+            .unwrap();
+        let prompt = probe.message().await;
+        assert_eq!(prompt["method"], "session/prompt");
+        for (shape, raw_input) in [
+            (
+                "argv",
+                Some(json!({"command":["/bin/bash","-lc","gh issue list"]})),
+            ),
+            // Pinned DSH run_command passes executable and args separately.
+            (
+                "dsh",
+                Some(json!({"command":"gh", "args":["issue", "view", "123"]})),
+            ),
+            ("kimi-stream", None),
+        ] {
+            let id = format!("gh-{shape}");
+            let mut tool_call = json!({"toolCallId":id, "kind":"execute", "title":"Bash"});
+            if let Some(input) = raw_input {
+                tool_call["rawInput"] = input;
+            } else {
+                // Recorded Kimi sequence: initial tool call, then cumulative
+                // JSON text updates; permission itself carries no input.
+                probe
+                    .send(
+                        json!({"jsonrpc":"2.0", "method":"session/update", "params": {
+                            "sessionId":"plan-session", "update": {
+                                "sessionUpdate":"tool_call", "toolCallId":id,
+                                "title":"Bash", "kind":"execute",
+                                "content":[{"type":"content", "content":{"type":"text", "text":""}}]
+                            }
+                        }}),
+                    )
+                    .await;
+                for text in [
+                    "{",
+                    "{\"command\": \"gh",
+                    "{\"command\": \"gh issue list\"}",
+                ] {
+                    probe.send(json!({"jsonrpc":"2.0", "method":"session/update", "params": {
+                        "sessionId":"plan-session", "update": {
+                            "sessionUpdate":"tool_call_update", "toolCallId":id,
+                            "status":"in_progress",
+                            "content":[{"type":"content", "content":{"type":"text", "text":text}}]
+                        }
+                    }})).await;
+                }
+                assert!(tool_call.get("rawInput").is_none());
+                assert!(tool_call.get("content").is_none());
+            }
+            probe.send(json!({"jsonrpc":"2.0", "id":id, "method":"session/request_permission", "params": {
+                "sessionId":"plan-session", "toolCall":tool_call,
+                "options":[{"optionId":"always","name":"Always","kind":"allow_always"},{"optionId":"once","name":"Once","kind":"allow_once"}]
+            }})).await;
+            let answer = probe.message().await;
+            assert_eq!(answer["id"], id, "{harness:?} {shape}");
+            assert_eq!(
+                answer["result"]["outcome"]["optionId"], "once",
+                "{harness:?} {shape}"
+            );
+        }
+        probe.answered(&prompt).await;
+    }
+}
+
+#[test]
+fn gh_permission_security_boundary() {
+    let mut value = json!({"sessionId":"s","toolCall":{"toolCallId":"t","kind":"execute","title":"gh issue list"},"options":[{"optionId":"yes","name":"Yes","kind":"allow_once"}]});
+    for (input, allowed) in [
+        (json!({"command":"gh issue list"}), true),
+        (json!({"cmd":"gh issue view 'a b'"}), true),
+        (json!({"command":["gh","issue","a; echo bad"]}), true),
+        (json!({"cmd":["sh","-c","gh issue list"]}), true),
+        (
+            json!({"command":["bash","-lc","gh issue list","extra"]}),
+            false,
+        ),
+        (json!({"command":["gh-evil","issue"]}), false),
+        (json!({"command":"gh"}), true),
+        (json!({"command":"gh issue view 123"}), true),
+        // DSH v0.5.0 run_command forwards executable and args unchanged.
+        (
+            json!({"command":"gh", "args":["issue", "view", "123"]}),
+            true,
+        ),
+        (
+            json!({"command":"/bin/bash", "args":["-lc", "gh issue list"]}),
+            true,
+        ),
+        (json!({"command":"gh issue list", "args":[]}), false),
+        (json!({"command":"gh", "args":[42]}), false),
+        (json!({"command":"gh issue list; echo bad"}), false),
+        (json!({"command":"gh issue list && echo bad"}), false),
+        (json!({"command":"gh issue list | cat"}), false),
+        (json!({"command":"gh issue $(echo bad)"}), false),
+        (json!({"command":"gh issue `echo bad`"}), false),
+        (json!({"command":"gh issue > file"}), false),
+        (json!({"command":"gh issue list;"}), false),
+        (json!({"command":"gh issue list &"}), false),
+        (json!({"command":"gh issue list 2>/dev/null"}), false),
+        (json!({"command":"gh issue \"$(echo bad)\""}), false),
+        (
+            json!({"command":["bash","--noprofile","-c","gh issue list"]}),
+            false,
+        ),
+        (json!({"command":"X=bad gh issue list"}), false),
+        (json!({"command":"gh issue $TOKEN"}), false),
+        (json!({"command":"gh issue list\necho bad"}), false),
+        (json!({"nested":{"command":"gh issue list"}}), false),
+        (json!({"command":"gh issue list","cmd":"echo bad"}), false),
+        (json!({"command":"gh issue list".repeat(2000)}), false),
+    ] {
+        let request = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            gh_permission_response(&request, Some(&input)).is_some(),
+            allowed,
+            "{input}"
+        );
+    }
+    for kind in [json!("read"), json!("switch_mode"), Value::Null] {
+        value["toolCall"]["kind"] = kind;
+        let request = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            gh_permission_response(&request, Some(&json!({"command":"gh issue list"}))).is_none()
+        );
+    }
+    value["toolCall"]["kind"] = json!("execute");
+    value["options"] = json!([]);
+    let request = serde_json::from_value(value).unwrap();
+    assert!(gh_permission_response(&request, Some(&json!({"command":"gh issue list"}))).is_none());
+}

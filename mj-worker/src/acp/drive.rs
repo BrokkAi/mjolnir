@@ -374,6 +374,21 @@ where
                     );
                     return responder.respond(response);
                 }
+                if !plan_permission && !claude_plan_approval
+                    && let Some(response) = gh_permission_response(
+                        &request,
+                        permission_tool_input(&request.tool_call, &permission_tool_content).as_ref(),
+                    )
+                {
+                    tracing::debug!(
+                        harness = %permission_harness.display_name(),
+                        session_id = %request.session_id,
+                        tool_call_id = %request.tool_call.tool_call_id,
+                        selected_option = ?response.outcome,
+                        "automatically approved a gh invocation"
+                    );
+                    return responder.respond(response);
+                }
                 // Preserve Muse's Guardian forms; YOLO plans use plan review.
                 let prefer_form_over_plan_review = permission_harness == HarnessKind::Muse
                     && !permission_policy.is_unconstrained();
