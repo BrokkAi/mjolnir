@@ -45,6 +45,35 @@ impl ChatState {
         })
     }
 
+    /// What Esc and the host's Interrupt turn command do. A steer can wait
+    /// behind a long tool call for its delivery boundary, so interrupting must
+    /// stay available; the worker returns the prompt and it runs next. Only
+    /// uncertain delivery stops for review, because a retry could repeat it.
+    pub(super) fn interrupt_action(&mut self) -> ChatAction {
+        match self.steering.as_ref().filter(|s| s.holds_queue()) {
+            Some(s) if s.status == SteeringStatus::Unconfirmed => {
+                self.turn_control_dialog_open = true;
+                ChatAction::None
+            }
+            Some(_) => match &self.turn_controls {
+                Some(controls) => controls.interrupt.clone(),
+                None => self.escape_command(),
+            }
+            .map_or(ChatAction::None, ChatAction::TurnControl),
+            None => {
+                let available = self.turn_controls.as_ref().map_or_else(
+                    || self.turn_interruptible(),
+                    |controls| controls.primary.is_some() || !self.active_user_shells.is_empty(),
+                );
+                if available {
+                    ChatAction::Cancel
+                } else {
+                    ChatAction::None
+                }
+            }
+        }
+    }
+
     pub(super) fn sync_turn_control(&mut self, state: &RelayOperationalState) {
         self.targeted_turn_control_supported = state.supports_targeted_turn_control();
         self.turn_controls = state.turn_controls.clone();
@@ -205,7 +234,8 @@ mod tests {
     use mj_core::relay::{ActiveRelayPrompt, RelaySnapshot, SteeringOperation};
 
     #[test]
-    fn reconnect_restores_pending_steering_and_escape_only_dismisses_failure_offer() {
+    // Hard-won: d3fde1066: automatic steering left Esc a no-op behind "Esc interrupts".
+    fn reconnect_restores_pending_steering_and_escape_interrupts_until_delivery_is_uncertain() {
         let mut chat = ChatState::from_materialized_tail(
             &mj_core::state::MaterializedSession::empty("owner"),
             &[],
@@ -224,10 +254,31 @@ mod tests {
             status: SteeringStatus::Pending,
             message: None,
         });
+        let interrupt = RelayCommand::CancelTurnFor {
+            active_prompt_id: "active".into(),
+        };
+        state.turn_controls = Some(mj_core::relay::TurnControls {
+            status: mj_core::relay::TurnControlStatus::Pending,
+            primary: None,
+            interrupt: Some(interrupt.clone()),
+            message: Some("Steering…".into()),
+        });
         chat.sync_turn_control(&state);
         let escape = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(chat.handle_key(escape), ChatAction::None);
+        assert_eq!(
+            chat.handle_key(escape),
+            ChatAction::TurnControl(interrupt.clone())
+        );
         assert_eq!(chat.operation_feedback["turn-control"], "Steering…");
+        assert_eq!(
+            chat.handle_key(KeyEvent::new_with_kind(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            )),
+            ChatAction::None,
+            "holding Esc must not interrupt"
+        );
         state.steering.as_mut().unwrap().status = SteeringStatus::Unconfirmed;
         chat.sync_turn_control(&state);
         assert!(chat.turn_control_dialog_open);

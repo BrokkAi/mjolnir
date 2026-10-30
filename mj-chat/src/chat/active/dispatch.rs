@@ -397,7 +397,8 @@ impl ActiveChat {
         if self.state.turn_control_pending() || !self.state.turn_interruptible() {
             return false;
         }
-        let _ = self.dispatch(ChatAction::Cancel);
+        let action = self.state.interrupt_action();
+        let _ = self.dispatch(action);
         true
     }
 

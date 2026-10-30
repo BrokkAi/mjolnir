@@ -781,6 +781,53 @@ fn admitted_claude_steer_returns_if_its_boundary_hook_becomes_unavailable() {
     assert!(next.steering_prompt.is_none());
 }
 
+// Hard-won: d3fde1066: a tool boundary during the interrupt fed the steer to the dying turn.
+#[test]
+fn interrupting_a_pending_claude_steer_runs_its_prompt_next() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = running_claude_turn(temp.path(), true);
+    relay.set_automatic_steering(true);
+    queue_prompt(&mut relay, "prompt-second", "Please change direction.");
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+
+    let controls = relay.operational_state().turn_controls.unwrap();
+    assert_eq!(controls.status, mj_core::relay::TurnControlStatus::Pending);
+    let interrupt = controls
+        .interrupt
+        .expect("a pending steer stays interruptible");
+    submit_relay(&mut relay, "interrupt", interrupt);
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    let [cancel] = claimed.as_slice() else {
+        panic!("the interrupt must reach the running turn, got {claimed:?}");
+    };
+    assert_eq!(cancel.command_id, "interrupt");
+
+    assert_eq!(drain_post_tool_batch(&mut relay).1, 0);
+    relay
+        .record_command_completed("interrupt", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    relay
+        .record_command_completed(
+            "prompt-first",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "Cancelled".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        relay.operational_state().steering.unwrap().status,
+        SteeringStatus::Resolved
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    let [next] = claimed.as_slice() else {
+        panic!("the returned prompt must run next, got {claimed:?}");
+    };
+    assert_eq!(next.command_id, "prompt-second");
+}
+
 #[test]
 fn claude_attachment_steer_is_left_for_the_next_normal_prompt() {
     let temp = tempfile::tempdir().unwrap();

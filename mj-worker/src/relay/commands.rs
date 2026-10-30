@@ -2037,6 +2037,8 @@ impl DurableRelay {
     fn pending_hook_steering(&self, hook_event: &str) -> Option<(MailboxHookSteering, &str)> {
         if hook_event != "PostToolBatch"
             || self.steering_delivery_mode != SteeringDeliveryMode::ClaudePostToolBatch
+            // A turn being interrupted discards its input; the prompt runs next.
+            || self.turn_cancellation_pending()
         {
             return None;
         }
