@@ -946,9 +946,7 @@ impl TryFrom<StoredConfig> for Config {
             targets,
         } = stored;
         github.watch.enabled &= mailbox.enabled;
-        if let Some(app) = &github.app {
-            app.validate()?;
-        }
+        github.validate()?;
         for profile in profiles.values_mut() {
             profile.inherit_provider_key();
         }

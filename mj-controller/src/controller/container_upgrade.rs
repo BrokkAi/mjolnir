@@ -122,7 +122,7 @@ impl Controller {
                         install_staged_worker_binary(&owner, &staging, executor, &backend, session_id)?;
                         replace_installed_worker_launch_config(executor, &backend, session_id, &launch)?;
                         owner.begin_restart(target, mj_core::worker_build::WORKER_BUILD_ID.into())?;
-                        start_worker_durably(&owner, target, executor, &backend, &root)?;
+                        start_worker_durably(&owner, target, executor, &backend, &root, &self.config.github)?;
                     }
                     executor.begin_resumable_work()?;
                     let mut connection = super::readiness::connect_started_worker_with_timeout(&reconnect, session_id, executor, &backend, &root, Duration::from_secs(300)).await?;

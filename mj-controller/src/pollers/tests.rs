@@ -1145,6 +1145,13 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
             in_container[0].skips_login_file_sync
         );
         assert!(!on_this_machine[0].sync_github_token, "{kind:?}");
+        controller.config.github.session_token_path = Some(directory.path().join("agent-pat"));
+        let with_pat = credential_sync_targets(&controller);
+        assert!(with_pat[0].sync_github_token, "{kind:?}");
+        assert_ne!(
+            with_pat, on_this_machine,
+            "config reload must publish the new source"
+        );
         assert_eq!(
             on_this_machine[0].skills_scope,
             mj_core::skills::SkillsScope::Localhost

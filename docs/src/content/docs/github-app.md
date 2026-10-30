@@ -75,7 +75,14 @@ applies the installation's full grant. Mjolnir checks configured levels
 against the installation and refuses to mint a token if the grant is too
 narrow. Repository scoping and permission subsets apply together.
 
-Without `[github.app]`, Mjolnir continues to use `GH_TOKEN`, `GITHUB_TOKEN`, or
+An optional `[github] session_token_path = "~/.secrets/gh_agents_pat"` overrides
+App tokens delivered to sessions with a dedicated PAT. It applies to every
+target on startup, restart, resume, and ordinary credential sync. The file is
+read on the daemon host; a missing or invalid file reports an error without
+falling back. This does not change the App tokens returned by `mj github-token`.
+See [Configuration](/configuration/#session-github-token-github).
+
+Without the override or `[github.app]`, Mjolnir continues to use `GH_TOKEN`, `GITHUB_TOKEN`, or
 `gh auth token`. The private key and installation tokens are not stored in the
 database or session checkpoints.
 
@@ -85,10 +92,8 @@ Each session can use repositories from one GitHub App installation. Session
 creation reports an error when its bundle needs more than one installation.
 Session tokens are limited to the repositories in that bundle; the controller
 keeps a separate cache entry for each installation and sorted repository set.
-Tokens refresh when fewer than 10 minutes of validity remain. Running remote
+Tokens refresh when fewer than 10 minutes of validity remain. Running local, remote,
 and container sessions receive the refreshed token through credential sync.
-Local bare sessions are not periodically refreshed, so an App token used there
-expires within at most one hour.
 
 Use the daemon's shared cache to obtain a token for host-side CI or automation:
 

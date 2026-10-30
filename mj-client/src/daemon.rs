@@ -720,6 +720,10 @@ pub enum DaemonAction {
         #[serde(default)]
         acknowledge_unpublished_work: bool,
     },
+    /// Explicitly omit untracked nested Git repositories from this suspension.
+    IgnoreNestedRepositoriesAndSuspend {
+        session_id: String,
+    },
     RestartSession {
         session_id: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2235,6 +2239,19 @@ impl DaemonClient {
         self.suspend_session_with_ack(session_id, false).await
     }
 
+    pub async fn ignore_nested_repositories_and_suspend(
+        &mut self,
+        session_id: String,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::IgnoreNestedRepositoriesAndSuspend { session_id })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected ignore-and-suspend reply {reply:?}"),
+        }
+    }
+
     pub async fn suspend_session_with_ack(
         &mut self,
         session_id: String,
@@ -2494,7 +2511,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Human interface activity can reset the daemon's automatic AFK clock.
 // Project removal runs through the daemon-owned database writer.
 // Per-profile remembered subagent preferences change runtime metadata shape.
-pub const PROTOCOL_VERSION: u32 = 68;
+// Explicit Ignore and Suspend preserves checkpoint verification while omitting nested repositories.
+pub const PROTOCOL_VERSION: u32 = 69;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

@@ -33,9 +33,9 @@ use crate::archive::{
     ArchiveInput, BundleManifest, CanonicalSessionSnapshot, CanonicalTranscriptBody,
     GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode, NativeArtifact, PayloadRole,
     RepositorySnapshot, SessionManifest, SystemGit, TargetManifest, collect_git_metadata_snapshot,
-    collect_git_snapshot, collect_plain_directory_snapshot, ensure_no_symlink_ancestors,
-    has_origin_refs, read_archive_verified, remote_workspace_base, validate_component,
-    verify_archive_streaming, write_archive_hashed, write_archive_hashed_borrowed,
+    collect_plain_directory_snapshot, ensure_no_symlink_ancestors, has_origin_refs,
+    read_archive_verified, remote_workspace_base, validate_component, verify_archive_streaming,
+    write_archive_hashed, write_archive_hashed_borrowed,
 };
 use mj_core::config::HarnessKind;
 /// Native state whose storage format is owned by the target runtime.
@@ -111,6 +111,9 @@ pub enum CheckpointRepositoryCapture {
 #[serde(deny_unknown_fields)]
 pub struct CheckpointExportSpec {
     pub protocol_version: u32,
+    /// One suspension's explicit consent; ordinary checkpoints remain strict.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_nested_repositories: bool,
     pub session: SessionManifest,
     pub target: TargetManifest,
     pub bundle: BundleManifest,

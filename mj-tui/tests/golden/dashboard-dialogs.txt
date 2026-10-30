@@ -1,3 +1,64 @@
+=== nested repository failure, checkpoint=false (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ─                                                                                       │
+│ Create   O                                                                                       │
+│hel ───────  ╭ × Suspension could not complete ─────────────────────────────────────╮             │
+│› ■ ACP pre  │Session: ACP pretty name                                              │  on.        │
+│  Stopped    │                                                                      │             │
+│  │ No mess  │Suspension failed: export target checkpoint failed with status 1:     │             │
+│  │          │repository 'bifrost': cannot checkpoint nested Git repository         │             │
+│             │directory at /workspace/bifrost/.scratch/s47-landing/master-check/:   │             │
+│             │for a disposable scratch worktree, exclude this path using the outer  │             │
+│             │repository's .git/info/exclude; otherwise preserve its work separately│             │
+│             │                                                                      │  ───────────╯
+│             │Ignore and Suspend omits untracked nested Git repositories from the   │  ───────────╮
+│             │recovery copy.                                                        │             │
+│             │Files inside them will not be recoverable after suspension removes the│  o open.    │
+│             │environment.                                                          │  ───────────╯
+│             │                                                                      │  ──── ▁   ▄ ╮
+│             │c Cancel  ·  i Ignore and Suspend                                     │             │
+│             │                                                                      │  ───────────╯
+│             │  Cancel     Ignore and Suspend                                       │  ──── ▁   ▄ ╮
+│             ╰──────────────────────────────────────────────────────────────────────╯   Resets    │
+│                                                                                                  │
+│                                                                                                  │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
+action: IgnoreNestedRepositoriesAndSuspend { session_id: "session-1" }
+
+=== nested repository failure, checkpoint=true (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                                                                                          │
+╰───────────                                                                                       │
+╭ Sessions ─  ╭ × Suspension could not complete ─────────────────────────────────────╮             │
+│ Create   O  │Session: ACP pretty name                                              │             │
+│hel ───────  │                                                                      │             │
+│› ■ ACP pre  │Suspension failed: export target checkpoint failed with status 1:     │  on.        │
+│  Stopped    │repository 'bifrost': cannot checkpoint nested Git repository         │             │
+│  │ No mess  │directory at /workspace/bifrost/.scratch/s47-landing/master-check/:   │             │
+│  │          │for a disposable scratch worktree, exclude this path using the outer  │             │
+│             │repository's .git/info/exclude; otherwise preserve its work separately│             │
+│             │                                                                      │             │
+│             │Ignore and Suspend omits untracked nested Git repositories from the   │             │
+│             │recovery copy.                                                        │  ───────────╯
+│             │Files inside them will not be recoverable after suspension removes the│  ───────────╮
+│             │environment.                                                          │             │
+│             │                                                                      │  o open.    │
+│             │c Cancel  ·  d Discard changes since checkpoint…  ·  i Ignore and     │  ───────────╯
+│             │Suspend                                                               │  ──── ▁   ▄ ╮
+│             │                                                                      │             │
+│             │  Cancel                                                              │  ───────────╯
+│             │  Discard changes since checkpoint…                                   │  ──── ▁   ▄ ╮
+│             │  Ignore and Suspend                                                  │   Resets    │
+│             ╰──────────────────────────────────────────────────────────────────────╯             │
+│                                                                                                  │
+│                                                                                                  │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
+action: IgnoreNestedRepositoriesAndSuspend { session_id: "session-1" }
 action: None
 
 === target actions (120x34) ===

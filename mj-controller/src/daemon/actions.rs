@@ -684,6 +684,12 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::IgnoreNestedRepositoriesAndSuspend { session_id } => {
+            state
+                .ignore_nested_repositories_and_suspend(session_id)
+                .await?;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::PreviewContainerUpgrade { session_id } => {
             Ok(DaemonReply::ContainerUpgradePreview(
                 state.preview_container_upgrade(session_id).await?,

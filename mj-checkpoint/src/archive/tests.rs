@@ -1353,7 +1353,8 @@ fn untracked_tar_preserves_executable_mode_and_safe_symlink() {
     let paths = b"scripts/tool\0scripts/current\0".to_vec();
     #[cfg(not(unix))]
     let paths = b"scripts/tool\0".to_vec();
-    let tar = build_untracked_tar(source.path(), &paths, &|_| Ok(())).unwrap();
+    let tar =
+        build_untracked_tar(source.path(), &paths, UntrackedFiles::Include, &|_| Ok(())).unwrap();
     validate_untracked_tar(&tar).unwrap();
 
     let destination = tempfile::tempdir().unwrap();
@@ -1387,7 +1388,7 @@ fn untracked_tar_progress_can_cancel_before_opening_the_next_file() {
     let paths = b"first.txt\0missing.txt\0";
     let seen = std::sync::Mutex::new(Vec::new());
 
-    let error = build_untracked_tar(source.path(), paths, &|progress| {
+    let error = build_untracked_tar(source.path(), paths, UntrackedFiles::Include, &|progress| {
         let GitSnapshotProgress::UntrackedFile { current, total, .. } = progress;
         seen.lock().unwrap().push((current, total));
         ensure!(current < 2, "cancelled by test");

@@ -432,6 +432,7 @@ fn exported_checkpoint_json() -> Vec<u8> {
 }
 fn export_spec_fixture() -> CheckpointExportSpec {
     CheckpointExportSpec {
+        ignore_nested_repositories: false,
         report_directories: None,
         protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
         session: mj_checkpoint::archive::SessionManifest {
@@ -613,66 +614,71 @@ fn an_export_with_no_native_history_tells_the_caller_why() {
 /// current spec before it can apply obsolete path or collection behavior.
 #[test]
 fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
-    let locator = targets::TargetLocator::LocalPodman {
-        borrowed_from: None,
-        container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
-        workspace_storage: Default::default(),
-    };
-    let spec = export_spec_fixture();
-    let executor = ExportExecutor::new(
-        1,
-        "Error: parse checkpoint export spec from standard input\n\nCaused by:\n    \
-             unknown field `protocol_version`, expected `session` at line 1 column 20\n",
-    )
-    .retry_stdin_after_failure();
-    let directory = tempfile::tempdir().unwrap();
-    let worker_binary = directory.path().join("hel-test-worker");
-    std::fs::write(&worker_binary, mj_core::worker_build::WORKER_BUILD_STAMP).unwrap();
+    for (ignore_nested_repositories, field) in [
+        (false, "protocol_version"),
+        (true, "ignore_nested_repositories"),
+    ] {
+        let locator = targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
+            workspace_storage: Default::default(),
+        };
+        let mut spec = export_spec_fixture();
+        spec.ignore_nested_repositories = ignore_nested_repositories;
+        let failure = format!(
+            "Error: parse checkpoint export spec from standard input\n\nCaused by:\n    unknown field `{field}`, expected `session` at line 1 column 20\n"
+        );
+        let executor = ExportExecutor::new(1, &failure).retry_stdin_after_failure();
+        let directory = tempfile::tempdir().unwrap();
+        let worker_binary = directory.path().join("hel-test-worker");
+        std::fs::write(&worker_binary, mj_core::worker_build::WORKER_BUILD_STAMP).unwrap();
 
-    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
-        LATCH_RELAY_SESSION,
-        "test legacy export",
-    )
-    .unwrap()
-    .unwrap();
-    let output = owner
-        .scope_blocking(|| {
-            run_checkpoint_staging_command(
-                &executor,
-                &locator,
-                LATCH_RELAY_SESSION,
-                &spec,
-                export_stdin_command,
-                "export target checkpoint",
-                Some(&worker_binary),
-            )
-        })
+        let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+            LATCH_RELAY_SESSION,
+            "test legacy export",
+        )
+        .unwrap()
         .unwrap();
+        let output = owner
+            .scope_blocking(|| {
+                run_checkpoint_staging_command(
+                    &executor,
+                    &locator,
+                    LATCH_RELAY_SESSION,
+                    &spec,
+                    export_stdin_command,
+                    "export target checkpoint",
+                    Some(&worker_binary),
+                )
+            })
+            .unwrap();
 
-    assert_eq!(output.stdout, exported_checkpoint_json());
-    assert_eq!(
-        serde_json::from_slice::<CheckpointExportSpec>(&executor.streamed_spec.borrow()).unwrap(),
-        spec
-    );
-    assert_eq!(
-        executor.purposes.into_inner(),
-        vec![
-            "export target checkpoint".to_owned(),
-            "remove stale private worker staging".to_owned(),
-            "collect unused Mjolnir worker binaries".to_owned(),
-            "verify shared Mjolnir worker".to_owned(),
-            "create private worker store upload".to_owned(),
-            "stage replacement Mjolnir worker".to_owned(),
-            "match replacement worker to the worker directory owner".to_owned(),
-            "replace installed Mjolnir worker".to_owned(),
-            "make replaced Mjolnir worker executable".to_owned(),
-            "verify uploaded Mjolnir worker".to_owned(),
-            "publish shared Mjolnir worker".to_owned(),
-            "discard private worker store upload".to_owned(),
-            "link shared Mjolnir worker into session".to_owned(),
-            "export target checkpoint".to_owned(),
-        ]
-    );
+        assert_eq!(output.stdout, exported_checkpoint_json());
+        assert_eq!(
+            serde_json::from_slice::<CheckpointExportSpec>(&executor.streamed_spec.borrow())
+                .unwrap(),
+            spec
+        );
+        assert_eq!(
+            executor.purposes.into_inner(),
+            vec![
+                "export target checkpoint".to_owned(),
+                "remove stale private worker staging".to_owned(),
+                "collect unused Mjolnir worker binaries".to_owned(),
+                "verify shared Mjolnir worker".to_owned(),
+                "create private worker store upload".to_owned(),
+                "stage replacement Mjolnir worker".to_owned(),
+                "match replacement worker to the worker directory owner".to_owned(),
+                "replace installed Mjolnir worker".to_owned(),
+                "make replaced Mjolnir worker executable".to_owned(),
+                "verify uploaded Mjolnir worker".to_owned(),
+                "publish shared Mjolnir worker".to_owned(),
+                "discard private worker store upload".to_owned(),
+                "link shared Mjolnir worker into session".to_owned(),
+                "export target checkpoint".to_owned(),
+            ]
+        );
+    }
 }
 /// A session that is working is busy, not wedged. A copy that can run
 /// again later leaves at once instead of waiting out the deadline, which
@@ -3659,6 +3665,7 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
             &SucceedingExecutor,
             &channels.control,
             true,
+            false,
             None,
         )
         .await;
@@ -3673,6 +3680,63 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
     }
     assert_eq!(record.state, SessionState::Stopped);
     assert_eq!(record.last_error, None);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ignoring_nested_repositories_requires_a_fresh_checkpoint_before_teardown() {
+    const NAME: &str = "ignoring_nested_repositories_requires_a_fresh_checkpoint_before_teardown";
+    if !in_close_cut_child(NAME, LATE_HARNESS_NOTIFICATION) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (mut controller, channels, _handle) = close_cut_controller(SessionState::Closing).await;
+    let original = controller.state.sessions[LATCH_RELAY_SESSION]
+        .checkpoint
+        .clone();
+    #[derive(Default)]
+    struct RefuseExport(std::sync::Mutex<Option<bool>>);
+    impl CommandExecutor for RefuseExport {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            SucceedingExecutor.execute(command)
+        }
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            assert_eq!(command.purpose, "export target checkpoint");
+            let spec: CheckpointExportSpec = serde_json::from_reader(input)?;
+            *self.0.lock().unwrap() = Some(spec.ignore_nested_repositories);
+            Ok(CommandOutput {
+                status: 1,
+                stdout: Vec::new(),
+                stderr: b"disk full while writing checkpoint".to_vec(),
+            })
+        }
+    }
+    let executor = RefuseExport::default();
+    let error = controller
+        .recover_interrupted_close_managed(
+            LATCH_RELAY_SESSION,
+            &executor,
+            &channels.control,
+            true,
+            true,
+            None,
+        )
+        .await
+        .unwrap_err();
+    channels.shutdown.shutdown().await.unwrap();
+    assert!(
+        format!("{error:#}").contains("disk full while writing checkpoint"),
+        "{error:#}"
+    );
+    assert_eq!(*executor.0.lock().unwrap(), Some(true));
+    let record = &controller.state.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(record.state, SessionState::Running);
+    assert!(record.target.is_some());
+    assert_eq!(record.checkpoint, original);
 }
 
 /// The container recreation an upgrade starts on its own may never cancel
@@ -4043,6 +4107,7 @@ async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier
             &SucceedingExecutor,
             &channels.control,
             true,
+            false,
             None,
         )
         .await;

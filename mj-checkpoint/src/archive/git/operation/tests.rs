@@ -626,7 +626,7 @@ fn a_capture_that_fails_mid_operation_leaves_no_temporary_refs() {
             history: GitHistoryMode::CloneFrom(lab.base.clone()),
             origin_override: None,
         },
-        true,
+        crate::archive::UntrackedFiles::Include,
         &|_| Err(anyhow::anyhow!("stopped by the caller")),
     )
     .unwrap_err();

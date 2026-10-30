@@ -75,6 +75,39 @@ pub(crate) fn copied_session_id_notice(session_id: &str) -> String {
     format!("Copied session ID {}", short_id(session_id))
 }
 
+fn start_suspension(
+    context: &mut DashboardContext,
+    session_id: String,
+    acknowledge_unpublished_work: bool,
+    ignore_nested_repositories: bool,
+) {
+    context.dashboard.set_notice(format!(
+        "Suspending {}…",
+        context.session_notice_name(&session_id)
+    ));
+    let request = context.begin_lifecycle_operation(&session_id, SessionOperationKind::Suspending);
+    mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
+    spawn_lifecycle_operation(
+        request,
+        context.critical_operations.clone(),
+        move |_controller, _cancelled| {
+            mj_core::runtime::block_on(async {
+                let mut client = daemon::connect_or_start().await?;
+                if ignore_nested_repositories {
+                    client
+                        .ignore_nested_repositories_and_suspend(session_id)
+                        .await
+                } else {
+                    client
+                        .suspend_session_with_ack(session_id, acknowledge_unpublished_work)
+                        .await
+                }
+            })??;
+            Ok(LifecycleSuccess::Closed)
+        },
+    );
+}
+
 /// Carries out one dashboard action.
 pub(crate) async fn apply_dashboard_action(
     context: &mut DashboardContext,
@@ -1475,27 +1508,9 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::Suspend {
             session_id,
             acknowledge_unpublished_work,
-        } => {
-            context.dashboard.set_notice(format!(
-                "Suspending {}…",
-                context.session_notice_name(&session_id)
-            ));
-            let request =
-                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Suspending);
-            mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
-            spawn_lifecycle_operation(
-                request,
-                context.critical_operations.clone(),
-                move |_controller, _cancelled| {
-                    mj_core::runtime::block_on(async {
-                        daemon::connect_or_start()
-                            .await?
-                            .suspend_session_with_ack(session_id, acknowledge_unpublished_work)
-                            .await
-                    })??;
-                    Ok(LifecycleSuccess::Closed)
-                },
-            );
+        } => start_suspension(context, session_id, acknowledge_unpublished_work, false),
+        DashboardAction::IgnoreNestedRepositoriesAndSuspend { session_id } => {
+            start_suspension(context, session_id, true, true);
         }
         DashboardAction::ResolveAwsResourceOptions {
             target_template_ids,

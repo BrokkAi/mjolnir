@@ -80,9 +80,31 @@ impl RuntimeState {
         session_id: String,
         acknowledge_unpublished_work: bool,
     ) -> Result<()> {
+        self.suspend_session_with_options(session_id, acknowledge_unpublished_work, false)
+            .await
+    }
+
+    pub async fn ignore_nested_repositories_and_suspend(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<()> {
+        self.suspend_session_with_options(session_id, true, true)
+            .await
+    }
+
+    async fn suspend_session_with_options(
+        self: &Arc<Self>,
+        session_id: String,
+        acknowledge_unpublished_work: bool,
+        ignore_nested_repositories: bool,
+    ) -> Result<()> {
         self.request_close(&session_id);
         let result = self
-            .suspend_with_children(&session_id, acknowledge_unpublished_work)
+            .suspend_with_children(
+                &session_id,
+                acknowledge_unpublished_work,
+                ignore_nested_repositories,
+            )
             .await;
         if let Err(error) = &result {
             let reference = new_command_id("suspension").unwrap_or_else(|_| "suspension".into());
@@ -104,10 +126,15 @@ impl RuntimeState {
         self: &Arc<Self>,
         session_id: &str,
         acknowledge_unpublished_work: bool,
+        ignore_nested_repositories: bool,
     ) -> Result<()> {
         self.prepare_suspension(session_id).await?;
-        self.close_requested_session_with_ack(session_id.to_owned(), acknowledge_unpublished_work)
-            .await
+        self.close_requested_session_with_ack(
+            session_id.to_owned(),
+            acknowledge_unpublished_work,
+            ignore_nested_repositories,
+        )
+        .await
     }
 
     /// Stop every active Mjolnir sub-agent of a parent whose suspend or
@@ -487,7 +514,9 @@ impl RuntimeState {
             Some(key),
             Some(control.clone()),
             move |state, session_id, _cancelled| async move {
-                state.suspend_admitted(session_id, control, true).await
+                state
+                    .suspend_admitted(session_id, control, true, false)
+                    .await
             },
         )?;
         let completed = result.clone();
@@ -501,6 +530,7 @@ impl RuntimeState {
         self: &Arc<Self>,
         session_id: String,
         acknowledge_unpublished_work: bool,
+        ignore_nested_repositories: bool,
     ) -> Result<()> {
         self.wait_before_close(&session_id).await?;
         let control = LifecycleControl::default();
@@ -512,7 +542,12 @@ impl RuntimeState {
             Some(control.clone()),
             move |state, session_id, _cancelled| async move {
                 state
-                    .suspend_admitted(session_id, control, acknowledge_unpublished_work)
+                    .suspend_admitted(
+                        session_id,
+                        control,
+                        acknowledge_unpublished_work,
+                        ignore_nested_repositories,
+                    )
                     .await
             },
         )?;
@@ -530,6 +565,7 @@ impl RuntimeState {
         session_id: String,
         control: LifecycleControl,
         acknowledge_unpublished_work: bool,
+        ignore_nested_repositories: bool,
     ) -> Result<DaemonLifecycleResult> {
         let cancelled = control.cancelled.clone();
         let _recovery_reservation = tokio::task::spawn_blocking({
@@ -553,6 +589,7 @@ impl RuntimeState {
             &mut controller,
             &executor,
             acknowledge_unpublished_work,
+            ignore_nested_repositories,
             Some(&control),
         )
         .await
@@ -567,6 +604,7 @@ impl RuntimeState {
         controller: &mut Controller,
         executor: &(impl CommandExecutor + Sync),
         acknowledge_unpublished_work: bool,
+        ignore_nested_repositories: bool,
         commit: Option<&LifecycleControl>,
     ) -> Result<DaemonLifecycleResult> {
         let route = close_route(
@@ -604,6 +642,7 @@ impl RuntimeState {
                         executor,
                         &self.session_manager,
                         acknowledge_unpublished_work,
+                        ignore_nested_repositories,
                         Some(self.stop_subagents_before_close(session_id, commit.cloned())),
                     )
                     .await?
@@ -628,6 +667,7 @@ impl RuntimeState {
                         executor,
                         &self.session_manager,
                         acknowledge_unpublished_work,
+                        ignore_nested_repositories,
                         Some(self.stop_subagents_before_close(session_id, commit.cloned())),
                     )
                     .await?

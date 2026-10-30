@@ -312,6 +312,22 @@ fn restart_owned_worker(
         refresh_worker_binary_if_stale(executor, plan.binary_refresh.as_ref())?;
     }
     refresh_worker_launch_if_stale(executor, plan.launch_refresh.as_ref())?;
+    if let Some(id) = session_id {
+        let config = mj_core::config::Config::load()?;
+        if config.github.session_token_path.is_some() {
+            let session = crate::database::read_durable_session_record(id)?
+                .context("session disappeared before installing its GitHub token")?;
+            let backend =
+                crate::controller::backend_locator(&plan.source_target, &session, &config)?;
+            let root = crate::targets::worker_root(&backend, id)?;
+            crate::controller::install_configured_session_github_token(
+                &config.github,
+                executor,
+                &backend,
+                &root,
+            )?;
+        }
+    }
     plan.restart.execute(executor)?;
     if let Some(owner) = owner.as_ref() {
         crate::database::advance_worker_restart(
