@@ -239,14 +239,16 @@ impl ControllerLog {
     pub(crate) fn start(command: &'static str, kind: ProcessKind) -> Result<Self> {
         let data_dir = mj_core::config::data_dir();
         let directory = data_dir.join("logs");
-        if let Err(error) = mj_core::config::create_owner_only_directory(&directory).and_then(|()| {
-            prune_logs(
-                &directory,
-                RETAINED_LOGS.saturating_sub(1),
-                current_daemon_pid(&data_dir),
-            )
-            .with_context(|| format!("prune diagnostic logs in {}", directory.display()))
-        }) {
+        if let Err(error) =
+            mj_core::config::create_owner_only_directory(&directory).and_then(|()| {
+                prune_logs(
+                    &directory,
+                    RETAINED_LOGS.saturating_sub(1),
+                    current_daemon_pid(&data_dir),
+                )
+                .with_context(|| format!("prune diagnostic logs in {}", directory.display()))
+            })
+        {
             mj_core::diagnostic_stderr!("Mjolnir could not prepare diagnostic logs: {error}");
         }
         let path = directory.join(log_filename(kind));

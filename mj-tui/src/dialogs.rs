@@ -567,6 +567,10 @@ fn clear_dialog_form_geometry(form: &mut Dialog<DialogControl>) {
     form.reset_geometry();
 }
 
+fn nested_repository_checkpoint_failure(error: &str) -> bool {
+    error.contains(mj_core::archive::NESTED_REPOSITORY_CHECKPOINT_ERROR)
+}
+
 impl Confirmation {
     /// The session this confirmation is about, when it is about one.
     fn session_id(&self) -> Option<&str> {
@@ -1841,19 +1845,29 @@ impl DashboardState {
                     checkpoint,
                 }
             }
-            (Confirmation::CloseFailed { session_id, .. }, 2)
+            (
+                Confirmation::CloseFailed {
+                    session_id, error, ..
+                },
+                2,
+            )
             | (
                 Confirmation::CloseFailed {
                     session_id,
+                    error,
                     can_discard: false,
                     ..
                 },
                 1,
             ) => {
                 self.cancel_modal();
-                DashboardAction::Suspend {
-                    session_id,
-                    acknowledge_unpublished_work: true,
+                if nested_repository_checkpoint_failure(&error) {
+                    DashboardAction::IgnoreNestedRepositoriesAndSuspend { session_id }
+                } else {
+                    DashboardAction::Suspend {
+                        session_id,
+                        acknowledge_unpublished_work: true,
+                    }
                 }
             }
             (Confirmation::SuspendSession { session_id, .. }, 1) => {

@@ -120,6 +120,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
         acknowledge_unpublished_work: bool,
+        ignore_nested_repositories: bool,
         before_close: Option<BeforeClose>,
     ) -> Result<bool> {
         self.suspend_session_controlled_with_manager(
@@ -128,7 +129,11 @@ impl Controller {
             Some(manager),
             None,
             SourceTargetDisposition::Destroy,
-            CheckpointExportPolicy::ReuseUnchangedArchive,
+            if ignore_nested_repositories {
+                CheckpointExportPolicy::IgnoreNestedRepositories
+            } else {
+                CheckpointExportPolicy::ReuseUnchangedArchive
+            },
             acknowledge_unpublished_work,
             before_close,
             None,
@@ -579,6 +584,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
         acknowledge_unpublished_work: bool,
+        ignore_nested_repositories: bool,
         before_close: Option<BeforeClose>,
     ) -> Result<bool> {
         crate::worker_lifecycle::run(session_id, "recover interrupted close managed", executor, async {
@@ -662,7 +668,11 @@ impl Controller {
                         Some(manager),
                         None,
                         SourceTargetDisposition::Destroy,
-                        CheckpointExportPolicy::ReuseUnchangedArchive,
+                        if ignore_nested_repositories {
+                            CheckpointExportPolicy::IgnoreNestedRepositories
+                        } else {
+                            CheckpointExportPolicy::ReuseUnchangedArchive
+                        },
                         acknowledge_unpublished_work,
                         before_close,
                         None,

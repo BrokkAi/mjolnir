@@ -458,6 +458,9 @@ pub enum DashboardAction {
         session_id: String,
         acknowledge_unpublished_work: bool,
     },
+    IgnoreNestedRepositoriesAndSuspend {
+        session_id: String,
+    },
     DiscardSinceCheckpoint {
         session_id: String,
         checkpoint: mj_core::state::CheckpointMetadata,

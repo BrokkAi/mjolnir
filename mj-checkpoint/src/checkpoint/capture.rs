@@ -725,7 +725,16 @@ pub fn export_checkpoint_with_native_state(
     )?;
     let native_ms = native_started.elapsed().as_millis() as u64;
     let repositories_started = std::time::Instant::now();
-    let repositories = collect_checkpoint_repositories(&workspace_root, &spec.repositories, git)?;
+    let repositories = collect_checkpoint_repositories_with_policy(
+        &workspace_root,
+        &spec.repositories,
+        git,
+        if spec.ignore_nested_repositories {
+            crate::archive::UntrackedFiles::IgnoreNestedRepositories
+        } else {
+            crate::archive::UntrackedFiles::Include
+        },
+    )?;
     let repositories_ms = repositories_started.elapsed().as_millis() as u64;
     // The export runs while the relay's barrier freezes ACP dispatch, so it
     // hashes the archive it just wrote instead of structurally re-reading it.
@@ -760,6 +769,20 @@ pub(super) fn collect_checkpoint_repositories(
     workspace_root: &Path,
     specifications: &[CheckpointRepositorySpec],
     git: &dyn GitCommandRunner,
+) -> Result<Vec<RepositorySnapshot>> {
+    collect_checkpoint_repositories_with_policy(
+        workspace_root,
+        specifications,
+        git,
+        crate::archive::UntrackedFiles::Include,
+    )
+}
+
+fn collect_checkpoint_repositories_with_policy(
+    workspace_root: &Path,
+    specifications: &[CheckpointRepositorySpec],
+    git: &dyn GitCommandRunner,
+    untracked_files: crate::archive::UntrackedFiles,
 ) -> Result<Vec<RepositorySnapshot>> {
     // Indexed parallel iteration preserves the spec order, which in turn keeps
     // the manifest and ZIP entry order deterministic.
@@ -818,7 +841,7 @@ pub(super) fn collect_checkpoint_repositories(
             };
             reject_dirty_submodules(git, &path)
                 .with_context(|| format!("repository '{}'", repository.id))?;
-            let mut snapshot = collect_git_snapshot(
+            let mut snapshot = crate::archive::collect_git_snapshot_with_progress(
                 git,
                 &path,
                 &GitCollectionSpec {
@@ -827,6 +850,8 @@ pub(super) fn collect_checkpoint_repositories(
                     history,
                     origin_override: repository.origin_override.clone(),
                 },
+                untracked_files,
+                &|_| Ok(()),
             )
             .with_context(|| format!("repository '{}'", repository.id))?;
             if let Some(base_commit) = remote_base {

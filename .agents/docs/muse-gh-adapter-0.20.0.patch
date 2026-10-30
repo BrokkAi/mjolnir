@@ -1,0 +1,322 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index dd5fe3a..6e88c4d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,16 @@
+ # Changelog
+
++## 0.20.0
++
++- Add opt-in native command prefix approval through
++  `MUSE_ACP_ALLOW_COMMAND_PREFIXES`. Exact structured argv prefixes can approve
++  an explicitly offered allow-once choice before Auto-review or ACP prompts.
++  Only complete, unambiguous single-stage shell commands qualify; other
++  approvals retain normal handling. No persistent Muse grants are created.
++
++- Accept npm 12 package-name-keyed `npm pack --json` results as well as the
++  list format emitted by earlier npm versions when preparing release packages.
++
+ ## 0.19.0
+
+ - Re-pin the Muse Code SDK corpus to `a45cb67` and the stable Muse
+diff --git a/Cargo.lock b/Cargo.lock
+index b078c25..d437b42 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -52,7 +52,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+ [[package]]
+ name = "muse-acp"
+-version = "0.19.0"
++version = "0.20.0"
+ dependencies = [
+  "acp-lite",
+  "muse-msp-client",
+diff --git a/Cargo.toml b/Cargo.toml
+index 855f36a..e3e750b 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -4,7 +4,7 @@ resolver = "3"
+
+ [package]
+ name = "muse-acp"
+-version = "0.19.0"
++version = "0.20.0"
+ edition = "2024"
+ rust-version = "1.88"
+ description = "Rust ACP-to-MSP adapter for using Muse Code in Zed and JetBrains IDEs"
+diff --git a/README.md b/README.md
+index d3e6358..65940d4 100644
+--- a/README.md
++++ b/README.md
+@@ -1003,3 +1003,15 @@ never in a public issue.
+
+ Copyright 2026 Brokk.ai. Licensed under the Apache License, Version 2.0. See
+ [LICENSE](LICENSE) and [NOTICE](NOTICE).
++
++### Command prefix approval (opt in)
++
++`MUSE_ACP_ALLOW_COMMAND_PREFIXES='[["gh"]]'` lets the native adapter approve
++an offered **allow once** choice before automatic review or an ACP permission
++prompt. The value is a JSON array of nonempty argv prefixes, matched exactly
++against the host's complete structured argv. Invalid values disable this policy
++and emit a diagnostic. Unset or `[]` leaves normal approval handling in place.
++Only a single unresolved shell stage with matching requirement IDs and consistent
++single-stage boundaries qualifies. Compound commands, wrappers, incomplete argv,
++other tools and persistent grants continue through normal review. This grants no
++standing Muse policy rule; every matching approval is decided separately.
+diff --git a/scripts/npm_release.py b/scripts/npm_release.py
+index 1819b68..0d97692 100644
+--- a/scripts/npm_release.py
++++ b/scripts/npm_release.py
+@@ -61,7 +61,18 @@ def pack(assets, output):
+         directory = Path(temp) / 'package'
+         manifest = stage(assets, directory)
+         result = json.loads(npm('pack', '--json', '--ignore-scripts', '--pack-destination',
+-                                str(output.resolve()), cwd=directory))[0]
++                                str(output.resolve()), cwd=directory))
++        # npm 12 keys results by package name; earlier versions return a list.
++        if isinstance(result, dict):
++            release.require(set(result) == {manifest['name']}, 'unexpected npm pack package names')
++            result = result[manifest['name']]
++        else:
++            release.require(isinstance(result, list) and len(result) == 1,
++                            'expected one npm pack result')
++            result = result[0]
++        release.require(result.get('name') == manifest['name']
++                        and result.get('version') == manifest['version'],
++                        'npm pack package identity mismatch')
+     archive = output / result['filename']
+     integrity = 'sha512-' + base64.b64encode(hashlib.sha512(archive.read_bytes()).digest()).decode()
+     release.require(integrity == result['integrity'], 'npm tarball integrity mismatch')
+diff --git a/src/main.rs b/src/main.rs
+index 5f66b1c..71d9aba 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -10090,6 +10090,79 @@ fn remember_review_line(buf: &mut VecDeque<String>, line: String) {
+     }
+ }
+
++/// Match only a complete, unambiguous single shell stage from the pinned MSP
++/// schema. Raw command text, titles and suggested prefixes are never authority.
++fn command_prefix_choice(params: &J) -> Option<String> {
++    static PREFIXES: LazyLock<Vec<Vec<String>>> = LazyLock::new(|| {
++        let Ok(raw) = std::env::var("MUSE_ACP_ALLOW_COMMAND_PREFIXES") else {
++            return Vec::new();
++        };
++        match serde_json::from_str::<Vec<Vec<String>>>(&raw) {
++            Ok(prefixes)
++                if prefixes
++                    .iter()
++                    .all(|p| !p.is_empty() && p.iter().all(|w| !w.is_empty())) =>
++            {
++                prefixes
++            }
++            _ => {
++                log("invalid MUSE_ACP_ALLOW_COMMAND_PREFIXES; command prefix approval disabled");
++                Vec::new()
++            }
++        }
++    });
++    if PREFIXES.is_empty() || params.non_empty_str("toolName") != Some("workspace-shell") {
++        return None;
++    }
++    let subject = params.get("subject")?;
++    if subject.non_empty_str("kind") != Some("shell") {
++        return None;
++    }
++    let J::Arr(stages) = subject.get("stages")? else {
++        return None;
++    };
++    let [stage] = stages.as_slice() else {
++        return None;
++    };
++    let requirement = params.get("currentRequirementId")?;
++    if requirement.non_empty_str("approvalId") != params.non_empty_str("approvalId")
++        || requirement.get("sourceIndex").map(j_to_string).as_deref() != Some("0")
++        || stage.get("requirementId").map(j_to_string) != Some(j_to_string(requirement))
++        || stage.get("position").map(j_to_string).as_deref() != Some("1")
++        || stage.get("totalStages").map(j_to_string).as_deref() != Some("1")
++        || !matches!(stage.get("argvComplete"), Some(J::Bool(true)))
++        || stage.get("resolution")?.non_empty_str("kind") != Some("unresolved")
++    {
++        return None;
++    }
++    let J::Arr(words) = stage.get("argv")? else {
++        return None;
++    };
++    let argv: Option<Vec<&str>> = words.iter().map(J::as_str).collect();
++    let argv = argv?;
++    if !PREFIXES
++        .iter()
++        .any(|p| argv.len() >= p.len() && argv.iter().zip(p).all(|(a, b)| *a == b))
++    {
++        return None;
++    }
++    // Require an explicitly offered once grant; perm_options tolerates missing
++    // scopes for interactive compatibility, which is too broad for policy.
++    let J::Arr(offered) = params.get("availableChoices")? else {
++        return None;
++    };
++    let (_, choices) = acp::perm_options(params);
++    let choice = acp::approve_once_choice(&choices)?;
++    offered
++        .iter()
++        .any(|c| {
++            c.non_empty_str("choiceId") == Some(choice.as_str())
++                && c.non_empty_str("scope") == Some("once")
++                && c.non_empty_str("decision") == Some("approved")
++        })
++        .then_some(choice)
++}
++
+ /// Hand an approval to the reviewer instead of the editor. Returns false when
+ /// auto-review is off or the approval cannot be described well enough to try.
+ fn enqueue_review(
+@@ -13553,6 +13626,34 @@ fn open_approval(host: &Arc<Hosts>, stdout: &StdoutShared, sessions: &Sessions,
+     );
+     // Adapter policy answers eligible approvals before the editor sees them.
+     // Ineligible or ambiguous requests fall through to the ordinary prompt.
++    if let Some(choice) = command_prefix_choice(params) {
++        let ver = {
++            let mut map = sessions.lock().unwrap_or_else(|p| p.into_inner());
++            let Some(s) = map.get_mut(&acp_sid) else {
++                return;
++            };
++            if !s.approval_seen.insert(approval_key) {
++                return;
++            }
++            s.ver
++        };
++        send_permission_decision(
++            host,
++            stdout,
++            sessions,
++            &acp_sid,
++            PermissionDecision {
++                msp_sid: msp_sid.to_string(),
++                ver,
++                approval_id,
++                requirement,
++                choice,
++                feedback: None,
++                deny_notice: None,
++            },
++        );
++        return;
++    }
+     if enqueue_review(host, stdout, sessions, &acp_sid, &owner_msp_sid, params) {
+         return;
+     }
+diff --git a/tests/acp_serve.rs b/tests/acp_serve.rs
+index 66e177f..fa5e47e 100644
+--- a/tests/acp_serve.rs
++++ b/tests/acp_serve.rs
+@@ -16925,3 +16925,94 @@ fn an_editor_terminal_approval_names_the_command_it_would_run() {
+     drop(frames);
+     c.finish();
+ }
++
++#[test]
++fn command_prefix_policy_precedes_review_and_preserves_ambiguous_approvals() {
++    use serde_json::json;
++    for case in [
++        "gh",
++        "unmatched",
++        "compound",
++        "incomplete",
++        "other",
++        "conflict",
++        "wrapper",
++        "persistent",
++        "disabled",
++    ] {
++        let requirement = json!({"approvalId":"ap-1", "sourceIndex":0});
++        let mut approval = json!({"currentRequirementId":requirement,
++            "subject":{"kind":"shell", "command":"display text is not authority",
++                "stages":[{"argv":["gh","issue","view"],"argvComplete":true,
++                    "position":1,"totalStages":1,"requirementId":requirement,
++                    "resolution":{"kind":"unresolved"}}]}});
++        match case {
++            "unmatched" => approval["subject"]["stages"][0]["argv"] = json!(["git", "status"]),
++            "wrapper" => {
++                approval["subject"]["stages"][0]["argv"] = json!(["sh", "-c", "gh issue view"])
++            }
++            "compound" => {
++                approval["subject"]["stages"][0]["totalStages"] = json!(2);
++                let mut second = approval["subject"]["stages"][0].clone();
++                second["argv"] = json!(["rm", "file"]);
++                approval["subject"]["stages"]
++                    .as_array_mut()
++                    .unwrap()
++                    .push(second);
++            }
++            "incomplete" => approval["subject"]["stages"][0]["argvComplete"] = json!(false),
++            "other" => approval["subject"]["kind"] = json!("tool"),
++            "conflict" => {
++                approval["subject"]["stages"][0]["requirementId"]["sourceIndex"] = json!(1)
++            }
++            "persistent" => {
++                approval["availableChoices"] =
++                    json!([{"choiceId":"forever","decision":"approved","scope":"localPersistent"}])
++            }
++            _ => {}
++        }
++        let raw = approval.to_string();
++        let prefixes = if case == "disabled" {
++            "[]"
++        } else {
++            r#"[["gh"]]"#
++        };
++        let mut c = Client::spawn(
++            "approval_hang",
++            &[
++                ("FAKE_PREFIX_APPROVAL", &raw),
++                ("MUSE_ACP_ALLOW_COMMAND_PREFIXES", prefixes),
++            ],
++        );
++        let sid = c.new_session(1, "");
++        if case == "gh" {
++            let set = c.req(
++                "session/set_config_option",
++                &format!(
++                    "{{\"sessionId\":\"{sid}\",\"configId\":\"auto_review\",\"value\":\"on\"}}"
++                ),
++            );
++            c.wait_for(&format!("\"id\":{set}"), Duration::from_secs(15));
++        }
++        let _prompt = c.prompt(&sid, "run command");
++        if case == "gh" {
++            c.wait_input("\"choiceId\": \"c-allow\"", Duration::from_secs(15));
++            let decisions = host_requests(&c, "approval/decide");
++            assert_eq!(decisions.len(), 1, "{decisions:?}");
++            assert_eq!(decisions[0]["requirementId"], requirement);
++            assert_eq!(decisions[0]["choiceId"], "c-allow");
++            assert_eq!(host_requests(&c, "turn/start").len(), 1, "no reviewer turn");
++            assert!(
++                !c.frames
++                    .lock()
++                    .unwrap()
++                    .iter()
++                    .any(|f| f.contains("session/request_permission"))
++            );
++        } else {
++            c.wait_for("request_permission", Duration::from_secs(15));
++            assert!(host_requests(&c, "approval/decide").is_empty(), "{case}");
++        }
++        c.finish();
++    }
++}
+diff --git a/tests/fixtures/fake_serve.py b/tests/fixtures/fake_serve.py
+index 7eaff8c..a82b98f 100755
+--- a/tests/fixtures/fake_serve.py
++++ b/tests/fixtures/fake_serve.py
+@@ -313,6 +313,8 @@ APPROVAL_PARAMS = {
+          "decision": "denied", "scope": "once"},
+     ],
+ }
++if os.environ.get("FAKE_PREFIX_APPROVAL"):
++    APPROVAL_PARAMS.update(json.loads(os.environ["FAKE_PREFIX_APPROVAL"]))
+ if os.environ.get("FAKE_APPROVAL_SUBJECT", "") == "file-write":
+     APPROVAL_PARAMS["toolName"] = "workspace-files"
+     APPROVAL_PARAMS["subject"] = {

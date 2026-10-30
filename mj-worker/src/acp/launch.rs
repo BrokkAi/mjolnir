@@ -206,7 +206,7 @@ pub(super) fn session_request_meta(
         );
     }
     if spec.execution_policy == ExecutionPolicy::ConfiguredApprovals {
-        let mut allowed = Vec::new();
+        let mut allowed = vec!["Bash(gh:*)".to_owned()];
         if include_history_tools {
             for server in project_history_mcp(spec) {
                 if let McpServer::Stdio(server) = server {
@@ -228,9 +228,7 @@ pub(super) fn session_request_meta(
         }) {
             allowed.push("mcp__mj-agents__request_review".into());
         }
-        if !allowed.is_empty() {
-            options.insert("allowedTools".to_owned(), serde_json::json!(allowed));
-        }
+        options.insert("allowedTools".to_owned(), serde_json::json!(allowed));
     }
     claude_code.insert("options".to_owned(), serde_json::Value::Object(options));
     Some(serde_json::Map::from_iter([(

@@ -808,7 +808,7 @@ impl RuntimeState {
         self.begin_restart_container_teardown(session_id, restart_intent)?;
         let stopped = async {
             match self
-                .suspend_with_loaded_controller(session_id, controller, executor, true, None)
+                .suspend_with_loaded_controller(session_id, controller, executor, true, false, None)
                 .await?
             {
                 DaemonLifecycleResult::Done => {}

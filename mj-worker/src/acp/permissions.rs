@@ -408,6 +408,132 @@ pub(super) fn allow_permission_response(
         })
 }
 
+/// Authorize only an execute tool with a single literal gh invocation. Titles
+/// and display summaries are never evidence of what will execute.
+pub(super) fn gh_permission_response(
+    request: &RequestPermissionRequest,
+    input: Option<&serde_json::Value>,
+) -> Option<RequestPermissionResponse> {
+    if request.tool_call.fields.kind != Some(agent_client_protocol::schema::v1::ToolKind::Execute) {
+        return None;
+    }
+    let input = input?.as_object()?;
+    // Conflicting command representations are ambiguous.
+    let command = match (input.get("command"), input.get("cmd")) {
+        (Some(command), None) | (None, Some(command)) => command,
+        _ => return None,
+    };
+    // DSH's run_command transports the executable separately from argv.
+    let normalized;
+    let command = if let Some(args) = input.get("args") {
+        let executable = command.as_str()?;
+        let args = args.as_array()?;
+        if args.len() > 1023 || executable.len() > 16 * 1024 {
+            return None;
+        }
+        let mut size = executable.len();
+        for arg in args {
+            size = size.checked_add(arg.as_str()?.len())?;
+            if size > 16 * 1024 {
+                return None;
+            }
+        }
+        normalized = serde_json::Value::Array(
+            std::iter::once(serde_json::Value::String(executable.to_owned()))
+                .chain(args.iter().cloned())
+                .collect(),
+        );
+        &normalized
+    } else {
+        command
+    };
+    let authorized = match command {
+        serde_json::Value::String(script) => gh_script(script),
+        serde_json::Value::Array(argv) if argv.len() <= 1024 => {
+            let argv = argv
+                .iter()
+                .map(serde_json::Value::as_str)
+                .collect::<Option<Vec<_>>>()?;
+            if argv.iter().map(|arg| arg.len()).sum::<usize>() > 16 * 1024 {
+                return None;
+            }
+            match argv.as_slice() {
+                ["gh", ..] => true,
+                [shell, "-c" | "-lc", script]
+                    if matches!(
+                        *shell,
+                        "bash" | "sh" | "/bin/bash" | "/bin/sh" | "/usr/bin/bash" | "/usr/bin/sh"
+                    ) =>
+                {
+                    gh_script(script)
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+    authorized
+        .then(|| allow_permission_response(request))
+        .flatten()
+}
+
+fn gh_script(script: &str) -> bool {
+    if script.len() > 16 * 1024 {
+        return false;
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
+        return false;
+    }
+    let Some(tree) = parser.parse(script, None) else {
+        return false;
+    };
+    let root = tree.root_node();
+    if root.has_error() || root.named_child_count() != 1 {
+        return false;
+    }
+    let Some(command) = root.named_child(0) else {
+        return false;
+    };
+    if command.kind() != "command" || command.named_child_count() < 1 {
+        return false;
+    }
+    // Reject terminators too: the complete script is exactly the command.
+    if script.trim() != &script[command.byte_range()] {
+        return false;
+    }
+    let Some(name) = command.child_by_field_name("name") else {
+        return false;
+    };
+    if &script[name.byte_range()] != "gh" {
+        return false;
+    }
+    fn literal(node: tree_sitter::Node<'_>, depth: usize) -> bool {
+        if depth > 16
+            || !matches!(
+                node.kind(),
+                "command"
+                    | "command_name"
+                    | "word"
+                    | "number"
+                    | "string"
+                    | "string_content"
+                    | "raw_string"
+                    | "concatenation"
+            )
+        {
+            return false;
+        }
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor)
+            .all(|child| literal(child, depth + 1))
+    }
+    literal(command, 0)
+}
+
 /// Calls to Mjolnir's own MCP servers, for a harness that cannot be told to
 /// trust them. Under configured approvals DSH asks before every MCP tool call
 /// and has no per-server rule, so the worker allows calls to the servers this

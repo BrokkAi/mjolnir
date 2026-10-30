@@ -35,7 +35,7 @@ use crate::relay::{
     RelayResponseEnvelope, RelayResponsePayload, invalid_relay_request_response,
     unsupported_relay_method_response,
 };
-use mj_core::config::HarnessKind;
+use mj_core::config::{ExecutionPolicy, HarnessKind};
 use mj_core::subprocess::terminate_process_group;
 use mj_core::worker_protocol::{DecodedRelayRequest, decode_relay_request};
 
@@ -1577,6 +1577,62 @@ async fn prepare_and_start_harness(
     // Persist only explicit and Mjolnir-generated overrides, never shell exports.
     config.environment = session_environment.clone();
 
+    if config.execution_policy == ExecutionPolicy::ConfiguredApprovals
+        && matches!(
+            config.harness,
+            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::OpenCode | HarnessKind::Mimo
+        )
+    {
+        let budget = preparation_step(
+            root,
+            status,
+            "command-permissions",
+            LOCAL_PREPARATION_STEP_TIMEOUT,
+            cancel,
+        )
+        .await?;
+        let home = credentials
+            .as_ref()
+            .map_err(|message| anyhow::anyhow!("{message}"))?
+            .home
+            .clone();
+        let root = root.to_owned();
+        let session_id = config.session_id.clone();
+        let harness = config.harness;
+        let policy = config.execution_policy;
+        let native_base_environment = base_environment.clone();
+        let native_explicit_environment = config.environment.clone();
+        let mut environment = native_base_environment.clone();
+        environment.extend(native_explicit_environment.clone());
+        config.environment =
+            bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
+                if step_cancel.is_cancelled() {
+                    bail!("preparation cancelled before configuring command permissions");
+                }
+                super::gh_rules::configure_toml_gh_rules(
+                    &root,
+                    &session_id,
+                    &home,
+                    harness,
+                    policy,
+                )?;
+                super::json_gh_rules::configure_json_gh_rules(
+                    &root,
+                    &session_id,
+                    &home,
+                    harness,
+                    policy,
+                    &mut environment,
+                )?;
+                environment.retain(|name, value| {
+                    native_explicit_environment.contains_key(name)
+                        || native_base_environment.get(name) != Some(value)
+                });
+                Ok(environment)
+            })
+            .await?;
+    }
+
     let mut claude_mailbox_hook_available = false;
     let profile_registration = match config.harness {
         HarnessKind::Codex => {
@@ -1594,6 +1650,7 @@ async fn prepare_and_start_harness(
                 .home
                 .clone();
             let root = root.to_owned();
+            let session_id = config.session_id.clone();
             let mut environment = config.environment.clone();
             let role = subagent_role;
             let policy = config.execution_policy;
@@ -1606,6 +1663,7 @@ async fn prepare_and_start_harness(
                     }
                     let registered = super::subagents::configure_codex_profile(
                         &root,
+                        &session_id,
                         &home,
                         &mut environment,
                         role,

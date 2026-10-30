@@ -889,6 +889,34 @@ fn golden_dashboard_dialogs() {
 
     let mut output = String::new();
 
+    for checkpoint in [false, true] {
+        let mut session = stopped_session();
+        if !checkpoint {
+            session.checkpoint = None;
+        }
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.show_close_failure(
+            "session-1".into(),
+            "export target checkpoint failed with status 1: repository 'bifrost': cannot checkpoint nested Git repository directory at /workspace/bifrost/.scratch/s47-landing/master-check/: for a disposable scratch worktree, exclude this path using the outer repository's .git/info/exclude; otherwise preserve its work separately",
+        );
+        let lines = drawn(&mut dashboard, 100, 28);
+        append_dialog_render(
+            &mut output,
+            &format!("nested repository failure, checkpoint={checkpoint}"),
+            100,
+            28,
+            &lines,
+        );
+        let action = dashboard.handle_key(key(KeyCode::Char('i')));
+        assert_eq!(
+            action,
+            DashboardAction::IgnoreNestedRepositoriesAndSuspend {
+                session_id: "session-1".into()
+            }
+        );
+        writeln!(output, "action: {action:?}").unwrap();
+    }
+
     let mut targets = dashboard_with_session(running_session());
     targets.cycle_focus(false);
     targets.cycle_focus(false);

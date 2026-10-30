@@ -36,6 +36,20 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
         } => &["Cancel", "Destroy session", "Destroy and delete branch"],
         Confirmation::DestroyStopped { .. } => &["Cancel", "Destroy session"],
         Confirmation::CloseFailed {
+            can_discard: false,
+            error,
+            ..
+        } if nested_repository_checkpoint_failure(error) => &["Cancel", "Ignore and Suspend"],
+        Confirmation::CloseFailed {
+            can_discard: true,
+            error,
+            ..
+        } if nested_repository_checkpoint_failure(error) => &[
+            "Cancel",
+            "Discard changes since checkpoint…",
+            "Ignore and Suspend",
+        ],
+        Confirmation::CloseFailed {
             can_discard: false, ..
         } => &["Cancel", "Retry suspension"],
         Confirmation::CloseFailed {
@@ -1419,17 +1433,28 @@ pub(crate) fn confirmation_body(
         ),
         Confirmation::CloseFailed {
             session_id, error, ..
-        } => (
-            " Suspension could not complete ",
-            vec![
+        } => {
+            let mut lines = vec![
                 session_line(session_id, session_name, width),
                 Line::raw(""),
                 Line::styled(
                     format!("Suspension failed: {error}"),
                     Style::default().fg(theme::palette().warning),
                 ),
-            ],
-        ),
+            ];
+            if nested_repository_checkpoint_failure(error) {
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    "Ignore and Suspend omits untracked nested Git repositories from the recovery copy.",
+                    Style::default().fg(theme::palette().warning),
+                ));
+                lines.push(Line::styled(
+                    "Files inside them will not be recoverable after suspension removes the environment.",
+                    Style::default().fg(theme::palette().warning),
+                ));
+            }
+            (" Suspension could not complete ", lines)
+        }
         Confirmation::RestartAgent {
             session_id,
             interrupting,
