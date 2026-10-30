@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use mj_core::config::{
-    GithubAppConfig, GithubPermissionLevel, GithubPermissionSet, ProjectBundle, ProjectRepository,
-    valid_github_owner_login,
+    GithubAppConfig, GithubConfig, GithubPermissionLevel, GithubPermissionSet, ProjectBundle,
+    ProjectRepository, valid_github_owner_login,
 };
 use mj_core::remote_git::{github_owner_repo, resolve_repository};
 
@@ -701,6 +701,9 @@ impl Controller {
         &self,
         bundle_id: &str,
     ) -> std::result::Result<(), GithubBundleSelectionError> {
+        if self.config.github.session_token_path.is_some() {
+            return Ok(());
+        }
         let Some(app) = self.config.github.app.as_ref() else {
             return Ok(());
         };
@@ -731,6 +734,9 @@ impl Controller {
         &self,
         session_id: &str,
     ) -> Result<Option<String>> {
+        if let Some(token) = session_token_override(&self.config.github).await? {
+            return Ok(Some(token));
+        }
         if self.config.github.app.is_none() {
             return Ok(controller_github_token().await);
         }
@@ -807,25 +813,105 @@ impl Controller {
 
 pub(crate) async fn github_token_for_session(
     session_id: String,
-    github_app_configured: bool,
+    github: GithubConfig,
 ) -> Result<Option<String>> {
-    if !github_app_configured {
+    if let Some(token) = session_token_override(&github).await? {
+        return Ok(Some(token));
+    }
+    if github.app.is_none() {
         return Ok(controller_github_token().await);
     }
     let controller = tokio::task::spawn_blocking(Controller::load)
         .await
         .context("load controller for GitHub credential sync")??;
-    if controller.config.github.app.is_none() {
-        return Ok(controller_github_token().await);
-    }
     controller.github_token_for_session(&session_id).await
 }
 
-pub(crate) async fn github_app_token_for_session(session_id: String) -> Result<Option<String>> {
+pub(crate) async fn renew_session_github_app_token(session_id: String) -> Result<Option<String>> {
     let controller = tokio::task::spawn_blocking(Controller::load)
         .await
         .context("load controller for GitHub App export token")??;
+    // Export may renew an App token, but must not replace an explicit PAT.
+    if controller.config.github.session_token_path.is_some() {
+        return Ok(None);
+    }
     controller.github_app_token_for_session(&session_id).await
+}
+
+/// Read the controller-side override afresh; missing is an error when configured.
+pub(super) fn configured_session_github_token(github: &GithubConfig) -> Result<Option<String>> {
+    use std::io::Read;
+
+    let Some(path) = &github.session_token_path else {
+        return Ok(None);
+    };
+    let path =
+        mj_core::path_input::expand_local(path).context("resolve [github] session_token_path")?;
+    let read = || -> Result<String> {
+        ensure!(
+            fs::metadata(&path)?.is_file(),
+            "session token must be a regular file"
+        );
+        let file = fs::File::open(&path)?;
+        let mut bytes = Vec::new();
+        file.take(mj_core::credentials::MAX_GITHUB_TOKEN_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        Ok(mj_core::credentials::validate_github_token(&bytes)?.to_owned())
+    };
+    read()
+        .map(Some)
+        .with_context(|| format!("read [github] session_token_path {}", path.display()))
+}
+
+async fn session_token_override(github: &GithubConfig) -> Result<Option<String>> {
+    if github.session_token_path.is_none() {
+        return Ok(None);
+    }
+    let github = github.clone();
+    tokio::task::spawn_blocking(move || configured_session_github_token(&github))
+        .await
+        .context("read session GitHub token task stopped")?
+}
+
+/// Refresh the override before a worker starts, including retained workers.
+/// Lifecycle ownership excludes periodic reconciliation while this runs.
+pub(crate) fn install_configured_session_github_token(
+    github: &GithubConfig,
+    executor: &impl CommandExecutor,
+    locator: &mj_core::targets::TargetLocator,
+    worker_root: &str,
+) -> Result<()> {
+    let Some(token) = configured_session_github_token(github)? else {
+        return Ok(());
+    };
+    const INSTALL: &str = r#"set -eu
+umask 077
+root=$1
+path=$root/github-token
+if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
+    echo 'session GitHub token is not a regular file' >&2; exit 1
+fi
+temporary=$(mktemp "$root/github-token.XXXXXXXX")
+trap 'rm -f -- "$temporary"' EXIT
+cat > "$temporary"
+mv -f -- "$temporary" "$path"
+"#;
+    let mut bytes = token.into_bytes();
+    bytes.push(b'\n');
+    let command = crate::targets::locator_command(
+        locator,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            INSTALL.into(),
+            "mj-session-github-token".into(),
+            worker_root.into(),
+        ],
+    )
+    .purpose("install configured session GitHub token")
+    .with_sensitive_stdin(bytes);
+    super::execute_checked(executor, command)?;
+    Ok(())
 }
 
 pub(super) fn github_repositories(
@@ -977,6 +1063,124 @@ mod tests {
     use super::*;
 
     const TEST_KEY: &[u8] = include_bytes!("testdata/github-app-test.pem");
+
+    #[tokio::test]
+    async fn session_pat_precedes_app_auth_and_rotation_never_falls_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session token");
+        let mut controller = Controller {
+            config: mj_core::config::Config::default(),
+            state: mj_core::state::State::default(),
+        };
+        controller.config.github.session_token_path = Some(path.clone());
+        controller.config.github.app = Some(test_config());
+        // There is deliberately no session or App key: neither may be consulted.
+        for token in ["github_pat_first", "github_pat_rotated"] {
+            fs::write(&path, format!("{token}\n")).unwrap();
+            assert_eq!(
+                controller
+                    .github_token_for_session("absent")
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some(token)
+            );
+            assert_eq!(
+                github_token_for_session("absent".into(), controller.config.github.clone())
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some(token)
+            );
+        }
+        for invalid in [
+            Vec::new(),
+            b"token with spaces".to_vec(),
+            vec![b'a'; mj_core::credentials::MAX_GITHUB_TOKEN_BYTES + 1],
+        ] {
+            fs::write(&path, invalid).unwrap();
+            let error = controller
+                .github_token_for_session("absent")
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("session_token_path"));
+        }
+        fs::remove_file(&path).unwrap();
+        let error = controller
+            .github_token_for_session("absent")
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("session_token_path"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_pat_installation_rotates_atomically_without_exposing_the_secret() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct ObservedExecutor;
+        impl CommandExecutor for ObservedExecutor {
+            fn execute(
+                &self,
+                command: &crate::targets::CommandSpec,
+            ) -> Result<crate::targets::CommandOutput> {
+                for token in ["github_pat_first", "github_pat_rotated"] {
+                    assert!(!format!("{command:?}").contains(token));
+                    assert!(!serde_json::to_string(command).unwrap().contains(token));
+                }
+                ProcessExecutor.execute(command)
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("worker 資料 with spaces");
+        fs::create_dir(&root).unwrap();
+        let path = directory.path().join("source");
+        let github = GithubConfig {
+            session_token_path: Some(path.clone()),
+            ..Default::default()
+        };
+        let locator = mj_core::targets::TargetLocator::LocalBare {
+            worker_root: root.to_string_lossy().into_owned(),
+        };
+        for token in ["github_pat_first", "github_pat_rotated"] {
+            fs::write(&path, token).unwrap();
+            install_configured_session_github_token(
+                &github,
+                &ObservedExecutor,
+                &locator,
+                root.to_str().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read_to_string(root.join("github-token")).unwrap(),
+                format!("{token}\n")
+            );
+            assert_eq!(
+                fs::metadata(root.join("github-token"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        // A malicious destination must not redirect a credential write.
+        let other = directory.path().join("unrelated");
+        fs::write(&other, "unchanged").unwrap();
+        fs::remove_file(root.join("github-token")).unwrap();
+        std::os::unix::fs::symlink(&other, root.join("github-token")).unwrap();
+        assert!(
+            install_configured_session_github_token(
+                &github,
+                &ObservedExecutor,
+                &locator,
+                root.to_str().unwrap()
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(other).unwrap(), "unchanged");
+    }
 
     #[derive(Clone)]
     struct FakeGithub {

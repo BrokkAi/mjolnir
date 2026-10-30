@@ -291,7 +291,7 @@ impl Controller {
                     desired_build: String::new(),
                 },
             )?;
-            start_worker_durably(&owner, target, executor, &backend, &worker_root)
+            start_worker_durably(&owner, target, executor, &backend, &worker_root, &self.config.github)
                 .context(RESTART_FROM_PARKED.start)
                 .map_err(|error| explain_process_exhaustion(error, &backend, session_id))?;
             // The active record and boot intent are durable. Handoff may cancel

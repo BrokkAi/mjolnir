@@ -377,7 +377,7 @@ pub(super) async fn reconcile_profile_guarded(
                         let github_token = if target.sync_github_token {
                             crate::controller::github_token_for_session(
                                 target.session_id.clone(),
-                                target.github_app_configured,
+                                target.github.clone(),
                             )
                             .await?
                         } else {
@@ -399,7 +399,7 @@ pub(super) async fn reconcile_profile_guarded(
                     let github_token = if target.sync_github_token {
                         crate::controller::github_token_for_session(
                             target.session_id.clone(),
-                            target.github_app_configured,
+                            target.github.clone(),
                         )
                         .await
                     } else {

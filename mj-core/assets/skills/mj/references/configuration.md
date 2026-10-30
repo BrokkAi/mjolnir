@@ -671,6 +671,32 @@ A configuration that uses a reference needs a Mjolnir that understands it;
 an older build reports the entry as an invalid type. Plain strings keep
 working everywhere.
 
+## Session GitHub token `[github]`
+
+Set a controller-side token file to give sessions a dedicated GitHub PAT instead
+of the host GitHub CLI login:
+
+```toml
+[github]
+session_token_path = "~/.secrets/gh_agents_pat"
+```
+
+The path must be absolute or start with `~/`; it is read on the daemon host.
+The file contains just the token, optionally followed by a newline. The token
+is never written into configuration or checkpoints. A configured file that
+cannot be read or validated reports an error instead of falling back to a
+broader credential.
+
+This override takes precedence over GitHub App session tokens and the host
+`GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token` lookup. It applies to local bare,
+SSH, EC2, local container, remote container, and sub-agent sessions. Every
+start, restart, and resume reads the latest file contents. Ordinary credential
+sync can also update running sessions, normally within 60 seconds. Containers
+continue receiving the selected credential as `GH_TOKEN` at creation.
+Removing the setting restores the previous App/host credential selection.
+The host's GitHub CLI login and explicit `mj github-token` App tokens are
+unchanged.
+
 ## GitHub App `[github.app]`
 
 An optional GitHub App can provide installation tokens for private bundle
@@ -699,8 +725,7 @@ Each managed session may use repositories from only one App installation. A
 bundle that resolves to multiple installations is rejected when the session is
 created. App tokens are refreshed before they approach expiry and are delivered
 to running remote/container sessions during credential sync. Local bare
-sessions do not receive periodic refresh; an App token used there expires
-within at most one hour.
+sessions also receive periodic refresh when session credentials are configured.
 
 See [GitHub App credentials](/github-app/) for creating an App and setting up
 its repository permissions.
@@ -1182,7 +1207,7 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_TURN_TOOL_STALL_TIMEOUT_MS` | Milliseconds one tool call may run before the worker ends the turn the same way. Off unless set to a positive value. |
 | `MJ_GITHUB_CLI_BIN` | Path or command name for the GitHub CLI used to read tokens. |
 | `RUST_LOG` | Tracing/log filter for Mjolnir processes. |
-| `GH_TOKEN`, `GITHUB_TOKEN` | GitHub token source, checked in that order before `gh auth token`, for private clones and live non-local session sync. |
+| `GH_TOKEN`, `GITHUB_TOKEN` | GitHub token source, checked in that order before `gh auth token`, for private clones and live non-local session sync when no session token override or App is configured. |
 | `GIT_SSH_COMMAND` | Overrides Mjolnir's non-interactive SSH command for checkpoint/archive Git operations. |
 
 Worker lookup checks `MJ_WORKER_BINARY`, `MJ_WORKER_DIR`, packaged or sibling

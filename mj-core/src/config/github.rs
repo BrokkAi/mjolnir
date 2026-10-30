@@ -3,13 +3,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 /// Optional GitHub integration settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GithubConfig {
+    /// Controller-side token file distributed to sessions instead of App or
+    /// host CLI credentials. Its contents are never serialized here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_token_path: Option<PathBuf>,
     /// GitHub App authentication. When absent, the controller uses its
     /// existing `GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token` lookup.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -21,7 +25,18 @@ pub struct GithubConfig {
 
 impl GithubConfig {
     pub fn is_default(&self) -> bool {
-        self.app.is_none() && self.watch.is_default()
+        self.session_token_path.is_none() && self.app.is_none() && self.watch.is_default()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if let Some(path) = &self.session_token_path {
+            crate::path_input::validate_absolute_input(path)
+                .context("[github] session_token_path")?;
+        }
+        if let Some(app) = &self.app {
+            app.validate()?;
+        }
+        Ok(())
     }
 }
 

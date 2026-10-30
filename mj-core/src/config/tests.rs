@@ -1400,6 +1400,7 @@ fn github_app_configuration_is_optional_and_round_trips() {
             GithubPermissionLevel::Read,
         )])),
     });
+    configured.github.session_token_path = Some(PathBuf::from("~/.secrets/gh_agents_pat"));
     configured.github.watch.interval_seconds = 30;
     configured.github.watch.api_base = "http://127.0.0.1:9411".into();
     configured.github.watch.enabled = false;

@@ -3041,7 +3041,7 @@ impl SubagentBackend for ApiBackend {
             if target.as_ref().is_some_and(|target| {
                 !matches!(target, mj_core::state::TargetLocator::LocalBare { .. })
             }) && let Some(token) =
-                crate::controller::github_app_token_for_session(session_id.clone())
+                crate::controller::renew_session_github_app_token(session_id.clone())
                     .await
                     .map_err(ExportError::Failed)?
             {

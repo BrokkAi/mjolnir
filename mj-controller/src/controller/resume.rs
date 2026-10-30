@@ -439,7 +439,9 @@ impl Controller {
                     .expect("accepted project source resolved above"),
             );
         }
-        let github_token = if let Some(app) = self.config.github.app.as_ref() {
+        let github_token = if self.config.github.session_token_path.is_some() {
+            self.github_token_for_session(session_id).await?
+        } else if let Some(app) = self.config.github.app.as_ref() {
             if let Some(project) = &project {
                 let bundle = project.bundle.clone();
                 let network_sources = project.network_sources.clone();
@@ -957,6 +959,7 @@ impl Controller {
                         executor,
                         &backend,
                         &worker_root,
+                        &self.config.github,
                     )?;
                     connect_started_worker(&spec, session_id, executor, &backend, &worker_root)
                         .await?

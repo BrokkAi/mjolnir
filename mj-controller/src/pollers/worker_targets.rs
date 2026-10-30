@@ -127,7 +127,6 @@ pub(crate) fn credential_sync_targets_from_sources(
                     return None;
                 }
             };
-            let sync_github_token = target_syncs_github_token(session.target.as_ref());
             let aws_credentials = match controller.aws_credential_source(&session.id) {
                 Ok(source) => source,
                 Err(error) => {
@@ -146,8 +145,10 @@ pub(crate) fn credential_sync_targets_from_sources(
                         session,
                         profile.kind,
                     ),
-                sync_github_token,
-                github_app_configured: controller.config.github.app.is_some(),
+                github: controller.config.github.clone(),
+                sync_github_token: target_syncs_github_token(session.target.as_ref())
+                    || controller.config.github.session_token_path.is_some()
+                    || controller.config.github.app.is_some(),
                 skills_scope: session.target.as_ref()?.skills_scope(),
                 spec,
             })

@@ -1218,6 +1218,13 @@ fn a_probe_that_prints_something_else_is_an_error() {
 // Hard-won: a6ad3cc: concurrent checkpoint, upgrade, and recovery paths shared worker launch logs
 #[test]
 fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
+    let token_dir = tempfile::tempdir().unwrap();
+    let token_path = token_dir.path().join("agent-pat");
+    std::fs::write(&token_path, "github_pat_at_start").unwrap();
+    let github = mj_core::config::GithubConfig {
+        session_token_path: Some(token_path),
+        ..Default::default()
+    };
     struct RecordingExecutor {
         commands: RefCell<Vec<CommandSpec>>,
     }
@@ -1256,10 +1263,22 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
             &executor,
             &locator,
             &targets::worker_root(&locator, "13131313131313131313131313131313").unwrap(),
+            &github,
         )
         .unwrap();
 
         let commands = executor.commands.borrow();
+        assert_eq!(
+            commands[0].purpose,
+            "install configured session GitHub token"
+        );
+        assert!(
+            commands[1]
+                .args
+                .iter()
+                .any(|arg| arg.contains("worker-launch.XXXXXXXX"))
+        );
+        assert!(!format!("{commands:?}").contains("github_pat_at_start"));
         let script = commands
             .iter()
             .flat_map(|command| command.args.iter())
