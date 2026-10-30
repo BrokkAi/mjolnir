@@ -1079,10 +1079,11 @@ fn a_new_credential_signal_waits_out_the_cooldown_without_being_lost() {
 }
 
 /// Every harness's session on this machine is reconciled the way its session in
-/// a container is: against the same canonical profile home, with only the
-/// GitHub token left out. A local session an earlier release started from the
+/// a container is: against the same canonical profile home and GitHub source.
+/// A local session an earlier release started from the
 /// profile home itself is left out while its staged home is a link to that
 /// home, because a push would go through the link into the person's own home.
+// Hard-won: #1432: removing a PAT override left its old copy in local workers.
 #[test]
 #[cfg_attr(windows, ignore = "#1300: fails on a Windows controller")]
 fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
@@ -1144,7 +1145,7 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
             on_this_machine[0].skips_login_file_sync,
             in_container[0].skips_login_file_sync
         );
-        assert!(!on_this_machine[0].sync_github_token, "{kind:?}");
+        assert!(on_this_machine[0].sync_github_token, "{kind:?}");
         controller.config.github.session_token_path = Some(directory.path().join("agent-pat"));
         let with_pat = credential_sync_targets(&controller);
         assert!(with_pat[0].sync_github_token, "{kind:?}");
@@ -1343,7 +1344,7 @@ fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_conta
 }
 
 #[test]
-fn github_tokens_sync_to_every_remote_target_but_raw_localhost() {
+fn github_tokens_sync_to_every_session_target() {
     use mj_core::state::TargetLocator;
 
     let remotes = [
@@ -1380,11 +1381,9 @@ fn github_tokens_sync_to_every_remote_target_but_raw_localhost() {
     for target in &remotes {
         assert!(target_syncs_github_token(Some(target)), "{target:?}");
     }
-    assert!(!target_syncs_github_token(Some(
-        &TargetLocator::LocalBare {
-            worker_root: "/tmp/worker".into(),
-        }
-    )));
+    assert!(target_syncs_github_token(Some(&TargetLocator::LocalBare {
+        worker_root: "/tmp/worker".into(),
+    })));
     assert!(!target_syncs_github_token(None));
 }
 

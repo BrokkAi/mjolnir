@@ -146,9 +146,7 @@ pub(crate) fn credential_sync_targets_from_sources(
                         profile.kind,
                     ),
                 github: controller.config.github.clone(),
-                sync_github_token: target_syncs_github_token(session.target.as_ref())
-                    || controller.config.github.session_token_path.is_some()
-                    || controller.config.github.app.is_some(),
+                sync_github_token: target_syncs_github_token(session.target.as_ref()),
                 skills_scope: session.target.as_ref()?.skills_scope(),
                 spec,
             })
@@ -158,10 +156,6 @@ pub(crate) fn credential_sync_targets_from_sources(
 
 pub(super) fn target_syncs_github_token(target: Option<&mj_core::state::TargetLocator>) -> bool {
     target.is_some()
-        && !matches!(
-            target,
-            Some(mj_core::state::TargetLocator::LocalBare { .. })
-        )
 }
 
 /// Revalidate a copied target while holding background admission: a lifecycle
