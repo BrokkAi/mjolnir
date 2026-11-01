@@ -363,25 +363,44 @@ pub async fn wait_for_web_viewer(client: &mut DaemonClient) -> Result<String> {
     wait_for_web_viewer_with_timeout(client, START_TIMEOUT).await
 }
 
-async fn wait_for_web_viewer_with_timeout(
+/// Wait for the web access publication that owns all local API connection
+/// details: advertised URL, listener address, and certificate pin.
+pub async fn wait_for_web_access(
+    client: &mut DaemonClient,
+) -> Result<mj_client::web::WebViewerAccess> {
+    wait_for_web_access_with_timeout(client, START_TIMEOUT).await
+}
+
+async fn wait_for_web_access_with_timeout(
     client: &mut DaemonClient,
     timeout: Duration,
-) -> Result<String> {
+) -> Result<mj_client::web::WebViewerAccess> {
     tokio::time::timeout(timeout, async {
         loop {
-            match client.status().await?.phone_status {
-                WebViewerStatus::Ready { viewer_url, .. } => return Ok(viewer_url),
-                WebViewerStatus::Starting => tokio::time::sleep(RETRY_DELAY).await,
-                WebViewerStatus::Disabled => bail!("the web viewer is disabled in config.toml"),
-                WebViewerStatus::Stopped => bail!("the web viewer stopped during startup"),
-                WebViewerStatus::Error { message } => {
-                    bail!("the web viewer failed to start: {message}")
+            match client.web_access().await? {
+                access @ mj_client::web::WebViewerAccess::Ready { .. } => return Ok(access),
+                mj_client::web::WebViewerAccess::Starting => tokio::time::sleep(RETRY_DELAY).await,
+                mj_client::web::WebViewerAccess::Failed { message, .. } => {
+                    bail!("the web viewer failed to start: {message}");
+                }
+                mj_client::web::WebViewerAccess::Unavailable(reason) => {
+                    bail!("the web viewer is unavailable: {reason}");
                 }
             }
         }
     })
     .await
     .context("timed out waiting for the web viewer to become ready")?
+}
+
+async fn wait_for_web_viewer_with_timeout(
+    client: &mut DaemonClient,
+    timeout: Duration,
+) -> Result<String> {
+    match wait_for_web_access_with_timeout(client, timeout).await? {
+        mj_client::web::WebViewerAccess::Ready { viewer_url, .. } => Ok(viewer_url),
+        _ => unreachable!("wait_for_web_access_with_timeout returns only Ready"),
+    }
 }
 
 /// How the running daemon's build stands against this client's.
@@ -1303,7 +1322,7 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     async fn viewer_fixture(
-        statuses: Vec<WebViewerStatus>,
+        statuses: Vec<mj_client::web::WebViewerAccess>,
     ) -> (DaemonClient, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let metadata = DaemonMetadata {
@@ -1318,8 +1337,8 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut statuses = statuses.into_iter();
             while let Ok(request) = read_frame::<RequestEnvelope>(&mut stream).await {
-                assert!(matches!(request.action, DaemonAction::Status));
-                let Some(phone_status) = statuses.next() else {
+                assert!(matches!(request.action, DaemonAction::WebViewerAccess));
+                let Some(access) = statuses.next() else {
                     // An exhausted script deliberately leaves this request
                     // unanswered. The timed-out client closes it; no response
                     // write can race with that expected disconnect.
@@ -1333,13 +1352,7 @@ mod tests {
                     &ResponseEnvelope {
                         protocol_version: request.protocol_version,
                         request_id: request.request_id,
-                        result: Ok(DaemonReply::Status(DaemonStatus {
-                            pid: 1,
-                            started_at: "test".into(),
-                            build_version: "test".into(),
-                            attached_clients: 0,
-                            phone_status,
-                        })),
+                        result: Ok(DaemonReply::WebViewerAccess(access)),
                     },
                 )
                 .await
@@ -1352,13 +1365,15 @@ mod tests {
     #[tokio::test]
     async fn api_and_desktop_wait_for_the_viewer_without_a_retry_command() {
         let (mut client, task) = viewer_fixture(vec![
-            WebViewerStatus::Starting,
-            WebViewerStatus::Starting,
-            WebViewerStatus::Ready {
+            mj_client::web::WebViewerAccess::Starting,
+            mj_client::web::WebViewerAccess::Starting,
+            mj_client::web::WebViewerAccess::Ready {
                 viewer_url: "http://127.0.0.1:1234".into(),
                 viewer_code: "test".into(),
                 qr_login_url: None,
                 fallback_reason: None,
+                local_address: Some("127.0.0.1:1234".parse().unwrap()),
+                certificate_sha256: None,
             },
         ])
         .await;
@@ -1373,9 +1388,11 @@ mod tests {
     #[tokio::test]
     async fn viewer_startup_reports_failure_and_bounds_a_stalled_start() {
         let (mut client, task) = viewer_fixture(vec![
-            WebViewerStatus::Starting,
-            WebViewerStatus::Error {
+            mj_client::web::WebViewerAccess::Starting,
+            mj_client::web::WebViewerAccess::Failed {
+                address: "127.0.0.1:1234".parse().unwrap(),
                 message: "port unavailable".into(),
+                port_conflict: false,
             },
         ])
         .await;

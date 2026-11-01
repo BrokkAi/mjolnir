@@ -38,6 +38,7 @@ futures = "0.3"
 libc.workspace = true
 ratatui.workspace = true
 reqwest = { workspace = true, features = ["json", "query"] }
+url.workspace = true
 # The API client pins the certificate the daemon publishes for its viewer.
 rustls.workspace = true
 serde.workspace = true

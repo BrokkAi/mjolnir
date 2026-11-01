@@ -117,7 +117,7 @@ async fn serve_inner(
             match listener {
                 Ok(listener) => {
                     address = listener.local_addr().context("read reserved viewer port")?;
-                    report(ready_at(&ready, address.port())?);
+                    report(ready_at(&ready, address)?);
                     let result = run_server_on_listener(options.clone(), listener).await;
                     if options.shutdown.is_cancelled() {
                         return result;
@@ -192,13 +192,14 @@ async fn port_conflict_message(address: SocketAddr) -> String {
     )
 }
 
-fn ready_at(ready: &WebViewerAccess, port: u16) -> Result<WebViewerAccess> {
+fn ready_at(ready: &WebViewerAccess, address: SocketAddr) -> Result<WebViewerAccess> {
     let WebViewerAccess::Ready {
         viewer_url,
         viewer_code,
         qr_login_url,
         fallback_reason,
         certificate_sha256,
+        ..
     } = ready
     else {
         bail!("viewer startup is missing its access details");
@@ -210,14 +211,25 @@ fn ready_at(ready: &WebViewerAccess, port: u16) -> Result<WebViewerAccess> {
         Ok(url.into())
     }
     Ok(WebViewerAccess::Ready {
-        viewer_url: with_port(viewer_url, port)?,
+        viewer_url: with_port(viewer_url, address.port())?,
         viewer_code: viewer_code.clone(),
         qr_login_url: qr_login_url
             .as_deref()
-            .map(|url| with_port(url, port))
+            .map(|url| with_port(url, address.port()))
             .transpose()?,
         fallback_reason: fallback_reason.clone(),
         certificate_sha256: certificate_sha256.clone(),
+        local_address: Some(match address {
+            SocketAddr::V4(mut address) if address.ip().is_unspecified() => {
+                address.set_ip(std::net::Ipv4Addr::LOCALHOST);
+                SocketAddr::V4(address)
+            }
+            SocketAddr::V6(mut address) if address.ip().is_unspecified() => {
+                address.set_ip(std::net::Ipv6Addr::LOCALHOST);
+                SocketAddr::V6(address)
+            }
+            address => address,
+        }),
     })
 }
 
@@ -543,6 +555,7 @@ mod tests {
             qr_login_url: None,
             fallback_reason: None,
             certificate_sha256: None,
+            local_address: None,
         }
     }
 
@@ -656,9 +669,10 @@ mod tests {
         cancel.cancel();
     }
 
+    // Hard-won: #1440: an advertised Tailscale hostname could be unreachable from its own host.
     #[tokio::test]
     async fn occupied_port_can_recover_on_another_reserved_port_and_serve_http() {
-        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let occupied = TcpListener::bind("0.0.0.0:0").await.unwrap();
         let address = occupied.local_addr().unwrap();
         let options = options(address);
         let cancel = options.shutdown.clone();
@@ -675,7 +689,7 @@ mod tests {
             unreachable!()
         };
         assert!(
-            message.contains("under `[phone]`") && message.contains("bind = \"127.0.0.1:"),
+            message.contains("under `[phone]`") && message.contains("bind = \"0.0.0.0:"),
             "a port conflict must name the config line that resolves it: {message}"
         );
         control.recover(WebViewerRecovery::AnotherPort).unwrap();
@@ -687,14 +701,27 @@ mod tests {
             matches!(access, WebViewerAccess::Ready { .. })
         })
         .await;
-        let WebViewerAccess::Ready { viewer_url, .. } = access else {
+        let WebViewerAccess::Ready {
+            viewer_url,
+            local_address: Some(local_address),
+            ..
+        } = access
+        else {
             unreachable!()
         };
         let url = url::Url::parse(&viewer_url).unwrap();
         let actual = SocketAddr::new(address.ip(), url.port().unwrap());
+        assert_eq!(
+            local_address,
+            SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), actual.port())
+        );
         assert_ne!(actual.port(), address.port());
         assert_ne!(actual.port(), 0);
-        assert!(http_response(actual).await.starts_with("HTTP/1.1 200"));
+        assert!(
+            http_response(local_address)
+                .await
+                .starts_with("HTTP/1.1 200")
+        );
         assert!(
             TcpListener::bind(address).await.is_err(),
             "recovery must leave the existing listener alone"
@@ -793,15 +820,34 @@ mod tests {
             qr_login_url: Some("https://host.tailnet.ts.net:37650/auth/login?token=secret".into()),
             fallback_reason: None,
             certificate_sha256: Some("pinned".into()),
+            local_address: None,
         };
-        let changed = ready_at(&ready, 49152).unwrap();
+        let changed = ready_at(&ready, "0.0.0.0:49152".parse().unwrap()).unwrap();
         assert!(
-            matches!(changed, WebViewerAccess::Ready { viewer_url, viewer_code, qr_login_url: Some(login), certificate_sha256: Some(pin), .. }
-            if pin == "pinned" && viewer_url == "https://host.tailnet.ts.net:49152/" && viewer_code == "123456" && login == "https://host.tailnet.ts.net:49152/auth/login?token=secret")
+            matches!(&changed, WebViewerAccess::Ready { viewer_url, viewer_code, qr_login_url: Some(login), certificate_sha256: Some(pin), local_address: Some(local_address), .. }
+            if pin == "pinned" && viewer_url == "https://host.tailnet.ts.net:49152/" && viewer_code == "123456" && login == "https://host.tailnet.ts.net:49152/auth/login?token=secret" && *local_address == "127.0.0.1:49152".parse::<SocketAddr>().unwrap())
         );
-        let ipv6 = ready_at(&self::ready("[::1]:0".parse().unwrap()), 49152).unwrap();
+        let wire = serde_json::to_value(&changed).unwrap();
+        assert_eq!(wire["Ready"]["local_address"], "127.0.0.1:49152");
+        let mut older_wire = wire;
+        older_wire["Ready"]
+            .as_object_mut()
+            .unwrap()
+            .remove("local_address");
+        assert!(matches!(
+            serde_json::from_value::<WebViewerAccess>(older_wire).unwrap(),
+            WebViewerAccess::Ready {
+                local_address: None,
+                ..
+            }
+        ));
+        let ipv6 = ready_at(
+            &self::ready("[::]:0".parse().unwrap()),
+            "[::]:49152".parse().unwrap(),
+        )
+        .unwrap();
         assert!(
-            matches!(ipv6, WebViewerAccess::Ready { viewer_url, .. } if viewer_url == "http://[::1]:49152/")
+            matches!(ipv6, WebViewerAccess::Ready { viewer_url, local_address: Some(local_address), .. } if viewer_url == "http://[::]:49152/" && local_address == "[::1]:49152".parse().unwrap())
         );
     }
 
