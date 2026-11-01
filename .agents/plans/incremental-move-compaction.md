@@ -17,7 +17,7 @@ Moving a session to another harness should reuse the latest complete summary and
 - [x] (2026-11-01) Validated shared transcript persistence: 93 tests passed.
 - [x] (2026-11-01) Unified controller context installs on existing durable command stream; added a real DurableRelay client integration regression.
 - [x] (2026-11-01) Completed independent integration review and dev-profile validation: checkpoint 169 passed, transcript 93 passed, controller 2,226 passed with 18 ignored; workspace Clippy and formatting passed.
-- [ ] Commit changed files on current branch and push to origin/master.
+- [x] (2026-11-01) Committed feature as `b9e735ce8`, merged unrelated upstream as `d3b6318a2`, and pushed current master to origin/master.
 
 ## Surprises & Discoveries
 
@@ -51,7 +51,7 @@ The feature is implemented and accepted. The bounded selected-checkpoint reader 
 
 The corrected assertion distinguishes old raw data intentionally kept inside the previous handoff's bounded retained context from old history rendered again as new transcript delta. The Claude archive fixture now supplies a valid non-genesis event digest/activity watermark and complete ACP plan fields. No test failure remains. Independent review checked the actual durable relay install route, native archive-to-prompt flow, prefix freshness, configuration isolation, and cancellation. Native parsing checks cancellation between bounded reads and records; explicit cancellation joins the blocking task, while a single capped payload read/hash must finish first.
 
-New handoffs preserve reusable state for every harness; Claude native summaries additionally provide a causal boundary within a turn. Old unmarked handoffs, absent native anchors, ambiguous histories, and changed historical prefixes retain full-history behavior. Codex native parsing was deliberately not added. Delivery is being completed on current master, including merge of unrelated upstream API-routing commit `b7aedfb43`.
+New handoffs preserve reusable state for every harness; Claude native summaries additionally provide a causal boundary within a turn. Old unmarked handoffs, absent native anchors, ambiguous histories, and changed historical prefixes retain full-history behavior. Codex native parsing was deliberately not added. Feature commit `b9e735ce8` and helper commit `48b402e8f` were pushed to origin/master through merge `d3b6318a2`, which also incorporates the unrelated upstream API-routing commit `b7aedfb43`. The merge was conflict-free and changed no feature files, so successful feature validation was reused.
 
 ## Context and Orientation
 
@@ -96,3 +96,5 @@ Plan updated 2026-11-01 after production integration review disproved the raw-us
 Plan updated 2026-11-01 after finding and removing the controller's unjournaled install route. Recorded actual relay integration coverage, transcript validation, source-native parsing on supervised blocking work, and final controller checks.
 
 Plan updated 2026-11-01 after final validation passed. Recorded passing counts, the two repaired test defects, cancellation bounds, independent review results, and remaining delivery step.
+
+Plan completed 2026-11-01 after committing, merging upstream without conflicts, and pushing the implementation to origin/master.
