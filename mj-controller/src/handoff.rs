@@ -9,11 +9,47 @@
 //! executor and cancellation-poll wrapper that keeps a cancelled operation from
 //! waiting out several network requests belongs to each caller.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
 
 use mj_checkpoint::archive::CanonicalSessionSnapshot;
 use mj_core::config::{Config, HarnessProfile};
+
+pub(crate) mod claude;
+
+/// Checkpoint native history is optional evidence for a cross-harness handoff.
+/// A missing or unusable native summary leaves the canonical handoff intact.
+pub(crate) async fn native_prior_from_archive(
+    session_id: &str,
+    archive_path: &std::path::Path,
+    manifest: &mj_checkpoint::archive::ArchiveManifest,
+    snapshot: &std::sync::Arc<CanonicalSessionSnapshot>,
+    cancel: CancellationToken,
+) -> Result<Option<crate::compaction::PriorCompaction>> {
+    if manifest.session.harness_kind != mj_core::config::HarnessKind::Claude {
+        return Ok(None);
+    }
+    let session_id = session_id.to_owned();
+    let archive_path = archive_path.to_owned();
+    let manifest = manifest.clone();
+    let snapshot = std::sync::Arc::clone(snapshot);
+    tokio::task::spawn_blocking(move || {
+        match claude::prior_compaction(&archive_path, &manifest, &snapshot, &cancel) {
+            Ok(prior) => Ok(prior),
+            Err(error) if cancel.is_cancelled() => Err(error),
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{error:#}"),
+                    "could not use Claude native compaction; using canonical history"
+                );
+                Ok(None)
+            }
+        }
+    })
+    .await
+    .context("join Claude native compaction read")?
+}
 
 /// The handoff byte budget for a target profile: its configured context window,
 /// or [`crate::compaction::DEFAULT_CONTEXT_BYTES`] when it names none. This is
@@ -37,6 +73,18 @@ pub(crate) async fn build_handoff_context(
     config: &Config,
     snapshot: &CanonicalSessionSnapshot,
     context_bytes: usize,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    build_handoff_context_with_prior(session_id, config, snapshot, context_bytes, None, cancel)
+        .await
+}
+
+pub(crate) async fn build_handoff_context_with_prior(
+    session_id: &str,
+    config: &Config,
+    snapshot: &CanonicalSessionSnapshot,
+    context_bytes: usize,
+    prior: Option<&crate::compaction::PriorCompaction>,
     cancel: &CancellationToken,
 ) -> Result<String> {
     let candidates = match crate::utility_llm::UtilityLlmRuntime::shared()
@@ -69,6 +117,7 @@ pub(crate) async fn build_handoff_context(
         context_bytes,
         &backend,
         page_bytes,
+        prior,
         cancel,
     )
     .await
@@ -89,6 +138,7 @@ async fn summarize_or_recent(
     context_bytes: usize,
     backend: &impl crate::compaction::CompactionBackend,
     page_bytes: usize,
+    prior: Option<&crate::compaction::PriorCompaction>,
     cancel: &CancellationToken,
 ) -> Result<String> {
     // Pages are sized by what the summarizer can read; the handoff is sized by
@@ -99,7 +149,7 @@ async fn summarize_or_recent(
         page_bytes,
         handoff_bytes: context_bytes,
     };
-    match crate::compaction::compact_snapshot(snapshot, budget, backend).await {
+    match crate::compaction::compact_snapshot_since(snapshot, budget, backend, prior).await {
         Ok(handoff) => Ok(handoff),
         Err(error) if cancel.is_cancelled() => Err(error),
         Err(error) => {
@@ -200,6 +250,7 @@ mod tests {
             64 * 1024,
             &FakeBackend,
             64 * 1024,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -226,6 +277,7 @@ mod tests {
             64 * 1024,
             &FailingBackend,
             64 * 1024,
+            None,
             &CancellationToken::new(),
         )
         .await

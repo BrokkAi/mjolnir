@@ -16,9 +16,10 @@ use mj_core::state::{MaterializedSession, SessionState};
 use mj_transcript::projection::materialized_session_from_canonical;
 
 use super::{
-    Controller, RestoreIntoTarget, WorkerRootReset, backend_locator, now,
-    projection_rebuild_required, restore_projection_after_failed_resume,
-    utility_handoff_while_cancellable, verify_resume_checkpoint,
+    Controller, RestoreIntoTarget, WorkerRootReset, backend_locator,
+    native_prior_while_cancellable, now, projection_rebuild_required,
+    restore_projection_after_failed_resume, utility_handoff_while_cancellable,
+    verify_resume_checkpoint,
 };
 use crate::controller::removable_profile_root;
 use crate::targets::CommandExecutor;
@@ -270,6 +271,11 @@ impl Controller {
             };
             let context_bytes = crate::handoff::profile_handoff_bytes(Some(&profile));
             let utility_config = (!native_continuity).then(|| self.config.clone());
+            let native_prior = if utility_config.is_some() {
+                native_prior_while_cancellable(session_id, &verified_archive, executor).await?
+            } else {
+                None
+            };
             let stored_frontier = crate::database::materialized_event_frontier(session_id)
             .unwrap_or_else(|error| {
                 tracing::warn!(
@@ -345,6 +351,7 @@ impl Controller {
                             session_id,
                             config,
                             &canonical_session,
+                            native_prior.as_ref(),
                             context_bytes,
                             executor,
                             CancellationToken::new(),

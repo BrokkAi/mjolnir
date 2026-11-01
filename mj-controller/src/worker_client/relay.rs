@@ -308,11 +308,12 @@ impl RelayClient {
     /// Install background text that only the target harness sees, prepended
     /// to the next real prompt without creating a synthetic transcript turn.
     pub async fn install_prompt_context(&mut self, text: String) -> Result<()> {
-        let request = RelayRequest::InstallPromptContext { text };
-        match self.call(request).await? {
-            RelayResponsePayload::PromptContextInstalled => Ok(()),
-            _ => bail!("relay returned an unexpected prompt-context response"),
-        }
+        self.submit(
+            crate::session_manager::new_command_id("prompt-context")?,
+            RelayCommand::InstallPromptContext { text },
+        )
+        .await
+        .map(|_| ())
     }
 
     pub async fn project_memory_snapshot(

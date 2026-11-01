@@ -74,11 +74,37 @@ pub(super) fn project_observation(
         RelayObservation::SessionConfigured { config_options } => {
             let mut configuration = current.configuration.clone();
             configuration.values = configuration_values(config_options)?;
+            configuration
+                .values
+                .remove(crate::handoff::HANDOFF_STATE_KEY);
+            if let Some(state) = current
+                .configuration
+                .values
+                .get(crate::handoff::HANDOFF_STATE_KEY)
+            {
+                configuration
+                    .values
+                    .insert(crate::handoff::HANDOFF_STATE_KEY.into(), state.clone());
+            }
             mutation.configuration = Some(configuration);
         }
         RelayObservation::SessionModesConfigured { .. } => {}
         RelayObservation::SessionUpdate { update } => {
             project_session_update(current, index, event, update, mutation)?;
+            if let Some(configuration) = mutation.configuration.as_mut() {
+                configuration
+                    .values
+                    .remove(crate::handoff::HANDOFF_STATE_KEY);
+                if let Some(state) = current
+                    .configuration
+                    .values
+                    .get(crate::handoff::HANDOFF_STATE_KEY)
+                {
+                    configuration
+                        .values
+                        .insert(crate::handoff::HANDOFF_STATE_KEY.into(), state.clone());
+                }
+            }
         }
         RelayObservation::PermissionAutoApproved {
             option_id,
@@ -170,6 +196,16 @@ pub(super) fn project_observation(
             command,
             created_at_ms,
         } => match command {
+            RelayCommand::InstallPromptContext { text } => {
+                if let Some(state) = crate::handoff::parse_handoff(text) {
+                    let mut configuration = current.configuration.clone();
+                    configuration.values.insert(
+                        crate::handoff::HANDOFF_STATE_KEY.into(),
+                        serde_json::to_value(state)?,
+                    );
+                    mutation.configuration = Some(configuration);
+                }
+            }
             RelayCommand::ClearContext => {
                 mutation.execution = Some(MaterializedExecutionState::Running {
                     started_at_ms: *created_at_ms,
@@ -601,6 +637,10 @@ pub(super) fn project_observation(
             // Typed control failures remain visible to the person.
         }
         RelayObservation::ConfigurationUpdated { key, value } => {
+            if key == crate::handoff::HANDOFF_STATE_KEY {
+                tracing::warn!("harness attempted to change reserved handoff state key");
+                return Ok(());
+            }
             let mut configuration = current.configuration.clone();
             configuration
                 .values

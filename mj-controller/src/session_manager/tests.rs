@@ -1779,6 +1779,57 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn installed_prompt_handoff_is_journaled_and_persisted_without_a_user_turn() {
+    const CHILD: &str = "MJ_TEST_PROMPT_HANDOFF_PERSISTENCE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "installed_prompt_handoff_is_journaled_and_persisted_without_a_user_turn",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let relay_root = tempfile::tempdir().unwrap();
+    let mut connection = StandaloneSession::connect(&leased_relay_target(relay_root.path()))
+        .await
+        .unwrap();
+    let source =
+        mj_transcript::projection::canonical_session_from_materialized(&connection.materialized)
+            .unwrap();
+    let text = format!(
+        "{}verified model handoff\n\n<retained_recent_context>\nrecent work</retained_recent_context>",
+        mj_transcript::handoff::MODEL_HANDOFF_OPENING
+    );
+    let marked = mj_transcript::handoff::encode_handoff(&source, &text).unwrap();
+
+    connection.install_prompt_context(marked).await.unwrap();
+
+    let canonical =
+        mj_transcript::projection::canonical_session_from_materialized(&connection.materialized)
+            .unwrap();
+    let reusable = mj_transcript::handoff::reusable_handoff(&canonical).unwrap();
+    assert_eq!(
+        reusable.summary,
+        "verified model handoff\n\n<retained_recent_context>\nrecent work</retained_recent_context>"
+    );
+    assert!(canonical.transcript.is_empty());
+    let requests = std::fs::read_to_string(relay_root.path().join(RELAY_REQUEST_LOG)).unwrap();
+    assert!(
+        requests.lines().any(|request| request == "submit"),
+        "{requests}"
+    );
+    assert!(
+        !requests
+            .lines()
+            .any(|request| request == "install_prompt_context"),
+        "{requests}"
+    );
+    connection.detach().await.unwrap();
+}
+
 /// Catching the local projection up to an accepted command is the
 /// expensive half of a submit, and a caller waiting to hear that the relay
 /// took the command should not wait for it. The two are separate calls, so

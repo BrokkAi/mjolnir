@@ -1,5 +1,6 @@
 //! Shared transcript interpretation, projection and presentation.
 
+pub mod handoff;
 pub mod projection;
 pub mod transcript;
 

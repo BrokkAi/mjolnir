@@ -864,25 +864,35 @@ pub(super) async fn run_session_actor(
                             sync_actor_connection(&target, &mut connection).await?;
                             let connection =
                                 connection.as_mut().context("relay is disconnected")?;
-                            connection.install_prompt_context(text).await
+                            connection.install_prompt_context(text).await?;
+                            connection.sync().await
                         }
                         .await;
-                        // Installing context changes nothing the projection
-                        // shows, so there is no view to publish; a transport
-                        // failure still drops the connection for a reconnect.
-                        if let Err(ref error) = result {
-                            if !is_final_rejection(error) {
-                                connection = None;
+                        match &result {
+                            Ok(snapshot) => publish_view(
+                                &target.session_id,
+                                ManagedSessionView {
+                                    snapshot: Some(snapshot.clone()),
+                                    connected: true,
+                                    error: None,
+                                },
+                                &view_tx,
+                                &updates,
+                            ),
+                            Err(error) => {
+                                if !is_final_rejection(error) {
+                                    connection = None;
+                                }
+                                tracing::warn!(
+                                    session_id = %target.session_id,
+                                    operation = "install_prompt_context",
+                                    error = %error,
+                                    "installing relay prompt context failed"
+                                );
                             }
-                            tracing::warn!(
-                                session_id = %target.session_id,
-                                operation = "install_prompt_context",
-                                error = %error,
-                                "installing relay prompt context failed"
-                            );
                         }
                         if reply
-                            .send(result.map_err(|error| format!("{error:#}")))
+                            .send(result.map(|_| ()).map_err(|error| format!("{error:#}")))
                             .is_err()
                         {
                             tracing::debug!(

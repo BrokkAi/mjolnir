@@ -31,6 +31,120 @@ fn apply_observation(session: &mut MaterializedSession, observation: RelayObserv
     apply(session, next);
 }
 
+#[test]
+fn hidden_handoff_state_survives_prompt_delivery_and_canonical_export() {
+    use crate::handoff::{
+        HANDOFF_STATE_KEY, MODEL_HANDOFF_OPENING, encode_handoff, reusable_handoff,
+    };
+
+    let mut session = MaterializedSession::empty("handoff-projection");
+    let source = canonical_session_from_materialized(&session).unwrap();
+    let text = format!(
+        "{MODEL_HANDOFF_OPENING}verified state\n\n<retained_recent_context>\nrecent work</retained_recent_context>"
+    );
+    let marked = encode_handoff(&source, &text).unwrap();
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "install-context".into(),
+            command: RelayCommand::InstallPromptContext {
+                text: marked.clone(),
+            },
+            created_at_ms: 100,
+        },
+    );
+    assert!(session.transcript.is_empty());
+    assert!(session.configuration.values.contains_key(HANDOFF_STATE_KEY));
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "first-prompt".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::Text(TextContent::new("continue work"))],
+            },
+            created_at_ms: 200,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandStarted {
+            command_id: "first-prompt".into(),
+            started_at_ms: 300,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        },
+    );
+    let canonical = canonical_session_from_materialized(&session).unwrap();
+    assert_eq!(
+        reusable_handoff(&canonical).unwrap().summary,
+        "verified state\n\n<retained_recent_context>\nrecent work</retained_recent_context>"
+    );
+    assert!(canonical.transcript.iter().all(|item| !matches!(
+        &item.body,
+        CanonicalTranscriptBody::User { content }
+            if crate::transcript::materialized_content_text(content).contains("verified state")
+    )));
+
+    let mut pasted = MaterializedSession::empty("pasted-handoff");
+    apply_observation(
+        &mut pasted,
+        RelayObservation::CommandQueued {
+            command_id: "pasted".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::Text(TextContent::new(marked))],
+            },
+            created_at_ms: 100,
+        },
+    );
+    assert!(!pasted.configuration.values.contains_key(HANDOFF_STATE_KEY));
+}
+
+#[test]
+fn handoff_provenance_rejects_a_later_update_to_an_old_tool_and_clear() {
+    let session = MaterializedSession::empty("handoff-freshness");
+    let mut source = canonical_session_from_materialized(&session).unwrap();
+    source.event_frontier = 1;
+    source.transcript.push(CanonicalTranscriptItem {
+        stable_id: "tool:old".into(),
+        position: 1,
+        latest_content_event_ordinal: None,
+        created_at_ms: 0,
+        last_changed_at_ms: 0,
+        body: CanonicalTranscriptBody::Tool {
+            call: json!({"toolCallId":"old", "status":"in_progress"}),
+            terminal_outputs: Vec::new(),
+            terminal_refs: Vec::new(),
+            presentation: None,
+        },
+    });
+    let state = crate::handoff::HandoffState::capture(&source, "old state".into()).unwrap();
+    assert!(state.validate(&source).unwrap());
+    let mut updated = source.clone();
+    if let CanonicalTranscriptBody::Tool { call, .. } = &mut updated.transcript[0].body {
+        *call = json!({"toolCallId":"old", "status":"completed"});
+    }
+    updated.event_frontier = 3;
+    assert!(!state.validate(&updated).unwrap());
+
+    let mut cleared = source;
+    cleared.event_frontier = 2;
+    cleared.transcript.push(CanonicalTranscriptItem {
+        stable_id: "context-cleared:reset".into(),
+        position: 2,
+        latest_content_event_ordinal: None,
+        created_at_ms: 0,
+        last_changed_at_ms: 0,
+        body: CanonicalTranscriptBody::System {
+            text: "clear".into(),
+        },
+    });
+    assert!(!state.validate(&cleared).unwrap());
+}
+
 fn rendered_materialized_transcript(session: &MaterializedSession) -> String {
     let title = session
         .resolved_title()

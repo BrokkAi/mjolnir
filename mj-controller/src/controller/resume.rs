@@ -1807,6 +1807,11 @@ impl Controller {
         // provisioning below. Clone only the configuration it reads so the
         // controller can continue owning and mutating its session record.
         let utility_config = (!native_continuity).then(|| self.config.clone());
+        let native_prior = if utility_config.is_some() {
+            native_prior_while_cancellable(session_id, &verified_archive, executor).await?
+        } else {
+            None
+        };
         let discard_queued_prompts = discard_queue || !native_continuity;
         // When this controller archived the session, its durable projection is
         // already the archive's content. Reading one row decides that; a read
@@ -2040,6 +2045,7 @@ impl Controller {
                             github_token.as_deref(),
                             config,
                             &canonical_session,
+                            native_prior.as_ref(),
                             context_bytes,
                         )
                         .context("prepare the cross-harness destination")?,
@@ -2551,6 +2557,7 @@ impl<E: CommandExecutor + ?Sized> CommandExecutor for CrossHarnessProvisionExecu
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn provision_with_cross_harness_handoff(
     controller: &mut Controller,
     session_id: &str,
@@ -2558,6 +2565,7 @@ fn provision_with_cross_harness_handoff(
     github_token: Option<&str>,
     config: &Config,
     snapshot: &CanonicalSessionSnapshot,
+    prior: Option<&crate::compaction::PriorCompaction>,
     context_bytes: usize,
 ) -> Result<String> {
     let (_provision, handoff) = execute_joined_cross_harness_work(
@@ -2585,6 +2593,7 @@ fn provision_with_cross_harness_handoff(
                     session_id,
                     config,
                     snapshot,
+                    prior,
                     context_bytes,
                     executor,
                     cancellation,
@@ -2698,6 +2707,43 @@ fn execute_joined_cross_harness_work<A: Send, B: Send>(
     })
 }
 
+/// Cooperatively stop native parsing on cancellation and join its blocking
+/// task before releasing the source archive and lifecycle ownership.
+async fn native_prior_while_cancellable(
+    session_id: &str,
+    archive: &VerifiedResumeArchive,
+    executor: &impl CommandExecutor,
+) -> Result<Option<crate::compaction::PriorCompaction>> {
+    ensure!(
+        !executor.cancellation_requested(),
+        "operation cancelled while reading native compaction"
+    );
+    let cancel = CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    let operation = crate::handoff::native_prior_from_archive(
+        session_id,
+        &archive.archive_path,
+        &archive.manifest,
+        &archive.canonical_session,
+        cancel.clone(),
+    );
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            result = &mut operation => return result,
+            _ = tokio::time::sleep(super::readiness::CANCELLATION_POLL_INTERVAL) => {
+                if executor.cancellation_requested() {
+                    cancel.cancel();
+                    return match operation.await {
+                        Ok(_) => Err(anyhow::anyhow!("operation cancelled while reading native compaction")),
+                        Err(error) => Err(error.context("operation cancelled while reading native compaction")),
+                    };
+                }
+            }
+        }
+    }
+}
+
 /// Discover a utility model and compact the cross-harness handoff while still
 /// watching for cancellation. Discovery and compaction can both make several
 /// network requests, so a cancelled resume must not wait them out.
@@ -2705,6 +2751,7 @@ async fn utility_handoff_while_cancellable(
     session_id: &str,
     config: &Config,
     snapshot: &CanonicalSessionSnapshot,
+    prior: Option<&crate::compaction::PriorCompaction>,
     context_bytes: usize,
     executor: &impl CommandExecutor,
     cancellation: CancellationToken,
@@ -2715,8 +2762,14 @@ async fn utility_handoff_while_cancellable(
     }
     let _compacting = ProvisionStageGuard::new(executor, ProvisionStage::Compacting);
     let cancel = cancellation.child_token();
-    let operation =
-        crate::handoff::build_handoff_context(session_id, config, snapshot, context_bytes, &cancel);
+    let operation = crate::handoff::build_handoff_context_with_prior(
+        session_id,
+        config,
+        snapshot,
+        context_bytes,
+        prior,
+        &cancel,
+    );
     tokio::pin!(operation);
     loop {
         tokio::select! {

@@ -421,10 +421,12 @@ impl StandaloneSession {
         Ok(())
     }
 
-    /// Persist relay-private context for the next real prompt. It never
-    /// contributes an event to the canonical projection.
+    /// Persist relay-private context for the next real prompt through the
+    /// journaled command stream, then catch the projection up to its receipt.
     pub async fn install_prompt_context(&mut self, text: String) -> Result<()> {
-        self.client.install_prompt_context(text).await
+        self.client.install_prompt_context(text).await?;
+        self.sync_in_place().await?;
+        Ok(())
     }
 
     /// Apply one relay transport page in bounded durable chunks. A transport
