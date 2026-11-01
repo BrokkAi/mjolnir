@@ -431,6 +431,7 @@ impl WizardDraft for NewWizard {
                     &mut self.project_picker.query
                 };
                 if PathField::apply(input, edit) == EditOutcome::Changed {
+                    self.project_picker.github_query_changed();
                     self.project_picker.focus_results = false;
                     dashboard.record_event_handled();
                 }

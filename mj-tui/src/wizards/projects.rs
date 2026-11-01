@@ -64,6 +64,30 @@ impl Default for ProjectPicker {
 }
 
 impl ProjectPicker {
+    fn github_query_needs_search(&self) -> bool {
+        self.tab == ProjectTab::Github
+            && !matches!(
+                &self.request,
+                Some(ProjectDiscoveryRequest::Github { query })
+                    if query == self.query.trim()
+            )
+    }
+
+    pub(super) fn github_query_changed(&mut self) {
+        if self.tab == ProjectTab::Github {
+            self.generation = self.generation.wrapping_add(1);
+            self.entries.clear();
+            self.selected = 0;
+            self.loading = false;
+            self.pending = false;
+            self.error = None;
+            self.creation_error = None;
+            self.truncated = false;
+            self.focus_results = false;
+            self.request = None;
+        }
+    }
+
     pub(super) fn context(&self) -> String {
         format!("{}:{}", self.id, self.generation)
     }
@@ -82,6 +106,14 @@ impl ProjectPicker {
 }
 
 impl NewWizard {
+    fn project_can_use(&self) -> bool {
+        self.project_picker.github_query_needs_search()
+            || !self.new_bundle_repositories.is_empty()
+            || (self.project_picker.tab == ProjectTab::Url
+                && !self.new_bundle_source.trim().is_empty())
+            || (!self.project_picker.multiple && !self.project_picker.entries.is_empty())
+    }
+
     pub(super) fn open_projects(&mut self, dashboard: &DashboardState) {
         self.step = WizardStep::NewBundle;
         self.choose_project_tab(dashboard, ProjectTab::Recent);
@@ -212,11 +244,11 @@ impl NewWizard {
         }
         form.declare_with_enabled(WizardControl::Back, ControlKind::Button, ready);
         form.declare_with_enabled(WizardControl::Cancel, ControlKind::Button, ready);
-        let can_use = !self.new_bundle_repositories.is_empty()
-            || (self.project_picker.tab == ProjectTab::Url
-                && !self.new_bundle_source.trim().is_empty())
-            || (!self.project_picker.multiple && !self.project_picker.entries.is_empty());
-        form.declare_with_enabled(WizardControl::Next, ControlKind::Button, ready && can_use);
+        form.declare_with_enabled(
+            WizardControl::Next,
+            ControlKind::Button,
+            ready && self.project_can_use(),
+        );
         form.set_default_action(WizardControl::Next);
     }
 }
@@ -331,8 +363,11 @@ impl DashboardState {
     pub(super) fn activate_project_control(
         &mut self,
         mut wizard: NewWizard,
-        id: WizardControl,
+        mut id: WizardControl,
     ) -> DashboardAction {
+        if id == WizardControl::Next && wizard.project_picker.github_query_needs_search() {
+            id = WizardControl::ProjectSearch;
+        }
         match id {
             WizardControl::ProjectRecent => wizard.choose_project_tab(self, ProjectTab::Recent),
             WizardControl::ProjectGithub => wizard.choose_project_tab(self, ProjectTab::Github),
@@ -814,11 +849,7 @@ pub(super) fn render_project_picker(
             (
                 WizardControl::Next,
                 &use_label,
-                ready
-                    && (!wizard.new_bundle_repositories.is_empty()
-                        || (picker.tab == ProjectTab::Url
-                            && !wizard.new_bundle_source.trim().is_empty())
-                        || (!picker.multiple && !picker.entries.is_empty())),
+                ready && wizard.project_can_use(),
             ),
         ],
         form,

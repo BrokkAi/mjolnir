@@ -1040,6 +1040,52 @@ fn project_picker_github_search_chooses_the_keyboard_selected_result() {
     );
 }
 
+// Hard-won: 42149aaf0: Next could submit stale GitHub search results.
+#[test]
+fn project_picker_github_next_searches_changed_query_before_selection() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
+    let (initial, _) = take_project_request(&mut dashboard);
+    dashboard.apply_project_discovery(
+        &initial,
+        Ok(discovered_projects(vec![discovered_repository("www-site")])),
+    );
+
+    type_source(&mut dashboard, "BrokkAi/attest");
+    assert!(project_wizard(&dashboard).project_picker.entries.is_empty());
+    dashboard.apply_project_discovery(
+        &initial,
+        Ok(discovered_projects(vec![discovered_repository("www-site")])),
+    );
+    assert!(project_wizard(&dashboard).project_picker.entries.is_empty());
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    assert_eq!(
+        click_project_text(&mut dashboard, &mut terminal, "Use project"),
+        DashboardAction::None
+    );
+    let (fresh, request) = take_project_request(&mut dashboard);
+    assert_eq!(
+        request,
+        ProjectDiscoveryRequest::Github {
+            query: "BrokkAi/attest".into()
+        }
+    );
+    dashboard.apply_project_discovery(
+        &fresh,
+        Ok(discovered_projects(vec![discovered_repository(
+            "BrokkAi/attest",
+        )])),
+    );
+    assert!(!project_wizard(&dashboard).bundle_creation_in_flight);
+    captured_drawn(&mut dashboard, 100, 30);
+    assert_eq!(
+        activate_project_control(&mut dashboard, WizardControl::Next),
+        DashboardAction::CreateBundle {
+            sources: vec!["BrokkAi/attest".into()]
+        }
+    );
+}
+
 #[test]
 fn project_picker_github_result_does_not_overwrite_query_or_steal_edit_focus() {
     let mut dashboard = dashboard_at_project_picker();
