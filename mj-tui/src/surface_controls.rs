@@ -156,9 +156,7 @@ impl DashboardState {
                     if let Some(id) = self.session_menu_ids.get(index).cloned()
                         && self.state.sessions.contains_key(&id)
                     {
-                        self.focus_sessions();
-                        self.select_active_session(&id);
-                        self.begin_session_palette();
+                        self.begin_session_palette_for(&id);
                     }
                     DashboardAction::None
                 }
@@ -678,22 +676,71 @@ mod tests {
         assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
 
+    // Hard-won: 213602c916: opening a row menu switched the visible conversation.
     #[test]
-    fn session_actions_and_palette_run_use_the_clicked_session() {
+    fn session_actions_target_the_clicked_row_without_switching_conversations() {
         let mut dashboard = dashboard_with_session(running_session());
         let mut second = running_session();
         second.id = "another-session".into();
+        second.session_title_override = Some("Menu target B".into());
         dashboard.state.sessions.insert(second.id.clone(), second);
+        dashboard.conversation_area = Some(Rect::new(0, 0, 120, 40));
+        let pinned = dashboard.browse_pane();
+        dashboard.set_pane_session(pinned, Some("session-1"));
+        dashboard
+            .split_focused_pane(ratatui::layout::Direction::Horizontal, None)
+            .unwrap();
+        dashboard.focus_pane(pinned);
+        dashboard.focus = Focus::Prompt;
         draw(&mut dashboard, (120, 40));
-        let &(index, row) = dashboard.session_row_areas.last().unwrap();
-        let expected = dashboard.session_menu_ids[index].clone();
+        let &(index, row) = dashboard
+            .session_row_areas
+            .iter()
+            .find(|(index, _)| dashboard.session_menu_ids[*index] == "another-session")
+            .unwrap();
         let menu = (row.right() - 2, row.y);
         click(&mut dashboard, menu);
-        assert_eq!(dashboard.selected_session_id(), Some(expected.as_str()));
+        assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+        assert_eq!(dashboard.focused_pane(), pinned);
+        assert_eq!(dashboard.focus, Focus::Prompt);
+        assert_eq!(dashboard.pane_session(pinned), Some("session-1"));
+        assert_eq!(dashboard.command_session_override, None);
         assert!(matches!(dashboard.mode, Mode::Palette(_)));
+        assert!(
+            draw(&mut dashboard, (120, 40))
+                .join("\n")
+                .contains("Menu target B")
+        );
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
+        assert_eq!(dashboard.command_session_override, None);
+        assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+        assert_eq!(dashboard.focused_pane(), pinned);
+        assert_eq!(dashboard.focus, Focus::Prompt);
+
+        // A different pointer position clears the modal click transition.
+        draw(&mut dashboard, (120, 40));
+        let &(other_index, other_row) = dashboard
+            .session_row_areas
+            .iter()
+            .find(|(index, _)| dashboard.session_menu_ids[*index] == "session-1")
+            .unwrap();
+        assert_ne!(index, other_index);
+        let other_menu = (other_row.right() - 2, other_row.y);
+        click(&mut dashboard, other_menu);
+        dashboard.handle_key(key(KeyCode::Esc));
+        draw(&mut dashboard, (120, 40));
+        click(&mut dashboard, menu);
         let lines = draw(&mut dashboard, (120, 40));
         click(&mut dashboard, point(&lines, "Rename…"));
-        assert!(matches!(dashboard.mode, Mode::Rename(_)));
+        let Mode::Rename(editor) = &dashboard.mode else {
+            panic!("rename editor should be open");
+        };
+        assert_eq!(editor.session_id, "another-session");
+        assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+        assert_eq!(dashboard.focused_pane(), pinned);
+        assert_eq!(dashboard.focus, Focus::Prompt);
+        assert_eq!(dashboard.command_session_override, None);
     }
 
     #[test]

@@ -572,6 +572,13 @@ impl DashboardState {
         self.mode = Mode::Palette(palette);
     }
 
+    /// Opens a row's menu for that session without changing the conversation.
+    pub(crate) fn begin_session_palette_for(&mut self, session_id: &str) {
+        let saved = self.command_session_override.replace(session_id.to_owned());
+        self.begin_session_palette();
+        self.command_session_override = saved;
+    }
+
     /// Refreshes query matches and availability.
     ///
     /// A new query is a new list, so the cursor starts on its top match: Enter
