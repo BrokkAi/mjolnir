@@ -492,6 +492,53 @@ pub fn read_checkpoint_manifest(path: &Path) -> Result<ArchiveManifest> {
     read_checkpoint_manifest_from(&mut archive)
 }
 
+/// Read one payload from an archive whose manifest was already verified.
+///
+/// The limit is checked before allocating or reading payload data. The entry
+/// sizes and the complete payload digest are checked again against the
+/// descriptor so a changed archive cannot rely on the earlier verification.
+pub fn read_verified_checkpoint_payload(
+    path: &Path,
+    descriptor: &PayloadDescriptor,
+    max_bytes: u64,
+) -> Result<Vec<u8>> {
+    ensure!(
+        descriptor.size <= max_bytes,
+        "payload '{}' exceeds read limit of {max_bytes} bytes",
+        descriptor.path
+    );
+    if !descriptor.parts.is_empty() {
+        let mut covered = 0u64;
+        for part in &descriptor.parts {
+            ensure!(
+                part.size <= max_bytes,
+                "payload part '{}' exceeds read limit of {max_bytes} bytes",
+                part.path
+            );
+            covered = covered
+                .checked_add(part.size)
+                .context("payload part sizes overflow")?;
+            ensure!(
+                covered <= descriptor.size,
+                "payload parts exceed declared size"
+            );
+        }
+        ensure!(
+            covered == descriptor.size,
+            "payload parts do not cover declared size"
+        );
+    }
+
+    let mut archive = open_archive(path)?;
+    let bytes = read_checkpoint_payload(&mut archive, descriptor)?;
+    ensure!(
+        digest_bytes(&bytes) == descriptor.sha256,
+        "SHA-256 mismatch for payload '{}'",
+        descriptor.path
+    );
+    Ok(bytes)
+}
+
 fn read_checkpoint_manifest_from(archive: &mut zip::ZipArchive<File>) -> Result<ArchiveManifest> {
     let manifest_bytes = {
         let mut entry = archive

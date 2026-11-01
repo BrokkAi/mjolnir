@@ -571,6 +571,82 @@ fn git_bundles_are_stored_and_other_payloads_use_zstandard() {
     );
 }
 
+#[test]
+fn verified_payload_reader_refuses_descriptor_over_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("bounded.hel.zip");
+    let verified = write_archive_atomic(&path, &input()).unwrap();
+    let descriptor = verified
+        .manifest
+        .payloads
+        .iter()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap();
+
+    let error =
+        read_verified_checkpoint_payload(&path, descriptor, descriptor.size - 1).unwrap_err();
+    assert!(format!("{error:#}").contains("exceeds read limit"));
+}
+
+#[test]
+fn verified_payload_reader_rejects_tampered_non_sharded_digest() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("digest.hel.zip");
+    let verified = write_archive_atomic(&path, &input()).unwrap();
+    let mut descriptor = verified
+        .manifest
+        .payloads
+        .iter()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap()
+        .clone();
+    assert!(descriptor.parts.is_empty());
+    descriptor.sha256 = "0".repeat(64);
+
+    let error = read_verified_checkpoint_payload(&path, &descriptor, descriptor.size).unwrap_err();
+    assert!(format!("{error:#}").contains("SHA-256 mismatch"));
+}
+
+#[test]
+fn verified_payload_reader_reassembles_sharded_payload() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sharded-reader.hel.zip");
+    let (archive_input, native, _) = sharded_input();
+    write_archive_installed_with_part_size(&path, &archive_input, TEST_PART_BYTES).unwrap();
+    let manifest = read_checkpoint_manifest(&path).unwrap();
+    let descriptor = manifest
+        .payloads
+        .iter()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap();
+    assert!(!descriptor.parts.is_empty());
+
+    assert_eq!(
+        read_verified_checkpoint_payload(&path, descriptor, native.len() as u64).unwrap(),
+        native
+    );
+}
+
+#[test]
+fn verified_payload_reader_refuses_incomplete_shard_coverage() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sharded-coverage.hel.zip");
+    let (archive_input, _, _) = sharded_input();
+    write_archive_installed_with_part_size(&path, &archive_input, TEST_PART_BYTES).unwrap();
+    let manifest = read_checkpoint_manifest(&path).unwrap();
+    let mut descriptor = manifest
+        .payloads
+        .iter()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap()
+        .clone();
+    assert!(!descriptor.parts.is_empty());
+    descriptor.parts.pop();
+
+    let error = read_verified_checkpoint_payload(&path, &descriptor, descriptor.size).unwrap_err();
+    assert!(format!("{error:#}").contains("payload parts do not cover declared size"));
+}
+
 /// Replaces a tar payload in an already prepared archive, resharding it so
 /// the manifest and the payload body stay consistent.
 fn replace_tar_payload(
