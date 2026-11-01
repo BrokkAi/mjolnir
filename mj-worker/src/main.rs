@@ -56,6 +56,22 @@ enum WorkerCommand {
         #[arg(long)]
         spec: PathBuf,
     },
+    /// Sign a mounted profile home in with the target's harness.
+    SignIn {
+        #[arg(long)]
+        spec: PathBuf,
+    },
+    /// Run the target's harness CLI, preparing it as a session would.
+    HarnessCli {
+        #[arg(long)]
+        harness: mj_core::config::HarnessKind,
+        /// A variable of this process's environment the harness must keep
+        /// over the target's login environment.
+        #[arg(long = "keep-env", value_name = "NAME")]
+        keep_env: Vec<String>,
+        #[arg(last = true)]
+        arguments: Vec<String>,
+    },
     /// Own an ACP bridge and durable session event log.
     Run {
         #[arg(long)]
@@ -294,6 +310,7 @@ fn bootstrap_login_environment(
         ),
         WorkerCommand::PrepareHarness { .. }
         | WorkerCommand::DiscoverConfig { .. }
+        | WorkerCommand::SignIn { .. }
         | WorkerCommand::Diff { .. }
         | WorkerCommand::PushBranch { .. } => Some(true),
         _ => None,
@@ -502,6 +519,30 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             let spec = serde_json::from_slice(&std::fs::read(spec)?)?;
             let config = mj_worker::worker_runtime::discover_profile_config(spec).await?;
             println!("{}", serde_json::to_string(&config)?);
+            Ok(())
+        }
+        WorkerCommand::HarnessCli {
+            harness,
+            keep_env,
+            arguments,
+        } => {
+            let environment = keep_env
+                .into_iter()
+                .filter_map(|name| Some((name.clone(), std::env::var(&name).ok()?)))
+                .collect();
+            let status =
+                mj_worker::worker_runtime::run_harness_cli(harness, environment, arguments).await?;
+            if status != 0 {
+                std::process::exit(status);
+            }
+            Ok(())
+        }
+        WorkerCommand::SignIn { spec } => {
+            let spec = serde_json::from_slice(&std::fs::read(spec)?)?;
+            let status = mj_worker::worker_runtime::run_sign_in(spec).await?;
+            if status != 0 {
+                std::process::exit(status);
+            }
             Ok(())
         }
         WorkerCommand::AcpSupervisor { spec } => {

@@ -15,6 +15,7 @@ pub mod controller;
 pub mod desktop;
 pub mod doctor;
 pub(crate) mod handoff;
+pub mod harness_sandbox;
 pub mod image;
 pub mod import;
 pub mod opencode_logins;

@@ -187,96 +187,14 @@ fn discovers_default_and_overridden_homes_with_authentication_markers() {
 }
 
 #[test]
-fn an_installed_mimo_is_offered_before_its_first_login() {
-    let directory = tempfile::tempdir().unwrap();
-    let executor = FakeExecutor {
-        commands: RefCell::new(Vec::new()),
-        statuses: vec![1, 1, 1, 1, 1, 1, 0, 1],
-    };
-    let mut homes = Vec::new();
-
-    discover_installed_harnesses(
-        Some(directory.path()),
-        &BTreeMap::new(),
-        &mut homes,
-        &executor,
-        |_| false,
-    );
-
-    assert_eq!(
-        homes,
-        [DiscoveredHome {
-            kind: HarnessKind::Mimo,
-            path: directory.path().join(".mimocode"),
-            codex_profile: None,
-            authenticated: false,
-        }]
-    );
-    assert!(
-        executor
-            .commands
-            .borrow()
-            .iter()
-            .any(|command| command.program == "mimo")
-    );
-}
-
-// Hard-won: 1bc3cfe43: dsh-acp harness detection keyed off the dsh-acp bridge
-// and ~/.dsh-acp, so a machine with DeepSeek's own CLI installed was never
-// detected: the bridge is installed on demand and proves nothing about a
-// DeepSeek installation.
-#[test]
-fn an_installed_dsh_is_offered_before_its_first_login() {
-    let directory = tempfile::tempdir().unwrap();
-    let executor = FakeExecutor {
-        commands: RefCell::new(Vec::new()),
-        statuses: vec![1, 1, 1, 1, 1, 1, 1, 0],
-    };
-    let mut homes = Vec::new();
-
-    discover_installed_harnesses(
-        Some(directory.path()),
-        &BTreeMap::new(),
-        &mut homes,
-        &executor,
-        |_| false,
-    );
-
-    assert_eq!(
-        homes,
-        [DiscoveredHome {
-            kind: HarnessKind::Dsh,
-            path: directory.path().join(".dsh"),
-            codex_profile: None,
-            authenticated: false,
-        }]
-    );
-    let commands = executor.commands.borrow();
-    let dsh_probes = commands
-        .iter()
-        .filter(|command| command.program == "dsh")
-        .count();
-    assert_eq!(dsh_probes, 1, "the probe keys off DeepSeek's own CLI");
-    assert!(
-        commands.iter().all(|command| command.program != "dsh-acp"),
-        "the dsh-acp bridge is installed on demand and is not a detection signal"
-    );
-}
-
-#[test]
 fn a_deepseek_api_key_offers_dsh_without_a_cli_or_home() {
     let directory = tempfile::tempdir().unwrap();
-    let executor = FakeExecutor {
-        commands: RefCell::new(Vec::new()),
-        statuses: vec![1; HarnessKind::ALL.len()],
-    };
     let mut homes = Vec::new();
 
     discover_installed_harnesses(
         Some(directory.path()),
         &BTreeMap::new(),
         &mut homes,
-        &executor,
         |key| key == "DEEPSEEK_API_KEY",
     );
 
@@ -288,14 +206,6 @@ fn a_deepseek_api_key_offers_dsh_without_a_cli_or_home() {
             codex_profile: None,
             authenticated: true,
         }]
-    );
-    assert!(
-        executor
-            .commands
-            .borrow()
-            .iter()
-            .all(|command| command.program != "dsh"),
-        "the key alone is enough; no installed DeepSeek CLI is required"
     );
 }
 
@@ -352,20 +262,18 @@ fn claude_keychain_marks_the_default_home_authenticated_without_a_marker() {
 }
 
 #[test]
-fn claude_status_checks_a_custom_home_without_a_marker() {
+fn claude_status_of_a_custom_home_without_a_marker_never_runs_claude() {
     let directory = tempfile::tempdir().unwrap();
     let claude = directory.path().join("claude-custom");
     fs::create_dir_all(&claude).unwrap();
-    // Where CLAUDE_CONFIG_DIR scopes a home, the CLI answers for that home.
-    // On macOS every home shares one Keychain item, so the Keychain is the
-    // only thing worth asking and the CLI would only report the default
-    // profile back.
+    // Claude Code does not run on this machine, so it is never asked. On
+    // macOS every home without a login file shares the one Keychain item, so
+    // the Keychain is the only thing worth asking; elsewhere the missing file
+    // is the answer.
     let on_macos = cfg!(target_os = "macos");
-    let executor = RuntimeProbeExecutor::new([if on_macos {
-        ok(br#"{"claudeAiOauth":{"accessToken":"access","refreshToken":"refresh"}}"#)
-    } else {
-        ok(br#"{"loggedIn":true,"authMethod":"claude.ai"}"#)
-    }]);
+    let executor = RuntimeProbeExecutor::new([ok(
+        br#"{"claudeAiOauth":{"accessToken":"access","refreshToken":"refresh"}}"#,
+    )]);
 
     let homes = discover_harness_homes_with_executor(
         None,
@@ -379,21 +287,15 @@ fn claude_status_checks_a_custom_home_without_a_marker() {
             kind: HarnessKind::Claude,
             path: claude.clone(),
             codex_profile: None,
-            authenticated: true,
+            authenticated: on_macos,
         }]
     );
     let commands = executor.commands.borrow();
-    assert_eq!(commands.len(), 1);
     if on_macos {
+        assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].program, "security");
-        assert!(commands[0].env.is_empty(), "{:?}", commands[0].env);
     } else {
-        assert_eq!(commands[0].program, "claude");
-        assert_eq!(commands[0].args, ["auth", "status", "--json"]);
-        assert_eq!(
-            commands[0].env.get("CLAUDE_CONFIG_DIR"),
-            Some(&claude.to_string_lossy().into_owned())
-        );
+        assert!(commands.is_empty(), "{commands:?}");
     }
 }
 

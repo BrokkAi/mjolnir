@@ -750,11 +750,10 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
     .await;
     let report = outcome.report;
 
+    // Whatever stops the probe (no container engine, no worker, no Grok
+    // Build), the profile reads as failed rather than as an empty allowance.
     assert!(report.windows.is_empty());
-    assert_eq!(
-        report.error.as_deref(),
-        Some("Grok Build executable not found")
-    );
+    assert!(report.error.is_some(), "{report:?}");
 }
 
 #[tokio::test]

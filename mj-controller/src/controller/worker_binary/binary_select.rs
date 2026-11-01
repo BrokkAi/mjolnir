@@ -206,6 +206,15 @@ pub(in crate::controller) fn worker_binary_for(
     materialize_worker_source(worker_binary_for_arch(platform.architecture, requirement)?)
 }
 
+/// The verified portable Linux worker for `arch`, as container targets run it.
+/// The harness sandbox mounts it so its probes run this exact build.
+pub fn portable_linux_worker(arch: &str) -> Result<PathBuf> {
+    materialize_worker_source(worker_binary_for_arch(
+        arch,
+        WorkerBinaryRequirement::PortableLinux,
+    )?)
+}
+
 fn materialize_worker_source(source: WorkerBinaryAvailability) -> Result<PathBuf> {
     let path = match source {
         WorkerBinaryAvailability::Local { path, .. } => Ok(path),

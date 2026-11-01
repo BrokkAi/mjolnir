@@ -32,6 +32,8 @@ anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true
 clap = { workspace = true, features = ["env"] }
+webbrowser = "1.2"
+tempfile.workspace = true
 crossterm = { workspace = true, features = ["osc52"] }
 # The event loop waits on every warm conversation at once through select_all.
 futures = "0.3"

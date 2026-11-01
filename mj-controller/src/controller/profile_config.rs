@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use crate::targets::{CancellableProcessExecutor, CommandExecutor, CommandSpec, TargetLocator};
+use crate::targets::{CancellableProcessExecutor, CommandExecutor};
 use anyhow::{Context, Result, ensure};
 use mj_core::config::{Config, HarnessProfile};
 use mj_core::worker_launch::{ProfileConfig, ProfileProbeSpec};
@@ -363,14 +363,7 @@ pub(crate) async fn observe(
         let fingerprint = fingerprint(profile);
         match check {
             ObservationCheck::ProbeBuild => {
-                let executor = CancellableProcessExecutor::new(cancelled)
-                    .with_deadline(Duration::from_secs(30));
-                super::worker_binary::worker_binary_for(
-                    &TargetLocator::LocalBare {
-                        worker_root: String::new(),
-                    },
-                    &executor,
-                )?;
+                let _ = cancelled;
                 if mj_core::worker_build::WORKER_BUILD_ID != worker_build {
                     return Ok(choices);
                 }
@@ -436,7 +429,7 @@ fn discover_from_config(
     // caching it: always probe the installation that actually runs, and never
     // write the result back.
     if profile.kind == mj_core::config::HarnessKind::Muse {
-        return probe_profile(profile_id, profile, environment, model, cancelled);
+        return probe_profile(config, profile_id, profile, environment, model, cancelled);
     }
     let fingerprint = fingerprint(profile);
     resolve_cached(
@@ -445,6 +438,7 @@ fn discover_from_config(
         || Ok(load(profile_id, &model, &fingerprint)),
         || {
             probe_profile(
+                config,
                 profile_id,
                 profile,
                 environment.clone(),
@@ -508,43 +502,43 @@ fn resolve_cached(
     }
 }
 
-/// Discovery that no retry can make succeed: this machine runs no local
-/// worker to probe a profile with. The profile's capabilities stay unknown;
-/// its sessions still offer the harness's own choices.
-#[derive(Debug)]
-pub(crate) struct DiscoveryUnsupported;
-
-impl std::fmt::Display for DiscoveryUnsupported {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(
-            "this machine runs no local Mjolnir worker, so it cannot discover the profile's models and efforts before a session starts",
-        )
-    }
-}
-
-impl std::error::Error for DiscoveryUnsupported {}
-
-/// Whether `error` is a discovery that no retry can make succeed.
+/// Whether `error` is a discovery that no retry can make succeed: this
+/// machine has no container engine to probe a profile in. The profile's
+/// capabilities stay unknown; its sessions still offer the harness's own
+/// choices.
 pub(crate) fn discovery_is_unsupported(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.is::<DiscoveryUnsupported>())
+    crate::harness_sandbox::is_unavailable(error)
 }
 
 fn probe_profile(
+    config: &Config,
     profile_id: &str,
     profile: &HarnessProfile,
     environment: BTreeMap<String, String>,
     model: Option<String>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<ProfileConfig> {
-    // Checked first, so a profile that is also not signed in is still
-    // reported as the failure no retry can fix.
-    if !mj_core::targets::HOST_RUNS_WORKERS {
-        return Err(DiscoveryUnsupported.into());
-    }
+    use crate::harness_sandbox::{
+        HarnessSandbox, SANDBOX_WORK, SANDBOX_WORKER, SandboxMount, SandboxRun,
+    };
     profile.ensure_ready(profile_id)?;
-    let root = tempfile::tempdir().context("create private profile discovery directory")?;
+    let executor =
+        CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(300));
+    // The probe runs in the harness sandbox, never on this machine: the
+    // sandbox's image supplies the harness, as it does for container sessions.
+    let sandbox = HarnessSandbox::select(config, &executor)?;
+    // Under Mjolnir's data directory rather than the system temporary
+    // directory: a container engine in a virtual machine shares the person's
+    // home with it, but not necessarily every temporary directory.
+    let work_root = mj_core::config::data_dir()
+        .join("harness-sandbox")
+        .join("work");
+    std::fs::create_dir_all(&work_root)
+        .with_context(|| format!("create {}", work_root.display()))?;
+    let root = tempfile::Builder::new()
+        .prefix("discovery-")
+        .tempdir_in(&work_root)
+        .context("create private profile discovery directory")?;
     // The staged home and the probe spec carry the profile's logins and
     // environment.
     #[cfg(unix)]
@@ -552,59 +546,63 @@ fn probe_profile(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
     }
+    let inside = std::path::Path::new(SANDBOX_WORK);
     // Muse and OpenCode read `$XDG_CONFIG_HOME/<id>`, so their staged home
     // must carry that leaf name or the harness never sees the staged login.
-    let home = profile
-        .kind
-        .home_from_environment(root.path().join("profile"));
     super::worker_binary::stage_profile_with_catalog(
         profile_id,
         profile,
-        &home,
+        &profile
+            .kind
+            .home_from_environment(root.path().join("profile")),
         &super::worker_binary::fetch_catalog_over_https,
         &super::worker_binary::SharedCatalogCache,
     )?;
-    let cwd = root.path().join("workspace");
-    std::fs::create_dir(&cwd)?;
-    let executor =
-        CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(300));
-    let worker = super::worker_binary::worker_binary_for(
-        &TargetLocator::LocalBare {
-            worker_root: root.path().to_string_lossy().into_owned(),
-        },
-        &executor,
-    )?;
+    std::fs::create_dir(root.path().join("workspace"))?;
     // Harnesses leave files in their temporary directory: OpenCode's Bun
     // runtime extracts native libraries there on every start and never
     // removes them. One inside the probe's root goes away with the probe.
-    let temporary = root.path().join("tmp");
-    std::fs::create_dir(&temporary)?;
+    std::fs::create_dir(root.path().join("tmp"))?;
     let mut environment = environment;
+    environment.extend(crate::harness_sandbox::home_environment());
     for name in ["TMPDIR", "TMP", "TEMP"] {
-        environment.insert(name.into(), temporary.to_string_lossy().into_owned());
+        environment.insert(name.into(), format!("{SANDBOX_WORK}/tmp"));
     }
     let excluded_environment = profile.exclude_harness_environment(&mut environment);
     let spec = ProfileProbeSpec {
         harness: profile.kind,
-        profile_home: home,
+        profile_home: profile.kind.home_from_environment(inside.join("profile")),
         environment,
         excluded_environment,
-        cwd,
+        cwd: inside.join("workspace"),
         model,
+        runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
     };
-    let path = root.path().join("probe.json");
-    mj_core::config::atomic_write(&path, &serde_json::to_vec(&spec)?)?;
-    let command = CommandSpec::new(
-        worker.to_string_lossy(),
-        [
-            "worker".to_owned(),
-            "discover-config".into(),
-            "--spec".into(),
-            path.to_string_lossy().into_owned(),
+    mj_core::config::atomic_write(&root.path().join("probe.json"), &serde_json::to_vec(&spec)?)?;
+    let worker = super::worker_binary::portable_linux_worker(sandbox.architecture()?)?;
+    let run = sandbox.command(&SandboxRun {
+        purpose: "discover profile configuration".to_owned(),
+        mounts: vec![
+            SandboxMount::writable(root.path(), SANDBOX_WORK),
+            SandboxMount::read_only(worker, SANDBOX_WORKER),
         ],
-    )
-    .purpose("discover profile configuration");
-    let output = executor.execute(&command)?;
+        command: vec![
+            SANDBOX_WORKER.to_owned(),
+            "worker".to_owned(),
+            "discover-config".to_owned(),
+            "--spec".to_owned(),
+            format!("{SANDBOX_WORK}/probe.json"),
+        ],
+        working_directory: Some(format!("{SANDBOX_WORK}/workspace")),
+        ..Default::default()
+    })?;
+    let output = executor.execute(&run.spec("discover profile configuration"));
+    // Removed on every exit, including a cancelled or timed-out probe whose
+    // engine client was killed before `--rm` could act.
+    run.remove(&CancellableProcessExecutor::with_timeout(
+        Duration::from_secs(30),
+    ));
+    let output = output?;
     if !output.stderr.is_empty() {
         tracing::info!(harness = ?profile.kind, diagnostics = %String::from_utf8_lossy(&output.stderr).trim(), "profile discovery worker diagnostics");
     }
@@ -703,6 +701,7 @@ mod tests {
             legacy_subagents: None,
         };
         let choices = probe_profile(
+            &Config::default().with_local_targets(),
             "muse-discovery-1284-test",
             &profile,
             Default::default(),
@@ -769,6 +768,7 @@ mod tests {
                 legacy_subagents: None,
             };
             let choices = probe_profile(
+                &Config::default().with_local_targets(),
                 "opencode-database-login-test",
                 &profile,
                 Default::default(),

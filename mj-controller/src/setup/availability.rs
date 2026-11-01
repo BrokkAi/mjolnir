@@ -15,7 +15,7 @@ use anyhow::{Result, ensure};
 use mj_core::config::{AuthScheme, Config, HarnessProfile, Machine};
 
 use super::machines::{MachineProbe, add_machine_runtimes, probe_machines};
-use super::{RuntimeProbe, add_detected_profiles, discover_runtimes, harness_cli_installed};
+use super::{RuntimeProbe, add_detected_profiles, discover_runtimes};
 use crate::targets::CommandExecutor;
 
 /// What one availability check found and changed.
@@ -37,14 +37,8 @@ pub struct AvailabilityReport {
 /// Why `profile` cannot be used here, or `Ok` when it can. A profile is
 /// there when a harness can start from it (`HarnessProfile::ensure_ready`,
 /// which every launch asks) and, for an agent that keeps its login in its
-/// home, that installation still exists: the home, or the agent's own
-/// command. Mjolnir runs its own pinned bridges, so a profile whose command
-/// was uninstalled but whose home remains is still there.
-pub fn profile_presence(
-    id: &str,
-    profile: &HarnessProfile,
-    executor: &impl CommandExecutor,
-) -> std::result::Result<(), String> {
+/// home, that home exists.
+pub fn profile_presence(id: &str, profile: &HarnessProfile) -> std::result::Result<(), String> {
     profile
         .ensure_ready(id)
         .map_err(|error| format!("{error:#}"))?;
@@ -52,17 +46,14 @@ pub fn profile_presence(
         profile.auth_scheme(),
         AuthScheme::NativeLogin | AuthScheme::NativeLoginStore
     );
-    // A probe that could not run says nothing, so only a command known to
-    // be absent makes the profile missing.
-    if logs_in_at_home
-        && !profile.home.is_dir()
-        && harness_cli_installed(profile.kind, executor) == Some(false)
-    {
+    // Mjolnir signs a profile in inside a container and never runs the
+    // agent here, so an agent installed on this machine is not a signal; the
+    // profile's home is.
+    if logs_in_at_home && !profile.home.is_dir() {
         let name = profile.kind.display_name();
         return Err(format!(
-            "{name} is not installed here: {} does not exist and `{}` is not on PATH. Install {name}, or turn the profile off in Settings › Profiles.",
+            "{name} is not signed in here: {} does not exist. Run `mj login --profile {id}` to sign in, or turn the profile off in Settings › Profiles.",
             profile.home.display(),
-            profile.kind.cli_binary_name()
         ));
     }
     Ok(())
@@ -96,7 +87,7 @@ pub fn check_availability(
         .profiles
         .into_iter()
         .map(|(id, profile)| {
-            let missing = profile_presence(&id, &profile, executor).err();
+            let missing = profile_presence(&id, &profile).err();
             (id, (profile, missing))
         })
         .collect();

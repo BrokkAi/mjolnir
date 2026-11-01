@@ -74,10 +74,13 @@ pub(super) fn stage_claude_keychain_login(
 ) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
+        // A home signed in through the harness sandbox holds its own login
+        // file, which is this profile's login rather than the shared item.
         if profile.kind != mj_core::config::HarnessKind::Claude
             || !profile.auth_scheme().uses_native_login_file()
             || environment_login_present
             || matches!(backend, targets::TargetLocator::LocalBare { .. })
+            || profile.authentication_marker().is_file()
         {
             return Ok(());
         }

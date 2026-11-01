@@ -1,16 +1,20 @@
-//! Sign in to a profile through the harness's own ACP server.
+//! Sign in to a profile through the harness's own ACP server, inside the
+//! target that holds the harness.
 //!
-//! Mjolnir already installs an exact pinned harness for sessions. This module
-//! starts that same harness as an ACP agent, reads the authentication methods
-//! it advertises, and performs the one the person picks. A `terminal` method
-//! names a command the client is expected to run (Muse does this); a method
-//! without a command is either handled by ACP `authenticate` (Codex) or by a
-//! known terminal fallback for bridges that only describe the command in text
-//! (OpenCode and MiMo).
+//! The controller never runs a harness itself. `mj login` starts this worker
+//! in a short-lived container (the harness sandbox) with the profile home
+//! mounted, and the worker selects the harness exactly as a container session
+//! does: the image's bridge when it is compatible, otherwise the pinned
+//! installation inside the container. It then starts that harness as an ACP
+//! agent, reads the authentication methods it advertises, and performs the
+//! one the person picks. A `terminal` method names a command the client is
+//! expected to run (Muse does this); a method without a command is either
+//! handled by ACP `authenticate` (Codex) or by a known terminal fallback for
+//! bridges that only describe the command in text (OpenCode and MiMo).
 //!
 //! The command runs with inherited standard input and output because it is an
-//! interactive browser or device-code flow. That is why this belongs to the
-//! terminal CLI rather than to the detached worker.
+//! interactive browser or device-code flow; the container has the person's
+//! terminal.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -18,10 +22,13 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use mj_core::config::{AuthScheme, HarnessHost, HarnessKind, HarnessProfile};
+use mj_core::config::{ExecutionPolicy, HarnessKind};
+use mj_core::worker_launch::{HarnessRuntimePolicy, SignInAction, SignInSpec};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+
+use super::AcpSupervisorSpec;
 
 /// How long a freshly installed bridge gets to answer `initialize`.
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -36,147 +43,195 @@ pub(crate) enum Outcome {
     /// ACP login cannot run for this profile or target. The caller may use the
     /// harness CLI's own login command instead.
     Unavailable(String),
-    /// This profile authenticates without an interactive harness login.
-    NoLogin(String),
 }
 
-/// A pinned harness CLI and the environment prepared for it. The managed
-/// harness keeps the installation lease alive while the child command runs.
-pub(crate) struct PinnedCli {
-    pub command: PathBuf,
-    pub environment: BTreeMap<String, String>,
-    _managed: mj_core::harness_install::ManagedHarness,
+/// The harness this target provides, ready to run: the image's when it is
+/// compatible, otherwise the pinned installation inside the target, exactly
+/// as a container session selects it.
+struct TargetHarness {
+    prepared: super::PreparedHarnessLaunch,
+    /// The ACP adapter or native harness a terminal sign-in method names.
+    entrypoint: PathBuf,
+    /// The harness's own command-line program.
+    cli: PathBuf,
 }
 
-fn uses_ambient_cli(profile: &HarnessProfile) -> bool {
-    let own_nested = profile.kind.nested_home() && profile.kind.is_own_nested_home(&profile.home);
-    let own_data = !profile
-        .kind
-        .data_source(&profile.home)
-        .starts_with(&profile.home);
-    own_nested || own_data
-}
-
-/// Sign in `profile` through the pinned harness's ACP methods.
-pub(crate) async fn login(
-    profile: &HarnessProfile,
-    requested_method: Option<&str>,
-) -> Result<Outcome> {
-    let scheme = profile.auth_scheme();
-    if !scheme.syncs_login() {
-        return Ok(Outcome::NoLogin(describe_auth(&scheme)));
-    }
-    // A person's own installation keeps its config in their own nested home
-    // (OpenCode/Muse), or its data outside a conventional profile home
-    // (MiMo's stock XDG data). Pointing the pinned harness at either could
-    // migrate a database Mjolnir does not own. Use their CLI for that case.
-    if uses_ambient_cli(profile) {
-        return Ok(Outcome::Unavailable(format!(
-            "this profile uses your own {} installation; Mjolnir signs in through that harness's installed CLI",
-            profile.kind.display_name()
-        )));
-    }
-    let (managed, launch_environment) = match managed_login(profile).await {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            return Ok(Outcome::Unavailable(format!(
-                "the pinned {} could not be prepared: {error:#}",
-                profile.kind.display_name()
-            )));
-        }
-    };
-    println!(
-        "Using the pinned {} at {}.",
-        profile.kind.display_name(),
-        managed.entrypoint.display()
-    );
-    sign_in(
-        profile.kind,
-        &profile.home,
-        &managed.command,
-        &managed.args,
-        &managed.entrypoint,
-        &launch_environment,
-        requested_method,
+async fn prepare_target_harness(
+    harness: HarnessKind,
+    cwd: &Path,
+    environment: BTreeMap<String, String>,
+) -> Result<TargetHarness> {
+    let policy = ExecutionPolicy::ConfiguredApprovals;
+    let (command, args) = mj_core::harness_runtime::fallback_launch(harness, policy);
+    let prepared = super::prepare_harness_launch(
+        harness,
+        HarnessRuntimePolicy::Ambient,
+        policy,
+        AcpSupervisorSpec {
+            command: command.into(),
+            args,
+            environment,
+            excluded_environment: Vec::new(),
+            cwd: cwd.to_path_buf(),
+            harness_lease: None,
+            node_lease: None,
+        },
     )
     .await
-}
-
-/// Resolve the same managed installation used for sessions and return its CLI
-/// with the environment that makes its shebangs and child tools use the
-/// managed Node version.
-pub(crate) async fn pinned_cli(profile: &HarnessProfile) -> Result<PinnedCli> {
-    anyhow::ensure!(
-        !uses_ambient_cli(profile),
-        "this profile uses your own {} installation; Mjolnir signs in through that harness's installed CLI",
-        profile.kind.display_name()
-    );
-    let (managed, environment) = managed_login(profile).await?;
-    Ok(PinnedCli {
-        command: managed.cli_entrypoint.clone(),
-        environment,
-        _managed: managed,
+    .with_context(|| format!("prepare {}", harness.display_name()))?;
+    let (entrypoint, cli) = match &prepared.managed {
+        Some(managed) => (managed.entrypoint.clone(), managed.cli_entrypoint.clone()),
+        None => (
+            PathBuf::from(target_entrypoint(harness)),
+            PathBuf::from(harness.native_login_command().0),
+        ),
+    };
+    Ok(TargetHarness {
+        prepared,
+        entrypoint,
+        cli,
     })
 }
 
-async fn managed_login(
-    profile: &HarnessProfile,
-) -> Result<(
-    mj_core::harness_install::ManagedHarness,
-    BTreeMap<String, String>,
-)> {
-    let created_home = !profile.home.exists();
-    std::fs::create_dir_all(&profile.home).with_context(|| {
-        format!(
-            "create the harness profile home {} for sign-in",
-            profile.home.display()
-        )
-    })?;
-    #[cfg(unix)]
-    if created_home {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&profile.home, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| {
-                format!(
-                    "restrict permissions on the harness profile home {}",
-                    profile.home.display()
+/// Run the target's harness CLI with `arguments` and this process's standard
+/// streams: a quota probe or a login renewal the controller asked for. The
+/// installation stays leased until the CLI exits.
+pub async fn run_harness_cli(
+    harness: HarnessKind,
+    environment: BTreeMap<String, String>,
+    arguments: Vec<String>,
+) -> Result<i32> {
+    let cwd = std::env::current_dir().context("read the working directory")?;
+    let target = prepare_target_harness(harness, &cwd, environment).await?;
+    let status = Command::new(&target.cli)
+        .args(&arguments)
+        .env_clear()
+        .envs(&target.prepared.environment)
+        .current_dir(&cwd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await
+        .with_context(|| format!("run `{}`", target.cli.display()))?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Run `spec` in this target and return the exit code the person's terminal
+/// should see.
+pub async fn run_sign_in(spec: SignInSpec) -> Result<i32> {
+    let mut environment = spec.environment.clone();
+    spec.harness
+        .configure_home_environment(&spec.profile_home, &mut environment);
+    let target = prepare_target_harness(spec.harness, &spec.profile_home, environment).await?;
+    let environment = target.prepared.environment.clone();
+    let (entrypoint, cli, prepared) = (&target.entrypoint, &target.cli, &target.prepared);
+    match spec.action {
+        SignInAction::ClaudeSetupToken => {
+            println_status("Running `claude setup-token`.");
+            run_terminal(
+                cli,
+                &["setup-token".to_owned()],
+                &environment,
+                &spec.profile_home,
+            )
+            .await
+        }
+        SignInAction::ClaudeAuthStatus => {
+            run_terminal(
+                cli,
+                &["auth".to_owned(), "status".to_owned()],
+                &environment,
+                &spec.profile_home,
+            )
+            .await
+        }
+        SignInAction::Login => {
+            if !spec.cli {
+                match sign_in(
+                    spec.harness,
+                    &spec.profile_home,
+                    &prepared.spec.command,
+                    &prepared.spec.args,
+                    entrypoint,
+                    &environment,
+                    spec.desktop,
+                    spec.method.as_deref(),
                 )
-            })?;
-    }
-    let mut environment = profile.environment.resolved().clone();
-    profile.kind.configure_profile_home_environment(
-        &profile.home,
-        HarnessHost::current(),
-        &mut environment,
-    );
-    // A login runs in the person's terminal, not in an isolated worker. Keep
-    // the ambient display, browser and provider-key environment, then layer
-    // the account login shell and finally the profile's own overrides. The
-    // old CLI login inherited this environment; env_clear here would drop
-    // DISPLAY/BROWSER and exported provider keys.
-    let mut launch_environment: BTreeMap<String, String> = std::env::vars_os()
-        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
-        .collect();
-    match mj_core::login_environment::with_overrides(&BTreeMap::new()).await {
-        Ok(login) => launch_environment.extend(login),
-        Err(error) => {
-            eprintln!(
-                "Could not read the account login shell ({error:#}); using the environment Mjolnir started with."
-            );
+                .await?
+                {
+                    Outcome::SignedIn { method } => {
+                        println_status(&format!("Signed in through the ACP method {method}."));
+                        return Ok(0);
+                    }
+                    Outcome::Unavailable(reason) => {
+                        if spec.method.is_some() {
+                            bail!("ACP sign-in was requested but is unavailable: {reason}");
+                        }
+                        println_status(&format!(
+                            "ACP sign-in is unavailable for {} ({reason}); using its command-line login.",
+                            spec.harness.display_name()
+                        ));
+                    }
+                }
+            }
+            let (_, arguments) = spec.harness.native_login_command();
+            println_status(&format!(
+                "Running `{} {}`.",
+                cli.display(),
+                arguments.join(" ")
+            ));
+            run_terminal(cli, &arguments, &environment, &spec.profile_home).await
         }
     }
-    launch_environment.extend(environment.clone());
-    let managed = mj_core::harness_install::resolve_with_environment(
-        profile.kind,
-        mj_core::config::ExecutionPolicy::ConfiguredApprovals,
-        &launch_environment,
-    )
-    .await?;
-    launch_environment.extend(managed.environment.clone());
-    Ok((managed, launch_environment))
+}
+
+/// Status lines go to standard error: `claude setup-token` prints the token
+/// on standard output, and the controller reads it from there.
+fn println_status(message: &str) {
+    eprintln!("{message}");
+}
+
+/// The program a target-provided harness's terminal sign-in runs: the native
+/// harness, or the ACP adapter whose own subcommand signs in.
+fn target_entrypoint(harness: HarnessKind) -> &'static str {
+    match harness {
+        HarnessKind::Codex => "codex-acp",
+        HarnessKind::Claude => "claude-agent-acp",
+        HarnessKind::Kimi => "kimi",
+        HarnessKind::Grok => "grok",
+        HarnessKind::Muse => "muse-acp",
+        HarnessKind::OpenCode => "opencode",
+        HarnessKind::Mimo => "mimo",
+        HarnessKind::Dsh => "dsh-acp",
+    }
+}
+
+async fn run_terminal(
+    program: &Path,
+    arguments: &[String],
+    environment: &BTreeMap<String, String>,
+    home: &Path,
+) -> Result<i32> {
+    restore_default_sigint();
+    let status = Command::new(program)
+        .args(arguments)
+        .env_clear()
+        .envs(environment)
+        .current_dir(home)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await
+        .with_context(|| format!("run `{}`", program.display()))?;
+    Ok(status.code().unwrap_or(1))
 }
 
 /// The core of ACP sign-in. Tests drive this directly with a scripted bridge.
+// Every argument is an independent input: the harness, where it runs, how to
+// start its bridge, and what the person chose.
+#[allow(clippy::too_many_arguments)]
 async fn sign_in(
     kind: HarnessKind,
     home: &Path,
@@ -184,6 +239,7 @@ async fn sign_in(
     args: &[String],
     entrypoint: &Path,
     environment: &BTreeMap<String, String>,
+    desktop: bool,
     requested_method: Option<&str>,
 ) -> Result<Outcome> {
     let mut session = match AcpSession::start(kind, home, command, args, environment).await {
@@ -202,7 +258,7 @@ async fn sign_in(
         ));
     } else if kind == HarnessKind::Codex
         && requested_method.is_none()
-        && !has_desktop_session(environment)
+        && !desktop
         && api_key_present(environment)
     {
         // Headless with an exported key: use the key method rather than
@@ -223,13 +279,10 @@ async fn sign_in(
             }
         }
     };
-    if !has_desktop_session(environment)
-        && method.id.eq_ignore_ascii_case("chat-gpt")
-        && !api_key_present(environment)
-    {
+    if !desktop && method.id.eq_ignore_ascii_case("chat-gpt") && !api_key_present(environment) {
         session.shutdown().await;
         bail!(
-            "the Codex ChatGPT sign-in needs a desktop browser; set CODEX_API_KEY or OPENAI_API_KEY, or run `mj login --cli` on a desktop"
+            "the Codex ChatGPT sign-in needs a desktop browser; set CODEX_API_KEY or OPENAI_API_KEY, or run `mj login` on a desktop"
         );
     }
     println!("Signing in with {} ({}).", method.name, method.id);
@@ -320,27 +373,6 @@ async fn sign_in(
         }
     }
     Ok(Outcome::SignedIn { method: method.id })
-}
-
-fn describe_auth(scheme: &AuthScheme) -> String {
-    match scheme {
-        AuthScheme::ApiKey { env_key } => {
-            format!("this profile authenticates with {env_key}, so it has no interactive login")
-        }
-        AuthScheme::InlineApiKey => {
-            "this profile inlines its provider API key, so it has no interactive login".to_owned()
-        }
-        AuthScheme::AwsCredentialChain => {
-            "this profile authenticates with the AWS credential chain, so it has no interactive login"
-                .to_owned()
-        }
-        AuthScheme::NoAuthentication => {
-            "this profile's built-in provider does not require an interactive login".to_owned()
-        }
-        AuthScheme::NativeLogin | AuthScheme::NativeLoginStore => {
-            "this profile has no ACP login method".to_owned()
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -477,16 +509,6 @@ fn looks_interactive(id: &str) -> bool {
     ["login", "chat-gpt", "chatgpt", "oauth", "browser"]
         .iter()
         .any(|needle| id.contains(needle))
-}
-
-/// Whether this login has a desktop session for a browser callback or opener.
-fn has_desktop_session(environment: &BTreeMap<String, String>) -> bool {
-    cfg!(any(target_os = "macos", target_os = "windows"))
-        || ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|name| {
-            environment
-                .get(*name)
-                .is_some_and(|value| !value.trim().is_empty())
-        })
 }
 
 fn api_key_present(environment: &BTreeMap<String, String>) -> bool {
@@ -831,83 +853,9 @@ mod tests {
                 directory.join(".local/share").display().to_string(),
             ),
             ("PATH".into(), std::env::var("PATH").unwrap_or_default()),
-            ("DISPLAY".into(), ":0".into()),
         ])
     }
 
-    #[tokio::test]
-    async fn pinned_cli_comes_from_the_same_managed_install_as_the_bridge() {
-        let _guard = TEST_LOCK.lock().await;
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let tools = root.join("tools");
-        std::fs::create_dir_all(&tools).unwrap();
-        for name in ["node", "npm", "npx"] {
-            write_script(
-                &tools,
-                name,
-                if name == "node" {
-                    "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.22.1; fi\n"
-                } else {
-                    "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 11.6.2; fi\n"
-                },
-            );
-        }
-        let xdg_cache = root.join("cache");
-        let cache_root = mj_core::harness_runtime::managed_harness_cache_root(
-            Some(xdg_cache.as_os_str()),
-            Some(root.as_os_str()),
-        )
-        .unwrap();
-        let install =
-            mj_core::harness_runtime::managed_harness_install_dir(&cache_root, HarnessKind::Claude);
-        std::fs::create_dir_all(install.join("node_modules/.bin")).unwrap();
-        let bridge = write_script(
-            &install.join("node_modules/.bin"),
-            "claude-agent-acp",
-            "#!/bin/sh\nexit 0\n",
-        );
-        let cli = write_script(
-            &install.join("node_modules/.bin"),
-            "claude",
-            "#!/bin/sh\necho pinned-claude\n",
-        );
-        let manifest =
-            mj_core::harness_runtime::ManagedHarnessManifest::for_harness(HarnessKind::Claude);
-        mj_core::config::atomic_write(
-            &install.join(mj_core::harness_runtime::MANIFEST_FILE),
-            &serde_json::to_vec_pretty(&manifest).unwrap(),
-        )
-        .unwrap();
-        let mut environment = home(root);
-        environment.insert("PATH".into(), format!("{}:/usr/bin:/bin", tools.display()));
-        environment.insert("XDG_CACHE_HOME".into(), xdg_cache.display().to_string());
-        let profile = HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Claude,
-            home: root.join("claude-profile"),
-            environment: environment.into(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            legacy_subagents: Default::default(),
-        };
-        std::fs::create_dir_all(&profile.home).unwrap();
-
-        let pinned = pinned_cli(&profile).await.unwrap();
-
-        assert_eq!(pinned.command, cli);
-        assert!(
-            pinned.environment["PATH"]
-                .split(':')
-                .any(|entry| Path::new(entry) == tools)
-        );
-        assert!(bridge.exists());
-    }
-
-    /// A bridge that answers initialize with `methods` and records every later
-    /// request in `requests`.
     fn bridge(directory: &Path, methods: &str) -> PathBuf {
         let response = json!({
             "jsonrpc": "2.0",
@@ -934,28 +882,6 @@ mod tests {
                 requests = directory.join("requests").display(),
             ),
         )
-    }
-
-    #[tokio::test]
-    async fn an_api_key_profile_reports_no_interactive_login() {
-        let _guard = TEST_LOCK.lock().await;
-        let directory = tempfile::tempdir().unwrap();
-        let mut profile = HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Dsh,
-            home: directory.path().to_path_buf(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            legacy_subagents: Default::default(),
-        };
-        profile
-            .environment
-            .insert("DEEPSEEK_API_KEY".to_owned(), "secret".to_owned());
-        let outcome = login(&profile, None).await.unwrap();
-        assert!(matches!(outcome, Outcome::NoLogin(reason) if reason.contains("DEEPSEEK_API_KEY")));
     }
 
     #[tokio::test]
@@ -990,6 +916,7 @@ mod tests {
             &[],
             &bridge,
             &home(directory.path()),
+            true,
             None,
         )
         .await
@@ -1017,6 +944,7 @@ mod tests {
             &[],
             &bridge,
             &home(directory.path()),
+            true,
             None,
         )
         .await
@@ -1046,6 +974,7 @@ mod tests {
             &[],
             &bridge,
             &home(directory.path()),
+            true,
             Some("missing"),
         )
         .await
@@ -1067,6 +996,7 @@ mod tests {
             &[],
             &bridge,
             &home(directory.path()),
+            true,
             None,
         )
         .await
@@ -1108,6 +1038,7 @@ mod tests {
             &[],
             &bridge,
             &home(directory.path()),
+            true,
             None,
         )
         .await

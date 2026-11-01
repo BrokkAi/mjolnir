@@ -68,29 +68,85 @@ impl fmt::Display for ClaudeUsageError {
     }
 }
 
-/// Query the same OAuth usage endpoint as Claude Code's interactive `/usage`,
-/// except on macOS, where Claude Code is asked directly.
+/// Query the same OAuth usage endpoint as Claude Code's interactive `/usage`.
 ///
 /// The endpoint is authenticated with the access token from the profile home's
-/// `.credentials.json`. On macOS that file does not exist: Claude Code keeps
-/// the credentials in the Keychain, where only Claude Code itself reads them.
-/// The API has no token to send there, so its print-mode `/usage` output is
-/// the only quota macOS can report.
+/// `.credentials.json`. A renewal runs `claude auth login` in the harness
+/// sandbox with the home mounted, never on this machine.
+///
+/// On macOS a profile at the person's own `~/.claude` may have no such file:
+/// the Claude Code they installed keeps its login in the Keychain. That login
+/// is copied into a private home and Claude Code's print-mode `/usage` reads
+/// it in the sandbox.
 pub async fn query(
     home: PathBuf,
     environment: HashMap<String, String>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    let executor = Arc::new(CancellableProcessExecutor::with_timeout(
+    let executor = CancellableProcessExecutor::with_timeout(
         USAGE_TIMEOUT + REFRESH_LOCK_WAIT + REFRESH_TIMEOUT,
-    ));
+    );
     let _cancel = executor.cancel_on_drop();
-    if cfg!(target_os = "macos") {
-        return query_cli_with(environment, executor).await;
+    #[cfg(target_os = "macos")]
+    if !home.join(".credentials.json").is_file() {
+        return query_keychain_login(environment, executor).await;
     }
-    query_with(home, environment, USAGE_URL, executor).await
+    let sandboxed = Arc::new(crate::harness_sandbox::SandboxExecutor::new(
+        executor,
+        mj_core::config::HarnessKind::Claude,
+        home.clone(),
+    ));
+    query_with(home, environment, USAGE_URL, sandboxed).await
+}
+
+/// Read the quota of the macOS Keychain login through Claude Code's own
+/// `/usage`, in the sandbox, from a private copy of the login.
+#[cfg(target_os = "macos")]
+async fn query_keychain_login(
+    environment: HashMap<String, String>,
+    executor: CancellableProcessExecutor,
+) -> Result<ClaudeUsageReport, ClaudeUsageError> {
+    let staged = tokio::task::spawn_blocking(|| -> anyhow::Result<Option<tempfile::TempDir>> {
+        let Some(credentials) =
+            crate::setup::claude_keychain_credentials(&crate::targets::ProcessExecutor)?
+        else {
+            return Ok(None);
+        };
+        let root = mj_core::config::data_dir()
+            .join("harness-sandbox")
+            .join("work");
+        std::fs::create_dir_all(&root)?;
+        let home = tempfile::Builder::new()
+            .prefix("claude-usage-")
+            .tempdir_in(root)?;
+        mj_core::credentials::write_credential_file(
+            mj_core::config::HarnessKind::Claude,
+            &home.path().join(".credentials.json"),
+            &credentials,
+        )?;
+        Ok(Some(home))
+    })
+    .await
+    .map_err(|error| ClaudeUsageError::Query(format!("worker failed: {error}")))?
+    .map_err(|error| ClaudeUsageError::Query(format!("{error:#}")))?
+    .ok_or(ClaudeUsageError::NotSignedIn)?;
+    let mut environment = environment;
+    environment.insert(
+        "CLAUDE_CONFIG_DIR".into(),
+        staged.path().to_string_lossy().into_owned(),
+    );
+    let sandboxed = Arc::new(crate::harness_sandbox::SandboxExecutor::new(
+        executor,
+        mj_core::config::HarnessKind::Claude,
+        staged.path().to_path_buf(),
+    ));
+    query_cli_with(environment, sandboxed).await
 }
 
 /// Read the quota out of Claude Code's own `/usage` output.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a macOS Keychain login reads /usage")
+)]
 async fn query_cli_with(
     environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
@@ -280,21 +336,18 @@ async fn refresh_and_retry(
     query_api(client, usage_url, token).await
 }
 
-/// On macOS, read Claude's quota through its Keychain-aware CLI.
+/// Read Claude's quota through its print-mode `/usage`.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a macOS Keychain login reads /usage")
+)]
 async fn run_claude_usage(
     environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
     purpose: &'static str,
 ) -> Result<CommandOutput, String> {
-    let mut command = CommandSpec::new(
-        if cfg!(windows) {
-            "claude.cmd"
-        } else {
-            "claude"
-        },
-        ["-p", "/usage", "--no-session-persistence"],
-    )
-    .purpose(purpose);
+    let mut command =
+        CommandSpec::new("claude", ["-p", "/usage", "--no-session-persistence"]).purpose(purpose);
     command.env.extend(environment);
     tokio::task::spawn_blocking(move || executor.execute(&command))
         .await
@@ -329,15 +382,7 @@ async fn run_claude_refresh(
         "CLAUDE_CODE_OAUTH_CLIENT_ID".into(),
         oauth["clientId"].as_str().unwrap_or_default().to_owned(),
     );
-    let mut command = CommandSpec::new(
-        if cfg!(windows) {
-            "claude.cmd"
-        } else {
-            "claude"
-        },
-        ["auth", "login"],
-    )
-    .purpose("refresh Claude login");
+    let mut command = CommandSpec::new("claude", ["auth", "login"]).purpose("refresh Claude login");
     command.env.extend(environment);
     command.sensitive_output = true;
     let output = tokio::task::spawn_blocking(move || {
@@ -603,6 +648,10 @@ fn strip_ansi(input: &str) -> String {
     output
 }
 
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only a macOS Keychain login reads /usage")
+)]
 fn is_authentication_error(detail: &str) -> bool {
     let lower = detail.to_ascii_lowercase();
     [

@@ -13,6 +13,71 @@ use super::AcpSupervisorSpec;
 
 pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileConfig> {
     let policy = ExecutionPolicy::ConfiguredApprovals;
+    let supervisor = spec.cwd.join("acp-supervisor.json");
+    // The installation guards stay alive until the probe ends, so a managed
+    // harness or Node.js runtime cannot be collected under the running probe.
+    let (session_environment, installation) = match spec.runtime {
+        HarnessRuntimePolicy::Managed => managed_supervisor(&spec, policy, &supervisor).await?,
+        HarnessRuntimePolicy::Ambient => target_supervisor(&spec, policy, &supervisor).await?,
+    };
+    let launch = LaunchSpec {
+        operator_away: Default::default(),
+        imported_logins: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
+        managed_subagent: false,
+        subagent_mcp_socket: None,
+        clear_context_request: None,
+        context_restore: None,
+        goal_recovery: Default::default(),
+        command: std::env::current_exe()?,
+        args: vec![
+            "--login-environment-ready".into(),
+            "worker".into(),
+            "acp-supervisor".into(),
+            "--spec".into(),
+            supervisor.to_string_lossy().into_owned(),
+        ],
+        environment: session_environment,
+        // Discovery opens a throwaway session that never accepts a selector,
+        // so there is nothing to pin into its spec.
+        bridge_spec_path: None,
+        cwd: spec.cwd,
+        additional_directories: vec![],
+        project_memory: None,
+        extra_mcp_servers: vec![],
+        resume_session: None,
+        native_session_may_have_history: false,
+        accepted_config: Arc::new(Mutex::new(AcceptedSessionConfig::default())),
+        initial_model: None,
+        harness: spec.harness,
+        execution_policy: policy,
+        acp_activity: Default::default(),
+        step_clock: Default::default(),
+        tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: None,
+        stall_policy: None,
+    };
+    let result = probe(launch, spec.model).await;
+    drop(installation);
+    result
+}
+
+/// What keeps a probe's harness installation leased while it runs.
+struct ProbeInstallation {
+    _managed: Option<super::harness::ManagedHarness>,
+    _node: Option<super::harness::ManagedNodeRuntime>,
+}
+
+/// Probe with the worker's own pinned installation, as a bare session runs.
+async fn managed_supervisor(
+    spec: &ProfileProbeSpec,
+    policy: ExecutionPolicy,
+    supervisor: &std::path::Path,
+) -> Result<(
+    std::collections::BTreeMap<String, String>,
+    ProbeInstallation,
+)> {
     // Discovery probes a fresh target before any session launch exists. Resolve
     // the account's login environment first so nvm/Homebrew Node installations
     // and the cache root (`HOME` or `XDG_CACHE_HOME`) are visible to the
@@ -67,7 +132,6 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     for name in &spec.excluded_environment {
         session_environment.remove(name);
     }
-    let supervisor = spec.cwd.join("acp-supervisor.json");
     AcpSupervisorSpec {
         command,
         args,
@@ -79,48 +143,55 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
             .as_ref()
             .map(|node| node.lease_path().to_path_buf()),
     }
-    .write_spec(&supervisor)?;
-    let launch = LaunchSpec {
-        operator_away: Default::default(),
-        imported_logins: None,
-        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
-        managed_subagent: false,
-        subagent_mcp_socket: None,
-        clear_context_request: None,
-        context_restore: None,
-        goal_recovery: Default::default(),
-        command: std::env::current_exe()?,
-        args: vec![
-            "--login-environment-ready".into(),
-            "worker".into(),
-            "acp-supervisor".into(),
-            "--spec".into(),
-            supervisor.to_string_lossy().into_owned(),
-        ],
-        environment: session_environment,
-        // Discovery opens a throwaway session that never accepts a selector,
-        // so there is nothing to pin into its spec.
-        bridge_spec_path: None,
-        cwd: spec.cwd,
-        additional_directories: vec![],
-        project_memory: None,
-        extra_mcp_servers: vec![],
-        resume_session: None,
-        native_session_may_have_history: false,
-        accepted_config: Arc::new(Mutex::new(AcceptedSessionConfig::default())),
-        initial_model: None,
-        harness: spec.harness,
-        execution_policy: policy,
-        acp_activity: Default::default(),
-        step_clock: Default::default(),
-        tools_in_flight: Default::default(),
-        turn_context: Default::default(),
-        verdict: None,
-        stall_policy: None,
-    };
-    let result = probe(launch, spec.model).await;
-    drop(managed_node);
-    result
+    .write_spec(supervisor)?;
+    Ok((
+        session_environment,
+        ProbeInstallation {
+            _managed: managed,
+            _node: managed_node,
+        },
+    ))
+}
+
+/// Probe with the harness the target provides, exactly as a container
+/// session selects it: the image's bridge when it is compatible, otherwise
+/// the pinned installation inside the target.
+async fn target_supervisor(
+    spec: &ProfileProbeSpec,
+    policy: ExecutionPolicy,
+    supervisor: &std::path::Path,
+) -> Result<(
+    std::collections::BTreeMap<String, String>,
+    ProbeInstallation,
+)> {
+    let mut environment = spec.environment.clone();
+    spec.harness
+        .configure_home_environment(&spec.profile_home, &mut environment);
+    let (command, args) = mj_core::harness_runtime::fallback_launch(spec.harness, policy);
+    let prepared = super::prepare_harness_launch(
+        spec.harness,
+        HarnessRuntimePolicy::Ambient,
+        policy,
+        AcpSupervisorSpec {
+            command: command.into(),
+            args,
+            environment,
+            excluded_environment: spec.excluded_environment.clone(),
+            cwd: spec.cwd.clone(),
+            harness_lease: None,
+            node_lease: None,
+        },
+    )
+    .await
+    .with_context(|| format!("prepare {} for discovery", spec.harness.display_name()))?;
+    prepared.spec.write_spec(supervisor)?;
+    Ok((
+        prepared.environment,
+        ProbeInstallation {
+            _managed: prepared.managed,
+            _node: prepared.managed_node,
+        },
+    ))
 }
 
 async fn probe(launch: LaunchSpec, model: Option<String>) -> Result<ProfileConfig> {

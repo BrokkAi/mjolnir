@@ -11,14 +11,16 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use mj_core::config::HarnessKind;
 use serde_json::{Value, json};
 use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout};
 
 /// A cold agent start plus one round trip to the billing backend. Generous
 /// because the alternative — reporting a timeout on a slow machine — reads to
 /// the user as a broken account.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The first request in a fresh sandbox also installs Grok Build there.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
 /// Ext method Grok Build serves for billing. The `_` prefix is the ACP ext
@@ -46,7 +48,6 @@ impl GrokUsageReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrokUsageError {
-    NotInstalled,
     Launch(String),
     TimedOut,
     /// The agent exited before answering. Grok Build tears the process down
@@ -62,7 +63,6 @@ pub enum GrokUsageError {
 impl fmt::Display for GrokUsageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotInstalled => write!(f, "Grok Build executable not found"),
             Self::Launch(error) => write!(f, "launch grok agent stdio: {error}"),
             Self::TimedOut => write!(f, "grok usage request timed out"),
             Self::Closed => write!(
@@ -79,24 +79,20 @@ impl fmt::Display for GrokUsageError {
 /// Ask a profile's Grok Build for its current billing period.
 pub async fn query(
     home: PathBuf,
-    cwd: PathBuf,
     env: HashMap<String, String>,
 ) -> Result<GrokUsageReport, GrokUsageError> {
-    let mut session = GrokUsageSession::spawn(&home, cwd, env)?;
+    let session = GrokUsageSession::spawn(&home, env).await?;
+    exchange_and_stop(session).await
+}
+
+async fn exchange_and_stop(
+    mut session: GrokUsageSession,
+) -> Result<GrokUsageReport, GrokUsageError> {
     // The exchange is bounded as a whole: a stalled agent must not hold the
     // quota refresh open, and its child must still be reaped.
     let result = tokio::time::timeout(REQUEST_TIMEOUT, session.exchange()).await;
     session.shutdown().await;
     result.map_err(|_| GrokUsageError::TimedOut)?
-}
-
-/// Executable candidates, in the order Hel tries them.
-///
-/// The installed CLI on `PATH` comes first, then the copy the official
-/// installer leaves inside the profile home.
-fn grok_programs(home: &Path) -> Vec<PathBuf> {
-    let name = if cfg!(windows) { "grok.exe" } else { "grok" };
-    vec![PathBuf::from(name), home.join("bin").join(name)]
 }
 
 struct GrokUsageSession {
@@ -105,41 +101,62 @@ struct GrokUsageSession {
     /// closes, so dropping this early kills the agent before it answers.
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    /// The sandbox container, removed at shutdown. Tests drive a fake agent
+    /// directly and have none.
+    container: Option<crate::harness_sandbox::SandboxCommand>,
 }
 
 impl GrokUsageSession {
-    fn spawn(
-        home: &Path,
-        cwd: PathBuf,
-        env: HashMap<String, String>,
-    ) -> Result<Self, GrokUsageError> {
-        let programs = grok_programs(home);
-        let mut child = None;
-        for (index, program) in programs.iter().enumerate() {
-            let mut command = Command::new(program);
-            command
-                .args(["agent", "stdio"])
-                .current_dir(&cwd)
-                .envs(&env)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true);
-            match command.spawn() {
-                Ok(spawned) => {
-                    child = Some(spawned);
-                    break;
-                }
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::NotFound
-                        && index + 1 < programs.len() => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(GrokUsageError::NotInstalled);
-                }
-                Err(error) => return Err(GrokUsageError::Launch(error.to_string())),
-            }
-        }
-        let mut child = child.ok_or(GrokUsageError::NotInstalled)?;
+    /// Start `grok agent stdio` in the harness sandbox. Grok Build is not in
+    /// the agent image; the worker there installs the pinned release once,
+    /// into the sandbox's persistent home.
+    async fn spawn(home: &Path, env: HashMap<String, String>) -> Result<Self, GrokUsageError> {
+        let home = home.to_path_buf();
+        let container = tokio::task::spawn_blocking(move || {
+            let config = mj_core::config::Config::load()?;
+            let sandbox = crate::harness_sandbox::HarnessSandbox::select(
+                &config,
+                &crate::targets::ProcessExecutor,
+            )?;
+            let host_home = home.to_string_lossy().into_owned();
+            let mount = crate::harness_sandbox::profile_mount_point(HarnessKind::Grok)
+                .to_string_lossy()
+                .into_owned();
+            let mut environment = env
+                .into_iter()
+                .map(|(name, value)| {
+                    let value = if value == host_home {
+                        mount.clone()
+                    } else {
+                        value
+                    };
+                    (name, value)
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            environment.extend(crate::harness_sandbox::profile_environment(
+                HarnessKind::Grok,
+            ));
+            let mut run = sandbox.harness_cli(
+                HarnessKind::Grok,
+                &home,
+                environment,
+                vec!["agent".into(), "stdio".into()],
+                "read Grok Build usage",
+            )?;
+            run.stdin = true;
+            sandbox.command(&run)
+        })
+        .await
+        .map_err(|error| GrokUsageError::Launch(error.to_string()))?
+        .map_err(|error| GrokUsageError::Launch(format!("{error:#}")))?;
+        let mut child = container
+            .process()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|error| GrokUsageError::Launch(error.to_string()))?;
         let stdin = child
             .stdin
             .take()
@@ -152,6 +169,7 @@ impl GrokUsageSession {
             child,
             stdin,
             stdout: BufReader::new(stdout),
+            container: Some(container),
         })
     }
 
@@ -226,6 +244,18 @@ impl GrokUsageSession {
         }
         if let Err(error) = self.child.wait().await {
             tracing::warn!(%error, "could not reap the Grok usage process");
+        }
+        let Some(container) = self.container else {
+            return;
+        };
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            container.remove(&crate::targets::CancellableProcessExecutor::with_timeout(
+                Duration::from_secs(30),
+            ));
+        })
+        .await
+        {
+            tracing::warn!(%error, "could not remove the Grok usage container");
         }
     }
 }
@@ -356,27 +386,30 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn fake_grok(directory: &Path, script: &str) -> PathBuf {
+    fn fake_grok(directory: &Path, script: &str) -> GrokUsageSession {
         mj_core::test_hooks::install_fake_command(directory, "grok", script);
-        directory.join("grok")
+        let mut child = tokio::process::Command::new(directory.join("grok"))
+            .args(["agent", "stdio"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        GrokUsageSession {
+            stdin: child.stdin.take().unwrap(),
+            stdout: BufReader::new(child.stdout.take().unwrap()),
+            child,
+            container: None,
+        }
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn an_agent_that_exits_without_answering_is_reported_not_awaited() {
         let directory = tempfile::tempdir().unwrap();
-        let _executable = fake_grok(directory.path(), "#!/bin/sh\nexit 0\n");
+        let session = fake_grok(directory.path(), "#!/bin/sh\nexit 0\n");
 
-        let error = query(
-            directory.path().to_path_buf(),
-            directory.path().to_path_buf(),
-            HashMap::from([(
-                "PATH".to_owned(),
-                directory.path().to_string_lossy().into_owned(),
-            )]),
-        )
-        .await
-        .unwrap_err();
+        let error = exchange_and_stop(session).await.unwrap_err();
 
         assert_eq!(error, GrokUsageError::Closed);
         assert!(

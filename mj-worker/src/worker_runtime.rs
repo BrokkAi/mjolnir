@@ -339,6 +339,22 @@ mod tool_cache;
 pub use discovery::discover_profile_config;
 #[cfg(unix)]
 pub use harness_launch::{PreparedHarnessLaunch, prepare_harness_launch};
+#[cfg(unix)]
+mod sign_in;
+#[cfg(unix)]
+pub use sign_in::{run_harness_cli, run_sign_in};
+#[cfg(not(unix))]
+pub async fn run_harness_cli(
+    _harness: mj_core::config::HarnessKind,
+    _environment: std::collections::BTreeMap<String, String>,
+    _arguments: Vec<String>,
+) -> anyhow::Result<i32> {
+    anyhow::bail!("running a harness requires a Unix worker host")
+}
+#[cfg(not(unix))]
+pub async fn run_sign_in(_spec: mj_core::worker_launch::SignInSpec) -> anyhow::Result<i32> {
+    anyhow::bail!("sign-in requires a Unix worker host")
+}
 #[cfg(not(unix))]
 pub async fn discover_profile_config(
     _spec: mj_core::worker_launch::ProfileProbeSpec,

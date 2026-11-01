@@ -580,6 +580,51 @@ pub struct ProfileProbeSpec {
     pub excluded_environment: Vec<String>,
     pub cwd: PathBuf,
     pub model: Option<String>,
+    /// Where the harness comes from. The harness sandbox probes inside a
+    /// container and selects the image's harness (`Ambient`), as a container
+    /// session does. A spec without this field predates the sandbox and
+    /// always meant the worker's own pinned installation.
+    #[serde(default = "managed_probe_runtime")]
+    pub runtime: HarnessRuntimePolicy,
+}
+
+/// What `mj-worker worker sign-in` does in the harness sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignInAction {
+    /// Sign the profile in through its ACP methods, or its CLI's own login.
+    Login,
+    /// Mint a long-lived Claude token with `claude setup-token`; the token is
+    /// printed on standard output.
+    ClaudeSetupToken,
+    /// Print `claude auth status` for the environment's token, so a freshly
+    /// minted setup token can be confirmed.
+    ClaudeAuthStatus,
+}
+
+/// An interactive sign-in the worker runs against a mounted profile home.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignInSpec {
+    pub harness: HarnessKind,
+    pub profile_home: PathBuf,
+    pub environment: std::collections::BTreeMap<String, String>,
+    pub action: SignInAction,
+    /// An ACP method id the person asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// Skip ACP and run the harness CLI's own login.
+    #[serde(default)]
+    pub cli: bool,
+    /// The person's machine can open a browser for a callback flow. The
+    /// sandbox has no display of its own; its `BROWSER` hands the address to
+    /// the controller, which opens it.
+    #[serde(default)]
+    pub desktop: bool,
+}
+
+const fn managed_probe_runtime() -> HarnessRuntimePolicy {
+    HarnessRuntimePolicy::Managed
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

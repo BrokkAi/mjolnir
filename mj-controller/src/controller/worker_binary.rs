@@ -61,6 +61,7 @@ use project_memory::*;
 mod binary_source;
 pub use binary_source::*;
 mod binary_select;
+pub use binary_select::portable_linux_worker;
 pub use binary_select::ssh_worker_binary_prerequisite;
 pub(crate) use binary_select::worker_source_problem;
 pub(super) use binary_select::*;

@@ -683,7 +683,7 @@ async fn refresh_profile_with_cache_root(
         // Grok Build publishes no HTTP quota endpoint. Its own usage view polls
         // an ACP billing extension, and so does Mjolnir.
         HarnessKind::Grok => {
-            grok_usage::query(source_home.clone(), cwd, environment)
+            grok_usage::query(source_home.clone(), environment)
                 .await
                 .map(|report| ProfileQuota {
                     banked_resets: None,

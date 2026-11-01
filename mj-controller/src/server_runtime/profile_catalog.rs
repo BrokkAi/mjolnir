@@ -1395,7 +1395,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
-    // Hard-won: #1232: Windows has no local worker, so every probe failed and the owner retried forever.
+    // Hard-won: #1232: a machine that cannot probe failed every probe, and the owner retried forever.
     #[tokio::test(start_paused = true)]
     async fn a_discovery_no_retry_can_fix_waits_for_a_session_to_report_choices() {
         let calls = calls();
@@ -1411,7 +1411,10 @@ mod tests {
                 if cached {
                     Ok(test_choices(&profile))
                 } else {
-                    Err(crate::controller::profile_config::DiscoveryUnsupported.into())
+                    Err(
+                        crate::harness_sandbox::SandboxUnavailable::new("no container engine")
+                            .into(),
+                    )
                 }
             })
         }));
@@ -1424,7 +1427,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let options = catalog.snapshot().options(&config, None).unwrap();
         assert!(
-            options.unavailable[0].contains("runs no local Mjolnir worker"),
+            options.unavailable[0].contains("no container engine"),
             "{options:?}"
         );
 
