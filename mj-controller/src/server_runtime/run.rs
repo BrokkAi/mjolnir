@@ -221,6 +221,7 @@ pub(crate) async fn run_server(
         qr_login_url,
         fallback_reason,
         certificate_sha256,
+        local_address: None,
     };
 
     let mut serve = ViewerServer::spawn({

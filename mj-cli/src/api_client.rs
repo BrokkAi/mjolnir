@@ -8,6 +8,7 @@
 pub(crate) mod events;
 mod pinned_tls;
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -123,16 +124,20 @@ impl ApiClient {
     }
 
     async fn connect_to(client: &mut daemon::DaemonClient) -> Result<Self> {
-        let viewer_url = daemon::wait_for_web_viewer(client).await?;
-        // The viewer may serve a self-signed certificate; the daemon publishes
-        // its SHA-256 beside the URL so this client trusts exactly that one.
-        let certificate_sha256 = match client.web_access().await? {
-            mj_client::web::WebViewerAccess::Ready {
-                certificate_sha256, ..
-            } => certificate_sha256,
-            _ => None,
+        let access = daemon::wait_for_web_access(client).await?;
+        let mj_client::web::WebViewerAccess::Ready {
+            viewer_url,
+            certificate_sha256,
+            local_address,
+            ..
+        } = access
+        else {
+            unreachable!("wait_for_web_access returns only Ready")
         };
-        let http = http_client(certificate_sha256.as_deref())?;
+        let local_address = local_address
+            .context("the daemon did not publish a local web viewer address; restart the daemon")?;
+        let (viewer_url, resolver) = route_viewer_to_local_socket(&viewer_url, local_address)?;
+        let http = http_client(certificate_sha256.as_deref(), resolver)?;
         probe_api(&http, &viewer_url).await?;
         let token_path = api_token_path();
         let token = std::fs::read_to_string(&token_path)
@@ -155,7 +160,7 @@ impl ApiClient {
 
     #[cfg(test)]
     pub(crate) fn new(base_url: String, token: String) -> Result<Self> {
-        Ok(Self::with_http(base_url, token, http_client(None)?))
+        Ok(Self::with_http(base_url, token, http_client(None, None)?))
     }
 
     fn with_http(base_url: String, token: String, http: reqwest::Client) -> Self {
@@ -874,13 +879,84 @@ impl ApiClient {
 /// The HTTP client for the daemon API. With a pin it trusts only the
 /// certificate the daemon published; without one (plain HTTP, or a publicly
 /// trusted Tailscale certificate) it verifies as any HTTPS client does.
-fn http_client(certificate_sha256: Option<&str>) -> Result<reqwest::Client> {
+fn http_client(
+    certificate_sha256: Option<&str>,
+    resolver: Option<(String, SocketAddr)>,
+) -> Result<reqwest::Client> {
+    build_http_client(certificate_sha256, resolver, None)
+}
+
+fn build_http_client(
+    certificate_sha256: Option<&str>,
+    resolver: Option<(String, SocketAddr)>,
+    proxy: Option<reqwest::Proxy>,
+) -> Result<reqwest::Client> {
     let mut builder =
         reqwest::Client::builder().user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")));
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(proxy);
+    }
+    builder = builder
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some((host, address)) = resolver {
+        builder = builder.resolve(&host, address);
+    }
     if let Some(pin) = certificate_sha256 {
         builder = builder.tls_backend_preconfigured(pinned_tls::pinned_client_config(pin)?);
     }
     builder.build().context("build the API HTTP client")
+}
+
+/// Preserve a DNS authority for HTTP Host and TLS SNI while sending the
+/// connection to the daemon-published local listener.
+fn route_viewer_to_local_socket(
+    viewer_url: &str,
+    local_address: SocketAddr,
+) -> Result<(String, Option<(String, SocketAddr)>)> {
+    let mut url = url::Url::parse(viewer_url).context("parse web viewer URL")?;
+    let port = url
+        .port_or_known_default()
+        .context("web viewer URL has no known port")?;
+    if port != local_address.port() {
+        bail!(
+            "web viewer URL port {port} does not match its local listener port {}",
+            local_address.port()
+        );
+    }
+    let host = url.host().context("web viewer URL has no host")?;
+    let resolver = match host {
+        url::Host::Ipv4(ip) if ip.is_unspecified() => {
+            if !local_address.is_ipv4() {
+                bail!("web viewer wildcard host and local listener use different address families");
+            }
+            url.set_ip_host(local_address.ip())
+                .map_err(|_| anyhow!("could not route web viewer wildcard host"))?;
+            None
+        }
+        url::Host::Ipv6(ip) if ip.is_unspecified() => {
+            if !local_address.is_ipv6() {
+                bail!("web viewer wildcard host and local listener use different address families");
+            }
+            url.set_ip_host(local_address.ip())
+                .map_err(|_| anyhow!("could not route web viewer wildcard host"))?;
+            None
+        }
+        url::Host::Ipv4(ip) => {
+            if local_address.ip() != std::net::IpAddr::V4(ip) {
+                bail!("web viewer URL address does not match its local listener address");
+            }
+            None
+        }
+        url::Host::Ipv6(ip) => {
+            if local_address.ip() != std::net::IpAddr::V6(ip) {
+                bail!("web viewer URL address does not match its local listener address");
+            }
+            None
+        }
+        url::Host::Domain(host) => Some((host.to_owned(), local_address)),
+    };
+    Ok((url.into(), resolver))
 }
 
 /// An unauthenticated versioned 401 proves the route exists before a token is read.
@@ -1047,6 +1123,7 @@ mod tests {
 
     use axum::extract::{Path as AxumPath, Query, State};
     use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
     use axum::routing::get;
     use axum::{Json, Router};
 
@@ -1374,14 +1451,16 @@ mod tests {
     #[tokio::test]
     async fn api_probe_succeeds_without_reading_a_token() {
         let (url, seen) = serve(Some("1")).await;
-        probe_api(&http_client(None).unwrap(), &url).await.unwrap();
+        probe_api(&http_client(None, None).unwrap(), &url)
+            .await
+            .unwrap();
         assert!(
             seen.lock().unwrap().is_empty(),
             "the support probe must not need authentication"
         );
         let (url, _) = serve(Some("2")).await;
         assert!(
-            probe_api(&http_client(None).unwrap(), &url)
+            probe_api(&http_client(None, None).unwrap(), &url)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -1393,7 +1472,7 @@ mod tests {
             axum::serve(listener, Router::new()).await.unwrap();
         });
         assert!(
-            probe_api(&http_client(None).unwrap(), &url)
+            probe_api(&http_client(None, None).unwrap(), &url)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -1429,7 +1508,10 @@ mod tests {
 
     /// Serve the API's unauthenticated probe over HTTPS with a generated
     /// self-signed certificate; returns the URL and the certificate's pin.
-    async fn serve_https(certificate_authority: bool) -> (String, String) {
+    async fn serve_https(
+        authority: &str,
+        certificate_authority: bool,
+    ) -> (String, String, SocketAddr, Seen) {
         mj_controller::server::install_rustls_crypto_provider();
         let mut params = rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()]).unwrap();
         if certificate_authority {
@@ -1447,31 +1529,64 @@ mod tests {
         )
         .await
         .unwrap();
-        let app = Router::new().route(
-            "/api/v1/sessions",
-            get(|| async {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    [(API_VERSION_HEADER, API_VERSION)],
-                )
-            }),
-        );
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("https://{}", listener.local_addr().unwrap());
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route(
+                "/api/v1/sessions",
+                get(|State(seen): State<Seen>, headers: HeaderMap| async move {
+                    let host = headers
+                        .get(axum::http::header::HOST)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default();
+                    let authorization = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default();
+                    seen.lock()
+                        .unwrap()
+                        .push(format!("host={host};authorization={authorization}"));
+                    if authorization.is_empty() {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            [(API_VERSION_HEADER, API_VERSION)],
+                        )
+                            .into_response();
+                    }
+                    Json(serde_json::json!({ "sessions": [sample_session("session-1")] }))
+                        .into_response()
+                }),
+            )
+            .layer(axum::middleware::from_fn(
+                |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let mut response = next.run(request).await;
+                    response
+                        .headers_mut()
+                        .insert(API_VERSION_HEADER, API_VERSION.parse().unwrap());
+                    response
+                },
+            ))
+            .with_state(seen.clone());
+        let listener = if authority.starts_with('[') {
+            std::net::TcpListener::bind("[::1]:0").unwrap()
+        } else {
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap()
+        };
+        let address = listener.local_addr().unwrap();
+        let url = format!("https://{authority}:{}", address.port());
         tokio::spawn(async move {
             axum_server::from_tcp_rustls(listener, tls)
                 .serve(app.into_make_service())
                 .await
                 .unwrap();
         });
-        (url, pin)
+        (url, pin, address, seen)
     }
 
     // Hard-won: 374b1915: the CLI rejected the viewer certificate that its daemon publishes and pins.
     #[tokio::test]
     async fn the_cli_reaches_a_viewer_serving_a_self_signed_ca_certificate_by_its_pin() {
-        let (url, pin) = serve_https(true).await;
-        let error = probe_api(&http_client(None).unwrap(), &url)
+        let (url, pin, _, _) = serve_https("127.0.0.1", true).await;
+        let error = probe_api(&http_client(None, None).unwrap(), &url)
             .await
             .unwrap_err();
         // The platform verifier words the rejection per OS (webpki reports
@@ -1480,28 +1595,135 @@ mod tests {
             format!("{error:#}").contains("invalid peer certificate"),
             "unexpected error: {error:#}"
         );
-        probe_api(&http_client(Some(&pin)).unwrap(), &url)
+        probe_api(&http_client(Some(&pin), None).unwrap(), &url)
             .await
             .unwrap();
     }
 
     #[tokio::test]
     async fn the_cli_reaches_a_viewer_serving_a_self_signed_leaf_certificate_by_its_pin() {
-        let (url, pin) = serve_https(false).await;
-        probe_api(&http_client(Some(&pin)).unwrap(), &url)
+        let (url, pin, _, _) = serve_https("127.0.0.1", false).await;
+        probe_api(&http_client(Some(&pin), None).unwrap(), &url)
             .await
             .unwrap();
     }
 
     #[tokio::test]
     async fn the_cli_refuses_a_certificate_other_than_the_pinned_one() {
-        let (url, _pin) = serve_https(true).await;
+        let (url, _pin, _, _) = serve_https("127.0.0.1", true).await;
         let other = "0".repeat(64);
         assert!(
-            probe_api(&http_client(Some(&other)).unwrap(), &url)
+            probe_api(&http_client(Some(&other), None).unwrap(), &url)
                 .await
                 .is_err()
         );
+    }
+
+    // Hard-won: #1440: CLI API requests used public DNS for an advertised Tailscale hostname instead of the local daemon listener.
+    #[tokio::test]
+    async fn pinned_api_requests_route_an_unresolvable_authority_to_the_local_socket() {
+        let authority = "viewer-does-not-resolve.invalid";
+        let (url, pin, address, seen) = serve_https(authority, false).await;
+        let (routed_url, resolver) = route_viewer_to_local_socket(&url, address).unwrap();
+        let routed_authority = url::Url::parse(&routed_url).unwrap();
+        assert_eq!(routed_authority.host_str(), Some(authority));
+        assert_eq!(routed_authority.port(), Some(address.port()));
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_url = format!("http://{}", proxy_listener.local_addr().unwrap());
+        let proxy_was_used = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_proxy = proxy_was_used.clone();
+        let proxy_task = tokio::spawn(async move {
+            if tokio::time::timeout(Duration::from_millis(300), proxy_listener.accept())
+                .await
+                .is_ok()
+            {
+                observed_proxy.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let proxy = reqwest::Proxy::all(&proxy_url).unwrap();
+        let http = build_http_client(Some(&pin), resolver.clone(), Some(proxy)).unwrap();
+        probe_api(&http, &routed_url).await.unwrap();
+        let client = ApiClient::with_http(routed_url.clone(), "secret-token".into(), http);
+        let response = client.sessions_in_workspace(None, true).await.unwrap();
+        assert_eq!(response.sessions[0].id, "session-1");
+        proxy_task.await.unwrap();
+        assert!(!proxy_was_used.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                format!("host={authority}:{};authorization=", address.port()),
+                format!(
+                    "host={authority}:{};authorization=Bearer secret-token",
+                    address.port()
+                ),
+            ]
+        );
+
+        let wrong_pin = "0".repeat(64);
+        let wrong_http = http_client(Some(&wrong_pin), resolver).unwrap();
+        assert!(probe_api(&wrong_http, &routed_url).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn pinned_api_request_reaches_an_ipv6_listener_advertised_as_wildcard() {
+        if std::net::TcpListener::bind("[::1]:0").is_err() {
+            return;
+        }
+        let (url, pin, address, _) = serve_https("[::]", false).await;
+        let (routed_url, resolver) = route_viewer_to_local_socket(&url, address).unwrap();
+        assert!(routed_url.starts_with("https://[::1]:"));
+        assert_eq!(resolver, None);
+        probe_api(&http_client(Some(&pin), resolver).unwrap(), &routed_url)
+            .await
+            .unwrap();
+        let (specific_url, resolver) =
+            route_viewer_to_local_socket(&format!("https://[::1]:{}", address.port()), address)
+                .unwrap();
+        assert_eq!(resolver, None);
+        probe_api(&http_client(Some(&pin), resolver).unwrap(), &specific_url)
+            .await
+            .unwrap();
+        assert!(
+            route_viewer_to_local_socket(&format!("https://[::2]:{}", address.port()), address)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn api_probe_does_not_follow_redirects() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let visited = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/api/v1/sessions",
+                get(|| async {
+                    (
+                        StatusCode::FOUND,
+                        [(axum::http::header::LOCATION, "/visited")],
+                    )
+                }),
+            )
+            .route(
+                "/visited",
+                get(|State(visited): State<Arc<AtomicUsize>>| async move {
+                    visited.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::OK
+                }),
+            )
+            .with_state(visited.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        assert!(
+            probe_api(&http_client(None, None).unwrap(), &url)
+                .await
+                .is_err()
+        );
+        assert_eq!(visited.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
