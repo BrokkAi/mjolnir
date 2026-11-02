@@ -115,7 +115,14 @@ impl Drop for WorkerLaunch {
     fn drop(&mut self) {
         if let Some(cleanup) = self.cleanup.take() {
             tracing::warn!(program = %self.program, "a harness launch was dropped without being finished; cleaning up now");
-            cleanup();
+            // A drop can happen on an async runtime thread, and cleanup can
+            // wait for a container engine, so it gets a thread of its own.
+            if let Err(error) = std::thread::Builder::new()
+                .name("harness-launch-cleanup".to_owned())
+                .spawn(cleanup)
+            {
+                tracing::error!(%error, "could not start harness launch cleanup");
+            }
         }
     }
 }
@@ -231,6 +238,9 @@ pub fn harness_cli(
             HarnessRuntimePolicy::Ambient => "ambient",
         }
         .to_owned(),
+        // A probe or renewal is bounded by a timeout an installation would
+        // outlast; installing is sign-in's and session launch's job.
+        "--installed-only".to_owned(),
     ];
     for name in variables.keys() {
         command.extend(["--keep-env".to_owned(), name.clone()]);
@@ -257,26 +267,48 @@ pub fn harness_cli(
 /// still run it against a fake directly.
 pub struct HarnessExecutor<E> {
     inner: E,
-    runner: Arc<dyn HarnessRunner>,
+    /// Chosen when the first command runs, so work that may need no harness
+    /// (a usage query with a current token) never requires a runner.
+    runner: std::sync::OnceLock<Arc<dyn HarnessRunner>>,
     kind: HarnessKind,
     home: PathBuf,
 }
 
 impl<E: CommandExecutor> HarnessExecutor<E> {
-    pub fn new(inner: E, runner: Arc<dyn HarnessRunner>, kind: HarnessKind, home: PathBuf) -> Self {
+    pub fn new(inner: E, kind: HarnessKind, home: PathBuf) -> Self {
         Self {
             inner,
-            runner,
+            runner: std::sync::OnceLock::new(),
             kind,
             home,
         }
+    }
+
+    /// An executor for a runner the caller already selected.
+    pub fn with_runner(
+        inner: E,
+        runner: Arc<dyn HarnessRunner>,
+        kind: HarnessKind,
+        home: PathBuf,
+    ) -> Self {
+        let executor = Self::new(inner, kind, home);
+        let _ = executor.runner.set(runner);
+        executor
+    }
+
+    fn runner(&self) -> Result<&Arc<dyn HarnessRunner>> {
+        if let Some(runner) = self.runner.get() {
+            return Ok(runner);
+        }
+        let runner = select(&Config::load()?, &self.inner)?;
+        Ok(self.runner.get_or_init(|| runner))
     }
 }
 
 impl<E: CommandExecutor> CommandExecutor for HarnessExecutor<E> {
     fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
         let launch = harness_cli(
-            self.runner.as_ref(),
+            self.runner()?.as_ref(),
             self.kind,
             &self.home,
             command.env.clone(),
@@ -301,15 +333,29 @@ impl<E: CommandExecutor> CommandExecutor for HarnessExecutor<E> {
 /// installation, exactly as a bare session does.
 pub struct LocalRunner;
 
-/// Variables a sign-in needs from the person's desktop session. The worker
-/// rebuilds its environment from a login shell, which does not carry them.
-const DESKTOP_ENVIRONMENT: [&str; 6] = [
+/// Variables a harness here needs from the session `mj` runs in: the desktop
+/// a sign-in opens its browser on, and the proxy and certificate settings
+/// its network requests need. The worker rebuilds its environment from a
+/// login shell, which does not carry what was exported only in a terminal.
+const SESSION_ENVIRONMENT: [&str; 18] = [
     "DISPLAY",
     "WAYLAND_DISPLAY",
     "XAUTHORITY",
     "BROWSER",
     "DBUS_SESSION_BUS_ADDRESS",
     "XDG_RUNTIME_DIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE",
 ];
 
 impl HarnessRunner for LocalRunner {
@@ -340,7 +386,7 @@ impl HarnessRunner for LocalRunner {
     }
 
     fn base_environment(&self) -> BTreeMap<String, String> {
-        DESKTOP_ENVIRONMENT
+        SESSION_ENVIRONMENT
             .iter()
             .filter_map(|name| Some(((*name).to_owned(), std::env::var(name).ok()?)))
             .collect()

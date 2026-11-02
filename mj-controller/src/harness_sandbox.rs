@@ -257,14 +257,21 @@ impl HarnessSandbox {
         container: &ContainerTemplate,
         executor: &impl CommandExecutor,
     ) -> Result<Self> {
-        let user = match engine {
-            SandboxEngine::Podman => {
-                crate::targets::verify_local_podman(executor)?;
-                SandboxUser::MappedRoot
-            }
-            SandboxEngine::Docker => {
-                crate::targets::verify_local_docker(executor)?;
-                docker_user(executor)?
+        let user = match verified_user(engine) {
+            Some(user) => user,
+            None => {
+                let user = match engine {
+                    SandboxEngine::Podman => {
+                        crate::targets::verify_local_podman(executor)?;
+                        SandboxUser::MappedRoot
+                    }
+                    SandboxEngine::Docker => {
+                        crate::targets::verify_local_docker(executor)?;
+                        docker_user(executor)?
+                    }
+                };
+                remember_verified(engine, user);
+                user
             }
         };
         let home = mj_core::config::data_dir()
@@ -652,6 +659,35 @@ fn sandbox_container_name() -> String {
         chrono::Utc::now().timestamp_millis(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     )
+}
+
+/// How long a successful engine check stands. Quota polls and discovery ask
+/// for the sandbox often; the engine's state rarely changes between them, and
+/// a launch against an engine that stopped still fails visibly.
+const ENGINE_CHECK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(60);
+
+type VerifiedEngines = std::sync::Mutex<Vec<(SandboxEngine, std::time::Instant, SandboxUser)>>;
+
+fn verified_engines() -> &'static VerifiedEngines {
+    static VERIFIED: OnceLock<VerifiedEngines> = OnceLock::new();
+    VERIFIED.get_or_init(Default::default)
+}
+
+fn verified_user(engine: SandboxEngine) -> Option<SandboxUser> {
+    verified_engines()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(checked, at, _)| *checked == engine && at.elapsed() < ENGINE_CHECK_LIFETIME)
+        .map(|(_, _, user)| *user)
+}
+
+fn remember_verified(engine: SandboxEngine, user: SandboxUser) {
+    let mut verified = verified_engines()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    verified.retain(|(checked, _, _)| *checked != engine);
+    verified.push((engine, std::time::Instant::now(), user));
 }
 
 /// How long a work directory may outlive its sign-in or probe. A sign-in

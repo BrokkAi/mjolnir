@@ -92,7 +92,7 @@ pub(crate) async fn run(
         &work.path().join("sign-in.json"),
         &serde_json::to_vec(&spec)?,
     )?;
-    let launch = runner.launch_worker(WorkerRun {
+    let run = WorkerRun {
         purpose: "sign in".to_owned(),
         profile: Some((profile.kind, profile.home.clone())),
         work: Some(work.path().to_path_buf()),
@@ -109,7 +109,13 @@ pub(crate) async fn run(
             },
             Output::Captured => WorkerIo::Stream,
         },
-    })?;
+    };
+    // Finding or downloading the worker, and writing the container's files,
+    // is blocking work.
+    let launch_runner = runner.clone();
+    let launch = tokio::task::spawn_blocking(move || launch_runner.launch_worker(run))
+        .await
+        .context("prepare the sign-in")??;
     if output == Output::Terminal {
         eprintln!(
             "Signing in to {} {}.",
@@ -150,7 +156,9 @@ pub(crate) async fn run(
     }
     .await;
     // Undone on every exit: a container is removed, a browser relay stopped.
-    let _ = tokio::task::spawn_blocking(move || launch.finish()).await;
+    if let Err(error) = tokio::task::spawn_blocking(move || launch.finish()).await {
+        eprintln!("Could not clean up after the sign-in: {error}");
+    }
     result
 }
 

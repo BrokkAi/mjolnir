@@ -60,6 +60,10 @@ After this change the person chooses where those jobs run with `[harnesses] run_
   Rationale: Node and harness CLIs look up the user; a root-owned credential file in the person's home would be a defect.
   Date/Author: 2026-11-01 / Claude.
 
+- Decision: probes and renewals (`harness_cli`) pass `--installed-only`: the worker uses the pinned installation when present, else the harness's own command (never for Codex, whose app-server protocol must match the pin), and fails fast otherwise.
+  Rationale: found in review of BrokkAi/mjolnir#1441. Each probe is bounded by a 20 to 120 second timeout; a worker that installed under it was killed mid-install on every poll, and host-mode Claude and Grok probes used to run the command on PATH.
+  Date/Author: 2026-11-02 / Claude.
+
 ## Outcomes & Retrospective
 
 Delivered: with `run_on = "container"` no code path in `mj-cli` or `mj-controller` installs or executes a harness on the host for sign-in, setup token, model discovery, quota, or login renewal; with the default `host` they run on this machine through the same procedures. Lesson: the first version read "make it possible" as "make it mandatory"; options that change where work runs should be confirmed as options first. Gaps: Apple `container` is not yet a runner, and the browser-callback path on macOS VMs is untested against real accounts.

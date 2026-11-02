@@ -97,20 +97,39 @@ async fn prepare_target_harness(
 /// Run the target's harness CLI with `arguments` and this process's standard
 /// streams: a quota probe or a login renewal the controller asked for. The
 /// installation stays leased until the CLI exits.
+///
+/// With `installed_only` nothing is installed: such a run is bounded by a
+/// probe's timeout, which an installation would outlast and then be killed
+/// on every attempt. The pinned installation is used when it is present,
+/// otherwise the harness's own command, except for Codex, whose app-server
+/// protocol must match Mjolnir's pin.
 pub async fn run_harness_cli(
     harness: HarnessKind,
     runtime: HarnessRuntimePolicy,
+    installed_only: bool,
     environment: BTreeMap<String, String>,
     drop_environment: Vec<String>,
     arguments: Vec<String>,
 ) -> Result<i32> {
     let cwd = std::env::current_dir().context("read the working directory")?;
-    let target = prepare_target_harness(harness, runtime, &cwd, environment).await?;
-    let mut environment = target.prepared.environment.clone();
+    // Whichever installation the run uses stays leased until it exits.
+    let (cli, mut environment, _managed, _target) =
+        if installed_only && runtime == HarnessRuntimePolicy::Managed {
+            let (cli, environment, managed) = installed_cli(harness, environment).await?;
+            (cli, environment, managed, None)
+        } else {
+            let target = prepare_target_harness(harness, runtime, &cwd, environment).await?;
+            (
+                target.cli.clone(),
+                target.prepared.environment.clone(),
+                None,
+                Some(target),
+            )
+        };
     for name in &drop_environment {
         environment.remove(name);
     }
-    let status = Command::new(&target.cli)
+    let status = Command::new(&cli)
         .args(&arguments)
         .env_clear()
         .envs(&environment)
@@ -120,8 +139,66 @@ pub async fn run_harness_cli(
         .stderr(Stdio::inherit())
         .status()
         .await
-        .with_context(|| format!("run `{}`", target.cli.display()))?;
+        .with_context(|| format!("run `{}`", cli.display()))?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// The harness CLI already installed for this account, without installing
+/// anything.
+async fn installed_cli(
+    harness: HarnessKind,
+    overrides: BTreeMap<String, String>,
+) -> Result<(
+    PathBuf,
+    BTreeMap<String, String>,
+    Option<super::harness::ManagedHarness>,
+)> {
+    let mut environment = mj_core::login_environment::with_overrides(&overrides).await?;
+    let pinned = harness != HarnessKind::Dsh && {
+        let root = mj_core::harness_runtime::managed_harness_cache_root(
+            environment.get("XDG_CACHE_HOME").map(std::ffi::OsStr::new),
+            environment.get("HOME").map(std::ffi::OsStr::new),
+        )?;
+        let install = mj_core::harness_runtime::managed_harness_install_dir(&root, harness);
+        mj_core::harness_runtime::managed_harness_manifest_matches(
+            &install,
+            harness,
+            mj_core::harness_runtime::pin(harness).install_id,
+        )
+        .unwrap_or(false)
+    };
+    if pinned {
+        // Complete, so this leases it rather than installing.
+        let managed = super::harness::resolve(
+            HarnessRuntimePolicy::Managed,
+            harness,
+            ExecutionPolicy::ConfiguredApprovals,
+            &environment,
+        )
+        .await?
+        .context("the pinned installation disappeared")?;
+        environment.extend(managed.environment.clone());
+        return Ok((managed.cli_entrypoint.clone(), environment, Some(managed)));
+    }
+    if harness != HarnessKind::Codex {
+        let program = harness.native_login_command().0;
+        let mut candidates = vec![PathBuf::from(&program)];
+        if let Some(home) = environment
+            .get(harness.home_env())
+            .filter(|home| !home.is_empty())
+        {
+            candidates.push(Path::new(home).join("bin").join(&program));
+        }
+        for candidate in candidates {
+            if let Some(found) = super::harness_launch::find_command(&candidate, &environment)? {
+                return Ok((found, environment, None));
+            }
+        }
+    }
+    bail!(
+        "{} is not installed for Mjolnir on this machine yet. Sign the profile in with `mj login`, or start a session of it here, to install the pinned version.",
+        harness.display_name()
+    )
 }
 
 /// Run `spec` in this target and return the exit code the person's terminal

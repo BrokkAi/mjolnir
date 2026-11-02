@@ -69,6 +69,9 @@ enum WorkerCommand {
         /// target's own (the image's, in a container).
         #[arg(long, default_value = "ambient")]
         runtime: String,
+        /// Use only what is already installed; never install the harness.
+        #[arg(long)]
+        installed_only: bool,
         /// A variable of this process's environment the harness must keep
         /// over the target's login environment.
         #[arg(long = "keep-env", value_name = "NAME")]
@@ -532,6 +535,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         WorkerCommand::HarnessCli {
             harness,
             runtime,
+            installed_only,
             keep_env,
             drop_env,
             arguments,
@@ -548,6 +552,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             let status = mj_worker::worker_runtime::run_harness_cli(
                 harness,
                 runtime,
+                installed_only,
                 environment,
                 drop_env,
                 arguments,

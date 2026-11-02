@@ -498,6 +498,12 @@ only `mj` and Podman or Docker.
   logins in a database that installation owns, so `mj login` refuses it rather
   than let a different version migrate that database. Sign in with that
   installation, or add a Mjolnir-managed profile.
+- Quota readings and login renewals never install a harness, in either
+  mode: they are bounded by a timeout an installation would outlast. On this
+  machine they use Mjolnir's pinned installation when it is present (signing
+  in or starting a local session installs it), otherwise the harness's own
+  command on `PATH`; Codex uses only the pinned installation. In a container
+  they use the image's harness.
 - Without an enabled Podman or Docker target whose engine is installed,
   sign-in stops and says so, model discovery waits for a session to report the
   profile's choices, and those quota readings show as unavailable.

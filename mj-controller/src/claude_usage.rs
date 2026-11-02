@@ -86,20 +86,19 @@ pub async fn query(
         USAGE_TIMEOUT + REFRESH_LOCK_WAIT + REFRESH_TIMEOUT,
     );
     let _cancel = executor.cancel_on_drop();
-    let runner = tokio::task::spawn_blocking(|| {
-        let config = mj_core::config::Config::load()?;
-        crate::harness_runner::select(&config, &crate::targets::ProcessExecutor)
-    })
-    .await
-    .map_err(|error| ClaudeUsageError::Query(format!("worker failed: {error}")))?
-    .map_err(|error| ClaudeUsageError::Query(format!("{error:#}")))?;
     #[cfg(target_os = "macos")]
     if !home.join(".credentials.json").is_file() {
+        let runner = tokio::task::spawn_blocking(|| {
+            let config = mj_core::config::Config::load()?;
+            crate::harness_runner::select(&config, &crate::targets::ProcessExecutor)
+        })
+        .await
+        .map_err(|error| ClaudeUsageError::Query(format!("worker failed: {error}")))?
+        .map_err(|error| ClaudeUsageError::Query(format!("{error:#}")))?;
         return query_keychain_login(home, environment, runner, executor).await;
     }
     let harness = Arc::new(crate::harness_runner::HarnessExecutor::new(
         executor,
-        runner,
         mj_core::config::HarnessKind::Claude,
         home.clone(),
     ));
@@ -116,7 +115,7 @@ async fn query_keychain_login(
     executor: CancellableProcessExecutor,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
     if runner.reads_host_keychain() {
-        let harness = Arc::new(crate::harness_runner::HarnessExecutor::new(
+        let harness = Arc::new(crate::harness_runner::HarnessExecutor::with_runner(
             executor,
             runner,
             mj_core::config::HarnessKind::Claude,
@@ -150,7 +149,7 @@ async fn query_keychain_login(
         "CLAUDE_CONFIG_DIR".into(),
         staged.path().to_string_lossy().into_owned(),
     );
-    let harness = Arc::new(crate::harness_runner::HarnessExecutor::new(
+    let harness = Arc::new(crate::harness_runner::HarnessExecutor::with_runner(
         executor,
         runner,
         mj_core::config::HarnessKind::Claude,
