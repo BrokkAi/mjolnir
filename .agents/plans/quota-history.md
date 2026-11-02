@@ -13,7 +13,7 @@ The user wants to estimate the effective discount of coding subscriptions agains
 - [x] (2026-11-02) Added migration/rollback coverage and extended existing cache, HTTP-reader, and writer-ownership integration cases.
 - [x] (2026-11-02) Documented querying and interpretation; exercised the exact documented SQL against an isolated in-memory schema with multiple windows, unknowns, and a failed probe.
 - [x] (2026-11-02) Focused history tests passed; full controller suite passed (2,228 passed, 18 ignored), including the direct-upgrade interruption matrix. Workspace clippy, rustfmt, and diff checks passed.
-- [ ] Commit the validated feature, merge the concurrently advanced origin/master, validate quota paths and compilation against its SDK update, and push the current branch to origin/master.
+- [x] (2026-11-02) Committed the feature as f37c2812c and merged origin/master as b0e72ad49 without conflicts. Final quota tests passed against ACP SDK 5 (70 passed, 1 ignored); merged workspace clippy and formatting checks passed. The current master is prepared for the authorized push to origin/master.
 
 ## Surprises & Discoveries
 
@@ -35,7 +35,7 @@ Some provider readers (notably Muse) cache recent provider responses themselves.
 
 ## Outcomes & Retrospective
 
-The feature and documentation are implemented and validated. History retains normalized observations for correlation with retained model/token usage; rounding, resets, incomplete usage, and activity outside Mjolnir remain explicit estimation limits. Collection begins when an updated daemon runs. No live store, installation, or release was changed. Upstream integration and publication remain.
+The feature and documentation are implemented, committed, merged with upstream, and validated. History retains normalized observations for correlation with retained model/token usage; rounding, resets, incomplete usage, and activity outside Mjolnir remain explicit estimation limits. Collection begins when an updated daemon runs. No live store, installation, or release was changed. Publication uses the repository's ordinary `git push origin HEAD:master` workflow.
 
 ## Context and Orientation
 
@@ -75,6 +75,8 @@ The migration runs once and is transactional. Failed writes roll back as a unit 
 
 The SQL example in profile documentation is the analysis entry point. Its isolated manual check passed: the LEFT JOIN preserves failed probes and missing percentages alongside multiple windows. With the unchanged mbx Cargo configuration, focused history tests passed (2/2), the full controller suite passed (2,228 passed, 18 ignored, 267 seconds), workspace clippy passed, and formatting/diff checks passed.
 
+After merging the upstream ACP SDK update, `cargo test -p brokk-mj-controller quota` passed (70 passed, 1 ignored), workspace `cargo clippy --all-targets -- -D warnings` passed again, and rustfmt passed. Only upstream's unrelated changes were added by the merge; the quota implementation required no conflict resolution.
+
 ## Interfaces and Dependencies
 
 Use existing `rusqlite`, `serde_json`, and the shared database writer; add no dependencies or crates. Keep `load_quota_cache` unchanged. Add `pub(crate) fn save_quota_report(identity: &str, report: &ProfileQuota) -> Result<()>` in `mj-controller/src/database/quota_cache.rs` and call it only from the existing supervised blocking persistence task.
@@ -84,3 +86,5 @@ Revision note: initial plan records raw-observation semantics, compatible migrat
 Revision note: implementation and documentation are ready for validation. Clarified provider-reader caching so observations are not overstated as fresh upstream measurements.
 
 Revision note: full validation passed. Origin/master advanced to 7cbd8a4fd with an ACP SDK update and unrelated lifecycle/release changes; none modify the quota implementation or migration ladder. Commit this validated checkpoint, merge upstream on the current master branch, then exercise quota tests and workspace clippy against the resulting dependency versions before pushing.
+
+Revision note: upstream integration and final validation are complete. The final documentation commit records the successful merged checks before the authorized publication.
