@@ -342,21 +342,21 @@ test('nightly versions stay ordered across same-day runs, pruning and prerelease
   };
 
   commit('1.2.3');
-  assert.equal(choose().tag, 'v1.2.4-nightly.20261102');
-  tagNightly('v1.2.4-nightly.20261102');
+  assert.equal(choose().tag, 'v1.3.0-nightly.20261102');
+  tagNightly('v1.3.0-nightly.20261102');
   assert.equal(choose().tag, '', 'unchanged master cuts no nightly');
 
   for (let counter = 2; counter <= 10; counter += 1) {
     commit('1.2.3');
     const { tag } = choose();
-    assert.equal(tag, `v1.2.4-nightly.20261102.${counter}`);
+    assert.equal(tag, `v1.3.0-nightly.20261102.${counter}`);
     tagNightly(tag);
   }
   // Pruning removed the day's oldest tags; .10 still sorts last, not .9.
-  git(work, 'push', '--quiet', 'origin', '--delete', 'refs/tags/v1.2.4-nightly.20261102', 'refs/tags/v1.2.4-nightly.20261102.2');
+  git(work, 'push', '--quiet', 'origin', '--delete', 'refs/tags/v1.3.0-nightly.20261102', 'refs/tags/v1.3.0-nightly.20261102.2');
   assert.equal(choose().tag, '', 'the numerically latest tag was cut from master');
 
-  // A prerelease base keeps the day's counter, so the order stays total.
+  // A new base version keeps the day's counter, so the order stays total.
   commit('1.3.0-rc.1');
-  assert.deepEqual(choose(), { version: '1.3.0-nightly.20261102.11', tag: 'v1.3.0-nightly.20261102.11' });
+  assert.deepEqual(choose(), { version: '1.4.0-nightly.20261102.11', tag: 'v1.4.0-nightly.20261102.11' });
 });

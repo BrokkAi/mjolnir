@@ -55,10 +55,9 @@ jobs:
     steps:
     - uses: actions/checkout@v6
 
-    # The nightly version sorts after the version master carries and before
-    # the next release cut from it: a stable 2.64.1 gives 2.64.2-nightly.<day>,
-    # a prerelease 2.65.0-rc.1 gives 2.65.0-nightly.<day>. Later nightlies on
-    # the same day append .2, .3 and so on. When master has not moved since
+    # The nightly version is the next minor after master's version: 2.64.1
+    # (or 2.64.1-rc.1) gives 2.65.0-nightly.<day>. Later nightlies on the same
+    # day append .2, .3 and so on. When master has not moved since
     # the latest nightly was cut, nothing is tagged.
     - name: Choose the nightly version
       id: version
@@ -66,11 +65,8 @@ jobs:
         set -euo pipefail
         current="$(sed -n '/^\[workspace\.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
         test -n "$current"
-        core="${current%%[-+]*}"
-        if [[ "$core" == "$current" ]]; then
-          IFS=. read -r major minor patch <<< "$core"
-          core="$major.$minor.$((patch + 1))"
-        fi
+        IFS=. read -r major minor _ <<< "${current%%[-+]*}"
+        core="$major.$((minor + 1)).0"
         # Field 4 is the day and field 5 the same-day counter, once the tag is
         # split on dots: v2 | 64 | 2-nightly | 20261102 | 2.
         tags="$(git ls-remote --tags --refs origin |

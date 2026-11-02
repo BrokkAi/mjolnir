@@ -55,9 +55,8 @@ authorization is configured once, not audited again for every release.
 `.github/workflows/nightly.yml` cuts a nightly from master at 05:41 UTC
 whenever master has changed since the previous nightly, and on manual dispatch
 from master. It runs the cargo-release preparation on top of master with a
-version such as `2.64.2-nightly.20261102` (the next patch after a stable
-master version, or master's own base version while master carries a
-prerelease), tags that commit, and starts `release.yml` on the tag. The
+version such as `2.65.0-nightly.20261102` (the next minor after master's
+version), tags that commit, and starts `release.yml` on the tag. The
 version commit is reachable only from the tag; master never carries a nightly
 version. No bot account or extra token is involved: the workflow's own token
 pushes the tag and dispatches the release.
