@@ -893,6 +893,7 @@ fn a_profile_whose_quota_cannot_be_read_says_why_in_the_log_once() {
 }
 
 async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::CapturedLog) {
+    let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
         directory.path().join("auth.json"),
@@ -980,6 +981,31 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
     );
     assert!(readable[0].contains("profile_id=muse"), "{readable:#?}");
     assert_eq!(said("could not read the profile's quota").len(), 1);
+
+    // Probe outcomes cross the HTTP reader and real writer lane. Repeated
+    // failures and unchanged readings are retained, rather than deduplicated.
+    let connection = rusqlite::Connection::open_with_flags(
+        crate::database::database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let reports = connection
+        .prepare("SELECT body FROM quota_history WHERE profile_id='muse' ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|body| serde_json::from_str::<ProfileQuota>(&body.unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(reports.len(), 4);
+    for report in &reports[..2] {
+        assert_eq!(report.error.as_deref(), Some(error.as_str()));
+        assert!(report.windows.is_empty());
+    }
+    for report in &reports[2..] {
+        assert!(report.error.is_none());
+        assert_eq!(report.windows[0].remaining_percent, Some(99));
+    }
+    assert_eq!(reports[2].windows, reports[3].windows);
 
     manager.shutdown().await;
     server.abort();
@@ -1590,7 +1616,8 @@ fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
     assert!(warnings.is_empty(), "no warning expected: {warnings:#?}");
     assert!(
         log.events().iter().any(|(level, text)| {
-            *level == tracing::Level::DEBUG && text.contains("leaving quota reset times")
+            *level == tracing::Level::DEBUG
+                && text.contains("leaving quota history and reset times")
         }),
         "the skipped write is still visible at debug level: {:#?}",
         log.events()
@@ -1606,5 +1633,17 @@ fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
     assert_eq!(
         crate::database::load_quota_cache(&identity).unwrap(),
         Some(outcome.report)
+    );
+    let connection = rusqlite::Connection::open_with_flags(
+        crate::database::database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM quota_history", [], |row| row
+                .get::<_, usize>(0))
+            .unwrap(),
+        1
     );
 }

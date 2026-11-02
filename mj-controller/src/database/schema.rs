@@ -1885,6 +1885,29 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Compatible: independent observations have no session/profile foreign
+    // keys. Older readers ignore them and older writers leave them intact,
+    // including when updating the reset cache or deleting sessions.
+    if version < 103 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS quota_history (
+                 id INTEGER PRIMARY KEY,
+                 identity TEXT NOT NULL,
+                 profile_id TEXT NOT NULL,
+                 harness TEXT NOT NULL,
+                 sampled_at_epoch_seconds INTEGER NOT NULL,
+                 body TEXT NOT NULL CHECK(json_valid(body))
+             ) STRICT;
+             CREATE INDEX IF NOT EXISTS quota_history_profile_time
+                 ON quota_history(profile_id, sampled_at_epoch_seconds, id);
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (103, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 103;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -3193,6 +3216,11 @@ mod reader_tests {
                 .execute_batch("ALTER TABLE session_restart_intents DROP COLUMN handoff_json;")
                 .unwrap();
         }
+        if version < 103 {
+            connection
+                .execute_batch("DROP TABLE IF EXISTS quota_history;")
+                .unwrap();
+        }
         // Historical fixtures must remove columns introduced by later revisions.
         if version < 94
             && legacy_schema::table_has_column(
@@ -3334,6 +3362,71 @@ mod reader_tests {
         assert_eq!(
             state.last_subagent_policy_for("codex"),
             SubagentPolicy::Native
+        );
+    }
+
+    #[test]
+    fn quota_history_migration_is_atomic_and_preserves_compatibility_with_previous_writers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("quota-history.sqlite3");
+        drop(open_writer(&path).unwrap());
+        stamp_schema_version(&path, 102);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "INSERT INTO quota_reset_cache VALUES ('account', '{\"windows\":[]}');
+             CREATE TRIGGER fail_quota_history BEFORE INSERT ON schema_migrations WHEN NEW.version=103
+                 BEGIN SELECT RAISE(ABORT,'quota history migration'); END;"
+        ).unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection
+            .execute_batch("ROLLBACK; DROP TRIGGER fail_quota_history;")
+            .unwrap();
+        assert_eq!(read_schema_state(&connection).unwrap().revision, 102);
+        assert!(
+            !connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='quota_history')",
+                    [],
+                    |row| row.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+        migrate_schema(&connection).unwrap();
+        let schema = read_schema_state(&connection).unwrap();
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert_eq!(schema.minimum_compatible, Some(102));
+        schema.ensure_supported_by(102).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT body FROM quota_reset_cache WHERE identity='account'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "{\"windows\":[]}"
+        );
+
+        // Revision 102 writes this cache and session state, but never history.
+        // Observations have no foreign keys to operational records.
+        connection.execute_batch(
+            "INSERT INTO quota_history(identity,profile_id,harness,sampled_at_epoch_seconds,body)
+                 VALUES ('account','codex','codex',123,'{\"windows\":[]}');
+             UPDATE quota_reset_cache SET body='{}' WHERE identity='account';"
+        ).unwrap();
+        let mut record = super::super::test_session("kept", "project");
+        super::super::sessions::save_session_to(&path, &record).unwrap();
+        record.title = "Updated by the existing writer".into();
+        super::super::sessions::save_session_to(&path, &record).unwrap();
+        connection
+            .execute("DELETE FROM sessions WHERE session_id=?1", [&record.id])
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT body FROM quota_history", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "{\"windows\":[]}"
         );
     }
 

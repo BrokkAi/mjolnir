@@ -63,6 +63,67 @@ region, or long-context premiums. Only completed turns with complete usage
 reports enter the estimates. A **+** marks partial accounting, and **unpriced**
 marks models or counters that cannot be priced from the recorded information.
 
+## Quota history
+
+While the daemon is running, it records each quota refresh result in the
+`quota_history` table of its `mj.sqlite3` database. Profiles normally refresh
+every ten minutes; provider rate limits can extend the interval. Manual and
+other requested probes also contribute. History starts with the first refresh
+after upgrading; earlier cached reports are not backfilled. Startup reuses of
+the cache do not add samples. History has no automatic expiry and survives
+session or profile removal.
+
+Each row has an `id`, a `profile_id`, a `harness`, a
+`sampled_at_epoch_seconds` timestamp (UTC Unix seconds, at refresh start), a
+hashed configuration `identity`, and a JSON `body` containing the complete
+quota report. The identity distinguishes changes to a profile's quota source;
+it does not identify the subscription account. Profiles sharing an account
+may report the same allowance. Multiple probes can share a timestamp; `id`
+distinguishes them.
+
+The report retains every window, including model-specific allowances, remaining
+percentages, reported usage and limits, reset times, and banked resets when
+available. These are the normalized quota readings, before filling missing
+reset data from the cache or substituting previous windows after a failed
+probe. Unchanged readings and failures are retained too. Missing values remain
+unknown; API-billed and non-reporting profiles have no quota windows. A quota
+reader may reuse its own recent provider response; sampling is not a guarantee
+of a new provider measurement.
+
+For example, open the database with `sqlite3 -readonly /path/to/mj.sqlite3`
+and list windows for one profile:
+
+```sql
+SELECT h.id, datetime(h.sampled_at_epoch_seconds, 'unixepoch') AS sampled_utc,
+       h.identity, w.value ->> '$.label' AS window,
+       w.value ->> '$.model_scope' AS model_scope,
+       w.value ->> '$.remaining_percent' AS remaining_percent,
+       w.value ->> '$.used' AS used, w.value ->> '$.limit' AS allowance,
+       w.value ->> '$.duration_seconds' AS duration_seconds,
+       w.value ->> '$.resets_at_epoch_seconds' AS resets_at_epoch_seconds,
+       h.body ->> '$.banked_resets' AS banked_resets,
+       h.body ->> '$.error' AS error,
+       h.body ->> '$.extra' AS note,
+       h.body ->> '$.rate_limited_until_epoch_seconds' AS probe_held_until
+FROM quota_history h
+LEFT JOIN json_each(h.body, '$.windows') w ON true
+WHERE h.profile_id = 'codex'
+ORDER BY h.sampled_at_epoch_seconds, h.id, w.key;
+```
+
+The left join includes failed probes and reports without windows. For cost
+analysis, compare decreases within the same configuration identity, window,
+model scope, and reset period with the **Usage by session** API cost estimates
+for that profile and period. Short and weekly allowances overlap; do not add
+them together. Resets, banked-reset use, rounded percentages, gaps between
+samples, incomplete token reports, and account usage outside Mjolnir limit
+precision. A reset between probes can hide consumption. History does not record
+the subscription price or plan changes, so supply those separately. Given a
+comparable period, the effective discount is
+`1 - subscription cost / estimated API cost` when the estimated API cost is
+positive. Estimating a fully used plan from a partially used quota also assumes
+the model mix and quota charging stay comparable.
+
 ## Supported harnesses
 
 | Harness | `kind` | Home variable | Conventional home | Authentication marker | Guardian approvals on a raw target |
