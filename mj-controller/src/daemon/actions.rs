@@ -271,23 +271,14 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::MarkSessionTargetMissing {
-            session_id,
-            detail,
-            updated_at,
+            session_id: _,
+            detail: _,
+            updated_at: _,
         } => {
-            let marked_session_id = session_id.clone();
-            let changed = blocking(move || {
-                crate::database::mark_session_target_missing(&session_id, &detail, &updated_at)
-            })
-            .await?;
-            refresh_runtime_controller(state).await;
-            // The same discard the daemon's own view watcher does, so a
-            // surface that reports the missing target over RPC ends up with
-            // the same store.
-            if changed == Some(SessionState::Lost) {
-                state.discard_lost_session(marked_session_id).await;
-            }
-            Ok(DaemonReply::OptionalSessionState(changed))
+            // Older clients still send this action. Only the daemon's worker
+            // view owns a definitive missing-target observation and its
+            // revision; a client-supplied detail may already be stale.
+            Ok(DaemonReply::OptionalSessionState(None))
         }
         DaemonAction::CheckpointSession { session_id } => Ok(DaemonReply::Checkpoint(
             state.checkpoint_session_now(&session_id).await?,
@@ -845,5 +836,60 @@ fn branch_disposition(delete_branch: bool) -> BranchDisposition {
         BranchDisposition::Delete
     } else {
         BranchDisposition::Keep
+    }
+}
+
+#[cfg(all(test, unix))]
+mod missing_target_compat_tests {
+    use super::*;
+
+    // Hard-won: #1444: an old client could mark a newly resumed session missing from a stale poll.
+    #[tokio::test]
+    async fn stale_client_missing_target_report_cannot_invalidate_a_resumed_session() {
+        const CHILD: &str = "MJ_TEST_STALE_MISSING_TARGET_ACTION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(
+                    module_path!(),
+                    "stale_client_missing_target_report_cannot_invalidate_a_resumed_session",
+                ),
+            )
+            .env(CHILD, "1")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("Resumed session").unwrap();
+        let mut session = super::super::tests::runtime_test_session(
+            "resumed",
+            &workspace.id,
+            SessionState::Running,
+        );
+        session.updated_at = "2026-11-02T18:00:00Z".into();
+        crate::database::save_session(&session).unwrap();
+
+        let state = super::super::tests::test_runtime_state();
+        let metadata = super::super::tests::test_metadata("127.0.0.1:1".parse().unwrap());
+        let reply = handle_action(
+            DaemonAction::MarkSessionTargetMissing {
+                session_id: session.id.clone(),
+                detail: "old working directory was missing".into(),
+                updated_at: "2026-11-02T17:00:00Z".into(),
+            },
+            &metadata,
+            &state,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(reply, DaemonReply::OptionalSessionState(None)));
+        let stored = crate::database::load_session_record(&session.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, SessionState::Running);
+        assert_eq!(stored.updated_at, session.updated_at);
+        assert_eq!(stored.last_error, None);
     }
 }

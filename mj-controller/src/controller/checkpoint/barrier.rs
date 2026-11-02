@@ -31,7 +31,7 @@ pub(in crate::controller) async fn connect_checkpoint_relay(
     }
 }
 
-pub(super) async fn adopt_restarted_checkpoint_relay(
+pub(in crate::controller) async fn adopt_restarted_checkpoint_relay(
     session_id: &str,
     manager: Option<&SessionManagerControl>,
     connection: StandaloneSession,

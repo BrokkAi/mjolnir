@@ -1347,6 +1347,7 @@ fn provisioning_persists_the_build_cache_it_resolved() {
     );
 }
 
+// Hard-won: #1444: repeated missing-target reports rewrote a recoverable error and announced it again.
 #[test]
 fn missing_target_keeps_a_checkpointed_session_recoverable_and_loses_one_without_checkpoint() {
     let directory = tempfile::tempdir().unwrap();
@@ -1381,7 +1382,7 @@ fn missing_target_keeps_a_checkpointed_session_recoverable_and_loses_one_without
             "2026-08-25T16:01:00Z",
         )
         .unwrap(),
-        Some(SessionState::Error)
+        None
     );
 
     let mut unrecoverable = session("session-2", "project-1");
@@ -1402,7 +1403,11 @@ fn missing_target_keeps_a_checkpointed_session_recoverable_and_loses_one_without
     let loaded = load_state_from(&database).unwrap();
     assert_eq!(
         loaded.sessions["session-1"].last_error.as_deref(),
-        Some("late duplicate")
+        Some("managed container is missing")
+    );
+    assert_eq!(
+        loaded.sessions["session-1"].updated_at,
+        "2026-08-25T16:00:00Z"
     );
     assert_eq!(loaded.sessions["session-2"].state, SessionState::Lost);
 
@@ -1445,6 +1450,27 @@ fn a_late_missing_workspace_report_cannot_invalidate_a_newer_session() {
         load_state_from(&database).unwrap().sessions[&live.id].state,
         SessionState::Running
     );
+    // A resume may enter Provisioning within the same timestamp second as
+    // the old Running observation. State must guard that transition too.
+    live.state = SessionState::Provisioning;
+    save_session_to(&database, &live).unwrap();
+    assert_eq!(
+        mark_session_target_missing_if_current_to(
+            &database,
+            &live.id,
+            "old working directory is missing",
+            "2026-09-08T00:02:00Z",
+            Some(&live.updated_at),
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&live.id].state,
+        SessionState::Provisioning
+    );
+    live.state = SessionState::Running;
+    save_session_to(&database, &live).unwrap();
     assert_eq!(
         mark_session_target_missing_if_current_to(
             &database,

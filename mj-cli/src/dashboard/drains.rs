@@ -314,6 +314,15 @@ impl DashboardContext {
     pub(crate) fn drain_worker_updates(&mut self) {
         while let Some(update) = self.worker.next_ready() {
             let session_id = update.session_id.clone();
+            if !self
+                .controller
+                .state
+                .sessions
+                .get(&session_id)
+                .is_some_and(session_target_is_pollable)
+            {
+                continue;
+            }
             let connected = update.view.connected;
             apply_worker_activity(
                 &mut self.dashboard,
@@ -328,12 +337,7 @@ impl DashboardContext {
                     None
                 }
             };
-            if let Some(materialized) = apply_worker_poll_update(
-                &self.controller,
-                &mut self.dashboard,
-                update,
-                Some((&self.dashboard_io_tx, &self.critical_operations)),
-            ) {
+            if let Some(materialized) = apply_worker_poll_update(&mut self.dashboard, update) {
                 let viewed_through_event_ordinal = self
                     .controller
                     .state
@@ -587,7 +591,11 @@ impl DashboardContext {
         {
             return;
         }
+        let mut retired_ids = Vec::new();
         for (id, record) in self.controller.state.sessions.changes(&sessions) {
+            if !record.is_some_and(session_target_is_pollable) {
+                retired_ids.push(id.clone());
+            }
             match (record, self.controller.state.sessions.get(id)) {
                 (None, Some(last)) if self.chats.contains_key(id) => {
                     self.departed_records.insert(id.clone(), last.clone());
@@ -603,6 +611,9 @@ impl DashboardContext {
         self.controller.state.subagents = subagents;
         self.controller.state.last_subagent_policies = last_subagent_policies;
         self.dashboard.set_state(self.controller.state.clone());
+        for id in retired_ids {
+            self.worker_diagnoses.observe(&id, true, None);
+        }
         self.finish_sessions_stopped_by_suspend();
         self.reconcile_question_drafts();
         self.refresh_chat_context();

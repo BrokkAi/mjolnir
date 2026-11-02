@@ -106,7 +106,10 @@ pub(super) async fn run_session_actor(
             event = async {
                 tokio::select! {
                     completed = reviewer_tasks.join_next(), if !reviewer_tasks.is_empty() => Event::Reviewer(completed),
-                    () = tokio::time::sleep_until(schedule.deadline) => Event::Tick,
+                    // A definitive missing target has no relay to poll. The
+                    // daemon owns persistence; a changed desired target
+                    // retires this actor and starts a fresh one.
+                    () = tokio::time::sleep_until(schedule.deadline), if !matches!(view_tx.borrow().error.as_ref(), Some(ViewError::TargetMissing(_))) => Event::Tick,
                     command = commands.recv() => Event::Command(command.map(Box::new)),
                     changed = retirement.changed() => Event::Retirement(changed),
                     changed = storage.changed(), if storage_wait.is_some() => Event::Storage(changed),
@@ -510,7 +513,6 @@ pub(super) async fn run_session_actor(
                                                 .into(),
                                         )),
                                     }, &view_tx, &updates);
-                                    schedule.after(RECONNECT_BACKOFF_CEILING);
                                 }
                                 Ok(WorkerRecoveryOutcome::WorkspaceMissing(directory)) => {
                                     let snapshot = view_tx.borrow().snapshot.clone();
@@ -527,7 +529,6 @@ pub(super) async fn run_session_actor(
                                         &view_tx,
                                         &updates,
                                     );
-                                    schedule.after(RECONNECT_BACKOFF_CEILING);
                                 }
                                 Err(recovery_error) => {
                                     tracing::warn!(
@@ -568,6 +569,20 @@ pub(super) async fn run_session_actor(
                         "rejecting relay operation while session target changes"
                     );
                     command.reject(&target.session_id, "session target is changing");
+                    continue;
+                }
+                if let Some(ViewError::TargetMissing(detail)) = view_tx.borrow().error.as_ref()
+                    && !matches!(
+                        command,
+                        ActorCommand::Lease {
+                            idle_harness: None,
+                            ..
+                        }
+                    )
+                {
+                    // A lifecycle lease may attach to a worker it explicitly
+                    // restored; its returned connection clears this view.
+                    command.reject(&target.session_id, detail);
                     continue;
                 }
                 match command {

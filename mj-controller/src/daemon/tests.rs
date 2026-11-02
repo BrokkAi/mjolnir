@@ -1493,6 +1493,70 @@ async fn daemon_records_definitive_missing_workspaces_without_an_attached_surfac
     assert!(state.missing_target_record(&session.id, &view).is_none());
 }
 
+#[cfg(unix)]
+// Hard-won: #1444: a committed missing-target write lost its notice when the following reload failed.
+#[tokio::test]
+async fn missing_target_retry_completes_a_committed_transition() {
+    const CHILD: &str = "MJ_TEST_MISSING_TARGET_RETRY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "missing_target_retry_completes_a_committed_transition",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Missing target retry").unwrap();
+    let mut session = runtime_test_session("missing", &workspace.id, SessionState::Running);
+    session.checkpoint = Some(mj_core::state::CheckpointMetadata {
+        archive_path: "/isolated/recovery.zip".into(),
+        sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        created_at: "2026-09-03T00:00:00Z".into(),
+        event_frontier: 1,
+    });
+    crate::database::save_session(&session).unwrap();
+    static RELOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn fail_first_reload() -> Result<Controller> {
+        if RELOADS.fetch_add(1, Ordering::SeqCst) == 0 {
+            bail!("simulated controller reload failure after commit");
+        }
+        Controller::load()
+    }
+    RELOADS.store(0, Ordering::SeqCst);
+    let remote = spawn_remote_session_manager().unwrap();
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        remote.control.clone(),
+        &recovery.observer(),
+    );
+    let state = Arc::new(RuntimeState::new_with_controller_loader(
+        remote.control,
+        Controller::load().unwrap(),
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        fail_first_reload,
+    ));
+    let detail = "the worker working directory is missing";
+
+    state
+        .persist_missing_target(&session.id, detail.into(), session.updated_at.clone())
+        .await;
+    let stored = state.owner().controller().state.sessions[&session.id].clone();
+    assert_eq!(stored.state, SessionState::Error);
+    assert_eq!(stored.last_error.as_deref(), Some(detail));
+    let notices = state.notices.lock().unwrap();
+    assert_eq!(notices.len(), 2);
+    assert!(notices.front().unwrap().text.contains("retrying"));
+    assert_eq!(notices.back().unwrap().text, detail);
+}
+
 #[test]
 fn late_runtime_revision_publication_cannot_move_cursor_backwards() {
     let revisions = RuntimeRevisions::new(40);
@@ -7777,6 +7841,242 @@ async fn exercise_child_close_with_a_nested_workspace(cancel_before_commit: bool
         mj_core::state::MaterializedExecutionState::Closed
     );
     assert!(stored.subagents.contains_key(LATCH_RELAY_SESSION));
+}
+
+// Hard-won: #1444: an unreachable Closing child could lose its final journal when cleanup skipped relay recovery.
+#[cfg(unix)]
+#[tokio::test]
+async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_proven() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    const NAME: &str = "unreachable_child_keeps_its_private_journal_until_worker_death_is_proven";
+    if !in_held_close_child(NAME, "unused") {
+        return;
+    }
+
+    struct AliveWorker;
+    impl CommandExecutor for AliveWorker {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.purpose, "probe Mjolnir worker daemon liveness");
+            Ok(CommandOutput {
+                status: 0,
+                stdout: b"alive\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let child_root = root.path().join(LATCH_RELAY_SESSION);
+    seed_live_session(root.path(), &child_root);
+    use std::os::unix::fs::PermissionsExt;
+    let proxy = child_root.join("hel");
+    std::fs::write(&proxy, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let last_event = "journal-only child output ".repeat(4096);
+    let mut journal =
+        mj_worker::relay::DurableRelay::open(&child_root, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    journal
+        .record_observation(mj_core::relay::RelayObservation::Warning {
+            message: last_event,
+        })
+        .unwrap();
+    drop(journal);
+
+    let workspace = crate::database::create_workspace("Dead child close").unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let parent_dir = root.path().join("parent-workspace");
+    std::fs::create_dir(&parent_dir).unwrap();
+    std::fs::write(parent_dir.join("parent-work"), "keep").unwrap();
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    parent.project_directory = Some(parent_dir.clone());
+    crate::database::save_session(&parent).unwrap();
+    let mut child = runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Closing);
+    child.project_directory = Some(parent_dir.clone());
+    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: child_root.clone(),
+    });
+    let mut relation = runtime_test_subagent(LATCH_RELAY_SESSION, parent_id);
+    relation.working_directory = "deleted-child-cwd".into();
+    crate::database::save_subagent_session(&child, &relation).unwrap();
+    assert!(!parent_dir.join(&relation.working_directory).exists());
+
+    let mut controller = Controller::load().unwrap();
+    let error = controller
+        .suspend_subagent_controlled(LATCH_RELAY_SESSION, &AliveWorker, None, None)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("worker is not confirmed dead"),
+        "{error:#}"
+    );
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(
+        stored.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Closing
+    );
+    assert_eq!(stored.sessions[LATCH_RELAY_SESSION].target, child.target);
+    assert!(child_root.join(mj_core::relay::RELAY_STATE_FILE).exists());
+    assert_eq!(stored.sessions[parent_id], parent);
+    assert_eq!(
+        std::fs::read_to_string(parent_dir.join("parent-work")).unwrap(),
+        "keep"
+    );
+}
+
+// Hard-won: #1444: a dead child's deleted cwd blocked close while its final journal remained recoverable.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires a matching built mj-worker via MJ_WORKER_BINARY"]
+async fn dead_child_close_recovers_journal_without_recreating_its_cwd() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    const NAME: &str = "dead_child_close_recovers_journal_without_recreating_its_cwd";
+    let worker_binary = PathBuf::from(
+        std::env::var_os("MJ_WORKER_BINARY").expect("matching worker binary is required"),
+    );
+    mj_core::worker_build::verify_worker_build(&worker_binary).unwrap();
+    const CHILD: &str = "MJ_TEST_DEAD_CHILD_CLOSE";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .include_ignored()
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", &worker_binary)
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let child_root = root.path().join(LATCH_RELAY_SESSION);
+    seed_live_session(root.path(), &child_root);
+    std::fs::copy(&worker_binary, child_root.join("hel")).unwrap();
+    Config::update(|config| {
+        config
+            .targets
+            .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
+        Ok(())
+    })
+    .unwrap();
+    let final_event = "journal-only child output ".repeat(4096);
+    let mut journal =
+        mj_worker::relay::DurableRelay::open(&child_root, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    journal
+        .record_observation(mj_core::relay::RelayObservation::Warning {
+            message: final_event.clone(),
+        })
+        .unwrap();
+    drop(journal);
+
+    let workspace = crate::database::create_workspace("Recover dead child close").unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let parent_dir = root.path().join("parent-workspace");
+    std::fs::create_dir(&parent_dir).unwrap();
+    std::fs::write(parent_dir.join("parent-work"), "keep").unwrap();
+    let parent_root = root.path().join(parent_id);
+    std::fs::create_dir(&parent_root).unwrap();
+    std::fs::write(parent_root.join("private"), "parent worker").unwrap();
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    parent.project_directory = Some(parent_dir.clone());
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: parent_root.clone(),
+    });
+    crate::database::save_session(&parent).unwrap();
+    let mut child = runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Closing);
+    child.project_directory = Some(parent_dir.clone());
+    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: child_root.clone(),
+    });
+    let mut relation = runtime_test_subagent(LATCH_RELAY_SESSION, parent_id);
+    relation.working_directory = "deleted-child-cwd".into();
+    crate::database::save_subagent_session(&child, &relation).unwrap();
+    let missing_cwd = parent_dir.join(&relation.working_directory);
+    assert!(!missing_cwd.exists());
+
+    let controller = Controller::load().unwrap();
+    let backend = crate::targets::TargetLocator::LocalBare {
+        worker_root: child_root.to_string_lossy().into_owned(),
+    };
+    let reconnect = crate::targets::reconnect_plan(&backend, LATCH_RELAY_SESSION)
+        .unwrap()
+        .commands
+        .remove(0);
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![crate::session_manager::RelaySessionTarget {
+            session_id: LATCH_RELAY_SESSION.into(),
+            spec: reconnect,
+            worker_recovery: None,
+            project_memory: None,
+        }])
+        .unwrap();
+    channels
+        .control
+        .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        channels.control.clone(),
+        &recovery.observer(),
+    );
+    let state = Arc::new(RuntimeState::new_with_controller_loader(
+        channels.control.clone(),
+        controller,
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        Controller::load,
+    ));
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        state.close_subagent_request(
+            LATCH_RELAY_SESSION.into(),
+            parent_id.into(),
+            "recover-dead-child".into(),
+        ),
+    )
+    .await
+    .expect("child close timed out")
+    .unwrap();
+
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(
+        stored.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Stopped
+    );
+    assert!(stored.sessions[LATCH_RELAY_SESSION].target.is_none());
+    assert!(
+        !child_root.exists(),
+        "private root removed only after final sync"
+    );
+    assert!(!missing_cwd.exists(), "child cwd was not recreated");
+    assert_eq!(stored.sessions[parent_id], parent);
+    assert_eq!(
+        std::fs::read_to_string(parent_root.join("private")).unwrap(),
+        "parent worker"
+    );
+    assert_eq!(
+        std::fs::read_to_string(parent_dir.join("parent-work")).unwrap(),
+        "keep"
+    );
+    let history = crate::database::load_materialized_session(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        history.execution,
+        mj_core::state::MaterializedExecutionState::Closed
+    );
+    assert!(
+        serde_json::to_string(&history)
+            .unwrap()
+            .contains(&final_event)
+    );
+    channels.shutdown.shutdown().await.unwrap();
 }
 
 // Hard-won: #1384: interrupted child cleanup wrongly required a workspace checkpoint and a live worker.

@@ -54,6 +54,16 @@ pub(super) fn project_event(
     ) {
         return Ok(());
     }
+    // Child forms go to their parent, not operator presence. Exclude their
+    // resolutions too, since no operator-away request was captured for them.
+    let subagent: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM subagent_sessions WHERE child_session_id=?1)",
+        [session],
+        |row| row.get(0),
+    )?;
+    if subagent {
+        return Ok(());
+    }
     let (away, period): (bool, i64) = tx.query_row(
         "SELECT away,revision FROM operator_away WHERE singleton=1",
         [],
@@ -64,10 +74,9 @@ pub(super) fn project_event(
             request: Some(request),
             ..
         } => {
-            // Captures survive API-event retention and page boundaries. Child
-            // forms have their own parent routing and never use operator AFK.
+            // Captures survive API-event retention and page boundaries.
             tx.execute("INSERT INTO operator_away_requests(session_id,requested_seq,elicitation_id,request,period)
-                SELECT ?1,?2,?3,?4,?5 WHERE NOT EXISTS(SELECT 1 FROM subagent_sessions WHERE child_session_id=?1)",
+                VALUES (?1,?2,?3,?4,?5)",
                 params![session, seq, request.id, bounded_request(&request.question_text()), period])?;
         }
         ApiEventData::InputResolved {
@@ -176,4 +185,65 @@ pub(super) fn set_with(connection: &mut Connection, away: bool) -> Result<bool> 
     }
     tx.commit()?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mj_core::elicitation::ElicitationRequest;
+
+    // Hard-won: #1444: a child operator-away resolution blocked relay projection forever.
+    #[test]
+    fn child_operator_away_resolution_advances_api_events_without_an_away_capture() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("operator-away.sqlite3");
+        for id in ["parent", "child"] {
+            super::super::save_session_to(&path, &super::super::tests::session(id, "project-1"))
+                .unwrap();
+        }
+        let mut connection = super::super::open(&path).unwrap();
+        connection.execute("INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES ('child','parent','child','{}')", []).unwrap();
+        let request = ElicitationRequest {
+            id: "elicitation-1".into(),
+            message: "Choose a response".into(),
+            title: None,
+            description: None,
+            fields: vec![],
+            tool_permission: None,
+        };
+        let required = ApiEventData::InputRequired {
+            request: Some(request),
+            turn_id: None,
+        };
+        let resolved = ApiEventData::InputResolved {
+            elicitation_id: "elicitation-1".into(),
+            turn_id: None,
+            action: OPERATOR_AWAY_ACTION.into(),
+        };
+        let tx = connection.transaction().unwrap();
+        super::super::insert_api_event(&tx, "child", 1, &required).unwrap();
+        super::super::insert_api_event(&tx, "child", 2, &resolved).unwrap();
+        tx.commit().unwrap();
+
+        let child_events: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM api_events WHERE session_id='child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let captures: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM operator_away_requests WHERE session_id='child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(child_events, 2);
+        assert_eq!(captures, 0);
+
+        let tx = connection.transaction().unwrap();
+        let error = super::super::insert_api_event(&tx, "parent", 3, &resolved).unwrap_err();
+        assert!(error.to_string().contains("has no captured request"));
+    }
 }

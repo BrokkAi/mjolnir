@@ -174,7 +174,7 @@ impl Controller {
     /// taken from the relay journal and the files on the target when the
     /// harness does not come back (R4-3). The same mode a Move uses to
     /// recover a source whose harness cannot start.
-    pub(super) async fn restart_worker_for_checkpoint_only(
+    pub(in crate::controller) async fn restart_worker_for_checkpoint_only(
         &self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),

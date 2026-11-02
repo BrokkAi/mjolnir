@@ -700,12 +700,11 @@ pub(super) async fn run_daemon_runtime(
                         let state = state.clone();
                         let session_id = update.session_id.clone();
                         client_tasks.spawn(async move {
-                            if let Err(error) = state.persist_missing_target(
+                            // Shutdown cancels this task. An uncommitted write
+                            // is rediscovered from the next daemon's actor.
+                            state.persist_missing_target(
                                 &session_id, detail, observed_updated_at,
-                            ).await {
-                                tracing::warn!(%session_id, %error, "could not persist missing worker target");
-                                state.push_notice(&session_id, format!("Could not record missing session target: {error:#}"));
-                            }
+                            ).await;
                         });
                     }
                     if let Some(publisher) = phone_publisher.as_ref()

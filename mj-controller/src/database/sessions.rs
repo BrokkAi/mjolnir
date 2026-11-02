@@ -838,7 +838,7 @@ pub(super) fn mark_session_target_missing_if_current_to(
              updated_at = ?3
          WHERE session_id = ?1
            AND (?4 IS NULL OR updated_at = ?4)
-           AND state IN ('provisioning', 'running', 'disconnected', 'error')",
+           AND state IN ('running', 'disconnected')",
         params![session_id, detail, updated_at, observed_updated_at],
     )?;
     ensure!(changed <= 1, "updated {changed} sessions for {session_id}");
