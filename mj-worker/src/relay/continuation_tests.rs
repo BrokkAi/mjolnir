@@ -671,7 +671,7 @@ fn handback_reminder_admission_is_durable_and_deduplicated() {
         .unwrap();
     assert_eq!(
         relay.snapshot.active_prompt.as_ref().unwrap().prompt,
-        vec![agent_client_protocol::schema::v1::ContentBlock::from(
+        vec![agent_client_protocol::v1::schema::ContentBlock::from(
             mj_core::subagent::HANDBACK_REMINDER_TEXT.to_owned()
         )]
     );

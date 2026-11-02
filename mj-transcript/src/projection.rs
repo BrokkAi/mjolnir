@@ -14,13 +14,10 @@ mod api_events;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use agent_client_protocol::schema::{
-    MaybeUndefined,
-    v1::{
-        ContentBlock, ContentChunk, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
-        SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
-        ToolCallUpdateFields,
-    },
+use agent_client_protocol::schema::MaybeUndefined;
+use agent_client_protocol::v1::schema::{
+    ContentBlock, ContentChunk, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, SessionUpdate,
+    TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdateFields,
 };
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -490,13 +487,13 @@ mod tests;
 pub fn project_native_update(
     current: &MaterializedSession,
     event: &RelayEvent,
-    update: &agent_client_protocol::schema::v1::SessionUpdate,
+    update: &agent_client_protocol::v1::schema::SessionUpdate,
 ) -> Result<MaterializedSessionMutation> {
     let mut mutation = MaterializedSessionMutation {
         last_activity_at_ms: Some(event.recorded_at_ms),
         ..Default::default()
     };
-    if let agent_client_protocol::schema::v1::SessionUpdate::UserMessageChunk(chunk) = update {
+    if let agent_client_protocol::v1::schema::SessionUpdate::UserMessageChunk(chunk) = update {
         mutation
             .transcript
             .push(TranscriptMutation::Upsert(TranscriptItem {

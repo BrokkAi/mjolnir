@@ -263,7 +263,7 @@ fn preserve_discovery(
 
 fn discovered(
     harness: mj_core::config::HarnessKind,
-    options: Vec<agent_client_protocol::schema::v1::SessionConfigOption>,
+    options: Vec<agent_client_protocol::v1::schema::SessionConfigOption>,
     models: Vec<acp::SessionConfigChoice>,
 ) -> ProfileConfig {
     let facts =

@@ -305,7 +305,7 @@ impl DurableRelay {
                     RelayCommand::ClearContext
                 } else {
                     RelayCommand::Prompt {
-                        prompt: vec![agent_client_protocol::schema::v1::ContentBlock::from(
+                        prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from(
                             if args.is_empty() {
                                 "/compact".to_owned()
                             } else {
@@ -1663,7 +1663,7 @@ impl DurableRelay {
         }
         let id = retry.command_id.clone();
         let prompt = vec![ContentBlock::Text(
-            agent_client_protocol::schema::v1::TextContent::new("Continue"),
+            agent_client_protocol::v1::schema::TextContent::new("Continue"),
         )];
         self.submit_command(&id, RelayCommand::Prompt { prompt })?
             .map_err(|error| anyhow!("submit capacity retry: {error:?}"))?;

@@ -4522,7 +4522,7 @@ fn submitted_prompt_text(command: &RelayCommand) -> String {
     prompt
         .iter()
         .map(|block| match block {
-            agent_client_protocol::schema::v1::ContentBlock::Text(text) => text.text.clone(),
+            agent_client_protocol::v1::schema::ContentBlock::Text(text) => text.text.clone(),
             other => panic!("expected text content, got {other:?}"),
         })
         .collect()

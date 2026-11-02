@@ -1905,7 +1905,7 @@ fn fresh_native_resume(
     };
     use crate::controller::test_support::write_checkpoint_gate_archive_for_harness;
     use crate::session_manager::StandaloneSession;
-    use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+    use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 
     let _writer = crate::database::install_isolated_test_writer();
     let session_id = LATCH_RELAY_SESSION;

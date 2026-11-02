@@ -228,8 +228,8 @@ async fn a_message_without_a_sender_is_submitted_as_the_users_prompt() {
     assert_eq!(json_body(again).await, first);
 
     let plain_prompt = mj_core::relay::RelayCommand::Prompt {
-        prompt: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
-            agent_client_protocol::schema::v1::TextContent::new("check the final patch"),
+        prompt: vec![agent_client_protocol::v1::schema::ContentBlock::Text(
+            agent_client_protocol::v1::schema::TextContent::new("check the final patch"),
         )],
     };
     assert_eq!(
@@ -6323,7 +6323,7 @@ async fn recovery_prompt_identity_is_forwarded_to_the_worker() {
         .zip(["/clear", "/clear", "restart attempt"])
     {
         assert!(
-            matches!(command, mj_core::relay::RelayCommand::Prompt { prompt: actual, .. } if matches!(actual.as_slice(), [agent_client_protocol::schema::v1::ContentBlock::Text(block)] if block.text == text))
+            matches!(command, mj_core::relay::RelayCommand::Prompt { prompt: actual, .. } if matches!(actual.as_slice(), [agent_client_protocol::v1::schema::ContentBlock::Text(block)] if block.text == text))
         );
     }
 }

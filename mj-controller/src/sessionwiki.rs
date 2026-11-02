@@ -501,7 +501,7 @@ fn tool_messages(tool: &serde_json::Value, created_at_ms: i64) -> Vec<Message> {
 /// The text a finished tool call produced, as Mjolnir's transcript shows it.
 fn tool_output(tool: &serde_json::Value) -> String {
     let Some(call) = tool.get("call").and_then(|call| {
-        serde_json::from_value::<agent_client_protocol::schema::v1::ToolCall>(call.clone()).ok()
+        serde_json::from_value::<agent_client_protocol::v1::schema::ToolCall>(call.clone()).ok()
     }) else {
         return String::new();
     };

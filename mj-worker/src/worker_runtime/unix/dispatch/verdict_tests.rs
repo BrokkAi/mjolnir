@@ -148,8 +148,8 @@ async fn completed_turn_response(
             request: RelayRequest::Submit {
                 command_id: id.into(),
                 command: RelayCommand::Prompt {
-                    prompt: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
-                        agent_client_protocol::schema::v1::TextContent::new("Do the work"),
+                    prompt: vec![agent_client_protocol::v1::schema::ContentBlock::Text(
+                        agent_client_protocol::v1::schema::TextContent::new("Do the work"),
                     )],
                 },
             },

@@ -2,7 +2,7 @@
 //! its cut (campaign finding I2-3).
 use super::test_support::*;
 use super::*;
-use agent_client_protocol::schema::v1::ContentChunk;
+use agent_client_protocol::v1::schema::ContentChunk;
 
 fn notification(text: &str) -> SessionUpdate {
     serde_json::from_value(serde_json::json!({

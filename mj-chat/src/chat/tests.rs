@@ -2708,7 +2708,7 @@ mod golden_cases {
         advertise(&mut chat, 1, &["plan"]);
         chat.set_config_options(&[
             select_config_option("mode", "default", &["default", "readOnly", "plan"])
-                .category(agent_client_protocol::schema::v1::SessionConfigOptionCategory::Mode),
+                .category(agent_client_protocol::v1::schema::SessionConfigOptionCategory::Mode),
             select_config_option(
                 "approval_mode",
                 "allowAll",

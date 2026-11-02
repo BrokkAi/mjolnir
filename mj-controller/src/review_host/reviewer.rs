@@ -2,8 +2,8 @@ use super::*;
 
 pub(super) fn prompt_command(prompt: String) -> RelayCommand {
     RelayCommand::Prompt {
-        prompt: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
-            agent_client_protocol::schema::v1::TextContent::new(prompt),
+        prompt: vec![agent_client_protocol::v1::schema::ContentBlock::Text(
+            agent_client_protocol::v1::schema::TextContent::new(prompt),
         )],
     }
 }

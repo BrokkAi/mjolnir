@@ -1,5 +1,5 @@
 use super::*;
-use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionId};
+use agent_client_protocol::v1::schema::{PermissionOption, PermissionOptionId};
 
 /// A permission callback captures the current command's sender, so a late
 /// answer cannot attach an implementation to a subsequent prompt or bridge.
@@ -414,7 +414,7 @@ pub(super) fn gh_permission_response(
     request: &RequestPermissionRequest,
     input: Option<&serde_json::Value>,
 ) -> Option<RequestPermissionResponse> {
-    if request.tool_call.fields.kind != Some(agent_client_protocol::schema::v1::ToolKind::Execute) {
+    if request.tool_call.fields.kind != Some(agent_client_protocol::v1::schema::ToolKind::Execute) {
         return None;
     }
     let input = input?.as_object()?;

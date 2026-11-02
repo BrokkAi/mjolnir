@@ -562,7 +562,7 @@ pub(crate) fn load_github_session_tool_commands_at(
         else {
             continue;
         };
-        let Ok(call) = serde_json::from_value::<agent_client_protocol::schema::v1::ToolCall>(call)
+        let Ok(call) = serde_json::from_value::<agent_client_protocol::v1::schema::ToolCall>(call)
         else {
             continue;
         };
@@ -686,7 +686,7 @@ pub(crate) fn seed_github_repo_start(owner: &str, repo: &str, at: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         ContentBlock, ContentChunk, SessionUpdate, TextContent, ToolCall, ToolCallStatus,
         ToolCallUpdate, ToolCallUpdateFields,
     };

@@ -1,7 +1,7 @@
 use super::*;
 
 pub fn viewer_config_options(
-    config_options: &[agent_client_protocol::schema::v1::SessionConfigOption],
+    config_options: &[agent_client_protocol::v1::schema::SessionConfigOption],
     facts: &mj_core::acp::AcpSessionFacts,
 ) -> Vec<ViewerConfigOption> {
     // Keep canonical model/effort aliases, then publish the other selectors

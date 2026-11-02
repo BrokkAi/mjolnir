@@ -1,5 +1,5 @@
 use super::*;
-use agent_client_protocol::schema::v1::Diff;
+use agent_client_protocol::v1::schema::Diff;
 
 fn diff(old_text: Option<&str>, new_text: &str) -> Diff {
     let mut diff = Diff::new("src/main.rs", new_text);

@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::v1::SessionUpdate;
+use agent_client_protocol::v1::schema::SessionUpdate;
 use anyhow::{Context, Result, bail};
 use mj_core::local_sockets::{bind_unix_listener, connect_unix_stream};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -2547,7 +2547,7 @@ pub(super) async fn serve_client_with_memory(
 #[cfg(test)]
 mod preparation_tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+    use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
     use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayCursor, RelayVersionRange};
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};

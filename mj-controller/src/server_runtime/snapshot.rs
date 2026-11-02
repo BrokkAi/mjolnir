@@ -286,8 +286,8 @@ pub(super) fn session_capabilities(
 pub(super) fn phone_prompt_blocks(
     text: String,
     images: Vec<crate::server::ViewerPromptImage>,
-) -> Vec<agent_client_protocol::schema::v1::ContentBlock> {
-    use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent};
+) -> Vec<agent_client_protocol::v1::schema::ContentBlock> {
+    use agent_client_protocol::v1::schema::{ContentBlock, ImageContent, TextContent};
 
     let mut prompt = Vec::with_capacity(images.len() + 1);
     if !text.is_empty() {
@@ -310,7 +310,7 @@ pub(super) fn phone_commands(
     operational: Option<&mj_core::relay::RelayOperationalState>,
 ) -> Vec<crate::server::ViewerMjCommand> {
     use crate::server::ViewerCommandSource;
-    use agent_client_protocol::schema::v1::AvailableCommandInput;
+    use agent_client_protocol::v1::schema::AvailableCommandInput;
 
     let command =
         |name: &str, description: &str, argument: Option<&str>| crate::server::ViewerMjCommand {

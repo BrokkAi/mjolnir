@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(unix)]
-use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 // `anyhow::Error::context` is inherent; only the Unix-only `Option`/`Result`
 // calls need the trait in scope.
 #[cfg(unix)]
@@ -756,7 +756,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
     snapshot.operational.tools_in_flight = vec![mj_core::activity::InFlightToolCall {
         title: None,
         tool_call_id: "bash-1".into(),
-        status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
+        status: agent_client_protocol::v1::schema::ToolCallStatus::InProgress,
         started_at_ms: 1,
     }];
     let tool_deferred = checkpoint_barrier_wait_ended(

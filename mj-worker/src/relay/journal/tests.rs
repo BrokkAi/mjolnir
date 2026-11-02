@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, SessionUpdate};
+use agent_client_protocol::v1::schema::{ContentBlock, ContentChunk, SessionUpdate};
 use mj_core::relay::RESTORED_RELAY_SEED_FILE;
 use serde_json::Value;
 

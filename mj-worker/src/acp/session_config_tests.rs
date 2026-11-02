@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::relay::{DurableRelay, RelayCommand, RelayCommandOutcome, RelayObservation};
-use agent_client_protocol::schema::v1::TextContent;
+use agent_client_protocol::v1::schema::TextContent;
 
 fn reset_on_load_harness(root: &std::path::Path) -> PathBuf {
     let script = root.join("reset_config.py");

@@ -1,5 +1,5 @@
 //! A deterministic model-facing view of history. Source transcripts stay lossless.
-use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate, ToolCall};
+use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate, ToolCall};
 use mj_core::archive::{CanonicalSessionSnapshot, CanonicalTranscriptBody};
 use mj_core::state::{MaterializedSession, TranscriptBody};
 use mj_core::transcript::{
@@ -820,7 +820,7 @@ fn bound_value(value: &mut Value, limit: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use mj_core::state::TranscriptItem;

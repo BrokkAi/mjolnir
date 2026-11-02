@@ -5,7 +5,7 @@
 //! function that stands in for them.
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::InitializeRequest;
+use agent_client_protocol::v1::schema::InitializeRequest;
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Client};
 
 /// A store that holds one workspace named "editor", written without a daemon.
@@ -34,7 +34,7 @@ async fn the_acp_command_answers_initialize_without_starting_a_daemon() {
     );
 
     let response = Client
-        .builder()
+        .v1()
         .name("mj-acp-test")
         .connect_with(agent, async |cx| {
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1))

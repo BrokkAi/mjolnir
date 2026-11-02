@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::v1::*;
+use agent_client_protocol::v1::schema::*;
 use mj_core::config::HarnessKind;
 use mj_core::relay::RELAY_EVENT_GENESIS_DIGEST;
 use mj_core::relay::snapshot::*;
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn relay_operational_state_tracks_mutable_acp_options_and_commands() {
-        use agent_client_protocol::schema::v1::{
+        use agent_client_protocol::v1::schema::{
             AvailableCommandsUpdate, ConfigOptionUpdate, CurrentModeUpdate,
             SessionConfigSelectOption, SessionMode, SessionModeState,
         };
@@ -444,7 +444,7 @@ mod tests {
     // Hard-won: b63924a3: full old and new file copies inflated a real session journal past IPC limits.
     #[test]
     fn a_recorded_edit_journals_a_patch_rather_than_the_whole_file() {
-        use agent_client_protocol::schema::v1::{Diff, ToolCall, ToolCallContent};
+        use agent_client_protocol::v1::schema::{Diff, ToolCall, ToolCallContent};
 
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();

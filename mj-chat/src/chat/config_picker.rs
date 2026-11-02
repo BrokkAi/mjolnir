@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigOptionCategory};
+use agent_client_protocol::v1::schema::{SessionConfigOption, SessionConfigOptionCategory};
 use mj_core::acp::surface::config_current_value;
 use mj_core::acp::{SessionConfigChoice, session_config_choices};
 use mj_core::relay::WorkerPhase;
@@ -536,7 +536,7 @@ mod tests {
     use crate::chat::ChatAction;
     use crate::chat::ChatState;
     use crate::chat::test_support::{drawn_transcript, key, snapshot};
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
         SessionConfigSelectOptions,
     };

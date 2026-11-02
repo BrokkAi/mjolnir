@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn review_selection_uses_one_model_and_effort_from_an_acp_config_fixture() {
         // ACP v1 documents session options as id/name/type/currentValue/options.
-        let options: Vec<agent_client_protocol::schema::v1::SessionConfigOption> =
+        let options: Vec<agent_client_protocol::v1::schema::SessionConfigOption> =
             serde_json::from_str(include_str!(
                 "../tests/fixtures/review-acp-config-options.json"
             ))

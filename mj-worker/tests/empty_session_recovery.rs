@@ -1,7 +1,7 @@
 //! Exercise native recovery through a real, disposable worker process.
 #![cfg(unix)]
 
-use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate, TextContent};
+use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate, TextContent};
 use mj_core::relay::{
     RELAY_EVENT_GENESIS_DIGEST, RELAY_PROTOCOL_VERSION, RelayCommand, RelayCommandOutcome,
     RelayObservation, RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponsePayload,
