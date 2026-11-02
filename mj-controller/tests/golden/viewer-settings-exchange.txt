@@ -114,6 +114,15 @@
               },
               {
                 "path": [
+                  "quota"
+                ],
+                "label": "Quota checks",
+                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it in the agent-dev image under Podman or Docker when one is installed.",
+                "control": "page",
+                "summary": "Auto · container when available"
+              },
+              {
+                "path": [
                   "sessionwiki"
                 ],
                 "label": "SessionWiki",
@@ -438,6 +447,15 @@
                 "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
                 "control": "page",
                 "summary": "Up to 6 at once"
+              },
+              {
+                "path": [
+                  "quota"
+                ],
+                "label": "Quota checks",
+                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it in the agent-dev image under Podman or Docker when one is installed.",
+                "control": "page",
+                "summary": "Auto · container when available"
               },
               {
                 "path": [
@@ -771,6 +789,15 @@
                 "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
                 "control": "page",
                 "summary": "Up to 6 at once"
+              },
+              {
+                "path": [
+                  "quota"
+                ],
+                "label": "Quota checks",
+                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it in the agent-dev image under Podman or Docker when one is installed.",
+                "control": "page",
+                "summary": "Auto · container when available"
               },
               {
                 "path": [

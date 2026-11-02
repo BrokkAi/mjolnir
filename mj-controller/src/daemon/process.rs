@@ -331,7 +331,17 @@ pub(super) async fn run_daemon_runtime(
     let image_refresh = spawn_image_refresher(
         {
             let state = state.clone();
-            move || state.with_config(crate::controller::image_refresh_plan)
+            move || {
+                state.with_config(|config| {
+                    let mut plan = crate::controller::image_refresh_plan(config);
+                    crate::quota_runtime::add_quota_image(
+                        &mut plan,
+                        config.quota.runtime,
+                        std::env::var_os("PATH").as_deref(),
+                    );
+                    plan
+                })
+            }
         },
         {
             // A background download is the daemon's own work, not a session's,

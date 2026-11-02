@@ -117,6 +117,19 @@ runtime, or an arm64 SSH host. Master publishes the floating `:latest` tag, and
 each release publishes an immutable tag for its own version, such as
 `agent-dev:2.36.0`.
 
+The daemon also uses this image for quota checks that start a harness: the
+Codex app-server, Grok's agent, and Claude Code's login refresh. With
+`[quota] runtime = "auto"`, the default, those checks run in the release's
+agent-dev image under Podman when it is installed, else Docker, else on the
+host, so a machine that runs every session in containers needs no harness
+installed to show its quota. The profile's account directory is mounted at its
+own path, so a refreshed login lands where the host keeps it. Set `runtime` to
+`podman` or `docker` to insist on one engine, or to `host` to never use a
+container. A check never downloads the image; the daemon downloads it in the
+background, and until then the check reports that it is waiting for it.
+Claude Code on macOS always checks on the host, because its login lives in the
+Keychain.
+
 The standard local targets already use this published image: an installed
 release names the image built for its own version, while a development build
 names `:latest`. Podman, Docker, and Apple's container runtime pull it

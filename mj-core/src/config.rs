@@ -514,6 +514,41 @@ impl JevConfig {
     }
 }
 
+/// Where the daemon runs the quota checks that start a harness program: the
+/// Codex app-server, Grok's agent, and Claude Code's login refresh.
+/// `[quota] runtime = "auto"`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QuotaConfig {
+    #[serde(skip_serializing_if = "QuotaRuntimeChoice::is_default")]
+    pub runtime: QuotaRuntimeChoice,
+}
+
+impl QuotaConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// `Auto` runs the checks in the release's agent-dev image under Podman when
+/// it is installed, else under Docker, else on the host. `Podman` and
+/// `Docker` insist on that engine; `Host` never uses a container.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QuotaRuntimeChoice {
+    #[default]
+    Auto,
+    Podman,
+    Docker,
+    Host,
+}
+
+impl QuotaRuntimeChoice {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Legacy GitHub event source switch, read but never written.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -699,6 +734,7 @@ pub struct Config {
     pub sessionwiki: SessionWikiConfig,
     pub subagents: SubagentConfig,
     pub jev: JevConfig,
+    pub quota: QuotaConfig,
     pub keys: KeysConfig,
     pub legacy_startup: (),
     pub profiles: BTreeMap<String, HarnessProfile>,
@@ -759,6 +795,8 @@ struct StoredConfig {
     build_cache: LegacyBuildCacheConfig,
     #[serde(default, skip_serializing_if = "JevConfig::is_default")]
     jev: JevConfig,
+    #[serde(default, skip_serializing_if = "QuotaConfig::is_default")]
+    quota: QuotaConfig,
     #[serde(default, skip_serializing_if = "KeysConfig::is_default")]
     keys: KeysConfig,
     #[serde(
@@ -938,6 +976,7 @@ impl TryFrom<StoredConfig> for Config {
             subagents,
             build_cache,
             jev,
+            quota,
             keys,
             legacy_startup,
             mut profiles,
@@ -1032,6 +1071,7 @@ impl TryFrom<StoredConfig> for Config {
             sessionwiki,
             subagents,
             jev,
+            quota,
             keys,
             legacy_startup,
             profiles,
@@ -1082,6 +1122,7 @@ impl From<Config> for StoredConfig {
             subagents: config.subagents,
             build_cache: LegacyBuildCacheConfig::default(),
             jev: config.jev,
+            quota: config.quota,
             keys: config.keys,
             legacy_startup: config.legacy_startup,
             profiles: config.profiles,
@@ -1108,6 +1149,7 @@ impl Default for Config {
             sessionwiki: SessionWikiConfig::default(),
             subagents: SubagentConfig::default(),
             jev: JevConfig::default(),
+            quota: QuotaConfig::default(),
             keys: KeysConfig::default(),
             legacy_startup: (),
             profiles: BTreeMap::new(),

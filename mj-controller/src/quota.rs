@@ -14,7 +14,9 @@ use crate::claude_usage;
 use crate::codex_usage::{self, CodexUsageClient, CodexUsageStatus};
 use crate::grok_usage;
 use mj_core::codex_provider::BuiltInCodexProvider;
-use mj_core::config::{AuthScheme, HarnessKind, HarnessProfile, harness_authentication_marker};
+use mj_core::config::{
+    AuthScheme, HarnessKind, HarnessProfile, QuotaRuntimeChoice, harness_authentication_marker,
+};
 use mj_core::credentials::{
     MAX_CREDENTIAL_BYTES, credential_expiry, credential_fingerprint, credential_freshness,
 };
@@ -48,6 +50,8 @@ pub struct QuotaRefreshRequest {
     pub cwd: std::path::PathBuf,
     /// Where a Codex profile's quota comes from. Other harnesses ignore it.
     pub codex_source: CodexQuotaSource,
+    /// Where a check that starts the harness runs it (`[quota] runtime`).
+    pub runtime: QuotaRuntimeChoice,
 }
 
 /// Where a Codex profile's quota comes from, decided once from its provider
@@ -144,6 +148,7 @@ impl QuotaRefreshRequest {
         profile_id: &str,
         profile: &HarnessProfile,
         cwd: std::path::PathBuf,
+        runtime: QuotaRuntimeChoice,
     ) -> Self {
         let mut environment = profile.environment.resolved().clone();
         profile.kind.configure_profile_home_environment(
@@ -159,6 +164,7 @@ impl QuotaRefreshRequest {
             environment,
             cwd,
             codex_source: CodexQuotaSource::of_profile(profile),
+            runtime,
         }
     }
 }
@@ -444,7 +450,22 @@ async fn refresh_profile_with_cache_root(
         environment,
         cwd,
         codex_source,
+        runtime,
     } = request;
+    // Only the checks that start a harness program consult the runtime.
+    let container = || -> Result<Option<crate::quota_runtime::ContainerCheck>> {
+        Ok(
+            match crate::quota_runtime::QuotaRuntime::current(runtime)? {
+                crate::quota_runtime::QuotaRuntime::Host => None,
+                crate::quota_runtime::QuotaRuntime::Container(runtime) => {
+                    Some(crate::quota_runtime::ContainerCheck {
+                        runtime,
+                        home: source_home.clone(),
+                    })
+                }
+            },
+        )
+    };
     let environment = environment.into_iter().collect::<HashMap<_, _>>();
     let refreshed_at_epoch_seconds = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -511,7 +532,12 @@ async fn refresh_profile_with_cache_root(
             CodexQuotaSource::Unreadable(error) => Err(anyhow::anyhow!(
                 "could not read the Codex configuration: {error}"
             )),
-            CodexQuotaSource::ChatGptLogin => {
+            CodexQuotaSource::ChatGptLogin => 'codex: {
+                let launcher = match container() {
+                    Ok(Some(check)) => codex_usage::CodexLauncher::Container(check),
+                    Ok(None) => codex_usage::CodexLauncher::Managed(cache_root.clone()),
+                    Err(error) => break 'codex Err(error),
+                };
                 // A poll starts at most one app-server. A failed rotation drops its
                 // client. When that client was cached from an earlier poll, a new
                 // one may still read the quota, which is how a login that the old
@@ -525,7 +551,7 @@ async fn refresh_profile_with_cache_root(
                         &mut codex_client,
                         cwd.clone(),
                         environment.clone(),
-                        cache_root.clone(),
+                        &launcher,
                     )
                     .await;
                     match login_refresh {
@@ -552,7 +578,7 @@ async fn refresh_profile_with_cache_root(
                             &mut codex_client,
                             cwd,
                             environment,
-                            cache_root,
+                            &launcher,
                         )
                         .await
                     }
@@ -587,85 +613,92 @@ async fn refresh_profile_with_cache_root(
         },
         // Bedrock bills through AWS and has no Claude subscription allowance.
         HarnessKind::Claude if auth_scheme == AuthScheme::AwsCredentialChain => Ok(usage_priced()),
-        HarnessKind::Claude => claude_usage::query(source_home, environment)
-            .await
-            .map(|report| ProfileQuota {
-                banked_resets: report.banked_resets,
-                profile_id: profile_id.clone(),
-                harness,
-                windows: {
-                    let mut windows = Vec::new();
-                    if let Some(window) = report.five_hour {
-                        windows.push(QuotaWindow {
-                            label: "5H".to_owned(),
-                            remaining_percent: Some(window.remaining_percent),
-                            duration_seconds: window.duration_seconds,
-                            model_scope: None,
-                            used: None,
-                            limit: None,
-                            resets: window
-                                .reset_context
-                                .as_deref()
-                                .and_then(normalize_reset_text),
-                            resets_at_epoch_seconds: window
-                                .reset_context
-                                .as_deref()
-                                .and_then(normalize_reset_epoch_seconds),
-                        });
+        HarnessKind::Claude => match if cfg!(target_os = "macos") {
+            Ok(None)
+        } else {
+            container()
+        } {
+            Err(error) => Err(error),
+            Ok(container) => claude_usage::query(source_home, environment, container)
+                .await
+                .map(|report| ProfileQuota {
+                    banked_resets: report.banked_resets,
+                    profile_id: profile_id.clone(),
+                    harness,
+                    windows: {
+                        let mut windows = Vec::new();
+                        if let Some(window) = report.five_hour {
+                            windows.push(QuotaWindow {
+                                label: "5H".to_owned(),
+                                remaining_percent: Some(window.remaining_percent),
+                                duration_seconds: window.duration_seconds,
+                                model_scope: None,
+                                used: None,
+                                limit: None,
+                                resets: window
+                                    .reset_context
+                                    .as_deref()
+                                    .and_then(normalize_reset_text),
+                                resets_at_epoch_seconds: window
+                                    .reset_context
+                                    .as_deref()
+                                    .and_then(normalize_reset_epoch_seconds),
+                            });
+                        }
+                        if let Some(window) = report.week {
+                            windows.push(QuotaWindow {
+                                label: "Week".to_owned(),
+                                remaining_percent: Some(window.remaining_percent),
+                                duration_seconds: window.duration_seconds,
+                                model_scope: None,
+                                used: None,
+                                limit: None,
+                                resets: window
+                                    .reset_context
+                                    .as_deref()
+                                    .and_then(normalize_reset_text),
+                                resets_at_epoch_seconds: window
+                                    .reset_context
+                                    .as_deref()
+                                    .and_then(normalize_reset_epoch_seconds),
+                            });
+                        }
+                        for (scope, window) in report.scoped_weeks {
+                            let mut chars = scope.chars();
+                            let label_scope = chars.next().map_or_else(String::new, |first| {
+                                first.to_ascii_uppercase().to_string() + chars.as_str()
+                            });
+                            windows.push(QuotaWindow {
+                                label: format!("Week ({label_scope})"),
+                                remaining_percent: Some(window.remaining_percent),
+                                duration_seconds: window.duration_seconds,
+                                model_scope: Some(scope),
+                                used: None,
+                                limit: None,
+                                resets: window
+                                    .reset_context
+                                    .as_deref()
+                                    .and_then(normalize_reset_text),
+                                resets_at_epoch_seconds: window
+                                    .reset_context
+                                    .as_deref()
+                                    .and_then(normalize_reset_epoch_seconds),
+                            });
+                        }
+                        windows
+                    },
+                    extra: None,
+                    error: None,
+                    refreshed_at_epoch_seconds,
+                    rate_limited_until_epoch_seconds: None,
+                })
+                .map_err(|error| match error {
+                    claude_usage::ClaudeUsageError::RateLimited(retry_after) => {
+                        anyhow::Error::new(RateLimited { retry_after })
                     }
-                    if let Some(window) = report.week {
-                        windows.push(QuotaWindow {
-                            label: "Week".to_owned(),
-                            remaining_percent: Some(window.remaining_percent),
-                            duration_seconds: window.duration_seconds,
-                            model_scope: None,
-                            used: None,
-                            limit: None,
-                            resets: window
-                                .reset_context
-                                .as_deref()
-                                .and_then(normalize_reset_text),
-                            resets_at_epoch_seconds: window
-                                .reset_context
-                                .as_deref()
-                                .and_then(normalize_reset_epoch_seconds),
-                        });
-                    }
-                    for (scope, window) in report.scoped_weeks {
-                        let mut chars = scope.chars();
-                        let label_scope = chars.next().map_or_else(String::new, |first| {
-                            first.to_ascii_uppercase().to_string() + chars.as_str()
-                        });
-                        windows.push(QuotaWindow {
-                            label: format!("Week ({label_scope})"),
-                            remaining_percent: Some(window.remaining_percent),
-                            duration_seconds: window.duration_seconds,
-                            model_scope: Some(scope),
-                            used: None,
-                            limit: None,
-                            resets: window
-                                .reset_context
-                                .as_deref()
-                                .and_then(normalize_reset_text),
-                            resets_at_epoch_seconds: window
-                                .reset_context
-                                .as_deref()
-                                .and_then(normalize_reset_epoch_seconds),
-                        });
-                    }
-                    windows
-                },
-                extra: None,
-                error: None,
-                refreshed_at_epoch_seconds,
-                rate_limited_until_epoch_seconds: None,
-            })
-            .map_err(|error| match error {
-                claude_usage::ClaudeUsageError::RateLimited(retry_after) => {
-                    anyhow::Error::new(RateLimited { retry_after })
-                }
-                error => anyhow::anyhow!(error.to_string()),
-            }),
+                    error => anyhow::anyhow!(error.to_string()),
+                }),
+        },
         HarnessKind::Kimi => {
             query_kimi(&source_home, &environment)
                 .await
@@ -682,8 +715,12 @@ async fn refresh_profile_with_cache_root(
         }
         // Grok Build publishes no HTTP quota endpoint. Its own usage view polls
         // an ACP billing extension, and so does Mjolnir.
-        HarnessKind::Grok => {
-            grok_usage::query(source_home.clone(), cwd, environment)
+        HarnessKind::Grok => 'grok: {
+            let container = match container() {
+                Ok(container) => container,
+                Err(error) => break 'grok Err(error),
+            };
+            grok_usage::query(source_home.clone(), cwd, environment, container)
                 .await
                 .map(|report| ProfileQuota {
                     banked_resets: None,

@@ -412,16 +412,16 @@ mode after selecting Open settings: "Setup"
 │           │   Code Review                     Off                                                        │           │
 │           │   Continuation                    On · 3 continuations plus quota recovery                   │           │
 │           │   Sub-agents                      Up to 6 at once                                            │  ─────────╯
-│           │   SessionWiki                     Keeps every session                                        │  ─────────╮
+│           │   Quota checks                    Auto · container when available                            │  ─────────╮
+│           │   SessionWiki                     Keeps every session                                        │           │
 │           │   Web Access                      On · 127.0.0.1:3765                                        │           │
+│           │                                                                                              │  ─────────╯
+│           │   Display                                                                                    │  ── ▁   ▄ ╮
+│           │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │           │
+│           │   Notifications                   Terminal                                                   │  ─────────╯
+│           │   Advanced                        All off                                                    │  ── ▁   ▄ ╮
 │           │                                                                                              │           │
-│           │   Display                                                                                    │  ─────────╯
-│           │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │  ── ▁   ▄ ╮
-│           │   Notifications                   Terminal                                                   │           │
-│           │   Advanced                        All off                                                    │  ─────────╯
-│           │                                                                                              │  ── ▁   ▄ ╮
 │           │   Privacy                                                                                    │           │
-│           │   Jev (hosted service)            On · sends turn text for classification                    │           │
 │           │   Save and Close                                                                             │           │
 │           ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯           │
 ╰─────────                                                                                                    ─────────╯
