@@ -12,6 +12,7 @@
 mod harness_adapters;
 pub(crate) mod history;
 mod provenance;
+mod search_query;
 pub mod tags;
 mod top_level;
 mod transcript_grep;
@@ -1813,9 +1814,9 @@ fn query_rows_from(
 /// person narrows the query, as with the resume dialog's own search.
 const TEXT_SEARCH_MESSAGE_LIMIT: i64 = 20_000;
 
-/// The live Mjolnir sessions whose user or agent messages contain `query`,
-/// ignoring case, and where: a session with a user match reports the user
-/// match. Tool messages never match. Runs SQLite work, so callers on the async
+/// The live Mjolnir sessions whose user or agent messages contain every query
+/// term, ignoring case; quotes group phrases. User matches take precedence over
+/// agent matches. Tool messages never match. Runs SQLite work, so callers on the async
 /// runtime wrap it in `spawn_blocking`.
 pub fn session_text_matches(query: &str, live: &BTreeSet<String>) -> Result<Vec<SessionTextMatch>> {
     let query = query.trim();
@@ -1835,60 +1836,61 @@ fn text_matches_in(
     live: &BTreeSet<String>,
     ownership: &top_level::Snapshot,
 ) -> Result<Vec<SessionTextMatch>> {
-    let mut statement;
-    let rows = if query.chars().count() < MIN_FULLTEXT_QUERY {
-        // Too short for the trigram index; scan the newest messages instead.
-        let pattern = format!(
-            "%{}%",
-            sessionwiki::util::nfc(query)
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        );
-        statement = connection.prepare(
-            "SELECT f.session_id, f.path, m.role, f.kind
-             FROM messages m JOIN files f ON f.session_id = m.session_id
-             WHERE f.tool = ?1 AND m.role IN ('user', 'assistant')
-               AND m.text LIKE ?2 ESCAPE '\\'
-             ORDER BY m.id DESC LIMIT ?3",
-        )?;
-        statement
-            .query_map(
-                rusqlite::params![TOOL, pattern, TEXT_SEARCH_MESSAGE_LIMIT],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()
-    } else {
-        let phrase = format!("\"{}\"", sessionwiki::util::nfc(query).replace('"', "\"\""));
-        statement = connection.prepare(
-            "SELECT f.session_id, f.path, m.role, f.kind
-             FROM (SELECT rowid AS mid FROM msgs WHERE msgs MATCH ?2 LIMIT ?3) x
-             JOIN messages m ON m.id = x.mid
-             JOIN files f ON f.session_id = m.session_id
-             WHERE f.tool = ?1 AND m.role IN ('user', 'assistant')",
-        )?;
-        statement
-            .query_map(
-                rusqlite::params![TOOL, phrase, TEXT_SEARCH_MESSAGE_LIMIT],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()
+    let terms = search_query::terms(query);
+    if terms.is_empty() {
+        return Ok(Vec::new());
     }
-    .context("search the indexed messages")?;
+    let fulltext = terms
+        .iter()
+        .filter(|term| term.chars().count() >= MIN_FULLTEXT_QUERY)
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut sql = if fulltext.is_empty() {
+        // No term is long enough for the trigram index.
+        "SELECT f.session_id, f.path, m.role, f.kind FROM messages m".to_owned()
+    } else {
+        "SELECT f.session_id, f.path, m.role, f.kind
+         FROM msgs JOIN messages m ON m.id = msgs.rowid"
+            .to_owned()
+    };
+    sql.push_str(
+        " JOIN files f ON f.session_id = m.session_id
+          WHERE f.tool = ? AND m.role IN ('user', 'assistant')",
+    );
+    let mut args = vec![rusqlite::types::Value::Text(TOOL.to_owned())];
+    if !fulltext.is_empty() {
+        sql.push_str(" AND msgs MATCH ?");
+        args.push(fulltext.clone().into());
+    }
+    for term in terms
+        .iter()
+        .filter(|term| term.chars().count() < MIN_FULLTEXT_QUERY)
+    {
+        sql.push_str(" AND m.text LIKE ? ESCAPE '\\'");
+        let escaped = term
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        args.push(format!("%{escaped}%").into());
+    }
+    if fulltext.is_empty() {
+        sql.push_str(" ORDER BY m.id DESC");
+    }
+    sql.push_str(" LIMIT ?");
+    args.push(TEXT_SEARCH_MESSAGE_LIMIT.into());
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(args), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("search the indexed messages")?;
     let mut found = BTreeMap::<String, SessionTextMatchKind>::new();
     for (session_id, path, role, kind) in rows {
         if !live.contains(&session_id)
@@ -4701,30 +4703,18 @@ mod tests {
         );
     }
 
-    /// The text search over an in-memory index shaped like SessionWiki's.
+    /// Text search against SessionWiki's real schema and query implementation.
     mod text_search {
         use super::super::{SessionTextMatch, SessionTextMatchKind, text_matches_in};
         use std::collections::BTreeSet;
 
-        fn index(sessions: &[(&str, &[(&str, &str)])]) -> rusqlite::Connection {
-            let connection = rusqlite::Connection::open_in_memory().unwrap();
-            connection
-                .execute_batch(
-                    "CREATE TABLE files(path TEXT PRIMARY KEY, session_id TEXT NOT NULL,
-                                        tool TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'main');
-                     CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
-                                           role TEXT NOT NULL, text TEXT NOT NULL);
-                     CREATE VIRTUAL TABLE msgs USING fts5(
-                         text, content='messages', content_rowid='id', tokenize='trigram');",
-                )
-                .unwrap();
+        // Caller holds the shared index lock for the returned directory's lifetime.
+        fn index(
+            sessions: &[(&str, &[(&str, &str)])],
+        ) -> (tempfile::TempDir, rusqlite::Connection) {
+            let (directory, connection) = super::super::tags::testing::isolated_index();
             for (id, messages) in sessions {
-                connection
-                    .execute(
-                        "INSERT INTO files(path, session_id, tool) VALUES (?1, ?2, 'mjolnir')",
-                        rusqlite::params![format!("/checkpoints/{id}"), id],
-                    )
-                    .unwrap();
+                super::super::tags::testing::index_row(&connection, id, "mjolnir");
                 for (role, text) in *messages {
                     connection
                         .execute(
@@ -4741,7 +4731,7 @@ mod tests {
                         .unwrap();
                 }
             }
-            connection
+            (directory, connection)
         }
 
         fn live(ids: &[&str]) -> BTreeSet<String> {
@@ -4758,9 +4748,13 @@ mod tests {
                 .collect()
         }
 
+        // Hard-won: 84c6e0274: Live search treated phrase delimiters as literal quote characters.
         #[test]
         fn golden_sessions_filter_search() {
-            let connection = index(&[
+            use std::fmt::Write as _;
+
+            let _held = super::super::tags::testing::lock();
+            let (_directory, connection) = index(&[
                 ("said-by-user", &[("user", "please fix the Zebra crossing")]),
                 ("said-by-agent", &[("assistant", "the zebra is fixed")]),
                 (
@@ -4772,12 +4766,27 @@ mod tests {
                     &[("assistant", "a ZEBRA appears"), ("user", "a zebra please")],
                 ),
                 ("gone", &[("user", "zebra")]),
+                (
+                    "billing",
+                    &[("assistant", "October 1–31, USD before credits: café 東京")],
+                ),
+                (
+                    "scattered",
+                    &[("user", "credits arrive after the USD before taxes")],
+                ),
+                ("split", &[("user", "USD before"), ("assistant", "credits")]),
+                (
+                    "quoted",
+                    &[("user", "a literal \"quoted phrase\"; caféine")],
+                ),
+                ("short", &[("assistant", r"qx qy % _ \")]),
+                ("phrase-only-in-tool", &[("tool", "USD before credits")]),
             ]);
-            let live = live(&["said-by-user", "said-by-agent", "only-in-tool", "both"]);
+            let initial_live = live(&["said-by-user", "said-by-agent", "only-in-tool", "both"]);
             let found = text_matches_in(
                 &connection,
                 "zebra",
-                &live,
+                &initial_live,
                 &super::super::top_level::Snapshot::default(),
             )
             .unwrap();
@@ -4789,11 +4798,103 @@ mod tests {
                     ("said-by-user", SessionTextMatchKind::User),
                 ])
             );
-            let rendered = format!(
+            let mut rendered = format!(
                 "=== controller text search response ({} matches) ===\n{}\n",
                 found.len(),
                 serde_json::to_string_pretty(&found).unwrap()
             );
+            let live = live(&[
+                "billing",
+                "scattered",
+                "split",
+                "quoted",
+                "short",
+                "phrase-only-in-tool",
+            ]);
+            let sessions: std::collections::BTreeMap<_, _> =
+                sessionwiki::index::recent(&connection, 100, None, None, None, true)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|row| live.contains(&row.session_id))
+                    .map(|row| {
+                        let session =
+                            sessionwiki::index::session_from_index(&connection, &row).unwrap();
+                        (row.session_id, session)
+                    })
+                    .collect();
+            for query in [
+                "\"usd before credits\"",
+                "usd before credits",
+                "october \"usd before credits\"",
+                "\"usd before credits",
+                "\"\"\"quoted phrase\"\"\"",
+                "\"qx\" \"qy\"",
+                "qx %_",
+                "\"%\"",
+                "\"_\"",
+                "\"\\\"",
+                "\"cafe\u{301}\"",
+                "\"東京\"",
+                "café caf",
+                "\"\"",
+                "\" \"",
+            ] {
+                let found = text_matches_in(
+                    &connection,
+                    query,
+                    &live,
+                    &super::super::top_level::Snapshot::default(),
+                )
+                .unwrap();
+                // The independently shipped index and our previews must agree
+                // on the same query, including escapes and short/CJK terms.
+                let indexed = sessionwiki::index::search_with_roles(
+                    &connection,
+                    query,
+                    100,
+                    Some("mjolnir"),
+                    None,
+                    Some(super::super::CONVERSATION_ROLES),
+                )
+                .unwrap();
+                let indexed_ids: BTreeSet<_> = indexed
+                    .iter()
+                    .filter(|hit| live.contains(&hit.row.session_id))
+                    .map(|hit| hit.row.session_id.as_str())
+                    .collect();
+                assert_eq!(
+                    found
+                        .iter()
+                        .map(|hit| hit.session_id.as_str())
+                        .collect::<BTreeSet<_>>(),
+                    indexed_ids,
+                    "index disagreement for {query:?}"
+                );
+                writeln!(rendered, "=== query {query:?} ===").unwrap();
+                writeln!(
+                    rendered,
+                    "{}",
+                    serde_json::to_string_pretty(&found).unwrap()
+                )
+                .unwrap();
+                for (id, session) in &sessions {
+                    let preview = super::super::hit_transcript(session, query, 0, 4_000);
+                    assert_eq!(
+                        !preview.blocks.is_empty(),
+                        indexed_ids.contains(id.as_str()),
+                        "preview disagreement for {query:?} in {id}"
+                    );
+                    if !preview.blocks.is_empty() {
+                        writeln!(rendered, "preview {id}:").unwrap();
+                        writeln!(
+                            rendered,
+                            "{}",
+                            serde_json::to_string_pretty(&preview).unwrap()
+                        )
+                        .unwrap();
+                    }
+                }
+            }
             mj_core::golden::assert_golden(
                 env!("CARGO_MANIFEST_DIR"),
                 "sessions-filter-search",
@@ -4803,7 +4904,8 @@ mod tests {
 
         #[test]
         fn a_query_too_short_for_the_trigram_index_still_matches() {
-            let connection = index(&[
+            let _held = super::super::tags::testing::lock();
+            let (_directory, connection) = index(&[
                 ("a", &[("user", "go to the zoo")]),
                 ("b", &[("assistant", "zoo")]),
                 ("c", &[("tool", "zoo")]),
