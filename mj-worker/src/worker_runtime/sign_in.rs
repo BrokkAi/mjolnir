@@ -58,6 +58,7 @@ struct TargetHarness {
 
 async fn prepare_target_harness(
     harness: HarnessKind,
+    runtime: HarnessRuntimePolicy,
     cwd: &Path,
     environment: BTreeMap<String, String>,
 ) -> Result<TargetHarness> {
@@ -65,7 +66,7 @@ async fn prepare_target_harness(
     let (command, args) = mj_core::harness_runtime::fallback_launch(harness, policy);
     let prepared = super::prepare_harness_launch(
         harness,
-        HarnessRuntimePolicy::Ambient,
+        runtime,
         policy,
         AcpSupervisorSpec {
             command: command.into(),
@@ -98,15 +99,21 @@ async fn prepare_target_harness(
 /// installation stays leased until the CLI exits.
 pub async fn run_harness_cli(
     harness: HarnessKind,
+    runtime: HarnessRuntimePolicy,
     environment: BTreeMap<String, String>,
+    drop_environment: Vec<String>,
     arguments: Vec<String>,
 ) -> Result<i32> {
     let cwd = std::env::current_dir().context("read the working directory")?;
-    let target = prepare_target_harness(harness, &cwd, environment).await?;
+    let target = prepare_target_harness(harness, runtime, &cwd, environment).await?;
+    let mut environment = target.prepared.environment.clone();
+    for name in &drop_environment {
+        environment.remove(name);
+    }
     let status = Command::new(&target.cli)
         .args(&arguments)
         .env_clear()
-        .envs(&target.prepared.environment)
+        .envs(&environment)
         .current_dir(&cwd)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -120,10 +127,15 @@ pub async fn run_harness_cli(
 /// Run `spec` in this target and return the exit code the person's terminal
 /// should see.
 pub async fn run_sign_in(spec: SignInSpec) -> Result<i32> {
-    let mut environment = spec.environment.clone();
-    spec.harness
-        .configure_home_environment(&spec.profile_home, &mut environment);
-    let target = prepare_target_harness(spec.harness, &spec.profile_home, environment).await?;
+    // The caller names the profile home in the environment the way its host
+    // reads it (on macOS a Claude login stays in the Keychain).
+    let target = prepare_target_harness(
+        spec.harness,
+        spec.runtime,
+        &spec.profile_home,
+        spec.environment.clone(),
+    )
+    .await?;
     let environment = target.prepared.environment.clone();
     let (entrypoint, cli, prepared) = (&target.entrypoint, &target.cli, &target.prepared);
     match spec.action {

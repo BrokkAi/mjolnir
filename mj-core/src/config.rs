@@ -514,6 +514,33 @@ impl JevConfig {
     }
 }
 
+/// Where Mjolnir runs a coding harness for work that belongs to no session:
+/// signing a profile in, discovering its models, reading its quota, and
+/// renewing its login. `[harnesses] run_on = "container"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessHostChoice {
+    /// On this machine, from Mjolnir's pinned installation or the harness's
+    /// own command.
+    #[default]
+    Host,
+    /// In a short-lived container from a local Podman or Docker target's
+    /// agent image, so this machine needs no harness installed.
+    Container,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HarnessesConfig {
+    pub run_on: HarnessHostChoice,
+}
+
+impl HarnessesConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 /// Legacy GitHub event source switch, read but never written.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -699,6 +726,7 @@ pub struct Config {
     pub sessionwiki: SessionWikiConfig,
     pub subagents: SubagentConfig,
     pub jev: JevConfig,
+    pub harnesses: HarnessesConfig,
     pub keys: KeysConfig,
     pub legacy_startup: (),
     pub profiles: BTreeMap<String, HarnessProfile>,
@@ -759,6 +787,8 @@ struct StoredConfig {
     build_cache: LegacyBuildCacheConfig,
     #[serde(default, skip_serializing_if = "JevConfig::is_default")]
     jev: JevConfig,
+    #[serde(default, skip_serializing_if = "HarnessesConfig::is_default")]
+    harnesses: HarnessesConfig,
     #[serde(default, skip_serializing_if = "KeysConfig::is_default")]
     keys: KeysConfig,
     #[serde(
@@ -938,6 +968,7 @@ impl TryFrom<StoredConfig> for Config {
             subagents,
             build_cache,
             jev,
+            harnesses,
             keys,
             legacy_startup,
             mut profiles,
@@ -1032,6 +1063,7 @@ impl TryFrom<StoredConfig> for Config {
             sessionwiki,
             subagents,
             jev,
+            harnesses,
             keys,
             legacy_startup,
             profiles,
@@ -1082,6 +1114,7 @@ impl From<Config> for StoredConfig {
             subagents: config.subagents,
             build_cache: LegacyBuildCacheConfig::default(),
             jev: config.jev,
+            harnesses: config.harnesses,
             keys: config.keys,
             legacy_startup: config.legacy_startup,
             profiles: config.profiles,
@@ -1108,6 +1141,7 @@ impl Default for Config {
             sessionwiki: SessionWikiConfig::default(),
             subagents: SubagentConfig::default(),
             jev: JevConfig::default(),
+            harnesses: HarnessesConfig::default(),
             keys: KeysConfig::default(),
             legacy_startup: (),
             profiles: BTreeMap::new(),

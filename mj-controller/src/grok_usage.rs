@@ -101,9 +101,9 @@ struct GrokUsageSession {
     /// closes, so dropping this early kills the agent before it answers.
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
-    /// The sandbox container, removed at shutdown. Tests drive a fake agent
-    /// directly and have none.
-    container: Option<crate::harness_sandbox::SandboxCommand>,
+    /// How the agent was started, undone at shutdown (a container is
+    /// removed). Tests drive a fake agent directly and have none.
+    container: Option<crate::harness_runner::WorkerLaunch>,
 }
 
 impl GrokUsageSession {
@@ -114,37 +114,17 @@ impl GrokUsageSession {
         let home = home.to_path_buf();
         let container = tokio::task::spawn_blocking(move || {
             let config = mj_core::config::Config::load()?;
-            let sandbox = crate::harness_sandbox::HarnessSandbox::select(
-                &config,
-                &crate::targets::ProcessExecutor,
-            )?;
-            let host_home = home.to_string_lossy().into_owned();
-            let mount = crate::harness_sandbox::profile_mount_point(HarnessKind::Grok)
-                .to_string_lossy()
-                .into_owned();
-            let mut environment = env
-                .into_iter()
-                .map(|(name, value)| {
-                    let value = if value == host_home {
-                        mount.clone()
-                    } else {
-                        value
-                    };
-                    (name, value)
-                })
-                .collect::<std::collections::BTreeMap<_, _>>();
-            environment.extend(crate::harness_sandbox::profile_environment(
-                HarnessKind::Grok,
-            ));
-            let mut run = sandbox.harness_cli(
+            let runner = crate::harness_runner::select(&config, &crate::targets::ProcessExecutor)?;
+            crate::harness_runner::harness_cli(
+                runner.as_ref(),
                 HarnessKind::Grok,
                 &home,
-                environment,
+                env.into_iter().collect(),
+                &[],
                 vec!["agent".into(), "stdio".into()],
+                crate::harness_runner::WorkerIo::Stream,
                 "read Grok Build usage",
-            )?;
-            run.stdin = true;
-            sandbox.command(&run)
+            )
         })
         .await
         .map_err(|error| GrokUsageError::Launch(error.to_string()))?
@@ -248,14 +228,8 @@ impl GrokUsageSession {
         let Some(container) = self.container else {
             return;
         };
-        if let Err(error) = tokio::task::spawn_blocking(move || {
-            container.remove(&crate::targets::CancellableProcessExecutor::with_timeout(
-                Duration::from_secs(30),
-            ));
-        })
-        .await
-        {
-            tracing::warn!(%error, "could not remove the Grok usage container");
+        if let Err(error) = tokio::task::spawn_blocking(move || container.finish()).await {
+            tracing::warn!(%error, "could not clean up the Grok usage process");
         }
     }
 }

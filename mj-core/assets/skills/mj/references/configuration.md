@@ -409,6 +409,22 @@ Workers read the switch when they start, so a running session follows the
 new value after it is next resumed or restarted. In the terminal the switch
 is **Settings → Privacy → Jev (hosted service)**.
 
+## Where harnesses run outside sessions `[harnesses]`
+
+```toml
+[harnesses]
+run_on = "container"
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `run_on` | string | no | `"host"` | Where Mjolnir runs a harness for work that belongs to no session: `mj login` (and `--setup-token`), model discovery, Codex, Grok Build, and Claude quota, and Claude login renewal. `"host"` uses the pinned harness Mjolnir installs on this machine. `"container"` uses a short-lived container from the agent image of the first enabled local Podman (then Docker) target, so nothing is installed here. A machine that runs no Mjolnir worker (Windows) always uses containers. |
+
+With `"container"` and no usable Podman or Docker target, sign-in stops and
+says so, model discovery waits for a session to report the profile's choices,
+and those quota readings show as unavailable. Sessions still run on the target
+you choose; a bare `localhost` runtime runs its harness on this machine.
+
 ## GitHub events `[github.watch]`
 
 `enabled` is a boolean that defaults to `true`. Together with `[jev] enabled`,

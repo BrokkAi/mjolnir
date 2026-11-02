@@ -94,27 +94,28 @@ mj login --profile <profile-id> --cli
 mj login --profile <claude-profile> --setup-token
 ```
 
-The profile may be omitted only when exactly one is configured. Nothing is
-installed or run on this machine: Mjolnir starts a short-lived container from
-the agent image of a local Podman or Docker target, with the profile home
-mounted and your terminal attached. Its worker selects the harness the way a
-container session does, starts it as an ACP agent, and asks which
-authentication methods it advertises. It then runs a `terminal` method's
-command, uses a known terminal action for a bridge that describes one in text
-only (OpenCode and MiMo), or completes an agent method through ACP
+The profile may be omitted only when exactly one is configured. Mjolnir installs
+or reuses the same pinned harness a session uses, starts it as an ACP agent, and
+asks it which authentication methods it advertises. It then runs a `terminal`
+method's command, uses a known terminal action for a bridge that describes one
+in text only (OpenCode and MiMo), or completes an agent method through ACP
 `authenticate` (Codex). Use `--method` to choose when several methods are
-offered, or `--cli` to skip ACP and run the harness CLI's own login in the same
-container. If the harness advertises no ACP login, Mjolnir also falls back to
-that command-line login. A sign-in page the harness opens is opened in your
-browser by `mj`. A profile pointed at your own OpenCode, Muse, or MiMo home is
-refused, so a different version never migrates a login database Mjolnir does
-not own. The same flow is available from the dashboard: Settings → Agent
-Profiles, select a profile, then **Sign in**. A profile that authenticates with
-an API key, such as a DSH profile or a Codex profile with a custom provider,
-has no login, and `mj login` refuses it. Without an enabled Podman or Docker
-target whose engine is installed, `mj login` says so and stops. `--setup-token` is
+offered, or `--cli` to skip ACP and run the harness command found on `PATH`
+exactly as earlier releases did. If the harness advertises no ACP login, Mjolnir
+also falls back to that command-line login. A profile pointed at your own
+OpenCode, Muse, or MiMo home signs in through that installed CLI, so the pinned binary
+never runs against a login database it does not own. The same flow is available
+from the dashboard: Settings → Agent Profiles, select a profile, then **Sign in**. A profile that authenticates with an
+API key, such as a DSH profile or a Codex profile with a custom provider, has no
+login, and `mj login` refuses it. Native Windows controllers take the CLI login
+path; ACP sign-in is available on Unix (including WSL). `--setup-token` is
 Claude-only: it mints and stores a long-lived subscription token so containers do
 not race the controller for a rotating OAuth refresh token.
+
+With `[harnesses] run_on = "container"` in `config.toml`, every form of `mj login`
+runs in a short-lived container from a local Podman or Docker target's agent
+image instead, so nothing is installed on this machine; see
+[profiles](/profiles/#run-harnesses-in-containers-instead-of-on-this-machine).
 
 See [profiles and harnesses](/profiles/) for home directories, credential handling, and runtime limitations.
 

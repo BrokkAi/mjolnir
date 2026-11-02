@@ -610,6 +610,11 @@ pub struct SignInSpec {
     pub profile_home: PathBuf,
     pub environment: std::collections::BTreeMap<String, String>,
     pub action: SignInAction,
+    /// Which installation signs in: the pinned one (`Managed`), or whatever
+    /// the target provides (`Ambient`): the image's harness in a container,
+    /// or the person's own installation for a home it owns.
+    #[serde(default)]
+    pub runtime: HarnessRuntimePolicy,
     /// An ACP method id the person asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,

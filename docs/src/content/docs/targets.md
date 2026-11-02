@@ -72,11 +72,10 @@ on this machine, on an SSH machine, and on an EC2 instance. Every session uses
 a staged copy of the selected profile's allowlisted files and credentials,
 while its runtime is managed independently
 of commands such as `codex` installed for native terminal use. Containers use
-the runtimes supplied by their image. Work that belongs to no session (signing a
-profile in, discovering its models, reading harness quota) runs in a
-short-lived container from a local Podman or Docker target's image, so the
-machine running `mj` needs no harness of its own unless you choose a bare
-runtime on it.
+the runtimes supplied by their image. To keep harnesses off this machine
+entirely, use container targets and set `[harnesses] run_on = "container"`, so
+sign-in, model discovery, and quota run in containers too; see
+[profiles](/profiles/#run-harnesses-in-containers-instead-of-on-this-machine).
 
 New workers use the versions shipped with your Mjolnir build. Upgrade an
 existing session's worker to adopt those versions; running workers retain their

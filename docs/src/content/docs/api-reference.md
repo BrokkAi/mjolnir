@@ -1109,13 +1109,13 @@ resuming do, and [security boundaries](/security/) for what the token reaches.
 and `observed_at` (Unix seconds). Each choice contains its exact `value`, display
 `name`, and optional `description`. Add `?model=<value>` to discover effort
 choices for that model. An empty cache is populated automatically with a
-prompt-free harness probe; no project session is created. The probe runs in a
-short-lived container from the agent image of a local Podman or Docker target,
-with a staged copy of the profile, so the controller never installs or runs the
-harness itself. The first lookup for a harness the image does not carry may
-install it in that container and take several minutes. Without a usable Podman
-or Docker target the probe cannot run; the profile's sessions then report
-their own choices.
+prompt-free harness probe; no project session or container is created. The
+first lookup may install the managed harness on the controller and take several
+minutes. Discovery currently requires a Unix controller with the harness's
+installation prerequisites and access to the profile's provider. With
+`[harnesses] run_on = "container"` the probe runs in a short-lived container from
+a local Podman or Docker target's agent image instead, and the controller
+installs nothing.
 
 The cache persists across daemon restarts, expires after 24 hours, and is keyed
 by profile settings and harness installation version. Efforts are cached per

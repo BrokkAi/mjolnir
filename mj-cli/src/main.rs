@@ -13,11 +13,11 @@ mod daemon;
 mod dashboard;
 mod desktop;
 mod go;
+mod harness_login;
 mod hints;
 mod import;
 mod logging;
 mod pollers;
-mod sandbox_login;
 mod session_presentation;
 mod simple;
 mod splash;
@@ -2275,14 +2275,14 @@ async fn login(args: LoginArgs) -> Result<()> {
         );
     }
     let before = profile_credential_fingerprint(profile)?;
-    let run = crate::sandbox_login::run(
+    let run = crate::harness_login::run(
         &config,
         profile,
         mj_core::worker_launch::SignInAction::Login,
         args.method.clone(),
         args.cli,
         &[],
-        crate::sandbox_login::Output::Terminal,
+        crate::harness_login::Output::Terminal,
     )
     .await?;
     report_login_change(&profile_id, profile, before, stored)?;
@@ -2357,14 +2357,14 @@ async fn store_claude_setup_token(
         "Running `claude setup-token` against {}.",
         profile.home.display()
     );
-    let output = crate::sandbox_login::run(
+    let output = crate::harness_login::run(
         config,
         profile,
         SignInAction::ClaudeSetupToken,
         None,
         false,
         &[],
-        crate::sandbox_login::Output::Captured,
+        crate::harness_login::Output::Captured,
     )
     .await?;
     if !output.status.success() {
@@ -2381,14 +2381,14 @@ async fn store_claude_setup_token(
     })?;
     mj_core::credentials::write_claude_oauth_token(&token_path, token.as_bytes())?;
 
-    let verified = crate::sandbox_login::run(
+    let verified = crate::harness_login::run(
         config,
         profile,
         SignInAction::ClaudeAuthStatus,
         None,
         false,
         &[(CLAUDE_OAUTH_TOKEN_ENV, token.as_str())],
-        crate::sandbox_login::Output::Captured,
+        crate::harness_login::Output::Captured,
     )
     .await?;
     if !verified.status.success() {

@@ -206,6 +206,14 @@ pub(in crate::controller) fn worker_binary_for(
     materialize_worker_source(worker_binary_for_arch(platform.architecture, requirement)?)
 }
 
+/// The verified worker for this machine, as a bare session here runs it.
+pub fn native_worker_binary() -> Result<PathBuf> {
+    materialize_worker_source(worker_binary_for_arch(
+        std::env::consts::ARCH,
+        WorkerBinaryRequirement::LocalHost,
+    )?)
+}
+
 /// The verified portable Linux worker for `arch`, as container targets run it.
 /// The harness sandbox mounts it so its probes run this exact build.
 pub fn portable_linux_worker(arch: &str) -> Result<PathBuf> {

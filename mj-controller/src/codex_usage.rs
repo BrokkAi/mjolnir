@@ -65,8 +65,9 @@ pub struct CodexUsageClient {
     child: Child,
     /// Held by the test double, which runs a fake managed installation here.
     _lease: Option<FileLock>,
-    /// The sandbox container app-server runs in, removed when it stops.
-    container: Option<crate::harness_sandbox::SandboxCommand>,
+    /// How app-server was started, undone when it stops (a container is
+    /// removed). Tests drive a fake installation directly and have none.
+    container: Option<crate::harness_runner::WorkerLaunch>,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     stderr: StderrTail,
@@ -95,7 +96,7 @@ impl CodexUsageClient {
             None => {
                 // app-server runs in the sandbox's home, not this machine's.
                 let _ = cwd;
-                let (child, container) = spawn_codex_in_sandbox(env).await?;
+                let (child, container) = spawn_codex_app_server(env).await?;
                 (child, None, Some(container))
             }
         };
@@ -257,12 +258,7 @@ impl CodexUsageClient {
             tracing::warn!(%error, "could not release the managed Codex installation lease");
         }
         if let Some(container) = self.container.take() {
-            let removed = tokio::task::spawn_blocking(move || {
-                container.remove(&crate::targets::CancellableProcessExecutor::with_timeout(
-                    std::time::Duration::from_secs(30),
-                ));
-            })
-            .await;
+            let removed = tokio::task::spawn_blocking(move || container.finish()).await;
             if let Err(error) = removed {
                 tracing::warn!(%error, "could not remove the Codex quota container");
             }
@@ -518,46 +514,41 @@ pub(crate) fn install_fake_managed_codex(cache_root: &Path, script: &str) -> Pat
     install
 }
 
-/// Start app-server in the harness sandbox with the profile home mounted
-/// where `CODEX_HOME` points. It renews the stored ChatGPT login in place,
-/// so the mount is writable.
-async fn spawn_codex_in_sandbox(
+/// Start app-server through the selected harness runner, here or in a
+/// container, with the profile home where `CODEX_HOME` points. It renews the
+/// stored ChatGPT login in place, so the home is writable.
+async fn spawn_codex_app_server(
     env: HashMap<String, String>,
-) -> Result<(Child, crate::harness_sandbox::SandboxCommand), QueryError> {
-    use crate::harness_sandbox::HarnessSandbox;
+) -> Result<(Child, crate::harness_runner::WorkerLaunch), QueryError> {
     let home = env
         .get("CODEX_HOME")
         .map(PathBuf::from)
         .ok_or_else(|| QueryError::Launch("the profile names no CODEX_HOME".to_owned()))?;
     let mut environment = env
         .into_iter()
-        // This probe reads a ChatGPT login's rate limits and refreshes that
-        // login. An API key from the profile's environment would let Codex
-        // use the key instead (#1160).
-        .filter(|(name, _)| !mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT.contains(&name.as_str()))
         .collect::<std::collections::BTreeMap<_, _>>();
-    environment.extend(crate::harness_sandbox::profile_environment(
-        HarnessKind::Codex,
-    ));
     // At error level app-server reports a rejected token refresh; a broader
     // level would add HTTP request bodies that carry the refresh token.
     environment.insert("RUST_LOG".to_owned(), "error".to_owned());
-    let command = tokio::task::spawn_blocking(move || {
+    let launch = tokio::task::spawn_blocking(move || {
         let config = mj_core::config::Config::load()?;
-        let sandbox = HarnessSandbox::select(&config, &crate::targets::ProcessExecutor)?;
-        let run = sandbox.harness_cli(
+        let runner = crate::harness_runner::select(&config, &crate::targets::ProcessExecutor)?;
+        crate::harness_runner::harness_cli(
+            runner.as_ref(),
             HarnessKind::Codex,
             &home,
             environment,
+            // This probe reads a ChatGPT login's rate limits and refreshes
+            // that login. An API key would let Codex use the key instead
+            // (#1160).
+            &mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT,
             vec!["app-server".into(), "--stdio".into()],
+            crate::harness_runner::WorkerIo::Stream,
             "read Codex quota",
-        )?;
-        let mut run = run;
-        run.stdin = true;
-        sandbox.command(&run)
+        )
     })
     .await
-    .map_err(|error| QueryError::Launch(format!("choose the harness sandbox: {error}")))?
+    .map_err(|error| QueryError::Launch(format!("prepare the Codex quota process: {error}")))?
     .map_err(|error| {
         if crate::harness_sandbox::is_unavailable(&error) {
             QueryError::Unavailable(format!("{error:#}"))
@@ -565,7 +556,7 @@ async fn spawn_codex_in_sandbox(
             QueryError::Launch(format!("{error:#}"))
         }
     })?;
-    let child = command
+    let child = launch
         .process()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -573,9 +564,9 @@ async fn spawn_codex_in_sandbox(
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| {
-            QueryError::Launch(format!("could not start {}: {error}", command.program))
+            QueryError::Launch(format!("could not start {}: {error}", launch.program))
         })?;
-    Ok((child, command))
+    Ok((child, launch))
 }
 
 #[cfg(test)]
@@ -754,7 +745,9 @@ impl QueryError {
 
     fn user_reason(&self) -> &'static str {
         match self {
-            Self::Unavailable(_) => "no container engine to read Codex quota in",
+            Self::Unavailable(_) => {
+                "no container engine to read Codex quota in; install Podman or Docker, or set `[harnesses] run_on = \"host\"`"
+            }
             Self::NotInstalled { .. } => "the Codex installation is unavailable",
             Self::Launch(_) => "could not start Codex CLI",
             Self::NotSignedIn => "not signed in with ChatGPT",

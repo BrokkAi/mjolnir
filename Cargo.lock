@@ -764,6 +764,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "url",
+ "webbrowser",
  "zip",
 ]
 
@@ -972,7 +973,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "vte",
- "webbrowser",
  "windows-sys 0.61.2",
 ]
 

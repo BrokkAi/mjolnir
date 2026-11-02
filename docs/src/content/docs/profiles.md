@@ -457,14 +457,63 @@ Profile configuration changes take effect after the worker restarts or the
 session resumes. Credential and skill reconciliation has its own live sync path
 described below.
 
+## Run harnesses in containers instead of on this machine
+
+Besides sessions, Mjolnir runs a harness for work that belongs to no session:
+`mj login` (and `--setup-token`), discovering a profile's models before a
+session starts, reading Codex, Grok Build, and Claude quota, and renewing an
+expired Claude login. By default that runs on this machine, with the pinned
+harness Mjolnir installs under its cache, as described in [Log in](#log-in)
+and [Harness runtimes](#harness-runtimes).
+
+If you would rather not install any agent, Node.js, or harness cache on this
+machine, run that work in containers:
+
+```toml
+[harnesses]
+run_on = "container"
+```
+
+Each job then runs in a short-lived container from the agent image of a local
+Podman or Docker target (Podman first when both are configured; a disabled
+target is never used), with the profile home mounted. Inside it, Mjolnir's
+worker selects the harness exactly as a container session does: the image's
+version when it is compatible, otherwise the pinned one, installed once into
+the container's own home under Mjolnir's data directory (`harness-sandbox/`).
+Pair it with container targets for sessions and the machine running `mj` needs
+only `mj` and Podman or Docker.
+
+- `mj login` attaches your terminal to the container. When the harness opens
+  a sign-in page, `mj` opens the address in your browser (or prints it when
+  this machine has no desktop session). A sign-in that returns to `localhost`
+  reaches the container through the host network on Linux; on macOS and
+  Windows Codex's callback port 1455 is published.
+- Files the harness writes into the profile home belong to you: rootless
+  Podman maps the container's root to your user, and Docker runs the harness
+  as your user id unless the Docker daemon is itself rootless.
+- A Claude profile signed in this way keeps its login in the profile home's
+  `.credentials.json`, macOS included, so each Claude profile has its own
+  login rather than sharing the Keychain item.
+- A profile pointed at your own OpenCode, Muse, or MiMo installation keeps its
+  logins in a database that installation owns, so `mj login` refuses it rather
+  than let a different version migrate that database. Sign in with that
+  installation, or add a Mjolnir-managed profile.
+- Without an enabled Podman or Docker target whose engine is installed,
+  sign-in stops and says so, model discovery waits for a session to report the
+  profile's choices, and those quota readings show as unavailable.
+
+A machine that runs no Mjolnir worker of its own (Windows) always uses
+containers for this work. `run_on = "host"`, the default, keeps the behavior
+described in the rest of this page.
+
 ## Log in
 
 The guided **Set up managed** flow creates a profile home under
 `<config dir>/profiles/<profile-id>/<harness>`, where `<config dir>` is
 `~/.config/mjolnir` on Linux or the path in `MJ_CONFIG_DIR`. These homes are
-owned by Mjolnir, so the harness that signs in can safely create or migrate the
-login without touching an existing agent installation. The same flow is
-available from first-run onboarding when no signed-in agent was found.
+owned by Mjolnir, so its pinned harness can safely create or migrate the login
+without touching an existing agent installation. The same flow is available
+from first-run onboarding when no installed agent was found.
 
 For Muse, configure `kind = "muse"` and a home ending in `muse`, for example
 `home = "/home/me/.config/muse"` or `/home/me/accounts/work/muse`. Discovery
@@ -605,71 +654,47 @@ available for profiles that already exist in the saved configuration and have no
 unsaved edits; save a new or changed profile first.
 
 When exactly one profile exists, `--profile` may be omitted. With several
-profiles it is required.
-
-### Signing in runs in a container
-
-No coding agent runs on your machine, and none needs to be installed there.
-`mj login` starts a short-lived container from the agent image of your local
-Podman or Docker target (the *harness sandbox*), with the profile home mounted
-at `/mj/profile` and your terminal attached. Inside it, Mjolnir's worker picks
-the harness exactly as a container session does: the image's version when it
-is compatible, otherwise the pinned version, installed once into the sandbox's
-own home under Mjolnir's data directory (`harness-sandbox/`). Podman is
-preferred when both engines are configured; a disabled target is never used.
-Files the harness writes into the profile home belong to you: rootless Podman
-maps the container's root to your user, and Docker runs the harness as your
-own user id unless the Docker daemon is itself rootless.
-
-The worker starts the harness as an ACP agent and reads the methods the bridge
-advertises:
+profiles it is required. Mjolnir sets the selected home variable and profile
+environment, installs the exact pinned harness under its own cache, and starts
+that harness as an ACP agent. It reads the methods the bridge advertises:
 
 | Harness | What `mj login` does |
 | --- | --- |
 | Codex | ACP `authenticate` for `chat-gpt` (browser) or `api-key` (environment key) |
-| Claude Code | No ACP methods; runs `claude auth login` |
+| Claude Code | No ACP methods; runs `auth login` through the Claude CLI installed in Mjolnir's pinned harness |
 | Kimi Code | Runs its advertised ACP method; falls back to `kimi login` only when the bridge cannot run |
 | Grok Build | Runs `grok login` for its `grok.com` method; falls back to the CLI when the bridge cannot run |
 | Muse Code | Runs the ACP `terminal` method `muse-acp login` |
-| OpenCode | Runs `opencode auth login --standalone` |
-| MiMo Code | Runs `mimo auth login` |
+| OpenCode | Runs the pinned `opencode auth login --standalone` |
+| MiMo Code | Runs the pinned `mimo auth login` |
 | DSH | none; `mj login` refuses the profile, which authenticates with `DEEPSEEK_API_KEY` |
 
 Use `--method <id>` when a bridge advertises several methods. Use `--cli` to
-skip ACP and run the harness CLI's own login, still inside the container. A
-bridge that advertises no usable method falls back to that CLI login. A failure
-inside a chosen ACP method is reported instead of silently trying a different
-flow.
+skip ACP and run the harness command found on `PATH`, which is the behavior of
+earlier releases. A bridge that advertises no usable method falls back to the
+CLI in the same pinned installation. A failure inside a chosen ACP method is
+reported instead of silently trying a different flow.
 
-The container has no browser. When the harness opens a sign-in page, the
-address comes back to `mj`, which opens it in your browser (or prints it when
-this machine has no desktop session). A sign-in that returns to
-`localhost` reaches the harness through the host network on Linux; on macOS
-and Windows, where the engine runs in a virtual machine, Codex's callback port
-1455 is published. `CODEX_API_KEY` or `OPENAI_API_KEY` exported to `mj` is
-passed in, so a headless Codex sign-in can use the key method.
+For harnesses with an ACP login, signing in installs or reuses the pinned
+harness, so the controller does not need a separate installation of that
+harness. Claude agent-acp advertises no login method, so Mjolnir runs
+`auth login` through the Claude CLI in the pinned installation. A profile
+pointed at your own OpenCode, Muse, or MiMo home signs in through that installed
+harness's CLI instead: Mjolnir never runs the pinned binary against a login
+database it does not own. A profile with its own Mjolnir-managed home gets the
+pinned flow. API-key profiles, and profiles whose harness is configured for an
+API key rather than a native login, have no interactive login.
 
-A profile pointed at your own OpenCode, Muse, or MiMo installation keeps its
-logins in a database that installation owns, so `mj login` refuses it rather
-than let a different version migrate that database; sign in with that
-installation, or add a Mjolnir-managed profile. API-key profiles, and profiles
-whose harness is configured for an API key rather than a native login, have no
-interactive login.
-
-Without an enabled Podman or Docker target whose engine is installed,
-`mj login` stops and says so; install one of them and run `mj doctor`.
-
-Because the harness in the sandbox is Linux, a Claude profile signed in through
-`mj login` keeps its login in the profile home's `.credentials.json` on every
-platform, macOS included, so each Claude profile has its own login. A profile
-at the default `~/.claude` on a Mac with no such file still uses the Claude
-Code Keychain item that a Claude Code you installed yourself created
-([anthropics/claude-code#20553](https://github.com/anthropics/claude-code/issues/20553)).
-Mjolnir copies that login into a session's staged home, because a container
-cannot reach the Keychain, and reads its quota from a private copy. A stored
-setup token takes precedence. For a long-running container session, prefer the
-setup token because the copied OAuth grant can rotate while both copies still
-hold the same refresh token.
+On macOS, Claude Code keeps its login in one Keychain item rather than in the
+home ([anthropics/claude-code#20553](https://github.com/anthropics/claude-code/issues/20553)),
+so `mj login` for a Claude profile leaves `CLAUDE_CONFIG_DIR` unset there and
+signs in to that one item. Every Claude profile on a Mac shares it.
+Mjolnir copies the current login into a session's staged home when the session
+runs in a container or on another machine, where the Keychain is unavailable.
+The Keychain remains authoritative at each launch. A stored setup token takes
+precedence. For a long-running container session, prefer the setup token because
+the copied OAuth grant can rotate while both copies still hold the same refresh
+token.
 
 After login, Mjolnir compares the authentication marker before and after the
 command and reports whether it changed. A successful update is reconciled into
@@ -685,8 +710,8 @@ sessions, create a non-rotating setup token:
 mj login --profile claude-work --setup-token
 ```
 
-This runs `claude setup-token` in the harness sandbox, verifies the token with
-`claude auth status` there, and stores it under Mjolnir's configuration
+This runs `setup-token` through the Claude CLI in Mjolnir's pinned installation,
+verifies it with `auth status`, and stores it under Mjolnir's configuration
 directory at:
 
 ```text
@@ -927,9 +952,7 @@ sync.
 
 Mjolnir talks to harnesses through the Agent Client Protocol (ACP). The
 published agent image already carries the supported bridge stack. Container
-targets use that target-provided runtime, and so does the harness sandbox in
-which Mjolnir signs profiles in, discovers their models, and reads harness
-quota: the machine running `mj` never installs or runs a harness for that work.
+targets use that target-provided runtime.
 
 Local-bare, raw SSH, and EC2 workers instead install the exact versions pinned by the
 Mjolnir release into `$XDG_CACHE_HOME/mjolnir/harnesses`, or
@@ -989,12 +1012,6 @@ profiles independently, so a slow provider does not delay the others. Press
 The pane's title, `Profiles ▾`, opens a small menu. Click it, or press `.`
 while the pane has focus. **Refresh** runs the same refresh as
 `prefix+shift+r`, and **Settings…** opens the Agent Profiles page of Settings.
-
-Where a reading needs the harness itself (Codex's `app-server`, Grok Build's
-billing extension, or Claude Code renewing an expired login), it runs in the
-harness sandbox described under [Signing in runs in a container](#signing-in-runs-in-a-container),
-never on this machine. Without a usable Podman or Docker target those readings
-show as unavailable.
 
 | Harness | Quota source shown by Mjolnir |
 | --- | --- |

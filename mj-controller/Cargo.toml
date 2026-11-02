@@ -55,6 +55,7 @@ serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
 tempfile.workspace = true
+webbrowser = "1.2"
 toml.workspace = true
 toml_edit.workspace = true
 tokio = { workspace = true, features = ["full"] }

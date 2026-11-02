@@ -83,12 +83,14 @@ builds, and desktop dependencies.
 
 ## Quick start
 
-You do not install any coding agent on your machine: Mjolnir runs agents only
-in containers, and signs you in inside one too, so you need Podman or Docker.
-On first launch, choose **Set up a managed agent** if no agent is found, or
-choose **Detect profiles** to use an agent home you already signed in to.
-Managed setup creates the profile and opens sign-in without asking you to
-choose a home directory. Then, from a project directory:
+Mjolnir can install a pinned coding harness when you sign in. On first launch,
+choose **Set up a managed agent** if no agent is found, or install and sign in
+to an agent you already have and choose **Detect profiles**. Managed setup
+creates the profile and opens sign-in without asking you to choose a home
+directory. To keep every agent off your machine, use container targets and set
+`[harnesses] run_on = "container"` in `config.toml`; Mjolnir then signs in,
+discovers models, and reads quota in containers too, so you need only `mj` and
+Podman or Docker. Then, from a project directory:
 
 ```sh
 mj

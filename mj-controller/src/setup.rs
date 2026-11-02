@@ -116,7 +116,7 @@ pub fn discover_profiles(executor: &impl CommandExecutor) -> Vec<DiscoveredHome>
         .collect::<BTreeMap<_, _>>();
     let mut homes =
         discover_harness_homes_with_executor(home.as_deref(), overrides.clone(), executor);
-    discover_installed_harnesses(home.as_deref(), &overrides, &mut homes, |key| {
+    discover_installed_harnesses(home.as_deref(), &overrides, &mut homes, executor, |key| {
         std::env::var(key).is_ok_and(|value| !value.trim().is_empty())
     });
     homes
@@ -221,13 +221,15 @@ pub fn ssh_config_aliases(contents: &str) -> Vec<String> {
     aliases
 }
 
-/// A harness that authenticates with an API key needs no home at all: the key
-/// in the environment Mjolnir started with is its signal. Mjolnir never runs
-/// a harness on this machine, so an agent CLI installed here is not one.
+/// A newly installed CLI may not create its profile directory until login,
+/// and a harness that authenticates with an API key needs no CLI at all: the
+/// key in the environment Mjolnir started with is its installation signal.
+/// Run these probes through setup's bounded, cancellable executor.
 fn discover_installed_harnesses(
     user_home: Option<&Path>,
     overrides: &BTreeMap<HarnessKind, PathBuf>,
     homes: &mut Vec<DiscoveredHome>,
+    executor: &impl CommandExecutor,
     api_key_is_set: impl Fn(&str) -> bool,
 ) {
     for kind in HarnessKind::ALL {
@@ -250,6 +252,38 @@ fn discover_installed_harnesses(
                 codex_profile: None,
                 authenticated: true,
             });
+            continue;
+        }
+        if harness_cli_installed(kind, executor) == Some(true) {
+            homes.push(DiscoveredHome {
+                kind,
+                path: home,
+                codex_profile: None,
+                authenticated: false,
+            });
+        }
+    }
+}
+
+/// Whether the harness's own command answers on this machine, or `None`
+/// when the probe could not run (cancelled, timed out). Discovery offers a
+/// profile for an installed command before its first login, and a
+/// configured profile without a home is still present while it does.
+pub(crate) fn harness_cli_installed(
+    kind: HarnessKind,
+    executor: &impl CommandExecutor,
+) -> Option<bool> {
+    let probe = CommandSpec::new(kind.cli_binary_name(), ["--version"])
+        .purpose("detect installed harness before first login");
+    match executor.execute(&probe) {
+        Ok(output) => Some(output.status == 0),
+        Err(error) if crate::controller::is_missing_command(&error) => Some(false),
+        Err(error) => {
+            tracing::debug!(
+                harness = kind.id(),
+                "installation probe unavailable: {error:#}"
+            );
+            None
         }
     }
 }
@@ -369,13 +403,35 @@ fn harness_is_authenticated_with(
     if kind != HarnessKind::Claude {
         return false;
     }
-    // Without a login file in the home, only a macOS Keychain login can sign
-    // the profile in; every Claude profile there shares the one item. The
-    // harness itself is never asked: it does not run on this machine.
+    // Where the login does not live in the home, every Claude profile shares
+    // the one Keychain item, so asking the CLI about a scoped home would only
+    // report the default profile's state again.
     if is_default_home || !kind.keeps_login_in_home(HarnessHost::current()) {
         return claude_keychain_reports_authenticated(executor);
     }
-    false
+    claude_cli_reports_authenticated(home, executor)
+}
+
+/// Ask Claude Code about a scoped profile. Setting `CLAUDE_CONFIG_DIR` for the
+/// default home changes Claude's profile selection, so the default macOS
+/// profile is checked directly in the Keychain instead.
+fn claude_cli_reports_authenticated(home: &Path, executor: &impl CommandExecutor) -> bool {
+    let mut command = CommandSpec::new("claude", ["auth", "status", "--json"])
+        .purpose("check Claude Code authentication");
+    command.env.insert(
+        HarnessKind::Claude.home_env().to_owned(),
+        home.to_string_lossy().into_owned(),
+    );
+    let Ok(output) = executor.execute(&command) else {
+        return false;
+    };
+    if output.status != 0 {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .ok()
+        .and_then(|status| status.get("loggedIn").and_then(serde_json::Value::as_bool))
+        == Some(true)
 }
 
 /// Mjolnir and Claude Code use this service for the default macOS profile.

@@ -839,6 +839,7 @@ fn sample_config() -> Config {
         sessionwiki: SessionWikiConfig::default(),
         subagents: SubagentConfig::default(),
         jev: Default::default(),
+        harnesses: Default::default(),
         legacy_startup: (),
         default_targets: Default::default(),
         disabled_targets: Default::default(),

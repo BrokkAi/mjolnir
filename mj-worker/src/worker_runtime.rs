@@ -346,7 +346,9 @@ pub use sign_in::{run_harness_cli, run_sign_in};
 #[cfg(not(unix))]
 pub async fn run_harness_cli(
     _harness: mj_core::config::HarnessKind,
+    _runtime: mj_core::worker_launch::HarnessRuntimePolicy,
     _environment: std::collections::BTreeMap<String, String>,
+    _drop_environment: Vec<String>,
     _arguments: Vec<String>,
 ) -> anyhow::Result<i32> {
     anyhow::bail!("running a harness requires a Unix worker host")

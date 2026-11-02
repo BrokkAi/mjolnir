@@ -71,13 +71,13 @@ impl fmt::Display for ClaudeUsageError {
 /// Query the same OAuth usage endpoint as Claude Code's interactive `/usage`.
 ///
 /// The endpoint is authenticated with the access token from the profile home's
-/// `.credentials.json`. A renewal runs `claude auth login` in the harness
-/// sandbox with the home mounted, never on this machine.
+/// `.credentials.json`. A renewal runs `claude auth login` through the
+/// selected harness runner, on this machine or in a container.
 ///
-/// On macOS a profile at the person's own `~/.claude` may have no such file:
-/// the Claude Code they installed keeps its login in the Keychain. That login
-/// is copied into a private home and Claude Code's print-mode `/usage` reads
-/// it in the sandbox.
+/// On macOS a profile may have no such file: Claude Code keeps that login in
+/// the Keychain, where only Claude Code itself reads it, so its print-mode
+/// `/usage` is asked instead. A runner that cannot reach the Keychain gets a
+/// private copy of the login.
 pub async fn query(
     home: PathBuf,
     environment: HashMap<String, String>,
@@ -86,60 +86,77 @@ pub async fn query(
         USAGE_TIMEOUT + REFRESH_LOCK_WAIT + REFRESH_TIMEOUT,
     );
     let _cancel = executor.cancel_on_drop();
-    #[cfg(target_os = "macos")]
-    if !home.join(".credentials.json").is_file() {
-        return query_keychain_login(environment, executor).await;
-    }
-    let sandboxed = Arc::new(crate::harness_sandbox::SandboxExecutor::new(
-        executor,
-        mj_core::config::HarnessKind::Claude,
-        home.clone(),
-    ));
-    query_with(home, environment, USAGE_URL, sandboxed).await
-}
-
-/// Read the quota of the macOS Keychain login through Claude Code's own
-/// `/usage`, in the sandbox, from a private copy of the login.
-#[cfg(target_os = "macos")]
-async fn query_keychain_login(
-    environment: HashMap<String, String>,
-    executor: CancellableProcessExecutor,
-) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    let staged = tokio::task::spawn_blocking(|| -> anyhow::Result<Option<tempfile::TempDir>> {
-        let Some(credentials) =
-            crate::setup::claude_keychain_credentials(&crate::targets::ProcessExecutor)?
-        else {
-            return Ok(None);
-        };
-        let root = mj_core::config::data_dir()
-            .join("harness-sandbox")
-            .join("work");
-        std::fs::create_dir_all(&root)?;
-        let home = tempfile::Builder::new()
-            .prefix("claude-usage-")
-            .tempdir_in(root)?;
-        mj_core::credentials::write_credential_file(
-            mj_core::config::HarnessKind::Claude,
-            &home.path().join(".credentials.json"),
-            &credentials,
-        )?;
-        Ok(Some(home))
+    let runner = tokio::task::spawn_blocking(|| {
+        let config = mj_core::config::Config::load()?;
+        crate::harness_runner::select(&config, &crate::targets::ProcessExecutor)
     })
     .await
     .map_err(|error| ClaudeUsageError::Query(format!("worker failed: {error}")))?
-    .map_err(|error| ClaudeUsageError::Query(format!("{error:#}")))?
-    .ok_or(ClaudeUsageError::NotSignedIn)?;
+    .map_err(|error| ClaudeUsageError::Query(format!("{error:#}")))?;
+    #[cfg(target_os = "macos")]
+    if !home.join(".credentials.json").is_file() {
+        return query_keychain_login(home, environment, runner, executor).await;
+    }
+    let harness = Arc::new(crate::harness_runner::HarnessExecutor::new(
+        executor,
+        runner,
+        mj_core::config::HarnessKind::Claude,
+        home.clone(),
+    ));
+    query_with(home, environment, USAGE_URL, harness).await
+}
+
+/// Read the quota of the macOS Keychain login through Claude Code's own
+/// `/usage`.
+#[cfg(target_os = "macos")]
+async fn query_keychain_login(
+    home: PathBuf,
+    environment: HashMap<String, String>,
+    runner: Arc<dyn crate::harness_runner::HarnessRunner>,
+    executor: CancellableProcessExecutor,
+) -> Result<ClaudeUsageReport, ClaudeUsageError> {
+    if runner.reads_host_keychain() {
+        let harness = Arc::new(crate::harness_runner::HarnessExecutor::new(
+            executor,
+            runner,
+            mj_core::config::HarnessKind::Claude,
+            home,
+        ));
+        return query_cli_with(environment, harness).await;
+    }
+    let staging_runner = runner.clone();
+    let staged =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Option<tempfile::TempDir>> {
+            let Some(credentials) =
+                crate::setup::claude_keychain_credentials(&crate::targets::ProcessExecutor)?
+            else {
+                return Ok(None);
+            };
+            let home =
+                crate::harness_runner::work_directory(staging_runner.as_ref(), "claude-usage-")?;
+            mj_core::credentials::write_credential_file(
+                mj_core::config::HarnessKind::Claude,
+                &home.path().join(".credentials.json"),
+                &credentials,
+            )?;
+            Ok(Some(home))
+        })
+        .await
+        .map_err(|error| ClaudeUsageError::Query(format!("worker failed: {error}")))?
+        .map_err(|error| ClaudeUsageError::Query(format!("{error:#}")))?
+        .ok_or(ClaudeUsageError::NotSignedIn)?;
     let mut environment = environment;
     environment.insert(
         "CLAUDE_CONFIG_DIR".into(),
         staged.path().to_string_lossy().into_owned(),
     );
-    let sandboxed = Arc::new(crate::harness_sandbox::SandboxExecutor::new(
+    let harness = Arc::new(crate::harness_runner::HarnessExecutor::new(
         executor,
+        runner,
         mj_core::config::HarnessKind::Claude,
         staged.path().to_path_buf(),
     ));
-    query_cli_with(environment, sandboxed).await
+    query_cli_with(environment, harness).await
 }
 
 /// Read the quota out of Claude Code's own `/usage` output.

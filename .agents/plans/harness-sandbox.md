@@ -1,25 +1,24 @@
-# Run every controller-side harness in a container (the harness sandbox)
+# Let controller-side harness work run in a container instead of on the host
 
 This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds. It is maintained in accordance with `.agents/PLANS.md`.
 
 ## Purpose / Big Picture
 
-Mjolnir (`mj`) runs coding agents ("harnesses": Codex, Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, MiMo Code, DSH). Sessions on a container target already run their harness inside a Podman or Docker container. Before this change, the machine running `mj` still installed and ran harnesses itself for four jobs that belong to no session: signing a profile in (`mj login`, `mj login --setup-token`), discovering a profile's models and efforts before a session starts, reading subscription quota (Codex `app-server`, Grok Build `agent stdio`, Claude Code `/usage` on macOS), and renewing an expired Claude login (`claude auth login`). Setup discovery also ran `<harness> --version` on the host, and Claude sign-in status could run `claude auth status` on the host.
+Mjolnir (`mj`) runs coding agents ("harnesses": Codex, Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, MiMo Code, DSH). Sessions on a container target already run their harness inside a Podman or Docker container. Four jobs belong to no session and used to run a harness only on the machine running `mj`: signing a profile in (`mj login`, `mj login --setup-token`), discovering a profile's models and efforts before a session starts, reading subscription quota (Codex `app-server`, Grok Build `agent stdio`, Claude Code `/usage` on macOS), and renewing an expired Claude login (`claude auth login`).
 
-After this change none of that runs on the host. The person installs `mj` and Podman or Docker, and nothing else: no agent CLI, no Node.js, no harness cache. Every one of those jobs runs in a short-lived container from the agent image of a local Podman or Docker target, the *harness sandbox*. To see it: configure an isolated instance with only a Docker target, run `mj --instance <name> models --profile <id>` and `mj --instance <name> login --profile <id>`, and observe that `~/.cache/mjolnir/harnesses` and `~/.npm/_npx` stay absent while `<data dir>/harness-sandbox/` appears and the profile home receives its credential file.
-
-A bare runtime on the local machine (`localhost` target) still runs its harness on the host, because that is what a bare runtime is; the person chooses it explicitly.
+After this change the person chooses where those jobs run with `[harnesses] run_on` in `config.toml`. `"host"` (the default) keeps the pinned installation on this machine. `"container"` runs each job in a short-lived container from the agent image of a local Podman or Docker target, so someone who wants nothing installed can use `mj` plus Podman or Docker alone, while someone who prefers local harnesses keeps them. To see it: in an isolated instance with a Docker target, set `run_on = "container"`, run `mj --instance <name> models --profile <id>` and `mj --instance <name> login --profile <id>`, and observe that `~/.cache/mjolnir` and `~/.npm/_npx` stay absent while the profile home receives its credential file; with `run_on = "host"` the same commands run on this machine.
 
 ## Progress
 
 - [x] (2026-11-01 16:30Z) Inventory every place the controller or CLI runs a harness on the host.
-- [x] (2026-11-01 16:40Z) Milestone 1: `mj-controller/src/harness_sandbox.rs` and model discovery in the sandbox; verified end to end with Docker.
-- [x] (2026-11-01 16:50Z) Milestone 2: `mj login` and `--setup-token` through `mj-worker worker sign-in` in the sandbox; verified end to end with a scripted stand-in harness.
-- [x] (2026-11-01 17:20Z) Milestone 3: quota and login renewal (Codex, Grok, Claude) through `mj-worker worker harness-cli` in the sandbox; `harness-cli` verified in a container.
-- [x] (2026-11-01 17:30Z) Removed host CLI detection from setup discovery and `profile_presence`, and the host `claude auth status` probe.
-- [x] (2026-11-01 17:40Z) Documentation updated (README, profiles, cli-reference, api-reference, targets, quickstart).
-- [ ] Follow-up: support Apple's `container` runtime as a sandbox engine on macOS (today only Podman and Docker are selected).
-- [ ] Follow-up: a real-account end-to-end check of Codex ChatGPT sign-in through the published port on macOS Docker Desktop and Podman machine.
+- [x] (2026-11-01 17:40Z) First version: container-only (commit 158f415). Superseded, see the Decision Log.
+- [x] (2026-11-02 08:40Z) `[harnesses] run_on` (`mj-core/src/config.rs`, `HarnessesConfig`, default `host`).
+- [x] (2026-11-02 08:50Z) `mj-controller/src/harness_runner.rs`: the `HarnessRunner` trait, `LocalRunner`, `select`, and the shared procedures (`harness_cli`, `HarnessExecutor`, `work_directory`); `HarnessSandbox` implements the trait.
+- [x] (2026-11-02 08:55Z) Discovery, Codex/Grok/Claude quota and renewal, and `mj login` rewritten as procedures over the runner; host setup detection restored.
+- [x] (2026-11-02 09:05Z) Both modes verified end to end in `--instance sbx` with Docker.
+- [x] (2026-11-02 09:15Z) Documentation describes the option.
+- [ ] Follow-up: Apple's `container` runtime as a sandbox engine on macOS.
+- [ ] Follow-up: real-account check of Codex ChatGPT sign-in through the published callback port on macOS Docker Desktop and Podman machine.
 
 ## Surprises & Discoveries
 
@@ -32,13 +31,23 @@ A bare runtime on the local machine (`localhost` target) still runs its harness 
 
 ## Decision Log
 
+- Decision: running harnesses in containers is an option, `[harnesses] run_on = "host" | "container"`, default `host`; the host behavior is kept.
+  Rationale: the user asked for a way to need no local installation, not to forbid local installations ("if a user would RATHER NOT DO THAT, they should be able to"). The first version made containers mandatory and was reworked.
+  Date/Author: 2026-11-02 / Claude.
+- Decision: express the difference as a template method. Each job is one fixed procedure (work directory, spec, `mj-worker` invocation, cleanup) over the `HarnessRunner` trait, whose steps (`runtime`, `work_root`, `work_view`, `profile_view`, `profile_environment`, `base_environment`, `launch_worker`, `may_sign_in_foreign_store`, `reads_host_keychain`) `LocalRunner` and `HarnessSandbox` implement. `harness_runner::select` is the only place that reads `run_on`.
+  Rationale: requested by the user; no procedure tests which mode it is in, so a third runner (Apple container, SSH) adds one implementation, not branches in every caller. Both modes run the same worker code (`worker sign-in`, `worker harness-cli`, `worker discover-config`) and differ only in where it runs and which installation it selects.
+  Date/Author: 2026-11-02 / Claude.
+- Decision: a machine that runs no worker of its own (Windows) always uses the container runner, logged once.
+  Rationale: the host procedures now run the native worker, which Windows lacks; containers are the sensible action instead of a dead end. Windows `mj login` previously ran the harness CLI from PATH directly; that path is gone.
+  Date/Author: 2026-11-02 / Claude.
+
 - Decision: one owner, `HarnessSandbox::select`, decides the engine and image; every caller asks it. Podman before Docker, disabled targets never, image and pull policy from the target.
   Rationale: the repository's concurrency rule ("one owner decides each fact"); the sandbox runs the same harness versions as that target's sessions.
   Date/Author: 2026-11-01 / Claude.
 - Decision: the harness inside the sandbox is always selected by the worker (`prepare_harness_launch` with the `Ambient` policy and the built-in fallback launch), never by the controller naming a binary.
   Rationale: identical to container sessions; an image without a harness (Kimi, Grok, OpenCode, DSH, custom images) gets the pinned install inside the container, cached in the persistent sandbox home.
   Date/Author: 2026-11-01 / Claude.
-- Decision: no host fallback. Without a usable engine, sign-in stops with a message naming the fix, discovery is reported as "no retry can fix" (sessions still report their own choices), and quota readings show as unavailable.
+- Decision (container mode): no host fallback. Without a usable engine, sign-in stops with a message naming the fix, discovery is reported as "no retry can fix" (sessions still report their own choices), and quota readings show as unavailable.
   Rationale: the user asked that nothing run locally; a silent host fallback would hide that the design is not working (AGENTS.md "A narrow fallback usually indicates a design problem").
   Date/Author: 2026-11-01 / Claude.
 - Decision: refuse `mj login` for a profile pointed at the person's own OpenCode, Muse, or MiMo login database.
@@ -53,7 +62,7 @@ A bare runtime on the local machine (`localhost` target) still runs its harness 
 
 ## Outcomes & Retrospective
 
-Delivered: no code path in `mj-cli` or `mj-controller` installs or executes a harness on the host for sign-in, setup token, model discovery, quota, or login renewal. Remaining host harness execution is the explicit bare `localhost` runtime. Gaps: Apple `container` is not yet a sandbox engine, and the browser-callback path on macOS VMs is untested against real accounts.
+Delivered: with `run_on = "container"` no code path in `mj-cli` or `mj-controller` installs or executes a harness on the host for sign-in, setup token, model discovery, quota, or login renewal; with the default `host` they run on this machine through the same procedures. Lesson: the first version read "make it possible" as "make it mandatory"; options that change where work runs should be confirmed as options first. Gaps: Apple `container` is not yet a runner, and the browser-callback path on macOS VMs is untested against real accounts.
 
 ## Context and Orientation
 
@@ -61,12 +70,13 @@ The control plane is the daemon (`mj-controller`, started by `mj daemon-run`); t
 
 Key files after this change:
 
-- `mj-controller/src/harness_sandbox.rs`: `HarnessSandbox::select`, `HarnessSandbox::command` (builds `podman|docker run --rm --init ...`), `HarnessSandbox::harness_cli` (a run of `mj-worker worker harness-cli`), `SandboxExecutor`, `SandboxCommand::remove` (called on every exit path), container paths `/mj/home` (persistent sandbox home under `<data dir>/harness-sandbox/<engine>`), `/mj/profile` (profile home), `/mj/work` (private work directory under `<data dir>/harness-sandbox/work`, swept after a day), `/mj/bin/mj-worker` (the controller's own Linux worker, read-only).
+- `mj-controller/src/harness_runner.rs`: the `HarnessRunner` trait, `LocalRunner` (native worker, `Managed` runtime, identity paths, desktop variables), `select`, `harness_cli` (a run of `mj-worker worker harness-cli --harness <id> --runtime <managed|ambient> --keep-env NAME... --drop-env NAME... -- <args>`), `HarnessExecutor` (a `CommandExecutor` that runs each harness command through a runner), `WorkerLaunch` (`spec`, `process`, `finish`).
+- `mj-controller/src/harness_sandbox.rs`: the container runner. `HarnessSandbox::select`, `HarnessSandbox::command` (builds `podman|docker run --rm --init ...`), `HarnessSandbox::harness_cli` (a run of `mj-worker worker harness-cli`), `SandboxExecutor`, `SandboxCommand::remove` (called on every exit path), container paths `/mj/home` (persistent sandbox home under `<data dir>/harness-sandbox/<engine>`), `/mj/profile` (profile home), `/mj/work` (private work directory under `<data dir>/harness-sandbox/work`, swept after a day), `/mj/bin/mj-worker` (the controller's own Linux worker, read-only).
 - `mj-controller/src/controller/profile_config.rs`: `probe_profile` stages the profile into a work directory and runs `mj-worker worker discover-config` in the sandbox with `ProfileProbeSpec.runtime = Ambient`.
 - `mj-worker/src/worker_runtime/discovery.rs`: `managed_supervisor` (bare targets, unchanged behavior) and `target_supervisor` (sandbox).
 - `mj-worker/src/worker_runtime/sign_in.rs` (moved from `mj-cli/src/acp_login.rs`): `run_sign_in` for `worker sign-in --spec`, and `run_harness_cli` for `worker harness-cli --harness <id> --keep-env NAME... -- <args>`.
 - `mj-core/src/worker_launch.rs`: `ProfileProbeSpec.runtime` (defaults to `Managed` for older specs), `SignInSpec`, `SignInAction`.
-- `mj-cli/src/sandbox_login.rs`: runs a sign-in action in the sandbox with the person's terminal, relays browser addresses written by the container's `BROWSER` script to the host browser.
+- `mj-cli/src/harness_login.rs`: the sign-in procedure over the runner. The browser relay for containers lives in `harness_sandbox.rs`.
 - `mj-controller/src/codex_usage.rs`, `grok_usage.rs`, `claude_usage.rs`: quota and renewal through the sandbox.
 - `mj-controller/src/setup.rs`, `setup/availability.rs`: no host CLI probes.
 
@@ -81,7 +91,8 @@ From the repository root, with Docker running and an image that has the harness 
     export MJ_INSTANCE=sbx MJ_WORKER_DIR=/path/to/dir/with/mj-worker-x86_64-unknown-linux-musl
     cargo build -p brokk-mjolnir
     cargo build -p brokk-mj-worker --target x86_64-unknown-linux-musl
-    # ~/.config/mjolnir/instances/sbx/config.toml: version = 19, a [targets.docker] kind = "docker" with the image, and a profile
+    # ~/.config/mjolnir/instances/sbx/config.toml: version = 19, [harnesses] run_on = "container" (or "host"),
+    # a [targets.docker] kind = "docker" with the image, and a profile
     ./target/debug/mj models --profile dsh
     ./target/debug/mj login --profile kimi
 
@@ -131,3 +142,5 @@ In `mj-controller/src/harness_sandbox.rs`:
     pub fn is_unavailable(error: &anyhow::Error) -> bool;
 
 In `mj-worker`: `worker sign-in --spec <path>` and `worker harness-cli --harness <id> [--keep-env NAME]... -- <args>`.
+
+Revision 2026-11-02: reworked from container-only to an option chosen with `[harnesses] run_on`, structured as a template method over `HarnessRunner`, after the user clarified that local installation must remain possible and asked for a template method rather than control branches.

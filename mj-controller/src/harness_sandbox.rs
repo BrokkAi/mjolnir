@@ -1,18 +1,12 @@
-//! Where the controller runs a coding harness of its own accord.
-//!
-//! Sessions run their harness on their target. The controller also needs a
-//! harness for work that belongs to no session: signing a profile in, minting
-//! a Claude setup token, discovering a profile's models before a session
-//! starts, and reading or renewing a subscription login for the quota view.
-//! None of that runs on this machine. It runs in a short-lived container from
-//! the agent image of a local Podman or Docker target, which already carries
-//! the pinned harnesses, so the host needs no harness, Node.js, or harness
-//! cache of its own.
+//! The container runner: controller-side harness work in a short-lived
+//! container from the agent image of a local Podman or Docker target, so this
+//! machine needs no harness, Node.js, or harness cache of its own. Selected
+//! with `[harnesses] run_on = "container"`; see [`crate::harness_runner`].
 //!
 //! [`HarnessSandbox::select`] is the one decision of which engine and image
-//! that is. Every caller asks it; none chooses an engine itself.
+//! that is.
 //!
-//! Files the harness must read or keep (a profile home, a probe directory)
+//! Files the harness must read or keep (a profile home, a work directory)
 //! are bind-mounted at fixed container paths, so nothing depends on the host's
 //! path syntax. What the container writes into a mount belongs to the person
 //! running Mjolnir: rootless Podman maps container root to them, and Docker
@@ -412,51 +406,6 @@ impl HarnessSandbox {
         })
     }
 
-    /// A run of `kind`'s own CLI with `arguments`, its profile home mounted
-    /// where the harness expects it. The worker inside prepares the harness
-    /// the way a container session does, so an image without it still works.
-    /// `environment` names the home with the mount point
-    /// ([`profile_environment`]); it may carry secrets, which travel only in
-    /// the engine client's environment.
-    pub fn harness_cli(
-        &self,
-        kind: HarnessKind,
-        home: &Path,
-        environment: BTreeMap<String, String>,
-        arguments: Vec<String>,
-        purpose: &str,
-    ) -> Result<SandboxRun> {
-        let worker = crate::controller::portable_linux_worker(self.architecture()?)?;
-        let mut environment = environment;
-        environment.extend(home_environment());
-        let mut command = vec![
-            SANDBOX_WORKER.to_owned(),
-            "worker".to_owned(),
-            "harness-cli".to_owned(),
-            "--harness".to_owned(),
-            kind.id().to_owned(),
-        ];
-        for name in environment.keys() {
-            command.extend(["--keep-env".to_owned(), name.clone()]);
-        }
-        command.push("--".to_owned());
-        command.extend(arguments);
-        Ok(SandboxRun {
-            purpose: purpose.to_owned(),
-            mounts: vec![
-                SandboxMount::writable(
-                    home,
-                    profile_mount_point(kind).to_string_lossy().into_owned(),
-                ),
-                SandboxMount::read_only(worker, SANDBOX_WORKER),
-            ],
-            environment,
-            command,
-            working_directory: Some(SANDBOX_HOME.to_owned()),
-            ..Default::default()
-        })
-    }
-
     fn write_account_files(&self, uid: u32, gid: u32) -> Result<()> {
         let passwd = format!(
             "root:x:0:0:root:/root:/bin/sh\nmj:x:{uid}:{gid}:Mjolnir:{SANDBOX_HOME}:/bin/sh\n"
@@ -488,67 +437,188 @@ pub fn home_environment() -> BTreeMap<String, String> {
     ])
 }
 
-/// Runs each harness command it is given in the sandbox, with one profile
-/// home mounted where the harness expects it. Code that builds a harness
-/// command as if the harness were local (a quota probe, a login renewal)
-/// takes this executor, so the command it builds is the whole description
-/// and its tests can still run it against a fake directly.
-///
-/// An environment value naming the home is rewritten to the mount point; no
-/// other path is translated.
-pub struct SandboxExecutor<E> {
-    inner: E,
-    kind: HarnessKind,
-    home: PathBuf,
-}
-
-impl<E: CommandExecutor> SandboxExecutor<E> {
-    pub fn new(inner: E, kind: HarnessKind, home: PathBuf) -> Self {
-        Self { inner, kind, home }
+impl crate::harness_runner::HarnessRunner for HarnessSandbox {
+    fn runtime(&self) -> mj_core::worker_launch::HarnessRuntimePolicy {
+        mj_core::worker_launch::HarnessRuntimePolicy::Ambient
     }
-}
 
-impl<E: CommandExecutor> CommandExecutor for SandboxExecutor<E> {
-    fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
-        let config = Config::load()?;
-        let sandbox = HarnessSandbox::select(&config, &self.inner)?;
-        let mount = profile_mount_point(self.kind)
-            .to_string_lossy()
-            .into_owned();
-        let home = self.home.to_string_lossy();
-        let environment = command
-            .env
-            .iter()
-            .map(|(name, value)| {
-                let value = if *value == home {
-                    mount.clone()
-                } else {
-                    value.clone()
-                };
-                (name.clone(), value)
-            })
-            .collect();
-        // The command names the harness CLI; the worker in the sandbox finds
-        // or installs it.
-        let run = sandbox.command(&sandbox.harness_cli(
-            self.kind,
-            &self.home,
+    fn work_root(&self) -> Result<PathBuf> {
+        // Under Mjolnir's data directory rather than the system temporary
+        // directory: an engine in a virtual machine shares the person's home
+        // with it, but not necessarily every temporary directory.
+        Ok(self.home.with_file_name("work"))
+    }
+
+    fn work_view(&self, _work: &Path) -> PathBuf {
+        PathBuf::from(SANDBOX_WORK)
+    }
+
+    fn profile_view(&self, kind: HarnessKind, _home: &Path) -> PathBuf {
+        profile_mount_point(kind)
+    }
+
+    fn profile_environment(&self, kind: HarnessKind, _home: &Path) -> BTreeMap<String, String> {
+        profile_environment(kind)
+    }
+
+    fn base_environment(&self) -> BTreeMap<String, String> {
+        let mut environment = home_environment();
+        // The container has no browser. A sign-in's work directory holds an
+        // opener that hands the address back to this machine; the worker
+        // rebuilds its environment from a login shell, so this travels in
+        // its spec rather than only in the container's environment.
+        environment.insert("BROWSER".to_owned(), format!("{SANDBOX_WORK}/open-url"));
+        environment
+    }
+
+    fn may_sign_in_foreign_store(&self, profile: &mj_core::config::HarnessProfile) -> Result<()> {
+        let (program, args) = profile.kind.native_login_command();
+        bail!(
+            "this profile uses your own {} installation, whose login database Mjolnir does not own, and harnesses run in containers here. Sign in with that installation (`{program} {}`), or add a Mjolnir-managed {} profile in Settings → Agent Profiles.",
+            profile.kind.display_name(),
+            args.join(" "),
+            profile.kind.display_name()
+        )
+    }
+
+    fn launch_worker(
+        &self,
+        run: crate::harness_runner::WorkerRun,
+    ) -> Result<crate::harness_runner::WorkerLaunch> {
+        use crate::harness_runner::WorkerIo;
+        let worker = crate::controller::portable_linux_worker(self.architecture()?)?;
+        let mut mounts = vec![SandboxMount::read_only(worker, SANDBOX_WORKER)];
+        if let Some((kind, home)) = &run.profile {
+            mounts.push(SandboxMount::writable(
+                home,
+                profile_mount_point(*kind).to_string_lossy().into_owned(),
+            ));
+        }
+        if let Some(work) = &run.work {
+            mounts.push(SandboxMount::writable(work, SANDBOX_WORK));
+        }
+        let environment = run.environment;
+        let (stdin, terminal, network) = match &run.io {
+            WorkerIo::Captured => (false, false, SandboxNetwork::Outbound),
+            WorkerIo::Stream => (true, false, SandboxNetwork::Outbound),
+            WorkerIo::Terminal { callback_ports } => (
+                true,
+                std::io::IsTerminal::is_terminal(&std::io::stdin()),
+                SandboxNetwork::BrowserCallbacks(callback_ports.clone()),
+            ),
+        };
+        // The container has no browser. Its `BROWSER` hands each address
+        // back through the work directory, and a relay here opens it.
+        let relay = match (&run.io, &run.work) {
+            (WorkerIo::Terminal { .. }, Some(work)) => {
+                let opener = work.join("open-url");
+                std::fs::write(
+                    &opener,
+                    format!("#!/bin/sh\nprintf '%s\\n' \"$1\" >> {SANDBOX_WORK}/urls\n"),
+                )
+                .with_context(|| format!("write {}", opener.display()))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755))?;
+                }
+                Some(BrowserRelay::start(work.join("urls")))
+            }
+            _ => None,
+        };
+        let command = self.command(&SandboxRun {
+            purpose: run.purpose,
+            mounts,
             environment,
-            command.args.clone(),
-            &command.purpose,
-        )?)?;
-        let mut spec = run.spec(&command.purpose);
-        spec.sensitive_output = command.sensitive_output;
-        let output = self.inner.execute(&spec);
-        // Its own bounded executor: a cancelled command must still be cleaned up.
-        run.remove(&crate::targets::CancellableProcessExecutor::with_timeout(
-            std::time::Duration::from_secs(30),
-        ));
-        output
+            command: std::iter::once(SANDBOX_WORKER.to_owned())
+                .chain(run.arguments)
+                .collect(),
+            stdin,
+            terminal,
+            network,
+            working_directory: Some(if run.work.is_some() {
+                SANDBOX_WORK.to_owned()
+            } else {
+                SANDBOX_HOME.to_owned()
+            }),
+        })?;
+        let mut launch =
+            crate::harness_runner::WorkerLaunch::new(command.program.clone(), command.args.clone());
+        launch.environment = command.environment.clone();
+        Ok(launch.with_cleanup(move || {
+            if let Some(relay) = relay {
+                relay.stop();
+            }
+            command.remove(&crate::targets::CancellableProcessExecutor::with_timeout(
+                std::time::Duration::from_secs(30),
+            ));
+        }))
     }
 
-    fn cancellation_requested(&self) -> bool {
-        self.inner.cancellation_requested()
+    fn reads_host_keychain(&self) -> bool {
+        false
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "in a {} container from {}",
+            self.engine.command(),
+            self.image
+        )
+    }
+}
+
+/// Opens the addresses the sandbox's `BROWSER` records, on this machine.
+struct BrowserRelay {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BrowserRelay {
+    fn start(path: PathBuf) -> Self {
+        let desktop = cfg!(any(target_os = "macos", target_os = "windows"))
+            || ["DISPLAY", "WAYLAND_DISPLAY"]
+                .iter()
+                .any(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let running = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let mut opened = 0usize;
+            loop {
+                let finished = running.load(std::sync::atomic::Ordering::Acquire);
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    let lines = text.lines().collect::<Vec<_>>();
+                    for url in lines.iter().skip(opened).map(|line| line.trim()) {
+                        if url.is_empty() {
+                            continue;
+                        }
+                        if desktop && webbrowser::open(url).is_ok() {
+                            eprintln!("Opened {url} in your browser.");
+                        } else {
+                            eprintln!("Open this address in a browser to sign in: {url}");
+                        }
+                    }
+                    opened = lines.len();
+                }
+                if finished {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn stop(mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            tracing::warn!("the sign-in browser relay stopped unexpectedly");
+        }
     }
 }
 

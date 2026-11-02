@@ -65,10 +65,18 @@ enum WorkerCommand {
     HarnessCli {
         #[arg(long)]
         harness: mj_core::config::HarnessKind,
+        /// `managed` for Mjolnir's pinned installation, `ambient` for the
+        /// target's own (the image's, in a container).
+        #[arg(long, default_value = "ambient")]
+        runtime: String,
         /// A variable of this process's environment the harness must keep
         /// over the target's login environment.
         #[arg(long = "keep-env", value_name = "NAME")]
         keep_env: Vec<String>,
+        /// A variable the harness must not receive, even from the login
+        /// shell.
+        #[arg(long = "drop-env", value_name = "NAME")]
+        drop_env: Vec<String>,
         #[arg(last = true)]
         arguments: Vec<String>,
     },
@@ -523,15 +531,28 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         }
         WorkerCommand::HarnessCli {
             harness,
+            runtime,
             keep_env,
+            drop_env,
             arguments,
         } => {
+            let runtime = match runtime.as_str() {
+                "managed" => mj_core::worker_launch::HarnessRuntimePolicy::Managed,
+                "ambient" => mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
+                other => anyhow::bail!("unknown harness runtime {other:?}"),
+            };
             let environment = keep_env
                 .into_iter()
                 .filter_map(|name| Some((name.clone(), std::env::var(&name).ok()?)))
                 .collect();
-            let status =
-                mj_worker::worker_runtime::run_harness_cli(harness, environment, arguments).await?;
+            let status = mj_worker::worker_runtime::run_harness_cli(
+                harness,
+                runtime,
+                environment,
+                drop_env,
+                arguments,
+            )
+            .await?;
             if status != 0 {
                 std::process::exit(status);
             }
