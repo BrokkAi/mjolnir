@@ -245,7 +245,8 @@ Harness versions are pinned in `mj-core/src/harness_runtime.rs`. When you
 change a pin, update the agent-dev container image in the same commit, so
 container sessions run the same harness versions as managed bare workers:
 
-- Codex and Claude bridges: update the `npm install --global` line in
+- Codex and Claude bridges, Kimi Code, Grok, and OpenCode: update the
+  `npm install --global` line in
   `containers/Containerfile.agent-dev`, as well as the package files in
   `mj-core/assets/harnesses/`. The test
   `bridge_fallback_pins_match_the_agent_dev_containerfile` fails if the
@@ -264,9 +265,8 @@ container sessions run the same harness versions as managed bare workers:
   the new tag. The test
   `opencode_provider_environment_was_generated_from_the_pinned_opencode`
   fails until you do.
-- MiMo Code, Kimi Code, Grok, and OpenCode: update
-  `mj-core/assets/<harness>/runtime.json`. The image installs each from that
-  file (`scripts/install-mimo.py`, `scripts/install-native-harness.py`).
+- MiMo Code: update `mj-core/assets/mimo/runtime.json`. The image installs
+  MiMo Code from that file.
 
 Pushing the commit to master runs `publish-agent-dev-image.yml`, which
 publishes `ghcr.io/brokkai/mjolnir/agent-dev:latest`. Check that the run

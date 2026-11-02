@@ -2229,32 +2229,15 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     assert!(CONTAINERFILE.contains("ENV MIMOCODE_DISABLE_AUTOUPDATE=1"));
     assert!(CONTAINERFILE.contains("OPENCODE_DISABLE_AUTOUPDATE=1"));
 
-    // Kimi Code, Grok, and OpenCode install from the managed runtimes' own
-    // metadata too.
-    assert!(CONTAINERFILE.contains("install-native-harness.py"));
-    for (harness, metadata, version) in [
-        (
-            "kimi",
-            include_str!("../../../../mj-core/assets/kimi/runtime.json"),
-            KIMI_VERSION,
-        ),
-        (
-            "grok",
-            include_str!("../../../../mj-core/assets/grok/runtime.json"),
-            GROK_VERSION,
-        ),
-        (
-            "opencode",
-            include_str!("../../../../mj-core/assets/opencode/runtime.json"),
-            OPENCODE_VERSION,
-        ),
+    for package in [
+        format!("@moonshot-ai/kimi-code@{KIMI_VERSION}"),
+        format!("@xai-official/grok@{GROK_VERSION}"),
+        format!("@opencode/cli@{OPENCODE_VERSION}"),
     ] {
         assert!(
-            CONTAINERFILE.contains(&format!("COPY mj-core/assets/{harness}/runtime.json")),
-            "containers/Containerfile.agent-dev must install {harness} from mj-core/assets/{harness}/runtime.json"
+            CONTAINERFILE.contains(&package),
+            "containers/Containerfile.agent-dev must install {package}"
         );
-        let metadata: serde_json::Value = serde_json::from_str(metadata).unwrap();
-        assert_eq!(metadata["version"], version);
     }
 
     // DSH has no managed installation. The image installs the pinned npm

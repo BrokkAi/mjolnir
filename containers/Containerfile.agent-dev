@@ -147,7 +147,6 @@ RUN apt-get update \
         tmux \
         unzip \
         zip \
-        zstd \
     && rm -rf /var/lib/apt/lists/*
 
 # Astral's distroless image provides native binaries for both supported
@@ -183,21 +182,26 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
     && [ "$(go env GOVERSION)" = "go${GO_VERSION}" ]
 
 # Keep these in lockstep with mj-core/src/harness_runtime.rs (see "Harness
-# pins" in AGENTS.md). Muse, MiMo Code, Kimi Code, Grok, and OpenCode install
-# below from their runtime.json files. dsh-acp's npm package carries its native
-# binaries, so the launch finds it on PATH instead of running npx.
+# pins" in AGENTS.md). Muse and MiMo Code install below from their
+# runtime.json files.
 RUN npm install --global --no-audit --no-fund \
         @brokkai/codex-acp@1.15.0 \
         @agentclientprotocol/claude-agent-acp@0.99.0 \
         @anthropic-ai/claude-code@2.1.308 \
         @brokkai/dsh-acp@0.5.0 \
         @brokkai/muse-acp@0.20.0 \
+        @moonshot-ai/kimi-code@2.4.0 \
         @openai/codex@0.165.0 \
+        @opencode/cli@2.2.1 \
+        @xai-official/grok@1.0.70 \
     && npm cache clean --force \
     && codex --version \
     && codex-acp --version \
     && claude --version \
     && [ "$(dsh-acp --version)" = "dsh-acp 0.5.0" ] \
+    && kimi --version | grep -qF 2.4.0 \
+    && grok --version | grep -qF 1.0.70 \
+    && OPENCODE_DISABLE_AUTOUPDATE=1 opencode --version | grep -qF 2.2.1 \
     && [ "$(node -p "require('/usr/local/lib/node_modules/@brokkai/muse-acp/package.json').version")" = "0.20.0" ]
 
 # The bridge prefers CODEX_PATH over its bundled Codex binary. Select the
@@ -346,23 +350,6 @@ COPY mj-core/assets/mimo/runtime.json /opt/mjolnir/mimo-runtime.json
 COPY scripts/install-mimo.py /opt/mjolnir/install-mimo.py
 RUN python3 /opt/mjolnir/install-mimo.py /opt/mjolnir/mimo-runtime.json /usr/local/bin \
     && mimo --version
-
-# Kimi Code, Grok, and OpenCode come from the same pinned artifacts and digests
-# as their managed installations, in the same layout (Grok keeps its `agent`
-# launcher beside it), linked onto PATH where the launch scripts look first.
-COPY scripts/install-native-harness.py /opt/mjolnir/install-native-harness.py
-COPY mj-core/assets/kimi/runtime.json /opt/mjolnir/kimi-runtime.json
-COPY mj-core/assets/grok/runtime.json /opt/mjolnir/grok-runtime.json
-COPY mj-core/assets/opencode/runtime.json /opt/mjolnir/opencode-runtime.json
-RUN for harness in kimi grok opencode; do \
-        python3 /opt/mjolnir/install-native-harness.py "$harness" \
-            "/opt/mjolnir/${harness}-runtime.json" "/opt/mjolnir/harnesses/${harness}" \
-        && ln -s "/opt/mjolnir/harnesses/${harness}/bin/${harness}" "/usr/local/bin/${harness}" \
-        || exit 1; \
-    done \
-    && [ "$(kimi --version)" = "$(jq -r .version /opt/mjolnir/kimi-runtime.json)" ] \
-    && grok --version | grep -qF "grok $(jq -r .version /opt/mjolnir/grok-runtime.json) " \
-    && [ "$(opencode --version)" = "opencode v$(jq -r .version /opt/mjolnir/opencode-runtime.json)" ]
 
 # Session workers construct a clean login environment instead of inheriting
 # the container exec environment. Keep image tool settings in that login too.
