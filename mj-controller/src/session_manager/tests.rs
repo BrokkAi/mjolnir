@@ -90,7 +90,7 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
     reply.closed().await;
 }
 #[cfg(unix)]
-use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use sha2::Digest;
 
 fn ordering_request(session_id: &str, command_id: &str) -> RemoteSessionRequest {

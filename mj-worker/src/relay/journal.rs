@@ -758,7 +758,7 @@ impl DurableRelay {
             let prompt_text = prompt
                 .iter()
                 .filter_map(|block| match block {
-                    agent_client_protocol::schema::v1::ContentBlock::Text(text) => {
+                    agent_client_protocol::v1::schema::ContentBlock::Text(text) => {
                         Some(text.text.as_str())
                     }
                     _ => None,
@@ -794,7 +794,7 @@ impl DurableRelay {
             ),
             RelayObservation::SessionUpdate { update } => matches!(
                 update.as_ref(),
-                agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(_)
+                agent_client_protocol::v1::schema::SessionUpdate::AgentMessageChunk(_)
             ),
             RelayObservation::HarnessTurnSettled {
                 prompt_in_flight: false,
@@ -831,7 +831,7 @@ impl DurableRelay {
         // bounded growth is checked above, but streaming still checkpoints at
         // the existing byte cadence rather than rewriting a snapshot per token.
         let evidence_chunk = matches!(&self.hot_events.back().expect("just appended").observation,
-            RelayObservation::SessionUpdate { update } if matches!(update.as_ref(), agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(_)));
+            RelayObservation::SessionUpdate { update } if matches!(update.as_ref(), agent_client_protocol::v1::schema::SessionUpdate::AgentMessageChunk(_)));
         if (stage_snapshot && !evidence_chunk)
             || idle_changed
             || self.unpersisted_journal_bytes >= RELAY_SNAPSHOT_LAG_BYTE_LIMIT

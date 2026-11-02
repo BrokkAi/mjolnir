@@ -49,7 +49,7 @@ sessionwiki = "0.34.5"
 # here, so a version can only be raised in one place. Each entry carries the
 # features every user of it needs; a crate that needs more adds them beside
 # `workspace = true`, which unions them with these.
-agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
+agent-client-protocol = { version = "5", features = ["unstable_session_fork", "unstable_end_turn_token_usage"] }
 anyhow = "1"
 axum = "0.8"
 # Use the ring provider already pulled by reqwest instead of aws-lc-rs, which

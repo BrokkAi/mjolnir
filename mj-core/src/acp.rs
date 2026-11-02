@@ -7,7 +7,7 @@ pub mod surface;
 mod terminal_compat;
 use crate::elicitation::*;
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::*;
+use agent_client_protocol::v1::schema::*;
 pub use claude_result::{ClaudeResultUsage, ClaudeTurnResult};
 use dialect::grok;
 use serde::{Deserialize, Serialize};
@@ -250,12 +250,12 @@ pub fn select_contains(kind: &SessionConfigKind, desired: &str) -> bool {
         return false;
     };
     match &select.options {
-        agent_client_protocol::schema::v1::SessionConfigSelectOptions::Ungrouped(options) => {
+        agent_client_protocol::v1::schema::SessionConfigSelectOptions::Ungrouped(options) => {
             options
                 .iter()
                 .any(|option| option.value.to_string() == desired)
         }
-        agent_client_protocol::schema::v1::SessionConfigSelectOptions::Grouped(groups) => groups
+        agent_client_protocol::v1::schema::SessionConfigSelectOptions::Grouped(groups) => groups
             .iter()
             .flat_map(|group| &group.options)
             .any(|option| option.value.to_string() == desired),
@@ -454,7 +454,7 @@ pub fn error_reports_missing_native_session(
             .chain()
             .filter_map(|cause| cause.downcast_ref::<agent_client_protocol::Error>())
             .any(|error| {
-                error.code == agent_client_protocol::ErrorCode::ResourceNotFound
+                error.code == agent_client_protocol::ErrorCode::RESOURCE_NOT_FOUND
                     && error.data.as_ref().is_some_and(|data| {
                         ["sessionId", "uri"].iter().any(|key| {
                             data.get(key).and_then(serde_json::Value::as_str)
@@ -847,7 +847,7 @@ impl AcpSessionFacts {
         harness_kind: HarnessKind,
         configuration: &std::collections::BTreeMap<String, String>,
         config_options: &[SessionConfigOption],
-        modes: Option<&agent_client_protocol::schema::v1::SessionModeState>,
+        modes: Option<&agent_client_protocol::v1::schema::SessionModeState>,
     ) -> Self {
         let values = configuration
             .iter()

@@ -4,7 +4,7 @@ use crate::chat::test_support::{
     agent_message_item, agent_transcript_item, ctrl, drawn_transcript, fast_mode_option, key,
     queued, snapshot,
 };
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelect, SessionConfigSelectOption, SessionConfigSelectOptions,
     SessionConfigValueId,

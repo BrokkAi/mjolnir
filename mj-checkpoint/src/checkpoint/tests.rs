@@ -3387,7 +3387,7 @@ fn checkpoint_round_trips_ten_image_references_and_restores_the_blob() {
         seed.queued_prompts[0].content,
         spec.canonical_session.queued_prompts[0].content
     );
-    let mut blocks: Vec<agent_client_protocol::schema::v1::ContentBlock> = seed.queued_prompts[0]
+    let mut blocks: Vec<agent_client_protocol::v1::schema::ContentBlock> = seed.queued_prompts[0]
         .content
         .iter()
         .cloned()
@@ -3403,7 +3403,7 @@ fn checkpoint_round_trips_ten_image_references_and_restores_the_blob() {
         .resolve(&mut blocks)
         .unwrap();
     for block in blocks {
-        let agent_client_protocol::schema::v1::ContentBlock::Image(image) = block else {
+        let agent_client_protocol::v1::schema::ContentBlock::Image(image) = block else {
             panic!("checkpoint image queue contained a non-image block");
         };
         assert!(image.uri.is_none());
@@ -3425,7 +3425,7 @@ fn restored_image_resolution_rejects_missing_and_corrupt_blobs() {
     let queued = restored_seed(&restored_relay).queued_prompts[0]
         .content
         .clone();
-    let mut blocks: Vec<agent_client_protocol::schema::v1::ContentBlock> = queued
+    let mut blocks: Vec<agent_client_protocol::v1::schema::ContentBlock> = queued
         .iter()
         .cloned()
         .map(serde_json::from_value)

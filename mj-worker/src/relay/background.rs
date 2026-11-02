@@ -688,7 +688,7 @@ impl DurableRelay {
     /// on the launcher card, which is the only link between the ACP card and
     /// the process its native journal later names.
     pub(super) fn track_agent_terminal_tool_call(&mut self, update: &SessionUpdate) {
-        use agent_client_protocol::schema::v1::ToolCallContent;
+        use agent_client_protocol::v1::schema::ToolCallContent;
 
         let (tool_call_id, content) = match update {
             SessionUpdate::ToolCall(call) => (call.tool_call_id.0.as_ref(), Some(&call.content)),
@@ -731,7 +731,7 @@ impl DurableRelay {
             ),
             _ => return,
         };
-        if status == Some(agent_client_protocol::schema::v1::ToolCallStatus::Failed) {
+        if status == Some(agent_client_protocol::v1::schema::ToolCallStatus::Failed) {
             self.kimi_provisional_tasks.remove(tool_call_id);
             return;
         }

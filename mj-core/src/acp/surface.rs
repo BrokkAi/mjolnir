@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AvailableCommand, SessionConfigKind, SessionConfigOption, SessionModeState,
 };
 use serde_json::Value;
@@ -371,7 +371,7 @@ pub fn config_current_value(options: &[SessionConfigOption], key: &str) -> Optio
 
 #[cfg(test)]
 mod tests {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         SessionConfigId, SessionConfigSelect, SessionConfigSelectOption,
         SessionConfigSelectOptions, SessionConfigValueId, SessionMode, SessionModeState,
     };

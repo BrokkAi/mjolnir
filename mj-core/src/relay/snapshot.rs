@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use agent_client_protocol::schema::ProtocolVersion as AcpProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AgentCapabilities, AvailableCommand, ContentBlock, Implementation, SessionConfigOption,
     SessionModeState, SessionUpdate,
 };
@@ -856,7 +856,7 @@ impl RelayOperationalState {
                     .map(|started_at_ms| crate::activity::InFlightToolCall {
                         tool_call_id: String::new(),
                         title: None,
-                        status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
+                        status: agent_client_protocol::v1::schema::ToolCallStatus::InProgress,
                         started_at_ms,
                     })
                     .into_iter()

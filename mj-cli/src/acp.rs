@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, InitializeRequest,
     InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
     SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
@@ -178,7 +178,7 @@ async fn serve_on(
     transport: impl agent_client_protocol::ConnectTo<Agent> + 'static,
 ) -> Result<()> {
     let served = Agent
-        .builder()
+        .v1()
         .name("mjolnir")
         .on_receive_request(
             async |request: InitializeRequest, responder, _cx| {
@@ -1476,14 +1476,19 @@ mod tests {
             .expect("the adapter answers within ten seconds")
         }
 
-        /// Start a session, the way every consumer does before its first prompt.
-        async fn open_session(&mut self) {
+        /// Complete the handshake every consumer sends before any other request.
+        async fn initialize(&mut self) {
             self.request(
                 1,
                 "initialize",
                 json!({"protocolVersion": 1, "clientCapabilities": {}}),
             );
             self.response(1).await;
+        }
+
+        /// Start a session, the way every consumer does before its first prompt.
+        async fn open_session(&mut self) {
+            self.initialize().await;
             self.request(
                 2,
                 "session/new",
@@ -1629,7 +1634,8 @@ mod tests {
         let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
         daemon.script("session-1", &[STARTING]);
         let adapter = Arc::new(Adapter::new(AcpArgs::default(), None, Some(client)));
-        let consumer = Consumer::connect(Arc::clone(&adapter));
+        let mut consumer = Consumer::connect(Arc::clone(&adapter));
+        consumer.initialize().await;
         consumer.request(
             2,
             "session/new",
@@ -1854,6 +1860,7 @@ mod tests {
             Some("nowhere".to_owned()),
             Some(client),
         )));
+        consumer.initialize().await;
         consumer.request(
             2,
             "session/new",
@@ -1884,6 +1891,7 @@ mod tests {
             Some("nowhere".to_owned()),
             Some(client),
         )));
+        consumer.initialize().await;
         consumer.request(
             2,
             "session/new",

@@ -243,10 +243,10 @@ pub(super) fn apply_native_agent_event(
             // its named row, even when many newer messages have followed it.
             view.projection.transcript = transcript(connection, owner, child, staging, 64)?;
             let tool_id = match update.as_ref() {
-                agent_client_protocol::schema::v1::SessionUpdate::ToolCall(call) => {
+                agent_client_protocol::v1::schema::SessionUpdate::ToolCall(call) => {
                     Some(call.tool_call_id.to_string())
                 }
-                agent_client_protocol::schema::v1::SessionUpdate::ToolCallUpdate(call) => {
+                agent_client_protocol::v1::schema::SessionUpdate::ToolCallUpdate(call) => {
                     Some(call.tool_call_id.to_string())
                 }
                 _ => None,

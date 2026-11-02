@@ -6,7 +6,7 @@
 //! without a live session.
 
 use super::*;
-use agent_client_protocol::schema::v1::ToolCallStatus;
+use agent_client_protocol::v1::schema::ToolCallStatus;
 
 const MINUTE: u64 = 60_000;
 const NOW: i64 = 1_000_000_000;

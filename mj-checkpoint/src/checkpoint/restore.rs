@@ -138,7 +138,7 @@ pub fn restore_checkpoint_with_native_state(
     };
     restore_subagent_reports(&archive, &spec.workspace_root, &report_root)?;
     for queued in &seed.queued_prompts {
-        let blocks: Vec<agent_client_protocol::schema::v1::ContentBlock> = queued
+        let blocks: Vec<agent_client_protocol::v1::schema::ContentBlock> = queued
             .content
             .iter()
             .cloned()

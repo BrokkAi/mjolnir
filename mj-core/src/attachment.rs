@@ -1,7 +1,7 @@
 //! Session-private immutable image blobs. Internal image references are resolved
 //! only at the ACP boundary; image bytes never belong in durable relay commands.
 use crate::hex::lower_hex;
-use agent_client_protocol::schema::v1::{ContentBlock, ImageContent};
+use agent_client_protocol::v1::schema::{ContentBlock, ImageContent};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};

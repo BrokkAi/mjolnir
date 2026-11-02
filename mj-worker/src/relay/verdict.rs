@@ -920,7 +920,7 @@ mod settled_task_tests {
     #[test]
     fn a_verdict_stays_with_its_own_turn_in_the_published_state() {
         use crate::relay::test_support::{prompt, submit_relay};
-        use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
+        use agent_client_protocol::v1::schema::{ContentBlock, ContentChunk, TextContent};
         use mj_core::activity::verdict::{Decision, TurnCompletion};
         use mj_core::assessment::{Action, Failure, Input, Judgment, Verdict, Work};
         use mj_core::relay::RelayCommandOutcome;
@@ -1036,7 +1036,7 @@ mod settled_task_tests {
     #[test]
     fn a_continue_verdict_is_not_parked_when_nobody_will_act_on_it() {
         use crate::relay::test_support::{prompt, submit_relay};
-        use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
+        use agent_client_protocol::v1::schema::{ContentBlock, ContentChunk, TextContent};
         use mj_core::assessment::{Failure, Input, Judgment, Status, Verdict, Work};
         use mj_core::relay::RelayCommandOutcome;
         let dir = tempfile::tempdir().unwrap();

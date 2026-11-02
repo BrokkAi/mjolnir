@@ -404,7 +404,7 @@ const DEFAULT_MODEL_VALUE: &str = "default";
 /// reaches this check: it is the one kind of value left to the bridge.
 fn lands_on_the_default_model(
     options: &[SessionConfigOption],
-    option_id: &agent_client_protocol::schema::v1::SessionConfigId,
+    option_id: &agent_client_protocol::v1::schema::SessionConfigId,
     sent: &str,
 ) -> bool {
     !sent.trim().eq_ignore_ascii_case(DEFAULT_MODEL_VALUE)
@@ -440,7 +440,7 @@ fn selector_current_value(kind: &SessionConfigKind) -> Option<String> {
 /// because a model change can legitimately reset the rest of the configuration.
 fn adopt_requested_value(
     options: &mut [SessionConfigOption],
-    option_id: &agent_client_protocol::schema::v1::SessionConfigId,
+    option_id: &agent_client_protocol::v1::schema::SessionConfigId,
     previous: Option<&str>,
     value: &str,
 ) {
@@ -506,7 +506,7 @@ pub(super) async fn enforce_execution_mode(
     selector: Option<&str>,
     desired: &str,
     config_options: &mut Vec<SessionConfigOption>,
-    legacy_modes: &mut Option<agent_client_protocol::schema::v1::SessionModeState>,
+    legacy_modes: &mut Option<agent_client_protocol::v1::schema::SessionModeState>,
 ) -> Result<String> {
     if let Some(option) = execution_mode_option(config_options, selector, desired) {
         let option_id = option.id.clone();
@@ -605,7 +605,7 @@ async fn select_confirmed(
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
     harness: HarnessKind,
-    option_id: agent_client_protocol::schema::v1::SessionConfigId,
+    option_id: agent_client_protocol::v1::schema::SessionConfigId,
     label: &str,
     desired: &str,
     config_options: &mut Vec<SessionConfigOption>,
@@ -660,7 +660,7 @@ pub(super) fn refused_mode_warning(
     selector: Option<&str>,
     desired: &str,
     refusal: &str,
-    modes: Option<&agent_client_protocol::schema::v1::SessionModeState>,
+    modes: Option<&agent_client_protocol::v1::schema::SessionModeState>,
     config_options: &[SessionConfigOption],
 ) -> String {
     let harness_name = harness.display_name();

@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent};
+use agent_client_protocol::v1::schema::{ContentBlock, ImageContent, TextContent};
 use anyhow::Result;
 
 #[cfg(unix)]

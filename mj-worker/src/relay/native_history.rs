@@ -176,7 +176,7 @@ pub(super) fn prompt_may_have_reached_agent(dispatch: &RelayDispatchRecord) -> b
 mod tests {
     use super::super::test_support::*;
     use super::super::*;
-    use agent_client_protocol::schema::v1::{ContentChunk, SessionInfoUpdate};
+    use agent_client_protocol::v1::schema::{ContentChunk, SessionInfoUpdate};
 
     fn remove_history_evidence(root: &Path) {
         let path = root.join(RELAY_STATE_FILE);

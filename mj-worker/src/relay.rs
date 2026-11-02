@@ -47,7 +47,7 @@ use std::io::Read;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
-use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate};
+use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate};
 use anyhow::{Context, Result, anyhow, bail};
 
 use journal::{

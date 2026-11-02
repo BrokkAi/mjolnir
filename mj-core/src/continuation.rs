@@ -216,9 +216,9 @@ impl ContinuationVerdict {
     }
 }
 
-pub fn prompt_blocks() -> Vec<agent_client_protocol::schema::v1::ContentBlock> {
-    vec![agent_client_protocol::schema::v1::ContentBlock::Text(
-        agent_client_protocol::schema::v1::TextContent::new(PROMPT),
+pub fn prompt_blocks() -> Vec<agent_client_protocol::v1::schema::ContentBlock> {
+    vec![agent_client_protocol::v1::schema::ContentBlock::Text(
+        agent_client_protocol::v1::schema::TextContent::new(PROMPT),
     )]
 }
 

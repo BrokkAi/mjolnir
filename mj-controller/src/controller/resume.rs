@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::v1::ContentBlock;
+use agent_client_protocol::v1::schema::ContentBlock;
 use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 use tokio_util::sync::CancellationToken;
