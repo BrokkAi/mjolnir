@@ -1,7 +1,7 @@
 name: Nightly
 
-# Nightly and manual runs of the shared macOS and Windows lanes, which
-# ordinary check-ins start only for platform-sensitive changes. A failing lane
+# Nightly and manual runs of the shared macOS and Windows lanes. Check-ins run
+# Linux only; release tags also run both lanes through ci.yml. A failing lane
 # opens or reopens its own tracking issue ("Nightly macOS CI is failing" or
 # "Nightly Windows CI is failing"), and that lane's next passing run closes
 # it. Only the report jobs can write issues.
