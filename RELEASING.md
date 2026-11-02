@@ -50,15 +50,16 @@ GitHub prereleases and use npm's `next` channel; stable versions use `latest`.
 A release request authorizes the normal tag push and publication. Registry
 authorization is configured once, not audited again for every release.
 
-## Daily release
+## Nightly release
 
-`.github/workflows/nightly.yml` releases master every day at 05:41 UTC when
-master's CI run is green. It runs `cargo release minor` as above, pushes the
-version commit to master together with its tag, and starts `release.yml` on
-the tag, so the result is an ordinary release on every channel. The version
-commit gets no CI run of its own, so a day without new commits releases
-nothing. If master moves while the job runs, the push is refused and the next
-day's run releases the newer master.
+The scheduled run of `.github/workflows/nightly.yml` (05:41 UTC) releases
+master when its macOS and Windows lanes both pass, master's CI passed on the
+same change, and the latest release does not already contain it. It runs
+`cargo release minor` as above on exactly the commit the lanes tested, tags
+it, updates master with the version commit (merging it if master moved in
+the meantime), and starts `release.yml` on the tag, so the result is an
+ordinary release on every channel. Manual dispatches of `nightly.yml` never
+release.
 
 ## Recovery and optional channels
 

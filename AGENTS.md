@@ -234,11 +234,10 @@ Unit tests are colocated in module-level `#[cfg(test)]` blocks. `mj-cli/tests/` 
 
 ## macOS and Windows CI
 
-Check-ins run CI on Linux only. The macOS and Windows lanes run on every
-release tag, including the daily release `nightly.yml` cuts from master, and
-on manual dispatch of `nightly.yml`, which runs only the lanes and releases
-nothing. After a platform-sensitive change, dispatch `nightly.yml` on master
-to check it before the next daily release.
+Check-ins run CI on Linux only. The macOS and Windows lanes run nightly, on
+manual dispatch of `nightly.yml`, and on every release tag. After a
+platform-sensitive change, dispatch `nightly.yml` on master to check it before
+the next night's run.
 
 ## Harness pins
 

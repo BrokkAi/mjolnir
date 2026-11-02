@@ -166,7 +166,6 @@ run_lane_reporter() {
         GITHUB_RUN_ID="$3" \
         GITHUB_RUN_ATTEMPT=1 \
         GITHUB_SHA="$4" \
-        GITHUB_REF_NAME=v2.65.0 \
         bash "$reporter"
 }
 
@@ -285,7 +284,7 @@ windows_issue="$(tracking_issue windows)"
 [[ "$(issue_field "$windows_issue" state)" == open ]]
 windows_body="$(issue_field "$windows_issue" body)"
 assert_text_contains "$windows_body" 'Windows / Windows (x86_64-pc-windows-msvc)' 'the Windows issue body'
-assert_text_contains "$windows_body" '.github/workflows/release.yml' 'the Windows issue body'
+assert_text_contains "$windows_body" '.github/workflows/nightly.yml' 'the Windows issue body'
 if [[ "$windows_body" == *'macOS / macOS'* ]]; then
     printf '%s\n' 'the Windows issue body lists a job from the macOS lane' >&2
     exit 1
@@ -327,7 +326,6 @@ if env -u GITHUB_RUN_ID \
     GITHUB_SERVER_URL=https://github.com \
     GITHUB_RUN_ATTEMPT=1 \
     GITHUB_SHA="$sha1" \
-    GITHUB_REF_NAME=v2.65.0 \
     bash "$reporter" >"$test_root/step8.out" 2>&1; then
     printf '%s\n' 'the reporter unexpectedly accepted a missing GITHUB_RUN_ID' >&2
     exit 1

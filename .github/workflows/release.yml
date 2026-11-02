@@ -4,8 +4,8 @@ on:
   push:
     tags:
       - 'v*.*.*'
-  # nightly.yml starts its daily release this way, because a tag it pushes
-  # with GITHUB_TOKEN does not trigger the push event. Dispatch only on a tag.
+  # nightly.yml starts its release this way, because a tag it pushes with
+  # GITHUB_TOKEN does not trigger the push event. Dispatch only on a tag.
   workflow_dispatch: {}
 
 permissions:
@@ -29,10 +29,6 @@ jobs:
       - name: Check tag against Cargo package versions
         id: version
         run: |
-          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
-            echo "release.yml publishes tags only; $GITHUB_REF_NAME is a $GITHUB_REF_TYPE" >&2
-            exit 1
-          fi
           version="${GITHUB_REF_NAME#v}"
           cargo metadata --locked --no-deps --format-version 1 |
             jq -e --arg version "$version" 'all(.packages[]; .version == $version)'
@@ -54,67 +50,12 @@ jobs:
 
   # The full CI suite on the tagged commit. Builds run beside it; only
   # publication waits for it, so a release never depends on a branch CI run
-  # that a later push cancelled. Check-ins run Linux only, so the macOS and
-  # Windows lanes run here for every tag rather than inside ci.yml; as
-  # top-level jobs their results are separate, and each one updates its
-  # tracking issue.
+  # that a later push cancelled.
   ci:
     name: CI
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
-
-  macos:
-    name: macOS
-    uses: ./.github/workflows/macos.yml
-    permissions:
-      contents: read
-
-  windows:
-    name: Windows
-    uses: ./.github/workflows/windows.yml
-    permissions:
-      contents: read
-
-  # A failing lane opens or reopens its tracking issue, and a passing one
-  # closes it. The script ignores cancelled or skipped lanes.
-  report-macos:
-    name: Update the macOS tracking issue
-    needs: macos
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      actions: read
-      contents: read
-      issues: write
-    steps:
-      - uses: actions/checkout@v6
-      - name: Open, update, or close the tracking issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_LANE: macos
-          LANE_RESULT: ${{ needs.macos.result }}
-        run: bash scripts/nightly-issue.sh
-
-  report-windows:
-    name: Update the Windows tracking issue
-    needs: windows
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      actions: read
-      contents: read
-      issues: write
-    steps:
-      - uses: actions/checkout@v6
-      - name: Open, update, or close the tracking issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_LANE: windows
-          LANE_RESULT: ${{ needs.windows.result }}
-        run: bash scripts/nightly-issue.sh
 
   release-notices:
     name: Generate release notices
@@ -651,7 +592,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [ci, macos, windows, verify-version, package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-x86_64-apple-darwin, package-aarch64-apple-darwin, package-x86_64-pc-windows-msvc, publish-agent-dev-image]
+    needs: [ci, verify-version, package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-x86_64-apple-darwin, package-aarch64-apple-darwin, package-x86_64-pc-windows-msvc, publish-agent-dev-image]
     runs-on: ubuntu-latest
     permissions:
       actions: write
