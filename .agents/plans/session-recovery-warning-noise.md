@@ -14,11 +14,11 @@ Repeated failed worker polls currently restart footer warnings for the same sess
 - [x] (2026-11-02 18:49Z) Remove TUI persistence and make unreachable notices follow outage transitions without resetting dismissal timers.
 - [x] (2026-11-02 19:15Z) Repair child operator-away replay and verify checkpoint-only close with a real worker, over 64 KiB of final journal output, missing cwd, and intact parent files.
 - [x] (2026-11-02 19:18Z) Independently review the combined changes and validate affected crates, corrected fixtures, exact late Provisioning race, real-worker acceptance, formatting, and workspace Clippy in the dev profile.
-- [ ] Commit, push to origin/master, and apply safe cleanup to the running installation where authorized and feasible.
+- [x] (2026-11-02 19:45Z) Commit and push ae5b18abb plus upstream merge dc4dbe4b6, install normally, and close all 12 diagnosed children while preserving histories and parent targets. Fresh runtime snapshot: 59 live worker views, zero errors, none of the 12 old IDs present.
 
 ## Surprises & Discoveries
 
-The live daemon is 2.64.1+aa6200c0. Its database has no unreachable or missing-directory `last_error` values even though the user sees these warnings. This supports tracing live poll warnings rather than deleting historical errors. The session listing contains 7,875 sessions: 7,295 suspended, 504 parked, 64 running, and 12 suspending. Existing suspension/checkpoint failures are separate and must not be erased just to quiet the dashboard.
+The initial live daemon was 2.64.1+aa6200c0. Its database had no unreachable or missing-directory `last_error` values even though the user saw these warnings. This supported tracing live poll warnings rather than deleting historical errors. The initial listing contained 7,875 sessions: 7,295 suspended, 504 parked, 64 running, and 12 suspending. Existing suspension/checkpoint failures were separate and were not erased just to quiet the dashboard.
 
 The TUI calls `report_session_unreachable` for each failed poll. `mj-tui/src/notify.rs` unconditionally restarts notice display. `mj-cli/src/pollers.rs` also persists `TargetMissing` despite a revision-guarded daemon path already doing so. The store permits repeated Error-to-Error transitions.
 
@@ -46,13 +46,15 @@ Decision: Keep the old internal missing-target action's wire shape but acknowled
 
 ## Outcomes & Retrospective
 
-Investigation established a current warning ownership/display bug. Implementation, validation, and live cleanup remain in progress.
+The warning ownership/display bugs and blocked child-close paths are fixed and installed. All 12 diagnosed children have been closed without losing their histories or changing their eight parents' Running states and target locators. The live runtime no longer publishes their failing views. The requested cleanup is complete.
 
 The controller full suite completed with 2,231 passing tests, 19 ignored cases, and one new fixture failure (`missing_target_retry_completes_a_committed_transition` saved its session before creating the referenced workspace). Creating the fixture workspace corrected it and the focused rerun passed. The full CLI/TUI suites passed: TUI unit tests 565 passed/2 ignored, CLI unit tests 231 passed, and all CLI integration suites passed (four explicitly ignored tests in one suite). `cargo fmt --all -- --check`, `git diff --check`, and default-members `cargo clippy --all-targets -- -D warnings` passed in the dev profile. Final stale-client action and idempotent database-transition regressions passed separately. The exact late Provisioning race case `a_late_missing_workspace_report_cannot_invalidate_a_newer_session` passed on final source (1/1).
 
 The real-worker acceptance passed: `MJ_WORKER_BINARY=/mnt/optane/tmp/mj-child-close-0aa688df/mj-worker cargo test -p brokk-mj-controller dead_child_close_recovers_journal_without_recreating_its_cwd -- --ignored --nocapture` imported the final 106,496-byte event into materialized history, reached Stopped, cleared the child target, removed only its private root, left the missing cwd absent, and preserved the parent record and files. The companion `unreachable_child_keeps_its_private_journal_until_worker_death_is_proven` also passed. Both ran elevated in isolated stores. An initial acceptance fixture lacked the local target template; adding that template to its isolated config corrected it without production changes.
 
-Live installation and cleanup remain. No live session mutation has been performed; the preserved baseline identifies all 12 Closing children and their materialized event frontiers.
+The normal complete installation finished, and an ordinary installed `mj sessions` initiated daemon handoff. New daemon build dc4dbe4b6 automatically closed 11 of the 12 old children through their normal lifecycle. The final Morannon child had a separate stale socket entry in a live fuse-overlayfs container: all path components were directories, the socket had no listener, worker unlink returned ENOTDIR, and a guarded operator unlink returned ENOENT while the entry remained visible. No host upper-layer inode or mount was changed. Holding the child's existing exclusive worker.lock, verifying a socket inode and ECONNREFUSED, and renaming only that socket to a unique backup succeeded. The retained journal and state metadata were unchanged. A normal installed `mj suspend --session ea6ea7905f724d79c2a22fec2aa46138 --acknowledge-unpublished-work --json` then finished the child close; the flag satisfied the CLI's generic publication preflight, while the ownership-aware child close left the parent workspace alone.
+
+Final live acceptance verified all 12 records are Stopped, have no target or last_error, retain their original native session IDs, and have Closed materialized histories at event frontiers strictly newer than the baseline. All eight parent records retain their Running state and original target locators. A fresh read of the daemon runtime feed reports 59 worker views with zero errors and none of the old failing child IDs. The pushed merge's CI passed, and the upstream worker-image publication included by that merge passed. Cleanup required no session destruction, direct SQL update, parent stop, or mount change.
 
 ## Context and Orientation
 
@@ -105,3 +107,7 @@ Revision note (2026-11-02): Created from the two independent diagnoses and live 
 Revision note (2026-11-02 18:49Z): Recorded the live Closing-child causes, checkpoint-only close design, stable footer wording, legacy-client write removal, and completed implementation slices. Focused projection and DB idempotence regressions have passed; combined validation is pending the close recovery integration fixture.
 
 Revision note (2026-11-02 19:04Z): Recorded the full controller result and targeted fixture correction; reassigned real-worker acceptance after a provider-capacity failure. Retained only filtered session status evidence from the live snapshot, removing its full configuration copy.
+
+Revision note (2026-11-02 19:33Z): Code and normal installation are delivered; normal startup recovery closed 11 children. Recorded the final remote filesystem-path blocker and verified all child histories and parent targets before investigating it.
+
+Revision note (2026-11-02 19:45Z): Recorded successful guarded socket rename, ordinary final child close, complete live acceptance, and successful upstream CI/image checks. The requested warning cleanup is complete.
