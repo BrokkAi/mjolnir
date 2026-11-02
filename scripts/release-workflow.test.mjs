@@ -8,17 +8,15 @@ import test from 'node:test';
 const root = resolve(import.meta.dirname, '..');
 // Exercise the shell shipped in the workflow, so fixtures verify its observable
 // behavior rather than maintaining a second copy of the publication algorithm.
-// stepIndent is the indentation of the step's `- name:` line.
-function runStep(workflow, name, stepIndent = 6) {
-  const pad = n => ' '.repeat(n);
-  const rest = workflow.split(`${pad(stepIndent)}- name: ${name}\n`)[1];
+function runStep(workflow, name) {
+  const rest = workflow.split(`      - name: ${name}\n`)[1];
   assert.ok(rest, `missing step ${name}`);
-  const body = rest.split(`${pad(stepIndent + 2)}run: |\n`)[1];
+  const body = rest.split('        run: |\n')[1];
   assert.ok(body, `missing shell for ${name}`);
   const lines = [];
   for (const line of body.split('\n')) {
-    if (line && !line.startsWith(pad(stepIndent + 4))) break;
-    lines.push(line.slice(stepIndent + 4));
+    if (line && !line.startsWith('          ')) break;
+    lines.push(line.slice(10));
   }
   return lines.join('\n');
 }
@@ -299,64 +297,3 @@ ${curlBody}`, { mode: 0o755 });
     assert.ok(files.includes('brokkai-mjolnir-linux-arm64-gnu-1.2.3.ready'));
   });
 }
-
-const nightly = readFileSync(join(root, '.github/workflows/nightly.yml'), 'utf8');
-// Retries, same-day reruns and pruning must never produce a nightly that sorts
-// before an older one, or the unchanged-master check reads the wrong tag.
-test('nightly versions stay ordered across same-day runs, pruning and prereleases', t => {
-  const dir = fixture(t);
-  const git = (cwd, ...args) => {
-    const result = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'init.defaultBranch=master', ...args], { cwd, encoding: 'utf8' });
-    assert.equal(result.status, 0, result.stderr);
-    return result.stdout.trim();
-  };
-  mkdirSync(join(dir, 'bin'));
-  writeFileSync(join(dir, 'bin/date'), '#!/bin/sh\necho 20261102\n', { mode: 0o755 });
-  git(dir, 'init', '--quiet', '--bare', 'origin.git');
-  git(dir, 'init', '--quiet', 'work');
-  const work = join(dir, 'work');
-  git(work, 'remote', 'add', 'origin', `file://${join(dir, 'origin.git')}`);
-  const commit = version => {
-    writeFileSync(join(work, 'Cargo.toml'), `[workspace.package]\nversion = "${version}"\n`);
-    git(work, 'add', 'Cargo.toml');
-    git(work, 'commit', '--quiet', '--allow-empty', '-m', version);
-    git(work, 'push', '--quiet', 'origin', 'HEAD:master');
-  };
-  // Tags the release commit nightly.yml places on top of master.
-  const tagNightly = tag => {
-    const master = git(work, 'rev-parse', 'HEAD');
-    git(work, 'commit', '--quiet', '--allow-empty', '-m', `Release ${tag}`);
-    git(work, 'tag', tag);
-    git(work, 'push', '--quiet', 'origin', `refs/tags/${tag}`);
-    git(work, 'reset', '--quiet', '--hard', master);
-  };
-  const choose = () => {
-    const output = join(dir, 'output');
-    writeFileSync(output, '');
-    const result = spawnSync('bash', ['-euo', 'pipefail', '-c', runStep(nightly, 'Choose the nightly version', 4)], {
-      cwd: work, encoding: 'utf8', timeout: 10000,
-      env: { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: '' },
-    });
-    assert.equal(result.status, 0, result.stdout + result.stderr);
-    return Object.fromEntries(readFileSync(output, 'utf8').trim().split('\n').map(line => line.split('=')));
-  };
-
-  commit('1.2.3');
-  assert.equal(choose().tag, 'v1.3.0-nightly.20261102');
-  tagNightly('v1.3.0-nightly.20261102');
-  assert.equal(choose().tag, '', 'unchanged master cuts no nightly');
-
-  for (let counter = 2; counter <= 10; counter += 1) {
-    commit('1.2.3');
-    const { tag } = choose();
-    assert.equal(tag, `v1.3.0-nightly.20261102.${counter}`);
-    tagNightly(tag);
-  }
-  // Pruning removed the day's oldest tags; .10 still sorts last, not .9.
-  git(work, 'push', '--quiet', 'origin', '--delete', 'refs/tags/v1.3.0-nightly.20261102', 'refs/tags/v1.3.0-nightly.20261102.2');
-  assert.equal(choose().tag, '', 'the numerically latest tag was cut from master');
-
-  // A new base version keeps the day's counter, so the order stays total.
-  commit('1.3.0-rc.1');
-  assert.deepEqual(choose(), { version: '1.4.0-nightly.20261102.11', tag: 'v1.4.0-nightly.20261102.11' });
-});

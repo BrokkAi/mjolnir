@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Keep one stable tracking issue per platform lane in sync with that lane's
-# nightly result.
+# result on the latest release tag.
 # Inputs (env): CI_LANE (macos or windows), LANE_RESULT (success, failure,
 # cancelled, or skipped), GITHUB_REPOSITORY, GITHUB_SERVER_URL, GITHUB_RUN_ID,
-# GITHUB_RUN_ATTEMPT, GITHUB_SHA. Every GitHub call goes through `gh api`, JSON
-# through `jq`.
+# GITHUB_RUN_ATTEMPT, GITHUB_SHA, GITHUB_REF_NAME. Every GitHub call goes
+# through `gh api`, JSON through `jq`.
 set -euo pipefail
 
 : "${CI_LANE:?CI_LANE must be set}"
@@ -14,8 +14,9 @@ set -euo pipefail
 : "${GITHUB_RUN_ID:?GITHUB_RUN_ID must be set}"
 : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT must be set}"
 : "${GITHUB_SHA:?GITHUB_SHA must be set}"
+: "${GITHUB_REF_NAME:?GITHUB_REF_NAME must be set}"
 
-# Both lanes run in one nightly release workflow. Each lane's jobs are named
+# Both lanes run in one release workflow. Each lane's jobs are named
 # "<caller job name> / <job name>", so the prefix keeps one lane's issue from
 # reporting the other lane's failures.
 case "$CI_LANE" in
@@ -93,6 +94,7 @@ fi
 details="$(
     printf -- '- Result: %s\n' "$result_word"
     printf -- '- Run: %s (attempt %s)\n' "$run_url" "$GITHUB_RUN_ATTEMPT"
+    printf -- '- Tag: %s\n' "$GITHUB_REF_NAME"
     printf -- '- Commit: [%s](%s)\n' "${GITHUB_SHA:0:12}" "$commit_url"
     if [[ -n "$failing_job_field" ]]; then
         printf '%s\n' "$failing_job_field"
@@ -106,8 +108,8 @@ if [[ "$LANE_RESULT" == failure ]]; then
             cat <<EOF
 $marker
 
-The $lane_name lane of the nightly release failed. \`.github/workflows/nightly.yml\` cuts the nightly from master and \`.github/workflows/release.yml\` runs the lane on its tag; a failing lane also keeps that nightly from publishing.
-This issue stays open until a nightly lane passes; the release workflow closes it then, and later failures reopen it.
+The $lane_name lane failed for release tag \`$GITHUB_REF_NAME\` in \`.github/workflows/release.yml\`, so that release did not publish.
+This issue stays open until a release's $lane_name lane passes; the release workflow closes it then, and later failures reopen it.
 
 Latest failure:
 
@@ -119,16 +121,16 @@ EOF
     elif [[ "$issue_state" == closed ]]; then
         gh api -X PATCH "$api_root/issues/$issue_number" -f state=open >/dev/null
         gh api -X POST "$api_root/issues/$issue_number/comments" \
-            -f body="$(printf 'The nightly %s lane failed again.\n\n%s\n' "$lane_name" "$details")" >/dev/null
+            -f body="$(printf 'The %s lane failed again.\n\n%s\n' "$lane_name" "$details")" >/dev/null
         printf 'Reopened #%s\n' "$issue_number"
     else
         gh api -X POST "$api_root/issues/$issue_number/comments" \
-            -f body="$(printf 'The nightly %s lane is still failing.\n\n%s\n' "$lane_name" "$details")" >/dev/null
+            -f body="$(printf 'The %s lane is still failing.\n\n%s\n' "$lane_name" "$details")" >/dev/null
         printf 'Commented on #%s\n' "$issue_number"
     fi
 elif [[ -n "$issue_number" && "$issue_state" == open ]]; then
     gh api -X POST "$api_root/issues/$issue_number/comments" \
-        -f body="$(printf 'The nightly %s lane passed. Closing.\n\n%s\n' "$lane_name" "$details")" >/dev/null
+        -f body="$(printf 'The %s lane passed. Closing.\n\n%s\n' "$lane_name" "$details")" >/dev/null
     gh api -X PATCH "$api_root/issues/$issue_number" -f state=closed -f state_reason=completed >/dev/null
     printf 'Closed #%s\n' "$issue_number"
 else

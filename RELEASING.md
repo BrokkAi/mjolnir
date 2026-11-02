@@ -50,29 +50,15 @@ GitHub prereleases and use npm's `next` channel; stable versions use `latest`.
 A release request authorizes the normal tag push and publication. Registry
 authorization is configured once, not audited again for every release.
 
-## Nightly releases
+## Daily release
 
-`.github/workflows/nightly.yml` cuts a nightly from master at 05:41 UTC
-whenever master has changed since the previous nightly, and on manual dispatch
-from master. It runs the cargo-release preparation on top of master with a
-version such as `2.65.0-nightly.20261102` (the next minor after master's
-version), tags that commit, and starts `release.yml` on the tag. The
-version commit is reachable only from the tag; master never carries a nightly
-version. No bot account or extra token is involved: the workflow's own token
-pushes the tag and dispatches the release.
-
-A nightly goes through the same release workflow, full CI and macOS and
-Windows lanes as any tag. It becomes a GitHub prerelease, publishes
-`agent-dev:<version>`, and publishes npm under the `nightly` dist-tag
-(`npm install -g @brokkai/mjolnir@nightly`). It never reaches crates.io,
-Homebrew, Discord, npm `latest` or `next`, or the GitHub "latest" release, so
-the startup update check of stable installs never offers it. Nightly lane
-results open and close the "Nightly macOS CI is failing" and "Nightly Windows
-CI is failing" tracking issues. The workflow keeps the newest 14 nightly tags
-and deletes older nightly releases and their tags.
-
-A nightly that fails CI publishes nothing; fix master and the next nightly
-picks it up, or rerun the failed jobs. Do not tag nightly versions by hand.
+`.github/workflows/nightly.yml` releases master every day at 05:41 UTC when
+master's CI run is green. It runs `cargo release minor` as above, pushes the
+version commit to master together with its tag, and starts `release.yml` on
+the tag, so the result is an ordinary release on every channel. The version
+commit gets no CI run of its own, so a day without new commits releases
+nothing. If master moves while the job runs, the push is refused and the next
+day's run releases the newer master.
 
 ## Recovery and optional channels
 

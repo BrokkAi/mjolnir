@@ -143,11 +143,7 @@ jobs:
         run: |
           set -euo pipefail
           version="$(sed -n '/^\[workspace\.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
-          # Nightlies from nightly.yml move only `nightly`; other prereleases
-          # move `next`. The update check follows `latest` alone.
-          if [[ "$version" == *-nightly.* ]]; then
-            dist_tag=nightly
-          elif [[ "$version" == *-* ]]; then
+          if [[ "$version" == *-* ]]; then
             dist_tag=next
           else
             dist_tag=latest

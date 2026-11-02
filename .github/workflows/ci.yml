@@ -157,7 +157,7 @@ jobs:
       run: cargo test
 
   # Check-ins run Linux only. release.yml runs the macOS and Windows lanes
-  # beside this workflow for every tag, nightly ones included, so a release
+  # beside this workflow for every tag, so a release
   # still publishes only after every platform lane passes.
 
   portable-worker:

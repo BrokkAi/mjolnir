@@ -236,10 +236,10 @@ tests, the desktop application, and the voice worker on macOS. The Windows
 lane (`.github/workflows/windows.yml`) compiles the workspace tests, runs the
 controller-side suites and the installer test, and builds the desktop
 application on Windows. Both lanes run for every release tag, including the
-nightly release that `.github/workflows/nightly.yml` cuts from master, and
-when `nightly.yml` is dispatched from another branch; check-ins do not run
-them. A failing nightly lane opens or reopens its own tracking issue, and
-that lane's next passing nightly closes it. Separate jobs check formatting, older GNU/Linux
+daily release that `.github/workflows/nightly.yml` cuts from master, and on
+manual dispatch of `nightly.yml`; check-ins do not run them. A lane that
+fails on a release tag opens or reopens its own tracking issue, and that
+lane's next passing release closes it. Separate jobs check formatting, older GNU/Linux
 compatibility, a deterministic multi-client reliability scenario,
 the Linux voice worker, dependency licenses, and packaged legal files.
 Build caches are isolated by job, OS, architecture, and configuration, with
