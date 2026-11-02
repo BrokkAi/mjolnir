@@ -234,14 +234,10 @@ Unit tests are colocated in module-level `#[cfg(test)]` blocks. `mj-cli/tests/` 
 
 ## macOS and Windows CI
 
-On check-ins, the macOS and Windows runners start only for changes sensitive
-to that platform; both also run nightly and on every release tag. The
-maintained lists are `.github/macos-ci-paths.txt` and
-`.github/windows-ci-paths.txt`; files with that platform's cfg gate, such as
-`target_os = "macos"` or `cfg(windows)`, match automatically (each list's
-header names every gate). When you add a macOS or Windows wrapper or
-platform-specific module without such a gate, add its path to that list in
-the same change.
+Check-ins run CI on Linux only. The macOS and Windows lanes run nightly, on
+manual dispatch of `nightly.yml`, and on every release tag. After a
+platform-sensitive change, dispatch `nightly.yml` on master to check it before
+the next night's run.
 
 ## Harness pins
 

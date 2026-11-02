@@ -139,10 +139,13 @@ with open(config, "w", encoding="utf-8") as output:
     json.dump({
         "session_id": "018f9dd2-a3b4-7c8d-9000-chaos000001",
         "harness": "kimi",
+        # State the home as the controller does; preparation refuses a
+        # session whose harness home it cannot locate.
+        "harness_home": profile,
         "bridge_command": "python3",
         "bridge_args": [bridge],
         "environment": {
-            "KIMI_HOME": profile,
+            "KIMI_CODE_HOME": profile,
             "MJ_CHAOS_STATE": state,
             "MJ_CHAOS_BINARY": hel,
             "MJ_CHAOS_MEMORY": memory,
@@ -167,6 +170,15 @@ require_pid() {
     kill -0 "$pid" 2>/dev/null || { echo "$expected pid is not alive: $pid" >&2; exit 1; }
 }
 
+# The worker keeps its relay up when harness preparation fails and records the
+# refusal only in its root, so its stdout alone cannot explain a missing bridge.
+report_worker_evidence() {
+    tail -n 80 "$worker_log" >&2
+    cat "$worker_root/worker-startup.json" >&2 2>/dev/null || true
+    tail -n 80 "$worker_root/worker.log" >&2 2>/dev/null || true
+    tail -n 80 "$chaos_root/bridge.log" >&2 2>/dev/null || true
+}
+
 wait_for_file_pid() {
     local path=$1 expected=$2 previous=${3:-}
     local pid=
@@ -181,8 +193,7 @@ wait_for_file_pid() {
     echo "timed out waiting for $expected pid in $path" >&2
     ps -eo pid=,ppid=,pgid=,sid=,stat=,wchan=,args= >&2
     echo "pid files: bridge=$(cat "$chaos_root/bridge.pid" 2>/dev/null || true) supervisor=$supervisor worker=$worker_pid" >&2
-    tail -n 80 "$worker_log" >&2
-    tail -n 80 "$chaos_root/bridge.log" >&2 || true
+    report_worker_evidence
     return 1
 }
 
@@ -199,8 +210,7 @@ supervisor_pid() {
     done
     echo "timed out waiting for ACP supervisor child of $worker_pid" >&2
     ps -eo pid=,ppid=,pgid=,sid=,args= >&2
-    tail -n 80 "$worker_log" >&2
-    tail -n 80 "$chaos_root/bridge.log" >&2 || true
+    report_worker_evidence
     return 1
 }
 
@@ -212,7 +222,7 @@ start_worker() {
         [[ -S $worker_root/control.sock ]] && return 0
         kill -0 "$worker_pid" 2>/dev/null || {
             echo "worker stopped during startup" >&2
-            tail -n 80 "$worker_log" >&2
+            report_worker_evidence
             return 1
         }
         sleep 0.02
@@ -249,8 +259,7 @@ sys.exit(0 if state.get("acp_ready") is True and state.get("native_session_id") 
         sleep 0.2
     done
     echo "worker did not finish the ACP handshake" >&2
-    tail -n 80 "$worker_log" >&2
-    tail -n 80 "$chaos_root/bridge.log" >&2 || true
+    report_worker_evidence
     return 1
 }
 
@@ -265,8 +274,7 @@ wait_for_markers() {
     ps -eo pid=,ppid=,pgid=,sid=,stat=,wchan=,args= >&2
     echo "pid files: bridge=$(cat "$chaos_root/bridge.pid" 2>/dev/null || true) supervisor=$supervisor worker=$worker_pid" >&2
     attach_response >&2 || true
-    tail -n 80 "$worker_log" >&2
-    tail -n 80 "$chaos_root/bridge.log" >&2 || true
+    report_worker_evidence
     return 1
 }
 
@@ -275,8 +283,7 @@ assert_markers() {
     actual=$(marker_count)
     [[ $actual == "$expected" ]] || {
         echo "expected $expected restart markers, found $actual" >&2
-        tail -n 80 "$worker_log" >&2
-        tail -n 80 "$chaos_root/bridge.log" >&2 || true
+        report_worker_evidence
         exit 1
     }
 }
