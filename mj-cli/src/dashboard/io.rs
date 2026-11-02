@@ -37,10 +37,7 @@ use tokio::task::{JoinError, JoinHandle};
 use crate::daemon;
 use crate::dashboard::{CriticalOperationTracker, DashboardContext};
 use crate::import::{DashboardImportSuccess, PendingDashboardImport, persist_imported_session};
-use crate::pollers::{
-    DashboardLifecycleUpdate, LifecycleSuccess, WorkerRecordPersistence,
-    WorkerRecordPersistenceOutcome,
-};
+use crate::pollers::{DashboardLifecycleUpdate, LifecycleSuccess};
 use crate::short_id;
 
 /// Everything the dashboard learns from a background job.
@@ -87,10 +84,6 @@ pub(crate) enum DashboardIoUpdate {
     WorkspaceLayouts {
         result:
             std::result::Result<BTreeMap<String, mj_core::workspace::ConversationLayout>, String>,
-    },
-    WorkerRecordPersistence {
-        operation: WorkerRecordPersistence,
-        result: std::result::Result<WorkerRecordPersistenceOutcome, String>,
     },
     MaterializedSessionProjection {
         session_id: String,
@@ -800,38 +793,6 @@ impl DashboardContext {
                     Some(chat) => chat.report_review_refusal(message),
                     // The chat moved on; the refusal still belongs on screen.
                     None => self.dashboard.set_notice(message),
-                }
-            }
-            DashboardIoUpdate::WorkerRecordPersistence { operation, result } => {
-                match (operation, result) {
-                    (
-                        WorkerRecordPersistence::TargetMissing {
-                            session_id,
-                            detail: _,
-                            updated_at: _,
-                        },
-                        Ok(WorkerRecordPersistenceOutcome::TargetMissing(state)),
-                    ) => {
-                        let name = self.session_notice_name(&session_id);
-                        let notice = match state {
-                            SessionState::Error => format!(
-                                "Session {name} cannot reach its managed target; its last verified checkpoint is ready to resume"
-                            ),
-                            SessionState::Lost => format!("Session {name} lost its managed target"),
-                            _ => unreachable!("target-missing result is error or lost"),
-                        };
-                        self.dashboard.set_notice(notice);
-                    }
-                    (WorkerRecordPersistence::TargetMissing { session_id, .. }, Err(error)) => {
-                        self.dashboard.set_notice(format!(
-                            "Could not record missing target for {}: {error}",
-                            self.session_notice_name(&session_id)
-                        ))
-                    }
-                    (
-                        WorkerRecordPersistence::TargetMissing { .. },
-                        Ok(WorkerRecordPersistenceOutcome::Unchanged),
-                    ) => {}
                 }
             }
             DashboardIoUpdate::MaterializedSessionProjection { session_id, result } => {
@@ -1953,6 +1914,21 @@ impl DashboardContext {
         episode_id: u64,
         result: std::result::Result<Option<String>, String>,
     ) {
+        if !self
+            .controller
+            .state
+            .sessions
+            .get(&session_id)
+            .is_some_and(mj_controller::pollers::session_target_is_pollable)
+        {
+            self.worker_diagnoses.observe(&session_id, true, None);
+            self.worker_diagnoses.finish(&session_id, episode_id);
+            self.dashboard.clear_session_unreachable(&session_id);
+            if let Err(error) = result {
+                tracing::warn!(%session_id, "retired worker diagnosis task failed: {error}");
+            }
+            return;
+        }
         let completion = self.worker_diagnoses.finish(&session_id, episode_id);
         if let Some(error) = completion.display_error {
             let mut message = format!("relay unreachable: {error}");
@@ -1968,8 +1944,6 @@ impl DashboardContext {
                 }
             }
             tracing::warn!(%session_id, "{message}");
-            self.dashboard
-                .report_session_unreachable(&session_id, false);
         } else if let Err(error) = &result {
             tracing::warn!(%session_id, "stale worker diagnosis task failed: {error}");
         }

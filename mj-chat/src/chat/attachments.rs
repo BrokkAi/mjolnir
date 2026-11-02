@@ -10,7 +10,7 @@ use std::io::Read;
 use std::ops::Range;
 use std::path::Path;
 
-use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent};
+use agent_client_protocol::v1::schema::{ContentBlock, ImageContent, TextContent};
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -579,7 +579,7 @@ pub(super) fn insert_image(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::ContentBlock;
+    use agent_client_protocol::v1::schema::ContentBlock;
     use base64::Engine;
 
     fn image(tag: &str) -> ClipboardImage {

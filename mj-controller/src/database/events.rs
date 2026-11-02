@@ -951,7 +951,7 @@ mod tests {
         else {
             unreachable!("turn fixture starts with a prompt")
         };
-        prompt.push(agent_client_protocol::schema::v1::ContentBlock::from(
+        prompt.push(agent_client_protocol::v1::schema::ContentBlock::from(
             "Inspect the chosen directory",
         ));
         observations.splice(

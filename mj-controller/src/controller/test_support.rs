@@ -598,6 +598,12 @@ impl IsolatedTest {
         self
     }
 
+    /// Include an ignored integration case in the isolated child process.
+    pub(crate) fn include_ignored(mut self) -> Self {
+        self.command.arg("--ignored");
+        self
+    }
+
     /// Give the child its own configuration and data directories under `root`.
     pub(crate) fn isolated_store(self, root: &Path) -> Self {
         self.env("MJ_DATA_DIR", root.join("data"))

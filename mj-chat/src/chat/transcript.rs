@@ -32,7 +32,7 @@ use crate::components::{
     scrollbar_geometry, scrollbar_mark_row,
 };
 use crate::theme;
-use agent_client_protocol::schema::v1::{ToolCall, ToolCallContent, ToolKind};
+use agent_client_protocol::v1::schema::{ToolCall, ToolCallContent, ToolKind};
 pub use mj_client::transcript::TAIL_SEED_ITEMS;
 pub(super) use mj_client::transcript::*;
 use ratatui::Frame;

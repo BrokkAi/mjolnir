@@ -1,5 +1,5 @@
 use super::*;
-use agent_client_protocol::schema::v1::{ImageContent, TextContent};
+use agent_client_protocol::v1::schema::{ImageContent, TextContent};
 use std::path::Path;
 
 /// Exercise the actual client and native host without printing credentials or

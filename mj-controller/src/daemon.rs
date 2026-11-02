@@ -29,7 +29,7 @@ use crate::targets::{
     CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor,
     ProvisionStage, ProvisionStageGuard,
 };
-use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use mj_core::config::Config;
 use mj_core::refusal::Refusal;

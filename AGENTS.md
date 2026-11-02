@@ -245,25 +245,28 @@ Harness versions are pinned in `mj-core/src/harness_runtime.rs`. When you
 change a pin, update the agent-dev container image in the same commit, so
 container sessions run the same harness versions as managed bare workers:
 
-- Codex and Claude bridges: update the `npm install --global` line in
+- Codex and Claude bridges, Kimi Code, Grok, and OpenCode: update the
+  `npm install --global` line in
   `containers/Containerfile.agent-dev`, as well as the package files in
   `mj-core/assets/harnesses/`. The test
   `bridge_fallback_pins_match_the_agent_dev_containerfile` fails if the
   Containerfile and the pins disagree.
 - Muse: update `mj-core/assets/muse/runtime.json`. The image installs Muse
   from that file.
-- dsh-acp: update `DSH_ACP_VERSION` in `mj-core/src/harness_runtime.rs`. DSH
-  has no managed installation and is not in the image; sessions and the model
-  discovery probe launch it through `npx -y @brokkai/dsh-acp@<version>`, so
-  the version in `dsh_acp_launch_script()` is the whole pin. The test
-  `bridge_fallback_pins_match_the_agent_dev_containerfile` asserts the launch
-  names the pinned version.
+- dsh-acp: update `DSH_ACP_VERSION` in `mj-core/src/harness_runtime.rs` and
+  the `npm install --global` line in `containers/Containerfile.agent-dev`. DSH
+  has no managed installation; outside the image, sessions and the model
+  discovery probe launch it through `npx -y @brokkai/dsh-acp@<version>` from
+  `dsh_acp_launch_script()`. The test
+  `bridge_fallback_pins_match_the_agent_dev_containerfile` asserts both name
+  the pinned version.
 - OpenCode: regenerate `mj-core/assets/opencode-provider-environment.txt`
   with `scripts/generate-opencode-provider-environment.py` from a checkout of
   the new tag. The test
   `opencode_provider_environment_was_generated_from_the_pinned_opencode`
   fails until you do.
-- Grok and Kimi are not in the image. They install on demand.
+- MiMo Code: update `mj-core/assets/mimo/runtime.json`. The image installs
+  MiMo Code from that file.
 
 Pushing the commit to master runs `publish-agent-dev-image.yml`, which
 publishes `ghcr.io/brokkai/mjolnir/agent-dev:latest`. Check that the run

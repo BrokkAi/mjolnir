@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::controller::checkpoint::{
-    BarrierBusyPolicy, CHECKPOINT_BARRIER_TIMEOUT, connect_checkpoint_relay,
-    wait_for_checkpoint_barrier,
+    BarrierBusyPolicy, CHECKPOINT_BARRIER_TIMEOUT, adopt_restarted_checkpoint_relay,
+    connect_checkpoint_relay, wait_for_checkpoint_barrier,
 };
 
 impl Controller {
@@ -52,7 +52,36 @@ impl Controller {
                     .into_iter()
                     .next()
                     .context("reconnect plan is empty")?;
-                Some(connect_checkpoint_relay(session_id, manager, &reconnect, None).await?)
+                let connected = connect_checkpoint_relay(session_id, manager, &reconnect, None).await;
+                Some(match connected {
+                    Ok(relay) => relay,
+                    Err(error) if crate::session_manager::worker_connect_needs_restart(&error) => {
+                        let (backend, worker_root) = self.worker_placement(session_id)?;
+                        let liveness = executor.execute(
+                            &super::super::worker_binary::worker_liveness_command(
+                                &backend,
+                                &worker_root,
+                            ),
+                        )?;
+                        ensure!(
+                            liveness.status == 0
+                                && String::from_utf8_lossy(&liveness.stdout).trim() == "dead",
+                            "child relay is unreachable, but its worker is not confirmed dead; preserving its private journal: {error:#}"
+                        );
+                        let connection = self
+                            .restart_worker_for_checkpoint_only(
+                                session_id,
+                                executor,
+                                &backend,
+                                &worker_root,
+                                &reconnect,
+                            )
+                            .await
+                            .context("recover dead child worker without starting its harness")?;
+                        adopt_restarted_checkpoint_relay(session_id, manager, connection).await?
+                    }
+                    Err(error) => return Err(error),
+                })
             } else {
                 None
             };

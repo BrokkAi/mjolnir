@@ -2,7 +2,7 @@ use super::*;
 use crate::pollers::QUOTA_REFRESH_INTERVAL;
 use std::collections::BTreeMap;
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     SessionConfigSelectOptions,
 };
@@ -512,7 +512,7 @@ fn a_session_whose_turn_outlives_the_daemon_is_not_reported_idle() {
 
 #[test]
 fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         AvailableCommand, AvailableCommandInput, SessionMode, SessionModeState,
         UnstructuredCommandInput,
     };

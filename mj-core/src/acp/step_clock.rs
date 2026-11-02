@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::v1::{SessionUpdate, ToolCallStatus};
+use agent_client_protocol::v1::schema::{SessionUpdate, ToolCallStatus};
 
 use crate::clock::epoch_millis;
 

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::*;
-use agent_client_protocol::schema::v1::ToolCallUpdate;
+use agent_client_protocol::v1::schema::ToolCallUpdate;
 use mj_core::subagent::SubagentMcpRole;
 
 // Hard-won: 61a1cfa: Codex replay dropped the current available-command catalogue and goal metadata, including on large history.
@@ -313,7 +313,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
 
 #[test]
 fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
-    use agent_client_protocol::schema::v1::{PermissionOption, ToolCallUpdateFields};
+    use agent_client_protocol::v1::schema::{PermissionOption, ToolCallUpdateFields};
     use mj_core::worker_launch::ReviewMcpServer;
     // A DSH permission request, titled and offering options as dsh-acp 0.2.0
     // does, and the option the worker selects for it without asking.
@@ -821,7 +821,7 @@ fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
         "session-1"
     ));
 
-    let created = SessionUpdate::ToolCall(agent_client_protocol::schema::v1::ToolCall::new(
+    let created = SessionUpdate::ToolCall(agent_client_protocol::v1::schema::ToolCall::new(
         "live-tool",
         "read",
     ));
@@ -1358,7 +1358,7 @@ async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter(
 
 #[test]
 fn unconstrained_permission_prefers_a_one_time_allow_and_never_cancels() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         PermissionOption, ToolCallUpdate, ToolCallUpdateFields,
     };
 
@@ -2211,7 +2211,7 @@ fn grok_plan_review_answers_are_user_selected() {
 
 #[test]
 fn supported_permission_plan_reviews_are_detected_and_mapped_to_native_options() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         PermissionOption, ToolCallUpdate, ToolCallUpdateFields,
     };
 
@@ -5798,7 +5798,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
 
 #[test]
 fn echoed_user_images_do_not_reenter_the_relay_journal() {
-    use agent_client_protocol::schema::v1::{ContentChunk, ImageContent};
+    use agent_client_protocol::v1::schema::{ContentChunk, ImageContent};
     let update = SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Image(
         ImageContent::new("x".repeat(700 * 1024), "image/png"),
     )));

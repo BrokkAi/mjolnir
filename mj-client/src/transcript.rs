@@ -1,5 +1,5 @@
 //! Transcript conversion and presentation rules shared by terminal and web clients.
-use agent_client_protocol::schema::v1::{Plan, ToolCall, ToolCallStatus};
+use agent_client_protocol::v1::schema::{Plan, ToolCall, ToolCallStatus};
 use mj_core::config::ToolOutput;
 use mj_core::hex::lower_hex;
 use mj_core::state::{MaterializedSession, TerminalOutputRecord, TranscriptBody, TranscriptItem};

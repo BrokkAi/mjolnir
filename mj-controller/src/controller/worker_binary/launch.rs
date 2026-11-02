@@ -651,8 +651,8 @@ impl Controller {
                         crate::daemon::StartupStep::ApiPrompt { text } => (
                             mj_core::relay::RelayCommand::Prompt {
                                 prompt: vec![
-                                    agent_client_protocol::schema::v1::ContentBlock::Text(
-                                        agent_client_protocol::schema::v1::TextContent::new(text),
+                                    agent_client_protocol::v1::schema::ContentBlock::Text(
+                                        agent_client_protocol::v1::schema::TextContent::new(text),
                                     ),
                                 ],
                             },

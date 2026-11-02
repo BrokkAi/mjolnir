@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AgentCapabilities, ContentBlock, ContentChunk, Implementation, SessionUpdate, TextContent,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -1668,7 +1668,7 @@ async fn kimi_native_task_level_blocks_replacement_until_termination() {
     monitor.attach(SESSION_ID.into(), &relay).await.unwrap();
 
     let task_query = || {
-        use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
+        use agent_client_protocol::v1::schema::{ToolCall, ToolCallStatus};
         let mut call = ToolCall::new("0:query-not-launcher", "TaskOutput");
         call.status = ToolCallStatus::Completed;
         call.raw_output = Some(serde_json::json!({"output": "task_id: agent-1\nstatus: running"}));
@@ -5431,7 +5431,7 @@ fn a_restored_never_prompted_session_may_replace_its_native_session() {
 /// mismatch. That pin belongs to the bridge's environment and nowhere else.
 #[tokio::test]
 async fn a_codex_resume_launches_its_bridge_on_the_accepted_model() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     };
 
@@ -5486,7 +5486,7 @@ async fn a_codex_resume_launches_its_bridge_on_the_accepted_model() {
 /// for, and a model the session accepted afterwards still wins.
 #[tokio::test]
 async fn a_new_codex_session_launches_its_bridge_on_its_creation_model() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     };
 

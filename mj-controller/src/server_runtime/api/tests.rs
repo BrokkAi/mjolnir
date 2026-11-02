@@ -595,7 +595,7 @@ impl ExportRuntime for NoExports {
 /// A connected view whose harness is ready and offers one model.
 fn ready_view(model: &str) -> ManagedSessionView {
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
-    let option: agent_client_protocol::schema::v1::SessionConfigOption =
+    let option: agent_client_protocol::v1::schema::SessionConfigOption =
         serde_json::from_value(serde_json::json!({
             "id": "model",
             "name": "Model",

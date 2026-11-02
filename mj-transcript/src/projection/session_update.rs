@@ -264,7 +264,7 @@ pub(super) fn push_stream_chunk(
     // another kind (a tool call, a plan update, ...) or a thought/agent kind switch makes the
     // transcript's last item mismatch, so the next chunk starts a fresh item.
     running: bool,
-    chunk: &agent_client_protocol::schema::v1::ContentChunk,
+    chunk: &agent_client_protocol::v1::schema::ContentChunk,
 ) -> Result<()> {
     let explicit_id = chunk.message_id.as_ref().map(|id| {
         if agent {
@@ -433,7 +433,7 @@ pub(super) fn upsert(mutation: &mut MaterializedSessionMutation, item: Transcrip
 }
 
 pub(super) fn configuration_values(
-    options: &[agent_client_protocol::schema::v1::SessionConfigOption],
+    options: &[agent_client_protocol::v1::schema::SessionConfigOption],
 ) -> Result<BTreeMap<String, Value>> {
     anyhow::ensure!(
         options

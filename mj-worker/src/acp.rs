@@ -53,8 +53,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::TextContent;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::TextContent;
+use agent_client_protocol::v1::schema::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, ContentBlock,
     CreateTerminalRequest, CreateTerminalResponse, ElicitationCapabilities,
     ElicitationFormCapabilities, EmbeddedResource, EmbeddedResourceResource, Implementation,
@@ -68,7 +69,7 @@ use agent_client_protocol::schema::v1::{
     TerminalId, TerminalOutputRequest, TerminalOutputResponse, ToolCallUpdateFields,
     WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo, UntypedMessage};
+use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, UntypedMessage};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
@@ -119,7 +120,7 @@ pub fn worker_exit_reason(error: &anyhow::Error) -> String {
 /// decides the form the harness's bridge receives.
 #[cfg(any(unix, test))]
 pub(crate) fn hidden_context_block(text: String) -> ContentBlock {
-    use agent_client_protocol::schema::v1::TextResourceContents;
+    use agent_client_protocol::v1::schema::TextResourceContents;
 
     ContentBlock::Resource(EmbeddedResource::new(
         EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
@@ -769,7 +770,7 @@ async fn emit_close_outcome<T>(
 ) -> Result<()> {
     match outcome {
         Ok(_) => emit_runtime_event(events, RuntimeEvent::CloseApplied { request_id }).await,
-        Err(error) if error.code == agent_client_protocol::ErrorCode::MethodNotFound => {
+        Err(error) if error.code == agent_client_protocol::ErrorCode::METHOD_NOT_FOUND => {
             emit_runtime_event(
                 events,
                 RuntimeEvent::Warning {

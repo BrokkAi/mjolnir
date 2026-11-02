@@ -838,7 +838,7 @@ fn claude_attachment_steer_is_left_for_the_next_normal_prompt() {
         RelayCommand::Prompt {
             prompt: vec![
                 ContentBlock::from("Review this image."),
-                ContentBlock::Image(agent_client_protocol::schema::v1::ImageContent::new(
+                ContentBlock::Image(agent_client_protocol::v1::schema::ImageContent::new(
                     "aW1hZ2U=",
                     "image/png",
                 )),
@@ -3336,7 +3336,7 @@ fn restarting_a_silent_autonomous_turn_clears_its_process_local_binding() {
 }
 
 fn tool_call_update() -> SessionUpdate {
-    SessionUpdate::ToolCall(agent_client_protocol::schema::v1::ToolCall::new(
+    SessionUpdate::ToolCall(agent_client_protocol::v1::schema::ToolCall::new(
         "call-1", "Bash",
     ))
 }
@@ -3344,7 +3344,7 @@ fn tool_call_update() -> SessionUpdate {
 /// The `usage_update` the Claude adapter sends when an SDK cycle ends and
 /// the cycle produced assistant usage.
 fn origin_marker(origin: &str) -> SessionUpdate {
-    let mut usage = agent_client_protocol::schema::v1::UsageUpdate::new(10, 200);
+    let mut usage = agent_client_protocol::v1::schema::UsageUpdate::new(10, 200);
     usage.meta = Some(
         serde_json::from_value(serde_json::json!({
             "_claude/origin": {"kind": origin},
@@ -3880,9 +3880,9 @@ fn exec_card(
     command: &[&str],
     exit_code: Option<i64>,
 ) -> SessionUpdate {
-    let mut call = agent_client_protocol::schema::v1::ToolCall::new(tool_call_id, "shell");
-    call.kind = agent_client_protocol::schema::v1::ToolKind::Execute;
-    call.status = agent_client_protocol::schema::v1::ToolCallStatus::Completed;
+    let mut call = agent_client_protocol::v1::schema::ToolCall::new(tool_call_id, "shell");
+    call.kind = agent_client_protocol::v1::schema::ToolKind::Execute;
+    call.status = agent_client_protocol::v1::schema::ToolCallStatus::Completed;
     call.raw_input = Some(serde_json::json!({ "command": command }));
     call.raw_output = Some(serde_json::json!({
         "output": "",
@@ -3892,7 +3892,7 @@ fn exec_card(
 }
 
 fn kimi_background_agent_card() -> SessionUpdate {
-    use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
+    use agent_client_protocol::v1::schema::{ToolCall, ToolCallStatus};
 
     let mut call = ToolCall::new(
         "1:tool_agent",
@@ -3911,7 +3911,7 @@ fn kimi_background_agent_card() -> SessionUpdate {
 }
 
 fn kimi_background_agent_card_with_run_in_background_only() -> SessionUpdate {
-    use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
+    use agent_client_protocol::v1::schema::{ToolCall, ToolCallStatus};
 
     let mut call = ToolCall::new("run-only", "agent");
     call.status = ToolCallStatus::Completed;
@@ -3924,7 +3924,7 @@ fn kimi_background_agent_card_with_run_in_background_only() -> SessionUpdate {
 
 #[test]
 fn kimi_task_queries_reconcile_by_native_identity_in_either_event_order() {
-    use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
+    use agent_client_protocol::v1::schema::{ToolCall, ToolCallStatus};
 
     for native_first in [false, true] {
         let temp = tempfile::tempdir().unwrap();
@@ -3979,7 +3979,7 @@ fn kimi_task_queries_reconcile_by_native_identity_in_either_event_order() {
 }
 
 fn kimi_background_agent_card_with_running_task_id_only() -> SessionUpdate {
-    use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
+    use agent_client_protocol::v1::schema::{ToolCall, ToolCallStatus};
 
     let mut call = ToolCall::new("task-only", "agent");
     call.status = ToolCallStatus::Completed;
@@ -3998,7 +3998,7 @@ fn kimi_background_shell_card(
     tool_call_id: &'static str,
     terminal_id: Option<&str>,
 ) -> SessionUpdate {
-    use agent_client_protocol::schema::v1::{Terminal, ToolCall, ToolCallContent, ToolCallStatus};
+    use agent_client_protocol::v1::schema::{Terminal, ToolCall, ToolCallContent, ToolCallStatus};
 
     let mut call = ToolCall::new(tool_call_id, "Bash");
     call.status = ToolCallStatus::Completed;
@@ -4486,7 +4486,7 @@ fn claude_stop_acknowledgement(name: &str) -> String {
 }
 
 fn agent_text_chunk(text: &str) -> SessionUpdate {
-    use agent_client_protocol::schema::v1::{ContentChunk, TextContent};
+    use agent_client_protocol::v1::schema::{ContentChunk, TextContent};
     SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
         text,
     ))))
@@ -4773,7 +4773,7 @@ fn air_tasks_are_authoritative_and_replay_does_not_anticipate_a_turn() {
 
 #[test]
 fn completed_codex_mcp_execute_calls_do_not_leave_background_work() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
 
@@ -4923,7 +4923,7 @@ fn an_unsettled_tool_call_is_foreground_work_even_without_a_turn_marker() {
 
 #[test]
 fn completed_subagent_tool_update_keeps_a_parent_prompt_busy() {
-    use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
+    use agent_client_protocol::v1::schema::{ToolCall, ToolCallStatus};
 
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
@@ -5048,7 +5048,7 @@ fn cancel_dispatches_while_the_prompt_it_targets_is_in_flight() {
     assert_eq!(
         steering.prompt,
         vec![ContentBlock::Text(
-            agent_client_protocol::schema::v1::TextContent::new("change direction")
+            agent_client_protocol::v1::schema::TextContent::new("change direction")
         )]
     );
 
@@ -6048,7 +6048,7 @@ fn clear_refuses_pending_work_and_invalid_input_without_changing_identity() {
 
 #[test]
 fn jev_messages_survive_reopen_without_tool_details() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use mj_core::activity::{ActivityFacts, verdict::TurnPhase};
@@ -6383,7 +6383,7 @@ fn output_while_a_resumed_session_is_set_up_is_a_notice_and_opens_no_turn() {
 // Hard-won: e8566ee4: a late Claude tool failure opened a turn that blocked mailbox wakes for 94 minutes.
 #[test]
 fn late_claude_tool_status_preserves_the_transcript_without_opening_a_turn() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         Content, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
     };
     use mj_core::state::TranscriptBody;
@@ -6486,7 +6486,7 @@ fn late_claude_tool_status_preserves_the_transcript_without_opening_a_turn() {
 // Hard-won: 748622b7: a live model-change notice was appended to the previous agent reply.
 #[test]
 fn text_that_answers_a_model_change_is_its_own_notice_and_leaves_the_reply_alone() {
-    use agent_client_protocol::schema::v1::{ContentChunk, TextContent};
+    use agent_client_protocol::v1::schema::{ContentChunk, TextContent};
 
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());

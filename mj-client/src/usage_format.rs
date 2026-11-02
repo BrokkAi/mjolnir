@@ -378,7 +378,7 @@ impl SessionActivity {
                 .map(|started_at_ms| mj_core::activity::InFlightToolCall {
                     tool_call_id: String::new(),
                     title: None,
-                    status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
+                    status: agent_client_protocol::v1::schema::ToolCallStatus::InProgress,
                     started_at_ms,
                 })
                 .into_iter()

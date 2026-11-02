@@ -1,6 +1,6 @@
 //! Transcript projection and presentation implementation.
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     SessionUpdate, ToolCall, ToolCallContent, ToolCallLocation, ToolCallUpdateFields, ToolKind,
 };
 use mj_core::acp::RuntimeEvent;
@@ -64,7 +64,7 @@ pub fn compact_tool_call_for_retention(body: &mut TranscriptBody) -> bool {
 }
 
 fn drop_diff_body(item: &mut serde_json::Value) -> bool {
-    use agent_client_protocol::schema::v1::ToolCallContent;
+    use agent_client_protocol::v1::schema::ToolCallContent;
 
     // Round-trip through `ToolCallContent`, not `Diff`: the variant tag lives
     // on the enum, and writing back a bare `Diff` would strip it and make the
@@ -1733,7 +1733,7 @@ pub fn transcript_item_text(item: &TranscriptItem) -> String {
             sanitize_terminal_text(&terminal_output_detail(record))
         }
         TranscriptBody::Plan { plan } => {
-            let Ok(plan) = agent_client_protocol::schema::v1::Plan::deserialize(plan) else {
+            let Ok(plan) = agent_client_protocol::v1::schema::Plan::deserialize(plan) else {
                 return String::new();
             };
             plan.entries
@@ -1789,7 +1789,7 @@ pub fn materialized_tool_diffstats(item: &TranscriptItem) -> Option<Vec<String>>
     (!diffstats.is_empty()).then_some(diffstats)
 }
 
-fn format_diffstat(diff: &agent_client_protocol::schema::v1::Diff) -> String {
+fn format_diffstat(diff: &agent_client_protocol::v1::schema::Diff) -> String {
     // A diff recorded since `diff` landed already carries its counts, so
     // this is a lookup. An older record still holds both file copies and is
     // diffed here on demand.
@@ -1805,7 +1805,7 @@ fn format_diffstat(diff: &agent_client_protocol::schema::v1::Diff) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus, ToolCallUpdate};
+    use agent_client_protocol::v1::schema::{ToolCall, ToolCallStatus, ToolCallUpdate};
     use serde_json::json;
 
     #[test]
@@ -2315,7 +2315,7 @@ mod tests {
         use std::fmt::Write as _;
 
         let mut output = String::new();
-        let diff = agent_client_protocol::schema::v1::Diff::new("/workspace/new.txt", "one\ntwo\n");
+        let diff = agent_client_protocol::v1::schema::Diff::new("/workspace/new.txt", "one\ntwo\n");
         writeln!(output, "=== new file diff detail (transcript row) ===").unwrap();
         writeln!(output, "{}", format_diffstat(&diff)).unwrap();
 

@@ -1,7 +1,7 @@
 //! Authenticated local daemon protocol and client transport.
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
-use agent_client_protocol::schema::v1::ContentBlock;
+use agent_client_protocol::v1::schema::ContentBlock;
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::{Config, data_dir};
 use mj_core::credentials::CredentialSyncSignal;

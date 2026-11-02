@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  # nightly.yml starts its release this way, because a tag it pushes with
+  # GITHUB_TOKEN does not trigger the push event. Dispatch only on a tag.
+  workflow_dispatch: {}
 
 permissions:
   contents: write

@@ -770,8 +770,7 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
         },
     };
 
-    let projection =
-        crate::pollers::apply_worker_poll_update(&controller, &mut dashboard, update, None);
+    let projection = crate::pollers::apply_worker_poll_update(&mut dashboard, update);
 
     assert!(projection.is_some());
     assert_eq!(
@@ -796,6 +795,28 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
         "the Sessions row's title"
     );
     assert_eq!(chats[session_id].header_title(), "r5 suspend probe");
+}
+
+// Hard-won: #1444: the terminal overwrote the daemon's missing-target notice while duplicating its persistence write.
+#[test]
+fn missing_target_poll_preserves_the_daemon_notice() {
+    let mut dashboard = populated_dashboard();
+    dashboard.set_notice("The daemon found the target missing.");
+    let update = crate::pollers::WorkerPollUpdate {
+        session_id: "missing-target".into(),
+        view: mj_controller::session_manager::ManagedSessionView {
+            snapshot: None,
+            connected: false,
+            error: Some(mj_controller::session_manager::ViewError::TargetMissing(
+                "working directory is missing".into(),
+            )),
+        },
+    };
+    assert!(crate::pollers::apply_worker_poll_update(&mut dashboard, update).is_none());
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("The daemon found the target missing.")
+    );
 }
 
 fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {

@@ -667,6 +667,12 @@ impl DashboardState {
             self.say_suspended_session_was_unpinned(&name);
         }
         for (id, record) in changed {
+            if record
+                .as_ref()
+                .is_none_or(|record| !record.state.has_live_worker())
+            {
+                self.clear_session_unreachable(&id);
+            }
             self.release_finished_conversation(&id);
             if let Some(record) = record {
                 self.session_details

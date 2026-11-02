@@ -2,7 +2,7 @@
 //! chosen completion lands back in the composer.
 
 use crate::theme;
-use agent_client_protocol::schema::v1::{AvailableCommandInput, SessionConfigOption};
+use agent_client_protocol::v1::schema::{AvailableCommandInput, SessionConfigOption};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn exact_config_value_is_ready_to_submit_during_session_refreshes() {
-        use agent_client_protocol::schema::v1::{
+        use agent_client_protocol::v1::schema::{
             SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigSelectOptions,
         };
 
@@ -669,7 +669,7 @@ mod tests {
 
     #[test]
     fn config_command_completes_arbitrary_option_ids_and_values() {
-        use agent_client_protocol::schema::v1::{
+        use agent_client_protocol::v1::schema::{
             SessionConfigSelectOption, SessionConfigSelectOptions,
         };
 

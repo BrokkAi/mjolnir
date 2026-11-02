@@ -5,8 +5,8 @@ use crate::chat::test_support::{
     queued, snapshot, transcript_text,
 };
 use crate::selection::SelectionState;
-use agent_client_protocol::schema::v1::ToolCallStatus;
-use agent_client_protocol::schema::v1::ToolKind;
+use agent_client_protocol::v1::schema::ToolCallStatus;
+use agent_client_protocol::v1::schema::ToolKind;
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,

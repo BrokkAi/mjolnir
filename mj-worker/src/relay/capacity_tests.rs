@@ -1,5 +1,5 @@
 use super::{test_support::*, *};
-use agent_client_protocol::schema::v1::{ContentChunk, TextContent};
+use agent_client_protocol::v1::schema::{ContentChunk, TextContent};
 use mj_core::config::HarnessKind;
 
 fn open(root: &std::path::Path) -> DurableRelay {

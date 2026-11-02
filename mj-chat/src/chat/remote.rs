@@ -1,7 +1,7 @@
 //! The chat's background command channel: every relay operation the view can
 //! ask for, the task that runs them, and how their results land back in state.
 
-use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 
 use mj_core::elicitation::{ElicitationRequest, ElicitationResponse};
 use mj_core::state::{QueuedCommandKind, config_command_text};

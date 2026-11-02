@@ -150,7 +150,7 @@ where
     let release_parent_router = native_agents.clone();
     let ext_parent_router = native_agents.clone();
     Client
-        .builder()
+        .v1()
         .on_receive_notification(
             async move |notification: RawSessionNotification, _cx| {
                 notification_activity.mark();
@@ -1056,8 +1056,8 @@ impl ToolCallContentInput {
         if matches!(
             status,
             Some(
-                agent_client_protocol::schema::v1::ToolCallStatus::Completed
-                    | agent_client_protocol::schema::v1::ToolCallStatus::Failed
+                agent_client_protocol::v1::schema::ToolCallStatus::Completed
+                    | agent_client_protocol::v1::schema::ToolCallStatus::Failed
             )
         ) {
             texts.remove(&id);
@@ -1079,10 +1079,10 @@ impl ToolCallContentInput {
 }
 
 fn single_text_content(
-    content: &[agent_client_protocol::schema::v1::ToolCallContent],
+    content: &[agent_client_protocol::v1::schema::ToolCallContent],
 ) -> Option<&str> {
     match content {
-        [agent_client_protocol::schema::v1::ToolCallContent::Content(block)] => {
+        [agent_client_protocol::v1::schema::ToolCallContent::Content(block)] => {
             match &block.content {
                 ContentBlock::Text(text) => Some(&text.text),
                 _ => None,
@@ -1102,7 +1102,7 @@ fn json_object_text(text: &str) -> Option<serde_json::Value> {
 /// else the JSON its content spells out, in the request itself or streamed
 /// for the same call before it.
 pub(super) fn permission_tool_input(
-    tool_call: &agent_client_protocol::schema::v1::ToolCallUpdate,
+    tool_call: &agent_client_protocol::v1::schema::ToolCallUpdate,
     streamed: &ToolCallContentInput,
 ) -> Option<serde_json::Value> {
     tool_call
@@ -1469,7 +1469,7 @@ pub(super) fn prompt_failure_warning(
     // A usage limit is named as one before anything else: Kimi sends its
     // weekly limit as ACP `auth_required` with a 403 message (R4-7), and the
     // credential marker would both mislabel it and ask for a credential sync.
-    if error.code == agent_client_protocol::ErrorCode::AuthRequired {
+    if error.code == agent_client_protocol::ErrorCode::AUTH_REQUIRED {
         if mj_core::diagnostic::TurnDiagnostic::from_acp(error).is_usage_limit() {
             return format!("prompt failed (usage limit reached): {error}");
         }
@@ -1682,7 +1682,7 @@ pub(super) async fn apply_cancel(
 pub(super) const SESSION_STEERING_METHOD: &str = "_session/steering";
 
 pub(super) fn steering_supported_from_meta(
-    meta: Option<&agent_client_protocol::schema::v1::Meta>,
+    meta: Option<&agent_client_protocol::v1::schema::Meta>,
 ) -> bool {
     meta.and_then(|meta| meta.get("steering"))
         .and_then(|steering| steering.get("supported"))
@@ -1779,10 +1779,10 @@ pub(super) async fn settle_steer(
         _ if outcome.as_ref().is_err_and(|error| {
             !matches!(
                 error.code,
-                agent_client_protocol::ErrorCode::InvalidRequest
-                    | agent_client_protocol::ErrorCode::InvalidParams
-                    | agent_client_protocol::ErrorCode::MethodNotFound
-                    | agent_client_protocol::ErrorCode::AuthRequired
+                agent_client_protocol::ErrorCode::INVALID_REQUEST
+                    | agent_client_protocol::ErrorCode::INVALID_PARAMS
+                    | agent_client_protocol::ErrorCode::METHOD_NOT_FOUND
+                    | agent_client_protocol::ErrorCode::AUTH_REQUIRED
             )
         }) || outcome.as_ref().is_ok_and(|v| {
             !matches!(

@@ -117,32 +117,82 @@ impl RuntimeState {
         session_id: &str,
         detail: String,
         observed_updated_at: String,
-    ) -> Result<()> {
-        let changed = blocking({
-            let session_id = session_id.to_owned();
-            let detail = detail.clone();
-            move || {
-                crate::database::mark_session_target_missing_if_current(
-                    &session_id,
-                    &detail,
-                    &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    &observed_updated_at,
-                )
+    ) {
+        let mut failure_reported = false;
+        let (changed, committed_at) = loop {
+            // This timestamp is the optimistic revision of this exact write.
+            let updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+            let result = blocking({
+                let session_id = session_id.to_owned();
+                let detail = detail.clone();
+                let observed_updated_at = observed_updated_at.clone();
+                let updated_at = updated_at.clone();
+                move || {
+                    crate::database::mark_session_target_missing_if_current(
+                        &session_id,
+                        &detail,
+                        &updated_at,
+                        &observed_updated_at,
+                    )
+                }
+            })
+            .await;
+            match result {
+                Ok(changed) => break (changed, updated_at),
+                Err(error) => {
+                    self.report_missing_target_retry(session_id, &error, &mut failure_reported);
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
             }
-        })
-        .await?;
-        if changed.is_some() {
-            self.reload_controller().await?;
+        };
+        // Keep the committed outcome through reload retries. Rewriting would
+        // now return None and lose the one-time notice or Lost cleanup.
+        loop {
+            match self.reload_controller().await {
+                Ok(()) => break,
+                Err(error) => {
+                    self.report_missing_target_retry(session_id, &error, &mut failure_reported);
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+            }
+        }
+        let still_current = {
+            let owner = self.owner();
+            owner
+                .controller()
+                .state
+                .sessions
+                .get(session_id)
+                .is_some_and(|session| {
+                    Some(session.state) == changed && session.updated_at == committed_at
+                })
+        };
+        if let Some(state) = changed.filter(|_| still_current) {
             // A lost session has no checkpoint and no target, so its record
             // offers nothing but Destroy. Report it once and discard it
             // instead of leaving a tombstone behind.
-            if changed == Some(SessionState::Lost) {
+            if state == SessionState::Lost {
                 self.discard_lost_session(session_id.to_owned()).await;
             } else {
                 self.push_notice(session_id, detail);
             }
         }
-        Ok(())
+    }
+
+    fn report_missing_target_retry(
+        &self,
+        session_id: &str,
+        error: &anyhow::Error,
+        reported: &mut bool,
+    ) {
+        tracing::warn!(%session_id, %error, "could not persist missing worker target; retrying");
+        if !*reported {
+            self.push_notice(
+                session_id,
+                format!("Could not record missing session target: {error:#}; retrying"),
+            );
+            *reported = true;
+        }
     }
 
     /// One pass of the harness readiness wait: which live sessions have run
