@@ -15,7 +15,7 @@ set -euo pipefail
 : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT must be set}"
 : "${GITHUB_SHA:?GITHUB_SHA must be set}"
 
-# Both lanes run in one nightly workflow. Each lane's jobs are named
+# Both lanes run in one nightly release workflow. Each lane's jobs are named
 # "<caller job name> / <job name>", so the prefix keeps one lane's issue from
 # reporting the other lane's failures.
 case "$CI_LANE" in
@@ -106,8 +106,8 @@ if [[ "$LANE_RESULT" == failure ]]; then
             cat <<EOF
 $marker
 
-The scheduled $lane_name lane in \`.github/workflows/nightly.yml\` failed on the default branch.
-This issue stays open until a nightly run passes; the workflow closes it then, and later failures reopen it.
+The $lane_name lane of the nightly release failed. \`.github/workflows/nightly.yml\` cuts the nightly from master and \`.github/workflows/release.yml\` runs the lane on its tag; a failing lane also keeps that nightly from publishing.
+This issue stays open until a nightly lane passes; the release workflow closes it then, and later failures reopen it.
 
 Latest failure:
 

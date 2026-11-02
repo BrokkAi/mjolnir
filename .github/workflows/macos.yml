@@ -1,8 +1,9 @@
 name: macOS
 
-# The one macOS job definition. ci.yml calls it on every release tag, and
-# nightly.yml calls it every night and on manual dispatch. Check-ins do not
-# run it. Do not add
+# The one macOS job definition. release.yml calls it on every release tag,
+# including the nightly release nightly.yml cuts from master, and nightly.yml
+# calls it directly when dispatched from another branch. Check-ins do not run
+# it. Do not add
 # workflow-level concurrency here: in a called workflow, github.workflow is the
 # caller's name, so the group would collide with the caller's own.
 

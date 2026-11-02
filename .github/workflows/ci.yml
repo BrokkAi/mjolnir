@@ -156,18 +156,9 @@ jobs:
     - name: Run tests
       run: cargo test
 
-  # Check-ins run Linux only. macOS and Windows run nightly in nightly.yml,
-  # and here only when release.yml calls this workflow for a tag, so a release
+  # Check-ins run Linux only. release.yml runs the macOS and Windows lanes
+  # beside this workflow for every tag, nightly ones included, so a release
   # still publishes only after every platform lane passes.
-  macos:
-    name: macOS
-    if: ${{ github.ref_type == 'tag' }}
-    uses: ./.github/workflows/macos.yml
-
-  windows:
-    name: Windows
-    if: ${{ github.ref_type == 'tag' }}
-    uses: ./.github/workflows/windows.yml
 
   portable-worker:
     name: Portable worker (x86_64-unknown-linux-musl)

@@ -1,10 +1,21 @@
 name: Nightly
 
-# Nightly and manual runs of the shared macOS and Windows lanes. Check-ins run
-# Linux only; release tags also run both lanes through ci.yml. A failing lane
-# opens or reopens its own tracking issue ("Nightly macOS CI is failing" or
-# "Nightly Windows CI is failing"), and that lane's next passing run closes
-# it. Only the report jobs can write issues.
+# Cuts a nightly prerelease from master every night that master has changed,
+# and on manual dispatch from master. This job only commits the version, tags
+# it, and starts release.yml on the tag; release.yml then runs the full CI
+# suite, including the macOS and Windows lanes, publishes the GitHub
+# prerelease, the agent-dev:<version> image and npm's `nightly` dist-tag, and
+# keeps the "Nightly macOS CI is failing" and "Nightly Windows CI is failing"
+# tracking issues in sync. Nightlies never reach crates.io, Homebrew, npm's
+# `latest` or `next`, or the GitHub "latest" release.
+#
+# No bot account is needed. A tag pushed with GITHUB_TOKEN does not start
+# workflows, so the tag push here starts nothing by itself; the explicit
+# workflow dispatch is the one event GITHUB_TOKEN may start, and it runs
+# release.yml exactly once, on the tag.
+#
+# A manual dispatch from any other branch publishes nothing: it runs that
+# branch's macOS and Windows lanes and leaves the tracking issues alone.
 
 on:
   schedule:
@@ -21,50 +32,147 @@ concurrency:
 jobs:
   macos:
     name: macOS
+    if: ${{ github.ref != 'refs/heads/master' }}
     uses: ./.github/workflows/macos.yml
 
   windows:
     name: Windows
+    if: ${{ github.ref != 'refs/heads/master' }}
     uses: ./.github/workflows/windows.yml
 
-  # Scheduled runs test the default branch. A manual dispatch updates the
-  # issues only when it tests master, so a branch dispatch cannot open or close
-  # them. The script takes its decision from its lane's result and ignores
-  # cancelled or skipped runs.
-  report-macos:
-    name: Update the macOS tracking issue
-    needs: macos
-    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') }}
+  tag:
+    name: Tag and start the nightly release
+    if: ${{ github.ref == 'refs/heads/master' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     permissions:
-      actions: read
-      contents: read
-      issues: write
+      # Dispatch release.yml.
+      actions: write
+      # Push the nightly tag.
+      contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
     - uses: actions/checkout@v6
-    - name: Open, update, or close the tracking issue
-      env:
-        GH_TOKEN: ${{ github.token }}
-        CI_LANE: macos
-        LANE_RESULT: ${{ needs.macos.result }}
-      run: bash scripts/nightly-issue.sh
 
-  report-windows:
-    name: Update the Windows tracking issue
-    needs: windows
-    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') }}
+    # The nightly version sorts after the version master carries and before
+    # the next release cut from it: a stable 2.64.1 gives 2.64.2-nightly.<day>,
+    # a prerelease 2.65.0-rc.1 gives 2.65.0-nightly.<day>. Later nightlies on
+    # the same day append .2, .3 and so on. When master has not moved since
+    # the latest nightly was cut, nothing is tagged.
+    - name: Choose the nightly version
+      id: version
+      run: |
+        set -euo pipefail
+        current="$(sed -n '/^\[workspace\.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+        test -n "$current"
+        core="${current%%[-+]*}"
+        if [[ "$core" == "$current" ]]; then
+          IFS=. read -r major minor patch <<< "$core"
+          core="$major.$minor.$((patch + 1))"
+        fi
+        # Field 4 is the day and field 5 the same-day counter, once the tag is
+        # split on dots: v2 | 64 | 2-nightly | 20261102 | 2.
+        tags="$(git ls-remote --tags --refs origin |
+          sed 's|.*refs/tags/||' |
+          { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]+(\.[0-9]+)?$' || true; } |
+          sort -t. -k4,4n -k5,5n)"
+        latest="$(tail -n 1 <<< "$tags")"
+        if [[ -n "$latest" ]]; then
+          # Every nightly tag is one version commit on top of the master commit
+          # it was cut from.
+          git fetch --quiet --no-tags --depth=2 origin "refs/tags/$latest:refs/tags/$latest"
+          built_from="$(git rev-parse "refs/tags/$latest^{commit}^")"
+          if [[ "$built_from" == "$(git rev-parse HEAD)" ]]; then
+            printf 'master is still at %s, which %s was cut from; no nightly today.\n' "$built_from" "$latest" |
+              tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        fi
+        # The counter is per day across every base version, and the next one
+        # follows the day's highest rather than filling a gap left by pruning,
+        # so day and counter alone order every nightly.
+        day="$(date -u +%Y%m%d)"
+        last_today="$({ grep -E -- "-nightly\.$day(\.[0-9]+)?$" <<< "$tags" || true; } | tail -n 1)"
+        if [[ -z "$last_today" ]]; then
+          version="$core-nightly.$day"
+        else
+          counter="${last_today##*-nightly."$day"}"
+          counter="${counter#.}"
+          version="$core-nightly.$day.$(( ${counter:-1} + 1 ))"
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+    - uses: dtolnay/rust-toolchain@1.99.1
+      if: ${{ steps.version.outputs.tag != '' }}
+
+    - name: Install cargo-release
+      if: ${{ steps.version.outputs.tag != '' }}
+      run: cargo install --locked cargo-release --version 1.1.5
+
+    # The same preparation RELEASING.md describes, on top of master. The commit
+    # is reachable only from the tag; master never carries nightly versions.
+    - name: Commit and push the nightly tag
+      if: ${{ steps.version.outputs.tag != '' }}
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
+        TAG: ${{ steps.version.outputs.tag }}
+      run: |
+        set -euo pipefail
+        git config user.name 'github-actions[bot]'
+        git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+        source_commit="$(git rev-parse HEAD)"
+        cargo release "$VERSION" --workspace --execute --no-confirm
+        test "$(git rev-parse HEAD^)" = "$source_commit"
+        git tag -a "$TAG" -m "Nightly $VERSION from master $source_commit"
+        git push origin "refs/tags/$TAG"
+
+    - name: Start the release workflow on the tag
+      if: ${{ steps.version.outputs.tag != '' }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: ${{ steps.version.outputs.tag }}
+      run: |
+        set -euo pipefail
+        gh workflow run release.yml --ref "$TAG"
+        printf 'Tagged %s from master %s and started release.yml on it.\n' "$TAG" "$(git rev-parse HEAD^)" >> "$GITHUB_STEP_SUMMARY"
+
+  # Keep the newest 14 nightly tags. Older nightly releases are deleted with
+  # their tags, and a tag whose release never published (its CI failed) is
+  # deleted on its own. Stable releases and other prereleases are never
+  # touched. A failure here leaves the new nightly unaffected.
+  prune:
+    name: Prune old nightly releases
+    needs: tag
+    if: ${{ needs.tag.outputs.tag != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      actions: read
-      contents: read
-      issues: write
+      contents: write
     steps:
     - uses: actions/checkout@v6
-    - name: Open, update, or close the tracking issue
+    - name: Delete nightlies beyond the newest 14
       env:
         GH_TOKEN: ${{ github.token }}
-        CI_LANE: windows
-        LANE_RESULT: ${{ needs.windows.result }}
-      run: bash scripts/nightly-issue.sh
+      run: |
+        set -euo pipefail
+        stale="$(git ls-remote --tags --refs origin |
+          sed 's|.*refs/tags/||' |
+          { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]+(\.[0-9]+)?$' || true; } |
+          sort -t. -k4,4n -k5,5n |
+          head -n -14)"
+        while IFS= read -r tag; do
+          [[ -n "$tag" ]] || continue
+          if lookup="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq .id 2>&1)"; then
+            gh release delete "$tag" --cleanup-tag --yes
+            printf 'Deleted release and tag %s\n' "$tag"
+          elif [[ "$lookup" == *"HTTP 404"* ]]; then
+            git push origin --delete "refs/tags/$tag"
+            printf 'Deleted unpublished tag %s\n' "$tag"
+          else
+            printf 'Could not look up the release for %s: %s\n' "$tag" "$lookup" >&2
+            exit 1
+          fi
+        done <<< "$stale"
