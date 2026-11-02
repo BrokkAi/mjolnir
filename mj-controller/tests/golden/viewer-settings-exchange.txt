@@ -117,7 +117,7 @@
                   "quota"
                 ],
                 "label": "Quota checks",
-                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it in the agent-dev image under Podman or Docker when one is installed.",
+                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it in your local Podman or Docker runtime's image when one is enabled, else on this machine.",
                 "control": "page",
                 "summary": "Auto · container when available"
               },
@@ -453,7 +453,7 @@
                   "quota"
                 ],
                 "label": "Quota checks",
-                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it in the agent-dev image under Podman or Docker when one is installed.",
+                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it in your local Podman or Docker runtime's image when one is enabled, else on this machine.",
                 "control": "page",
                 "summary": "Auto · container when available"
               },
@@ -795,7 +795,7 @@
                   "quota"
                 ],
                 "label": "Quota checks",
-                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it in the agent-dev image under Podman or Docker when one is installed.",
+                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it in your local Podman or Docker runtime's image when one is enabled, else on this machine.",
                 "control": "page",
                 "summary": "Auto · container when available"
               },

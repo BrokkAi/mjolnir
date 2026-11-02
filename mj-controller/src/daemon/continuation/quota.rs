@@ -185,7 +185,7 @@ pub(super) async fn prepare(
                 .get(&session.last_profile)
                 .context("profile was removed")?
                 .clone(),
-            controller.config.quota.runtime,
+            crate::quota::QuotaRuntimeConfig::of(&controller.config),
         )
     };
     let harness = profile.kind;

@@ -119,12 +119,15 @@ each release publishes an immutable tag for its own version, such as
 
 The daemon also uses this image for quota checks that start a harness: the
 Codex app-server, Grok's agent, and Claude Code's login refresh. With
-`[quota] runtime = "auto"`, the default, those checks run in the release's
-agent-dev image under Podman when it is installed, else Docker, else on the
-host, so a machine that runs every session in containers needs no harness
-installed to show its quota. The profile's account directory is mounted at its
+`[quota] runtime = "auto"`, the default, those checks run in the image of your
+enabled local Podman runtime, else your enabled local Docker runtime, when its
+engine is installed. With no such runtime they run on this machine. A machine
+that runs every session in containers therefore needs no harness installed to
+show its quota, and the check uses the image the daemon already keeps
+downloaded for that runtime. The profile's account directory is mounted at its
 own path, so a refreshed login lands where the host keeps it. Set `runtime` to
-`podman` or `docker` to insist on one engine, or to `host` to never use a
+`podman` or `docker` to insist on one engine (with that runtime's image, or the
+release's agent-dev image when none is configured), or to `host` to never use a
 container. A check never downloads the image; the daemon downloads it in the
 background, and until then the check reports that it is waiting for it.
 Claude Code on macOS always checks on the host, because its login lives in the

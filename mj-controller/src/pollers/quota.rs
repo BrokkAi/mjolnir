@@ -2,16 +2,12 @@ use super::*;
 
 pub fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefreshRequest> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let runtime = crate::quota::QuotaRuntimeConfig::of(&controller.config);
     controller
         .config
         .enabled_profiles()
         .map(|(id, profile)| {
-            QuotaRefreshRequest::for_profile(
-                id,
-                profile,
-                cwd.clone(),
-                controller.config.quota.runtime,
-            )
+            QuotaRefreshRequest::for_profile(id, profile, cwd.clone(), runtime.clone())
         })
         .collect()
 }

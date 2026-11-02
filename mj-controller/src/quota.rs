@@ -51,7 +51,54 @@ pub struct QuotaRefreshRequest {
     /// Where a Codex profile's quota comes from. Other harnesses ignore it.
     pub codex_source: CodexQuotaSource,
     /// Where a check that starts the harness runs it (`[quota] runtime`).
-    pub runtime: QuotaRuntimeChoice,
+    pub runtime: QuotaRuntimeConfig,
+}
+
+/// What `[quota] runtime` and the configured runtimes allow a check that
+/// starts a harness to use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotaRuntimeConfig {
+    pub choice: QuotaRuntimeChoice,
+    /// The image of the enabled local Podman runtime, preferring one the
+    /// person configured over a standard candidate.
+    pub podman_image: Option<String>,
+    /// The same for Docker.
+    pub docker_image: Option<String>,
+}
+
+impl QuotaRuntimeConfig {
+    pub fn of(config: &mj_core::config::Config) -> Self {
+        let image = |wanted: mj_core::targets::ImageHost| {
+            let mut enabled = config
+                .targets
+                .iter()
+                .filter(|(id, _)| !config.disabled_targets.contains(*id))
+                .filter_map(|(id, target)| {
+                    let (host, container) = target.image_host()?;
+                    (host == wanted).then(|| (config.default_targets.contains(id), container))
+                })
+                .collect::<Vec<_>>();
+            // Configured runtimes first: `false` sorts before `true`.
+            enabled.sort_by_key(|(standard, _)| *standard);
+            enabled
+                .first()
+                .map(|(_, container)| container.image.clone())
+        };
+        Self {
+            choice: config.quota.runtime,
+            podman_image: image(mj_core::targets::ImageHost::LocalPodman),
+            docker_image: image(mj_core::targets::ImageHost::LocalDocker),
+        }
+    }
+
+    /// Never a container.
+    pub fn host() -> Self {
+        Self {
+            choice: QuotaRuntimeChoice::Host,
+            podman_image: None,
+            docker_image: None,
+        }
+    }
 }
 
 /// Where a Codex profile's quota comes from, decided once from its provider
@@ -148,7 +195,7 @@ impl QuotaRefreshRequest {
         profile_id: &str,
         profile: &HarnessProfile,
         cwd: std::path::PathBuf,
-        runtime: QuotaRuntimeChoice,
+        runtime: QuotaRuntimeConfig,
     ) -> Self {
         let mut environment = profile.environment.resolved().clone();
         profile.kind.configure_profile_home_environment(
@@ -455,7 +502,7 @@ async fn refresh_profile_with_cache_root(
     // Only the checks that start a harness program consult the runtime.
     let container = || -> Result<Option<crate::quota_runtime::ContainerCheck>> {
         Ok(
-            match crate::quota_runtime::QuotaRuntime::current(runtime)? {
+            match crate::quota_runtime::QuotaRuntime::current(&runtime)? {
                 crate::quota_runtime::QuotaRuntime::Host => None,
                 crate::quota_runtime::QuotaRuntime::Container(runtime) => {
                     Some(crate::quota_runtime::ContainerCheck {

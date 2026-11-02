@@ -45,6 +45,10 @@ Kimi, Muse and Z.ai quota checks are plain HTTPS requests from the daemon and ar
 - Decision: environment variables pass by name (`--env NAME`) with their values set on the engine process, never as `NAME=value` arguments.
   Rationale: profile environments carry API keys and tokens; argument lists are visible to every local user through `ps`.
 
+- Decision (revision, 2026-11-03): `auto` uses a container only for an enabled local Podman or Docker runtime (`[targets.<id>]`, standard candidates included, `enabled = false` excluded) whose engine is installed, and runs that runtime's image; a runtime the person configured wins over a standard candidate. With no such runtime the check runs on the host. `podman` and `docker` use that engine's runtime image, or `DEFAULT_CONTAINER_IMAGE` when none is configured. `QuotaRefreshRequest.runtime` is now `QuotaRuntimeConfig` (in `mj-controller/src/quota.rs`), built by `QuotaRuntimeConfig::of(&Config)`.
+  Rationale: the repository owner asked that checks run locally when no container runtime is set up. `Config::load` always adds the standard `podman` and `docker` candidates, so "a runtime exists" alone would always be true; the installed engine and the enabled flag decide it. Using the runtime's own image means the daemon's existing background download already covers it.
+  Date/Author: 2026-11-03, agent.
+
 ## Outcomes & Retrospective
 
 Delivered as planned. The suites of mj-core, mj-client, mj-tui, mj-controller and the `mj` CLI pass except for failures that also occur without this change on the development host: the move-session transfer tests need `rsync`, which the host lacks, and `golden_transcript_navigation` in mj-chat depends on the host's time zone. Clippy with `-D warnings` and rustfmt are clean for every crate the host can build (mj-desktop and voice-worker need GTK and ALSA headers it lacks). No end-to-end run against a real Podman was possible on the development host, which has no container engine; the engine is exercised through a stand-in script that records its arguments.

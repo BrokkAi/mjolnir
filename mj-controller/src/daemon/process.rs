@@ -336,7 +336,7 @@ pub(super) async fn run_daemon_runtime(
                     let mut plan = crate::controller::image_refresh_plan(config);
                     crate::quota_runtime::add_quota_image(
                         &mut plan,
-                        config.quota.runtime,
+                        &crate::quota::QuotaRuntimeConfig::of(config),
                         std::env::var_os("PATH").as_deref(),
                     );
                     plan

@@ -943,10 +943,10 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
         }
         "quota" => {
-            "Codex, Grok and Claude quota checks start the agent. Auto runs it in the agent-dev image under Podman or Docker when one is installed."
+            "Codex, Grok and Claude quota checks start the agent. Auto runs it in your local Podman or Docker runtime's image when one is enabled, else on this machine."
         }
         "runtime" if path.first().is_some_and(|key| key == "quota") => {
-            "Auto: Podman, else Docker, else this machine. Podman or Docker: always that engine. Host: never a container."
+            "Auto: an enabled local Podman runtime, else Docker, else this machine. Podman or Docker: always that engine. Host: never a container."
         }
         "jev" => {
             "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart."

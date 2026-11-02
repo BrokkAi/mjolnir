@@ -48,7 +48,7 @@ fn an_inline_token_provider_credential_does_not_become_native_openai() {
         "custom",
         &profile,
         home.path().to_owned(),
-        mj_core::config::QuotaRuntimeChoice::Host,
+        crate::quota::QuotaRuntimeConfig::host(),
     );
     assert!(
         matches!(
@@ -80,7 +80,7 @@ async fn a_provider_without_a_readable_key_never_reads_the_chatgpt_quota() {
             id,
             &profile,
             home.path().to_path_buf(),
-            mj_core::config::QuotaRuntimeChoice::Host,
+            crate::quota::QuotaRuntimeConfig::host(),
         );
         assert!(
             matches!(request.codex_source, CodexQuotaSource::UsagePriced { .. }),
@@ -112,7 +112,7 @@ async fn a_provider_without_a_quota_endpoint_reports_usage_pricing() {
         "other",
         &zai_profile(home.path(), "https://example.invalid/v1"),
         home.path().to_path_buf(),
-        mj_core::config::QuotaRuntimeChoice::Host,
+        crate::quota::QuotaRuntimeConfig::host(),
     );
     let (outcome, _) = refresh_profile_with_cache_root(request, None, None).await;
     assert_eq!(outcome.report.error, None);
@@ -138,7 +138,7 @@ async fn bedrock_claude_reports_usage_pricing_without_an_oauth_login() {
         "aws-model",
         &profile,
         home.path().to_path_buf(),
-        mj_core::config::QuotaRuntimeChoice::Host,
+        crate::quota::QuotaRuntimeConfig::host(),
     );
     let (outcome, client) = refresh_profile_with_cache_root(request, None, None).await;
 
@@ -398,7 +398,7 @@ fn codex_quota_request(
         environment,
         cwd: directory.to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
-        runtime: mj_core::config::QuotaRuntimeChoice::Host,
+        runtime: crate::quota::QuotaRuntimeConfig::host(),
     }
 }
 
@@ -759,7 +759,7 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
             )]),
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
-            runtime: mj_core::config::QuotaRuntimeChoice::Host,
+            runtime: crate::quota::QuotaRuntimeConfig::host(),
         },
         None,
         None,
@@ -821,7 +821,7 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
         environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
-        runtime: mj_core::config::QuotaRuntimeChoice::Host,
+        runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     let mut manager = QuotaManager::default();
     manager
@@ -926,7 +926,7 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
         environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
-        runtime: mj_core::config::QuotaRuntimeChoice::Host,
+        runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     // Lines logged at exactly info that contain `text`.
     let said = |text: &str| {
@@ -1123,7 +1123,7 @@ async fn expired_claude_credentials_report_login_expired() {
             environment: BTreeMap::new(),
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
-            runtime: mj_core::config::QuotaRuntimeChoice::Host,
+            runtime: crate::quota::QuotaRuntimeConfig::host(),
         },
         None,
         None,
@@ -1465,7 +1465,7 @@ while IFS= read -r line; do :; done
         ]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
-        runtime: mj_core::config::QuotaRuntimeChoice::Host,
+        runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
 
     let mut quotas = QuotaManager {
@@ -1595,7 +1595,7 @@ fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
         "other",
         &zai_profile(home.path(), "https://example.invalid/v1"),
         home.path().to_path_buf(),
-        mj_core::config::QuotaRuntimeChoice::Host,
+        crate::quota::QuotaRuntimeConfig::host(),
     );
     let identity = request.cache_identity();
     let runtime = tokio::runtime::Builder::new_current_thread()

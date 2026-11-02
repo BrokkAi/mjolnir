@@ -210,7 +210,9 @@ impl UtilityLlmRuntime {
                         now.saturating_sub(report.refreshed_at_epoch_seconds) > QUOTA_FRESH_SECONDS
                     })
                 })
-                .map(|(id, profile)| quota_request(id, profile, config.quota.runtime))
+                .map(|(id, profile)| {
+                    quota_request(id, profile, crate::quota::QuotaRuntimeConfig::of(config))
+                })
                 .collect::<Vec<_>>()
         };
         // The daemon's poller keeps the stored report of each profile current;
@@ -503,7 +505,7 @@ impl CompactionBackend for UtilityCompactionBackend {
 fn quota_request(
     profile_id: &str,
     profile: &HarnessProfile,
-    runtime: mj_core::config::QuotaRuntimeChoice,
+    runtime: crate::quota::QuotaRuntimeConfig,
 ) -> QuotaRefreshRequest {
     QuotaRefreshRequest::for_profile(
         profile_id,

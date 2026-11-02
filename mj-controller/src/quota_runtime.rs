@@ -17,6 +17,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::quota::QuotaRuntimeConfig;
 use anyhow::{Result, bail};
 use mj_core::config::QuotaRuntimeChoice;
 use mj_core::targets::{
@@ -62,50 +63,59 @@ pub(crate) struct ContainerRuntime {
 }
 
 impl QuotaRuntime {
-    /// Decide where a check runs, from the configured choice and the engines
-    /// on `path`. `Auto` without an engine is the host by design; an engine
-    /// that was named but is missing is an error the check reports.
-    pub(crate) fn resolve(choice: QuotaRuntimeChoice, path: Option<&OsStr>) -> Result<Self> {
-        let installed = |engine: Engine| {
-            mj_core::program_path::find_program_on_path(engine.program(), path)
-                .map(|program| (engine, program))
+    /// Decide where a check runs, from the configuration and the engines on
+    /// `path`.
+    ///
+    /// `Auto` uses a container only for an enabled local Podman or Docker
+    /// runtime whose engine is installed, and runs that runtime's image,
+    /// which the daemon already keeps downloaded. With no such runtime the
+    /// check runs on this host, by design. A named engine that is missing is
+    /// an error the check reports.
+    pub(crate) fn resolve(config: &QuotaRuntimeConfig, path: Option<&OsStr>) -> Result<Self> {
+        let installed =
+            |engine: Engine| mj_core::program_path::find_program_on_path(engine.program(), path);
+        let image = |engine: Engine| match engine {
+            Engine::Podman => config.podman_image.clone(),
+            Engine::Docker => config.docker_image.clone(),
         };
-        let (engine, program) = match choice {
+        let (engine, program, image) = match config.choice {
             QuotaRuntimeChoice::Host => return Ok(Self::Host),
             QuotaRuntimeChoice::Auto => {
-                match [Engine::Podman, Engine::Docker]
+                let found = [Engine::Podman, Engine::Docker]
                     .into_iter()
-                    .find_map(installed)
-                {
+                    .find_map(|engine| Some((engine, installed(engine)?, image(engine)?)));
+                match found {
                     Some(found) => found,
                     None => return Ok(Self::Host),
                 }
             }
             QuotaRuntimeChoice::Podman | QuotaRuntimeChoice::Docker => {
-                let engine = if choice == QuotaRuntimeChoice::Podman {
+                let engine = if config.choice == QuotaRuntimeChoice::Podman {
                     Engine::Podman
                 } else {
                     Engine::Docker
                 };
-                match installed(engine) {
-                    Some(found) => found,
-                    None => bail!(
+                let Some(program) = installed(engine) else {
+                    bail!(
                         "[quota] runtime is {0}, but {0} is not installed; install it or set runtime to auto or host",
                         engine.program()
-                    ),
-                }
+                    );
+                };
+                let image = image(engine)
+                    .unwrap_or_else(|| mj_core::config::DEFAULT_CONTAINER_IMAGE.to_owned());
+                (engine, program, image)
             }
         };
         Ok(Self::Container(ContainerRuntime {
             engine,
             program,
-            image: mj_core::config::DEFAULT_CONTAINER_IMAGE.to_owned(),
+            image,
         }))
     }
 
     /// Resolve against this process's `PATH`.
-    pub(crate) fn current(choice: QuotaRuntimeChoice) -> Result<Self> {
-        Self::resolve(choice, std::env::var_os("PATH").as_deref())
+    pub(crate) fn current(config: &QuotaRuntimeConfig) -> Result<Self> {
+        Self::resolve(config, std::env::var_os("PATH").as_deref())
     }
 }
 
@@ -416,13 +426,14 @@ impl ContainerCheck {
 }
 
 /// Add the image quota checks run in to the daemon's background downloads,
-/// unless a configured target already downloads it from the same engine.
+/// unless a configured runtime already downloads it from the same engine, as
+/// it does whenever `auto` chose that runtime.
 pub(crate) fn add_quota_image(
     plan: &mut Vec<mj_core::targets::ImageRefresh>,
-    choice: QuotaRuntimeChoice,
+    config: &QuotaRuntimeConfig,
     path: Option<&OsStr>,
 ) {
-    let Ok(QuotaRuntime::Container(runtime)) = QuotaRuntime::resolve(choice, path) else {
+    let Ok(QuotaRuntime::Container(runtime)) = QuotaRuntime::resolve(config, path) else {
         return;
     };
     let host = match runtime.engine {

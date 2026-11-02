@@ -530,9 +530,11 @@ impl QuotaConfig {
     }
 }
 
-/// `Auto` runs the checks in the release's agent-dev image under Podman when
-/// it is installed, else under Docker, else on the host. `Podman` and
-/// `Docker` insist on that engine; `Host` never uses a container.
+/// `Auto` runs the checks in the image of an enabled local Podman runtime,
+/// else an enabled local Docker runtime, when its engine is installed, and
+/// otherwise on the host. `Podman` and `Docker` insist on that engine (with
+/// its runtime's image, or the release's agent-dev image without one); `Host`
+/// never uses a container.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QuotaRuntimeChoice {
