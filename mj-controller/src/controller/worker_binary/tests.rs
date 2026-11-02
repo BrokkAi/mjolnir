@@ -2172,8 +2172,8 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
 #[test]
 fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     use mj_core::harness_runtime::{
-        CLAUDE_CLI_VERSION, DSH_ACP_PACKAGE, DSH_ACP_VERSION, MIMO_VERSION, MUSE_ACP_PACKAGE,
-        MUSE_ACP_VERSION,
+        CLAUDE_CLI_VERSION, DSH_ACP_PACKAGE, DSH_ACP_VERSION, GROK_VERSION, KIMI_VERSION,
+        MIMO_VERSION, MUSE_ACP_PACKAGE, MUSE_ACP_VERSION, OPENCODE_VERSION,
     };
 
     const CONTAINERFILE: &str = include_str!("../../../../containers/Containerfile.agent-dev");
@@ -2227,9 +2227,43 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
         serde_json::from_str(include_str!("../../../../mj-core/assets/mimo/runtime.json")).unwrap();
     assert_eq!(mimo["version"], MIMO_VERSION);
     assert!(CONTAINERFILE.contains("ENV MIMOCODE_DISABLE_AUTOUPDATE=1"));
+    assert!(CONTAINERFILE.contains("OPENCODE_DISABLE_AUTOUPDATE=1"));
 
-    // DSH has no managed installation or image layer; its only launch path is
-    // the npm bootstrap, which must name the pinned package version.
+    // Kimi Code, Grok, and OpenCode install from the managed runtimes' own
+    // metadata too.
+    assert!(CONTAINERFILE.contains("install-native-harness.py"));
+    for (harness, metadata, version) in [
+        (
+            "kimi",
+            include_str!("../../../../mj-core/assets/kimi/runtime.json"),
+            KIMI_VERSION,
+        ),
+        (
+            "grok",
+            include_str!("../../../../mj-core/assets/grok/runtime.json"),
+            GROK_VERSION,
+        ),
+        (
+            "opencode",
+            include_str!("../../../../mj-core/assets/opencode/runtime.json"),
+            OPENCODE_VERSION,
+        ),
+    ] {
+        assert!(
+            CONTAINERFILE.contains(&format!("COPY mj-core/assets/{harness}/runtime.json")),
+            "containers/Containerfile.agent-dev must install {harness} from mj-core/assets/{harness}/runtime.json"
+        );
+        let metadata: serde_json::Value = serde_json::from_str(metadata).unwrap();
+        assert_eq!(metadata["version"], version);
+    }
+
+    // DSH has no managed installation. The image installs the pinned npm
+    // package, and the launch otherwise fetches that same version through npx.
+    let dsh = format!("{DSH_ACP_PACKAGE}@{DSH_ACP_VERSION}");
+    assert!(
+        CONTAINERFILE.contains(&dsh),
+        "containers/Containerfile.agent-dev must install {dsh}"
+    );
     let (command, arguments) =
         bridge_launch(HarnessKind::Dsh, ExecutionPolicy::ConfiguredApprovals);
     assert_eq!(command, "sh");

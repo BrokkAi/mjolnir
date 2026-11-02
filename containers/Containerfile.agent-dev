@@ -147,6 +147,7 @@ RUN apt-get update \
         tmux \
         unzip \
         zip \
+        zstd \
     && rm -rf /var/lib/apt/lists/*
 
 # Astral's distroless image provides native binaries for both supported
@@ -182,19 +183,21 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
     && [ "$(go env GOVERSION)" = "go${GO_VERSION}" ]
 
 # Keep these in lockstep with mj-core/src/harness_runtime.rs (see "Harness
-# pins" in AGENTS.md). Kimi, Grok, and dsh-acp are not in the image; they
-# install on demand. Muse and MiMo Code install below from their runtime.json
-# files.
+# pins" in AGENTS.md). Muse, MiMo Code, Kimi Code, Grok, and OpenCode install
+# below from their runtime.json files. dsh-acp's npm package carries its native
+# binaries, so the launch finds it on PATH instead of running npx.
 RUN npm install --global --no-audit --no-fund \
         @brokkai/codex-acp@1.15.0 \
         @agentclientprotocol/claude-agent-acp@0.99.0 \
         @anthropic-ai/claude-code@2.1.308 \
+        @brokkai/dsh-acp@0.5.0 \
         @brokkai/muse-acp@0.20.0 \
         @openai/codex@0.165.0 \
     && npm cache clean --force \
     && codex --version \
     && codex-acp --version \
     && claude --version \
+    && [ "$(dsh-acp --version)" = "dsh-acp 0.5.0" ] \
     && [ "$(node -p "require('/usr/local/lib/node_modules/@brokkai/muse-acp/package.json').version")" = "0.20.0" ]
 
 # The bridge prefers CODEX_PATH over its bundled Codex binary. Select the
@@ -206,8 +209,10 @@ ENV CODEX_PATH=/usr/local/lib/node_modules/@openai/codex/bin/codex.js
 # Match the separately pinned Code used by managed bare workers.
 ENV CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude
 
-# MiMo Code applies patch updates during normal startup unless this is set.
-ENV MIMOCODE_DISABLE_AUTOUPDATE=1
+# MiMo Code and OpenCode apply updates during normal startup unless these are
+# set; the managed installations set the same variables.
+ENV MIMOCODE_DISABLE_AUTOUPDATE=1 \
+    OPENCODE_DISABLE_AUTOUPDATE=1
 
 # slopcop sends a session's change to the hosted SlopCop check service; the
 # skill synced into sessions tells agents to run it. Pinned release archive per
@@ -342,12 +347,31 @@ COPY scripts/install-mimo.py /opt/mjolnir/install-mimo.py
 RUN python3 /opt/mjolnir/install-mimo.py /opt/mjolnir/mimo-runtime.json /usr/local/bin \
     && mimo --version
 
+# Kimi Code, Grok, and OpenCode come from the same pinned artifacts and digests
+# as their managed installations, in the same layout (Grok keeps its `agent`
+# launcher beside it), linked onto PATH where the launch scripts look first.
+COPY scripts/install-native-harness.py /opt/mjolnir/install-native-harness.py
+COPY mj-core/assets/kimi/runtime.json /opt/mjolnir/kimi-runtime.json
+COPY mj-core/assets/grok/runtime.json /opt/mjolnir/grok-runtime.json
+COPY mj-core/assets/opencode/runtime.json /opt/mjolnir/opencode-runtime.json
+RUN for harness in kimi grok opencode; do \
+        python3 /opt/mjolnir/install-native-harness.py "$harness" \
+            "/opt/mjolnir/${harness}-runtime.json" "/opt/mjolnir/harnesses/${harness}" \
+        && ln -s "/opt/mjolnir/harnesses/${harness}/bin/${harness}" "/usr/local/bin/${harness}" \
+        || exit 1; \
+    done \
+    && [ "$(kimi --version)" = "$(jq -r .version /opt/mjolnir/kimi-runtime.json)" ] \
+    && grok --version | grep -qF "grok $(jq -r .version /opt/mjolnir/grok-runtime.json) " \
+    && [ "$(opencode --version)" = "opencode v$(jq -r .version /opt/mjolnir/opencode-runtime.json)" ]
+
 # Session workers construct a clean login environment instead of inheriting
 # the container exec environment. Keep image tool settings in that login too.
 RUN printf '%s\n' \
         'export CODEX_PATH=/usr/local/lib/node_modules/@openai/codex/bin/codex.js' \
         'export PLAYWRIGHT_BROWSERS_PATH=/ms-playwright' \
         'export MUSE_CLI=/usr/local/bin/muse' \
+        'export MIMOCODE_DISABLE_AUTOUPDATE=1' \
+        'export OPENCODE_DISABLE_AUTOUPDATE=1' \
         > /etc/profile.d/20-mjolnir-tools.sh
 
 RUN useradd --create-home --shell /bin/bash hel \
@@ -372,7 +396,7 @@ COPY --from=worker /out/mj-worker /opt/mjolnir/mj-worker
 ARG MJ_WORKER_BUILD_ID
 LABEL org.opencontainers.image.title="Mjolnir agent development environment" \
       org.opencontainers.image.source="https://github.com/BrokkAi/mjolnir" \
-      org.opencontainers.image.description="Mjolnir agent development environment with Node, Rust, Go, cargo-nextest, OpenJDK, and the pinned ACP bridges" \
+      org.opencontainers.image.description="Mjolnir agent development environment with Node, Rust, Go, cargo-nextest, OpenJDK, and the pinned harnesses" \
       org.brokk.mjolnir.worker-build="${MJ_WORKER_BUILD_ID}"
 
 # Hel overrides the command with the same keepalive, but retaining it here also
