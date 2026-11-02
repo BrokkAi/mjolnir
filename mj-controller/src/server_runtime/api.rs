@@ -974,6 +974,7 @@ impl ApiBackend {
                         let record = self.exports.session_record(&relation.child_session_id);
                         // This listing reports state; the mailbox carries reports.
                         let unknown = ChildProgress {
+                            turn_pending: true,
                             finished_span: None,
                             last_completed_ordinal: None,
                             report: ReportState::Fallback,
@@ -1301,6 +1302,7 @@ impl ApiBackend {
                 })
                 .collect::<Result<Vec<_>>>()?;
             let mut summaries = summaries;
+            self.observe_child_resolution(&mut summaries).await?;
             self.describe_child_profile_failures(&mut summaries).await?;
             return Ok((summaries, starts));
         }
@@ -1321,8 +1323,55 @@ impl ApiBackend {
                 starts.insert(id.clone(), status);
             }
         }
+        self.observe_child_resolution(&mut summaries).await?;
         self.describe_child_profile_failures(&mut summaries).await?;
         Ok((summaries, starts))
+    }
+
+    async fn observe_child_resolution(
+        &self,
+        children: &mut [(
+            String,
+            Option<mj_core::state::MaterializedSessionSummary>,
+            ChildProgress,
+        )],
+    ) -> Result<()> {
+        for (id, _, progress) in children {
+            if self.exports.session_record(id).is_none_or(|record| {
+                !matches!(
+                    record.state,
+                    SessionState::Provisioning
+                        | SessionState::Running
+                        | SessionState::Disconnected
+                        | SessionState::Checkpointing
+                )
+            }) {
+                continue;
+            }
+            let view = self
+                .session_handle(id.clone())
+                .await?
+                .map(|handle| handle.view());
+            // A projection commit can precede publication of its actor view.
+            // Only the worker publication for that completion can resolve it.
+            progress.turn_pending = view.as_ref().is_none_or(|view| {
+                !view.connected
+                    || view.snapshot.as_ref().is_none_or(|snapshot| {
+                        snapshot
+                            .materialized
+                            .last_turn_outcome
+                            .as_ref()
+                            .map(|turn| turn.completed_ordinal)
+                            != progress.last_completed_ordinal
+                            || !matches!(
+                                snapshot.materialized.execution,
+                                MaterializedExecutionState::Idle
+                            )
+                            || crate::server::api::WaitObservation::worker_turn_pending(snapshot)
+                    })
+            });
+        }
+        Ok(())
     }
 
     async fn describe_child_profile_failures(
@@ -1796,10 +1845,12 @@ fn subagent_status(
             // Mjolnir is reminding it.
             Some(summary)
                 if idle(summary)
-                    && (progress.awaiting_prompt(match start {
-                        Some(StartStatus::Submitted { turn_id }) => Some(*turn_id),
-                        _ => None,
-                    }) || matches!(progress.report, ReportState::Pending { .. })) =>
+                    && (progress.turn_pending
+                        || progress.awaiting_prompt(match start {
+                            Some(StartStatus::Submitted { turn_id }) => Some(*turn_id),
+                            _ => None,
+                        })
+                        || matches!(progress.report, ReportState::Pending { .. })) =>
             {
                 ("running".into(), summary.last_agent_message.clone(), false)
             }
@@ -1846,6 +1897,9 @@ fn subagent_status(
 /// What the store says about a child's answer to its parent's newest prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChildProgress {
+    /// The worker still owns assessment or retry resolution for this turn,
+    /// or its matching connected publication is not available yet.
+    pub turn_pending: bool,
     /// The completed turn observed here owns only this transcript span.
     pub finished_span: Option<(u64, u64)>,
     /// Stable terminal-failure generation even when the turn has no span.
@@ -1875,6 +1929,7 @@ impl ChildProgress {
     #[cfg(test)]
     pub(crate) fn settled(report: ReportState) -> Self {
         Self {
+            turn_pending: false,
             finished_span: None,
             last_completed_ordinal: Some(1),
             report,
@@ -1913,6 +1968,7 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
         .map(|turn| turn.command_id.as_str())
         .collect::<Vec<_>>();
     ChildProgress {
+        turn_pending: false,
         finished_span: last.and_then(|turn| {
             turn.turn_start_position
                 .map(|start| (start, turn.completed_ordinal))
@@ -1987,6 +2043,7 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         .filter(|turn| mj_core::subagent::turn_failed_on_login(turn))
         .and(subagent.map(|record| record.profile_id));
     Ok(ChildProgress {
+        turn_pending: false,
         finished_span: last.as_ref().and_then(|turn| {
             turn.turn_start_position
                 .map(|start| (start, turn.completed_ordinal))

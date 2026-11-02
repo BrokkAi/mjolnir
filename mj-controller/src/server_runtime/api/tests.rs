@@ -1688,6 +1688,7 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
     let progress =
         |awaited: Option<u64>, answered: Option<u64>, failed: Option<(&'static str, &str)>| {
             ChildProgress {
+                turn_pending: false,
                 finished_span: None,
                 last_completed_ordinal: answered.map(|ordinal| ordinal + 1),
                 report: ReportState::Fallback,
@@ -1759,6 +1760,7 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         interruption_event_ordinals: Vec::new(),
     };
     let progress = ChildProgress {
+        turn_pending: false,
         finished_span: None,
         last_completed_ordinal: Some(21),
         report: ReportState::Fallback,
@@ -4386,6 +4388,213 @@ async fn reviewer_children_are_private_to_the_review_host() {
             .unwrap()
             .is_empty(),
         "reviewers never notify their parent through SubagentFinished"
+    );
+}
+
+// Hard-won: #1442: delegation announced a provider failure while its worker had a retry armed.
+#[tokio::test]
+async fn child_provider_retry_keeps_listings_notifications_and_parking_pending() {
+    use mj_core::assessment::{Action, Status, TurnAssessment};
+    use mj_core::relay::CapacityRetry;
+
+    if !isolated_parked_test(
+        "child_provider_retry_keeps_listings_notifications_and_parking_pending",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let exports = ParkingExports::new(SessionState::Running, None);
+    let backend_for = |view: ManagedSessionView| {
+        Arc::new(ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: "child-1".into(),
+                accepted_ordinal: 3,
+                submitted: mpsc::unbounded_channel().0,
+                view: Some(view),
+            })),
+            running_states(),
+            exports.clone(),
+        ))
+    };
+    async fn pending(backend: &Arc<ApiBackend>, phase: &str) {
+        let listed = backend
+            .execute_subagent_tool(
+                "parent-1".into(),
+                mj_core::subagent::SubagentToolRequest {
+                    originating_command_id: None,
+                    request_id: format!("list-{phase}"),
+                    created_at_ms: 1,
+                    action: mj_core::subagent::SubagentToolAction::ListAgents,
+                },
+            )
+            .await;
+        assert!(!listed.is_error, "{}", listed.message);
+        let listed: serde_json::Value = serde_json::from_str(&listed.message).unwrap();
+        assert_eq!(listed["agents"][0]["state"], "running", "{phase}: {listed}");
+        backend.reconcile_parent_reports("parent-1").await.unwrap();
+        assert!(
+            crate::database::pending_mailbox_events(10)
+                .unwrap()
+                .is_empty(),
+            "{phase}: the parent must not be told its retrying child finished"
+        );
+    }
+    fn unresolved(view: &ManagedSessionView, phase: &str) {
+        assert!(
+            crate::session_manager::DelegationObservation::from_view(view)
+                .unwrap()
+                .outcome
+                .is_none(),
+            "{phase}: completion must not remind or park a retrying child"
+        );
+    }
+
+    let mut view = ready_view("model");
+    let snapshot = view.snapshot.as_mut().unwrap();
+    snapshot.materialized.session_id = "child-1".into();
+    snapshot.operational.session_id = "child-1".into();
+    let mut turn = finished_turn("task");
+    turn.outcome = mj_core::state::TurnOutcomeKind::Completed {
+        stop_reason: "error".into(),
+    };
+    turn.diagnostic = Some(mj_core::diagnostic::TurnDiagnostic {
+        message: "Selected model is at capacity. Please try a different model.".into(),
+        code: Some("service".into()),
+        http_status: None,
+        reset_at: None,
+    });
+    snapshot.materialized.applied_event_ordinal = turn.completed_ordinal;
+    snapshot.materialized.applied_event_digest = format!("{:064x}", turn.completed_ordinal);
+    snapshot.materialized.last_turn_outcome = Some(turn.clone());
+    snapshot.operational.assessment = Some(Box::new(TurnAssessment::pending(
+        turn.command_id.clone(),
+        turn.completed_ordinal,
+        turn.completed_at_ms,
+        mj_core::activity::verdict::CompletionEvidence::bounded("error", turn.diagnostic.as_ref()),
+    )));
+    crate::database::save_materialized_session(&snapshot.materialized).unwrap();
+    unresolved(&view, "assessment");
+    pending(&backend_for(view.clone()), "assessment").await;
+
+    // A store commit can reach readers before the actor publishes that turn.
+    let mut older = view.clone();
+    older
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .materialized
+        .last_turn_outcome
+        .as_mut()
+        .unwrap()
+        .completed_ordinal -= 1;
+    older.snapshot.as_mut().unwrap().operational.assessment = None;
+    pending(&backend_for(older), "projection-before-worker-view").await;
+    let mut disconnected = view.clone();
+    disconnected.connected = false;
+    unresolved(&disconnected, "disconnected");
+    pending(&backend_for(disconnected), "disconnected").await;
+
+    let snapshot = view.snapshot.as_mut().unwrap();
+    let assessment = snapshot.operational.assessment.as_mut().unwrap();
+    assessment.status = Status::Scheduled;
+    assessment.action = Some(Action::RetryProvider);
+    let mut retry = CapacityRetry::new(1, turn.completed_ordinal, 1);
+    snapshot.operational.capacity_retry = Some(retry.clone());
+    unresolved(&view, "armed");
+    pending(&backend_for(view.clone()), "armed").await;
+
+    // The submitted retry is now queued; the timer alone no longer holds it.
+    retry.submitted = true;
+    let snapshot = view.snapshot.as_mut().unwrap();
+    snapshot.operational.capacity_retry = Some(retry.clone());
+    snapshot.operational.assessment = None;
+    snapshot
+        .materialized
+        .queued_prompts
+        .push(mj_core::state::MaterializedQueuedPrompt {
+            command_id: retry.command_id.clone(),
+            kind: Default::default(),
+            content: Vec::new(),
+            queued_at_ms: 2,
+            accepted_ordinal: Some(10),
+        });
+    crate::database::save_materialized_session(&snapshot.materialized).unwrap();
+    unresolved(&view, "queued");
+    pending(&backend_for(view.clone()), "queued").await;
+
+    let snapshot = view.snapshot.as_mut().unwrap();
+    snapshot.materialized.queued_prompts.clear();
+    snapshot.materialized.execution = MaterializedExecutionState::Running { started_at_ms: 2 };
+    snapshot.materialized.active_turn = Some(mj_core::state::MaterializedTurn {
+        command_id: retry.command_id.clone(),
+        accepted_ordinal: Some(10),
+        turn_start_position: 11,
+        started_at_ms: 2,
+        steered_into: None,
+    });
+    crate::database::save_materialized_session(&snapshot.materialized).unwrap();
+    unresolved(&view, "running");
+    pending(&backend_for(view.clone()), "running").await;
+
+    // A second refusal still belongs to the worker until it has a verdict.
+    turn.command_id = retry.command_id.clone();
+    turn.accepted_ordinal = Some(10);
+    turn.turn_start_position = Some(11);
+    turn.completed_ordinal = 20;
+    let snapshot = view.snapshot.as_mut().unwrap();
+    snapshot.materialized.execution = MaterializedExecutionState::Idle;
+    snapshot.materialized.active_turn = None;
+    snapshot.materialized.applied_event_ordinal = 20;
+    snapshot.materialized.applied_event_digest = format!("{:064x}", 20);
+    snapshot.materialized.last_turn_outcome = Some(turn.clone());
+    snapshot.operational.capacity_retry = None;
+    snapshot.operational.assessment = Some(Box::new(TurnAssessment::pending(
+        turn.command_id.clone(),
+        turn.completed_ordinal,
+        turn.completed_at_ms,
+        mj_core::activity::verdict::CompletionEvidence::bounded("error", turn.diagnostic.as_ref()),
+    )));
+    crate::database::save_materialized_session(&snapshot.materialized).unwrap();
+    unresolved(&view, "second-assessment");
+    pending(&backend_for(view.clone()), "second-assessment").await;
+
+    // Classification can decline another retry. That failure must reach the
+    // parent, with no earlier notification having consumed its identity.
+    view.snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .assessment
+        .as_mut()
+        .unwrap()
+        .status = Status::Assessed;
+    assert!(
+        crate::session_manager::DelegationObservation::from_view(&view)
+            .unwrap()
+            .outcome
+            .is_some()
+    );
+    let backend = backend_for(view);
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(
+        events.len(),
+        1,
+        "only the final resolved failure is reported"
+    );
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&events[0].event_json).unwrap();
+    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = event.body else {
+        panic!("expected child report")
+    };
+    assert_eq!(report.state, "failed");
+    assert!(
+        report
+            .output
+            .unwrap()
+            .contains("Selected model is at capacity")
     );
 }
 

@@ -405,28 +405,7 @@ pub(super) fn build_observation(
         observation
             .pending_elicitations
             .clone_from(&snapshot.materialized.pending_elicitations);
-        observation.execution = snapshot.materialized.execution;
-        observation.active_turn = snapshot.materialized.active_turn.clone();
-        observation
-            .last_turn_outcome
-            .clone_from(&snapshot.materialized.last_turn_outcome);
-        observation.queued = snapshot
-            .materialized
-            .queued_prompts
-            .iter()
-            .map(|prompt| prompt.command_id.clone())
-            .collect();
-        observation
-            .capacity_retry
-            .clone_from(&snapshot.operational.capacity_retry);
-        observation.retry_assessment_pending = snapshot.operational.retry_assessment_pending;
-        observation.turn_assessment = snapshot.operational.assessment.as_deref().cloned();
-        observation.quota_recovery = snapshot
-            .operational
-            .continuation
-            .quota_recovery
-            .clone()
-            .filter(|r| !r.submitted);
+        observation.observe_worker_turn(snapshot);
     } else if let Some(durable) = durable {
         observation.execution = durable.execution;
         observation.active_turn = durable.active_turn.clone();

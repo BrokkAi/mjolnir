@@ -7,14 +7,15 @@ use mj_core::subagent::SubagentToolRequest;
 pub(crate) struct DelegationObservation {
     pub requests: Vec<SubagentToolRequest>,
     pub completed: Vec<String>,
-    pub idle: bool,
+    /// Present only once the worker has resolved this ending, including its
+    /// assessment and retries. Completion cannot observe an intermediate stop.
     pub outcome: Option<MaterializedTurnOutcome>,
     pub in_flight: Vec<String>,
     pub credential_signal: Option<CredentialSyncSignal>,
 }
 
 impl DelegationObservation {
-    fn from_view(view: &ManagedSessionView) -> Option<Self> {
+    pub(crate) fn from_view(view: &ManagedSessionView) -> Option<Self> {
         let snapshot = view.snapshot.as_ref()?;
         Some(Self {
             requests: snapshot.subagent_requests.clone(),
@@ -23,11 +24,14 @@ impl DelegationObservation {
                 .iter()
                 .map(|r| r.request_id.clone())
                 .collect(),
-            idle: matches!(
-                snapshot.materialized.execution,
-                mj_core::state::MaterializedExecutionState::Idle
-            ),
-            outcome: snapshot.materialized.last_turn_outcome.clone(),
+            outcome: snapshot.materialized.last_turn_outcome.clone().filter(|_| {
+                view.connected
+                    && matches!(
+                        snapshot.materialized.execution,
+                        mj_core::state::MaterializedExecutionState::Idle
+                    )
+                    && !crate::server::api::WaitObservation::worker_turn_pending(snapshot)
+            }),
             in_flight: snapshot
                 .materialized
                 .active_turn
