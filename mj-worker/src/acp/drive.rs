@@ -227,9 +227,13 @@ where
                         }
                     },
                 };
-                if !notification_live_history_enabled.load(Ordering::Acquire)
-                    && !session_update_is_session_state(&update) {
-                    return Ok(());
+                if !notification_live_history_enabled.load(Ordering::Acquire) {
+                    if !session_update_is_session_state(&update) {
+                        return Ok(());
+                    }
+                    // Session state can carry historical failures alongside
+                    // current metadata. Do not timestamp those as new errors.
+                    remove_session_failure(&mut update);
                 }
                 suppress_codex_sandbox_warning(notification_harness, notification_policy, &mut update);
                 notification_goal.lock().expect("goal lock poisoned").state.apply(&update)

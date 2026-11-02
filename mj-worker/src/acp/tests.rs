@@ -7,12 +7,14 @@ use agent_client_protocol::schema::v1::ToolCallUpdate;
 use mj_core::subagent::SubagentMcpRole;
 
 // Hard-won: 61a1cfa: Codex replay dropped the current available-command catalogue and goal metadata, including on large history.
+// Hard-won: #1443: loading a session presented historical quota failures as new errors.
 #[cfg(unix)]
 #[tokio::test]
-async fn loading_native_history_preserves_current_commands_and_goal_metadata() {
-    let temp = tempfile::tempdir().unwrap();
-    let script = temp.path().join("load_metadata.py");
-    std::fs::write(&script, r#"
+async fn loading_native_history_preserves_current_metadata_without_replaying_failures() {
+    for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("load_metadata.py");
+        std::fs::write(&script, r#"
 import json, sys
 
 def emit(value):
@@ -23,6 +25,8 @@ def update(value):
 
 goal = {'objective':'finish', 'status':'complete', 'createdAt':1, 'tokensUsed':42}
 execution = {'version':1, 'revision':1, 'status':'idle'}
+failure = {'id':'quota-error','revision':1,'category':'limit','severity':'error',
+    'title':"You've hit your session limit · resets 5:20pm (UTC)",'actions':[]}
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get('method')
@@ -36,15 +40,17 @@ for line in sys.stdin:
         update({'sessionUpdate':'agent_message_chunk', 'content':{'type':'text','text':'old history ' * 12000}})
         update({'sessionUpdate':'available_commands_update', 'availableCommands':[{'name':'goal','description':'Set a goal'}]})
         update({'sessionUpdate':'tool_call','toolCallId':'old-tool','title':'old call','status':'in_progress'})
-        update({'sessionUpdate':'session_info_update','title':'Current title','_meta':{'jetbrains':{'air':{'goal':goal}},'execution':execution}})
+        update({'sessionUpdate':'session_info_update','_meta':{'jetbrains':{'air':{'sessionFailure':failure}}}})
+        update({'sessionUpdate':'session_info_update','title':'Current title','_meta':{'jetbrains':{'air':{'goal':goal,'sessionFailure':failure}},'execution':execution}})
         update({'sessionUpdate':'usage_update','used':100,'size':1000})
         update({'sessionUpdate':'config_option_update','configOptions':[
             {'id':'model','name':'Model','type':'select','currentValue':'astra','options':[{'value':'astra','name':'Astra'}]}]})
         update({'sessionUpdate':'current_mode_update','currentModeId':'agent'})
         update({'sessionUpdate':'plan','entries':[{'content':'old plan','priority':'medium','status':'completed'}]})
-        result = {'sessionId':'native', 'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'}]},
+        result = {'sessionId':'native', 'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'},{'id':'auto','name':'Auto'}]},
             '_meta':{'jetbrains':{'air':{'goal':goal}},'execution':execution}}
     elif method == 'session/prompt':
+        update({'sessionUpdate':'session_info_update','_meta':{'jetbrains':{'air':{'sessionFailure':failure}}}})
         update({'sessionUpdate':'tool_call_update','toolCallId':'old-tool','status':'completed'})
         update({'sessionUpdate':'tool_call','toolCallId':'new-tool','title':'new call','status':'in_progress'})
         update({'sessionUpdate':'tool_call_update','toolCallId':'new-tool','status':'completed'})
@@ -55,131 +61,153 @@ for line in sys.stdin:
     if ident is not None:
         emit({'jsonrpc':'2.0','id':ident,'result':result})
 "#).unwrap();
-    let (request_tx, request_rx) = mpsc::channel(4);
-    let (event_tx, mut event_rx) = mpsc::channel(64);
-    let runtime = tokio::spawn(run(
-        LaunchSpec {
-            operator_away: Default::default(),
-            imported_logins: None,
-            bridge_spec_path: None,
-            subagent_policy: mj_core::subagent::SubagentPolicy::Native,
-            managed_subagent: false,
-            subagent_mcp_socket: None,
-            clear_context_request: None,
-            context_restore: None,
-            goal_recovery: Default::default(),
-            command: "python3".into(),
-            args: vec![script.to_string_lossy().into_owned()],
-            environment: BTreeMap::new(),
-            cwd: temp.path().to_path_buf(),
-            additional_directories: Vec::new(),
-            extra_mcp_servers: Vec::new(),
-            project_memory: None,
-            resume_session: Some("native".into()),
-            native_session_may_have_history: true,
-            accepted_config: Default::default(),
-            initial_model: None,
-            harness: HarnessKind::Codex,
-            execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            acp_activity: Default::default(),
-            step_clock: Default::default(),
-            tools_in_flight: Default::default(),
-            turn_context: Default::default(),
-            verdict: Some(crate::acp::VerdictSource::Direct {
-                key: String::new(),
-                endpoint: String::new(),
-            }),
-            stall_policy: None,
-        },
-        request_rx,
-        event_tx,
-    ));
-    let mut updates = Vec::new();
-    let mut started = false;
-    let mut replay_committed = false;
-    let mut before_load_response = Vec::new();
-    loop {
-        let event = tokio::time::timeout(Duration::from_secs(10), event_rx.recv())
-            .await
-            .expect("adapter must not stall on a full output pipe")
-            .expect("runtime remains connected");
-        match event {
-            RuntimeEvent::SessionUpdate { update } => {
-                if !replay_committed {
-                    before_load_response.push(update.clone());
+        let (request_tx, request_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let runtime = tokio::spawn(run(
+            LaunchSpec {
+                operator_away: Default::default(),
+                imported_logins: None,
+                bridge_spec_path: None,
+                subagent_policy: mj_core::subagent::SubagentPolicy::Native,
+                managed_subagent: false,
+                subagent_mcp_socket: None,
+                clear_context_request: None,
+                context_restore: None,
+                goal_recovery: Default::default(),
+                command: "python3".into(),
+                args: vec![script.to_string_lossy().into_owned()],
+                environment: BTreeMap::new(),
+                cwd: temp.path().to_path_buf(),
+                additional_directories: Vec::new(),
+                extra_mcp_servers: Vec::new(),
+                project_memory: None,
+                resume_session: Some("native".into()),
+                native_session_may_have_history: true,
+                accepted_config: Default::default(),
+                initial_model: None,
+                harness,
+                execution_policy: ExecutionPolicy::ConfiguredApprovals,
+                acp_activity: Default::default(),
+                step_clock: Default::default(),
+                tools_in_flight: Default::default(),
+                turn_context: Default::default(),
+                verdict: Some(crate::acp::VerdictSource::Direct {
+                    key: String::new(),
+                    endpoint: String::new(),
+                }),
+                stall_policy: None,
+            },
+            request_rx,
+            event_tx,
+        ));
+        let mut updates = Vec::new();
+        let mut started = false;
+        let mut replay_committed = false;
+        let mut before_load_response = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(10), event_rx.recv())
+                .await
+                .expect("adapter must not stall on a full output pipe")
+                .expect("runtime remains connected");
+            match event {
+                RuntimeEvent::SessionUpdate { update } => {
+                    if !replay_committed {
+                        before_load_response.push(update.clone());
+                    }
+                    updates.push(update);
                 }
-                updates.push(update);
+                RuntimeEvent::NativeAgent {
+                    event: mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+                } => replay_committed = true,
+                RuntimeEvent::SessionStarted { resumed, .. } => {
+                    assert!(resumed);
+                    started = true;
+                }
+                RuntimeEvent::SessionConfigured { .. } if started => {
+                    request_tx
+                        .send(CommandRequest::Prompt {
+                            request_id: "new-turn".into(),
+                            prompt: vec![ContentBlock::Text(TextContent::new("continue"))],
+                        })
+                        .await
+                        .unwrap();
+                    started = false;
+                }
+                RuntimeEvent::PromptFinished { request_id, .. } if request_id == "new-turn" => {
+                    break;
+                }
+                RuntimeEvent::Stopped => panic!(
+                    "{harness:?}: runtime stopped while loading the session: {:#?}",
+                    runtime.await
+                ),
+                _ => {}
             }
-            RuntimeEvent::NativeAgent {
-                event: mj_core::native_agent::NativeAgentEvent::ReplayCommit,
-            } => replay_committed = true,
-            RuntimeEvent::SessionStarted { resumed, .. } => {
-                assert!(resumed);
-                started = true;
-            }
-            RuntimeEvent::SessionConfigured { .. } if started => {
-                request_tx
-                    .send(CommandRequest::Prompt {
-                        request_id: "new-turn".into(),
-                        prompt: vec![ContentBlock::Text(TextContent::new("continue"))],
-                    })
-                    .await
-                    .unwrap();
-                started = false;
-            }
-            RuntimeEvent::PromptFinished { request_id, .. } if request_id == "new-turn" => break,
-            RuntimeEvent::Stopped => panic!("runtime stopped while loading the session"),
-            _ => {}
         }
+        drop(request_tx);
+        tokio::time::timeout(Duration::from_secs(10), runtime)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(replay_committed);
+        assert!(
+            before_load_response
+                .iter()
+                .all(|u| u.pointer("/_meta/jetbrains/air/sessionFailure").is_none()),
+            "{harness:?}: historical failures must not become current transcript notices"
+        );
+        let live_failures: Vec<_> = updates
+            .iter()
+            .filter_map(|u| u.pointer("/_meta/jetbrains/air/sessionFailure"))
+            .collect();
+        assert_eq!(
+            live_failures.len(),
+            1,
+            "{harness:?}: live failures still pass"
+        );
+        assert_eq!(live_failures[0]["id"], "quota-error");
+        assert!(
+            before_load_response
+                .iter()
+                .any(|u| u["availableCommands"][0]["name"] == "goal")
+        );
+        assert!(
+            before_load_response
+                .iter()
+                .any(|u| u["_meta"]["jetbrains"]["air"]["goal"]["tokensUsed"] == 42)
+        );
+        assert!(
+            before_load_response
+                .iter()
+                .any(|u| u["configOptions"][0]["currentValue"] == "astra")
+        );
+        assert!(
+            before_load_response
+                .iter()
+                .any(|u| u["currentModeId"] == "agent")
+        );
+        assert!(
+            before_load_response
+                .iter()
+                .any(|u| u["title"] == "Current title")
+        );
+        assert!(!updates.iter().any(|u| u["toolCallId"] == "old-tool"));
+        assert!(
+            !updates
+                .iter()
+                .any(|u| matches!(u["sessionUpdate"].as_str(), Some("plan" | "usage_update")))
+        );
+        assert!(
+            updates
+                .iter()
+                .any(|u| u["toolCallId"] == "new-tool" && u["status"] == "completed")
+        );
+        let text: String = updates
+            .iter()
+            .filter_map(|u| u["content"]["text"].as_str())
+            .collect();
+        assert_eq!(text, "live output ".repeat(12000));
     }
-    drop(request_tx);
-    tokio::time::timeout(Duration::from_secs(10), runtime)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(replay_committed);
-    assert!(
-        before_load_response
-            .iter()
-            .any(|u| u["availableCommands"][0]["name"] == "goal")
-    );
-    assert!(
-        before_load_response
-            .iter()
-            .any(|u| u["_meta"]["jetbrains"]["air"]["goal"]["tokensUsed"] == 42)
-    );
-    assert!(
-        before_load_response
-            .iter()
-            .any(|u| u["configOptions"][0]["currentValue"] == "astra")
-    );
-    assert!(
-        before_load_response
-            .iter()
-            .any(|u| u["currentModeId"] == "agent")
-    );
-    assert!(
-        before_load_response
-            .iter()
-            .any(|u| u["title"] == "Current title")
-    );
-    assert!(!updates.iter().any(|u| u["toolCallId"] == "old-tool"));
-    assert!(
-        !updates
-            .iter()
-            .any(|u| matches!(u["sessionUpdate"].as_str(), Some("plan" | "usage_update")))
-    );
-    assert!(
-        updates
-            .iter()
-            .any(|u| u["toolCallId"] == "new-tool" && u["status"] == "completed")
-    );
-    let text: String = updates
-        .iter()
-        .filter_map(|u| u["content"]["text"].as_str())
-        .collect();
-    assert_eq!(text, "live output ".repeat(12000));
 }
 
 /// Every launch request states the servers Mjolnir owns. A bridge that opens

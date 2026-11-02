@@ -233,16 +233,21 @@ fn suppress_codex_sandbox_warning(
         return;
     }
     // Codex checks sandbox prerequisites before opening a full-access thread.
-    // Keep any title, goal, or other state carried alongside the notice.
-    if let Some(air) = info
-        .meta
-        .as_mut()
-        .and_then(|meta| meta.get_mut("jetbrains"))
-        .and_then(|jetbrains| jetbrains.get_mut("air"))
-        .and_then(serde_json::Value::as_object_mut)
+    remove_session_failure(update);
+    tracing::debug!("suppressed Codex bubblewrap prerequisite warning in YOLO mode");
+}
+
+/// Keep any title, goal, or other state carried alongside a suppressed notice.
+fn remove_session_failure(update: &mut SessionUpdate) {
+    if let SessionUpdate::SessionInfoUpdate(info) = update
+        && let Some(air) = info
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.get_mut("jetbrains"))
+            .and_then(|jetbrains| jetbrains.get_mut("air"))
+            .and_then(serde_json::Value::as_object_mut)
     {
         air.remove("sessionFailure");
-        tracing::debug!("suppressed Codex bubblewrap prerequisite warning in YOLO mode");
     }
 }
 
