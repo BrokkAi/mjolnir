@@ -671,6 +671,7 @@ fn deployment_capacity_groups_local_and_same_host_targets() {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        daemon: Default::default(),
         github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),

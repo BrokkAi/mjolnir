@@ -66,7 +66,7 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 20
+version = 21
 ```
 
 The top-level keys are listed below. The legacy `[mailbox] enabled` switch is
@@ -74,7 +74,7 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `20`. |
+| `version` | integer | yes | none | Configuration schema version; use `21`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -85,6 +85,7 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 | `review` | table | no | default `[review]` values | Automatic review trigger and reviewer settings. |
 | `continuation` | table | no | enabled | Automatic continuation of already-requested unfinished work; also requires Jev. |
 | `jev` | table | no | enabled | Hosted turn classification, continuation checks, and semantic help search. |
+| `daemon` | table | no | runs on the host | Where the daemon runs: on this computer or in a Podman or Docker container. |
 | `sessionwiki` | table | no | default `[sessionwiki]` values | Full-text session index and automatic archiving. |
 | `keys` | table | no | default `[keys]` values | The prefix key and every command's key bindings. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
@@ -100,7 +101,7 @@ and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
 
-A missing or empty file is treated as an empty version 20 configuration. Older
+A missing or empty file is treated as an empty version 21 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -379,6 +380,45 @@ In the terminal, these review fields are edited inside **Settings** so one Save 
 Cancel applies to the entire configuration draft. Settings can discover the
 selected review profile's supported model and effort choices and filters the
 profile list to compatible reviewer profiles.
+
+## Where the daemon runs `[daemon]`
+
+In the terminal or the web UI this is **Settings → Setup → Daemon**. Saving a
+change moves the daemon at once; running sessions keep going.
+
+```toml
+[daemon]
+runtime = "podman"
+image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+mounts = ["/srv/projects"]
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `runtime` | string | no | `"host"` | `"host"` runs `mj daemon-run` as a process on this computer. `"podman"` or `"docker"` runs it in a container of that engine. Container runtimes need Linux; elsewhere the daemon runs on the host and says so. |
+| `image` | string | no | this release's agent-dev image | The daemon container's image. |
+| `mounts` | array of absolute paths | no | `[]` | Further host directories the daemon container sees at the same path. |
+
+The daemon in the container is the image's own `mj`, built in the image
+from the same commit as your `mj`. Mjolnir uses an image only when its
+`org.brokk.mjolnir.revision` label is your build's revision: the configured
+`image`, or with none configured this release's agent-dev image or any local
+image carrying that label. Release images always match their release. For a
+development build, `scripts/build-agent-dev-image.sh docker` (or `podman`)
+builds a matching image from the checkout. Without one the daemon runs on
+this computer and says why.
+
+The daemon container is one long-lived container per instance. It uses this
+computer's network and process namespaces and runs as your own user, so
+clients reach the daemon at the same loopback address and the same process ID
+as a host daemon. It mounts your home directory, Mjolnir's data and settings
+directories, `/tmp` and your runtime directory at their host paths, plus
+`mounts`. Local sessions run in the container too, with the image's tools and
+worker, and keep running when the daemon is replaced. Container sessions reach
+the host's engine through its socket: Docker's `/var/run/docker.sock`, or your
+Podman socket, which Mjolnir starts with `systemctl --user start podman.socket`
+when it is not running. A change of image or mounts gets a new container. The
+previous container is removed once no session runs in it.
 
 ## Hosted Jev service `[jev]`
 
@@ -1145,7 +1185,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 19
+version = 21
 
 [phone]
 enabled = true

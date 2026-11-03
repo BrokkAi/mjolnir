@@ -538,9 +538,15 @@ impl DashboardContext {
         if config == self.controller.config {
             return;
         }
+        // A save from any surface reaches every terminal here, so this is
+        // where a changed `[daemon]` setting is carried out.
+        let daemon_changed = config.daemon != self.controller.config.daemon;
         self.controller.config = config.clone();
         self.dashboard.set_config(config);
         self.refresh_chat_context();
+        if daemon_changed {
+            super::actions::spawn_daemon_placement(self);
+        }
         // A profile added or changed here is probed once by the daemon, which
         // reloads the same configuration; this process asks no provider.
         // Config and session records have one owner: the runtime feed.
