@@ -1,10 +1,5 @@
 use super::*;
 
-/// Stands in for the session id of the launch standby, which is opened before
-/// the daemon has registered a session. [`DashboardState::adopt_launch_standby`]
-/// replaces it with the real id.
-const LAUNCH_STANDBY_SESSION_ID: &str = "launching";
-
 impl DashboardState {
     /// Records the conversation the focused pane shows, which decides which
     /// project the compact Sessions list belongs to.
@@ -152,6 +147,9 @@ impl DashboardState {
     /// there is no conversation to type toward.
     pub(crate) fn standby_prompt_session(&self) -> Option<&str> {
         let session_id = self.current_session_id()?;
+        if self.session_failed(session_id) || self.transition_failure_kind(session_id).is_some() {
+            return None;
+        }
         let parked = self
             .transition_kind(session_id)
             .is_some_and(Self::transition_accepts_prompts)
@@ -199,61 +197,6 @@ impl DashboardState {
             harness_kind: session.as_ref().map(|session| session.harness_kind),
             subagent_count: self.subagent_count_for(session_id),
         }
-    }
-
-    /// Opens the launch standby: the composer that holds typing from the
-    /// moment the new-session wizard closes until the daemon registers the
-    /// session. The conversation on screen is cleared so the session that was
-    /// selected before neither draws nor takes the keys.
-    pub fn begin_launch_standby(&mut self, header: SessionHeaderIdentity) {
-        self.launch_standby = Some(ChatState::standby(
-            LAUNCH_STANDBY_SESSION_ID,
-            &self.config,
-            header,
-            self.notices.clone(),
-        ));
-        self.launch_standby
-            .as_mut()
-            .expect("launch composer exists")
-            .bind_composer_session(None);
-        self.focus_pane(self.browse_pane());
-        self.set_current_session(None);
-        self.focus_prompt();
-    }
-
-    /// Whether a launch standby is waiting for its session.
-    pub fn has_launch_standby(&self) -> bool {
-        self.launch_standby.is_some()
-    }
-
-    /// Whether the launch standby is the surface keys, paste, and the prompt
-    /// band belong to. Selecting another session hands them back to that
-    /// session's conversation; the launch standby keeps its text until the
-    /// launch registers.
-    pub fn launch_standby_capturing(&self) -> bool {
-        self.launch_standby.is_some()
-            && self.focused_pane() == self.browse_pane()
-            && self.current_session_id().is_none()
-    }
-
-    /// Hands the launch standby to the session that has just registered: it
-    /// becomes that session's standby composer, and the prompts queued in it
-    /// are returned oldest first so the host can have the daemon deliver
-    /// each one.
-    pub fn adopt_launch_standby(&mut self, session_id: &str) -> Vec<String> {
-        let Some(mut standby) = self.launch_standby.take() else {
-            return Vec::new();
-        };
-        standby.adopt_session_id(session_id);
-        let header = self.standby_prompt_header(session_id);
-        standby.set_subagent_count(header.subagent_count);
-        standby.set_header_summary(header.target, header.profile, header.title);
-        if let Some(harness_kind) = header.harness_kind {
-            standby.set_harness_kind(harness_kind);
-        }
-        let queued = standby.queued_prompt_texts();
-        self.standby_prompts.insert(session_id.to_owned(), standby);
-        queued
     }
 
     /// Seeds the standby composer from a warm chat's input, so a restart
@@ -381,10 +324,6 @@ impl DashboardState {
                 });
             }
         }
-        if let Some(chat) = self.launch_standby.as_mut() {
-            changed |= chat.has_composer_updates();
-            chat.drain_composer();
-        }
         (changed, actions)
     }
 
@@ -396,19 +335,11 @@ impl DashboardState {
     /// plain prompt returns `QueueStartupPrompt` so the host can have the
     /// daemon deliver it when the session is live; a command keeps the draft
     /// and explains. `Some` means the key was consumed, including as a no-op.
-    ///
-    /// The launch standby, which has no session id yet, takes the same keys
-    /// the same way; its Enter only keeps the preview, because the prompt is
-    /// queued when the session registers and adopts the composer.
     pub(crate) fn handle_standby_prompt_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
         if self.focus != Focus::Prompt {
             return None;
         }
-        let session_id = match self.standby_prompt_session() {
-            Some(session_id) => Some(session_id.to_owned()),
-            None if self.launch_standby_capturing() => None,
-            None => return None,
-        };
+        let session_id = self.standby_prompt_session()?.to_owned();
         // Pane keys still belong to the dashboard; the prefix router has
         // already taken everything a user can rebind.
         if crate::actions::pane_command_for_key(key, self.focus).is_some() {
@@ -419,25 +350,13 @@ impl DashboardState {
         // CONTROL. Once the dashboard has declined the chord, keep that
         // platform convention from turning Ctrl-A/K/Y into inserted text.
         let key = standby_prompt_key(key);
-        let action = match &session_id {
-            Some(session_id) => self.standby_prompt_mut(session_id).handle_key(key),
-            None => self
-                .launch_standby
-                .as_mut()
-                .expect("the launch standby is capturing keys")
-                .handle_key(key),
-        };
+        let action = self.standby_prompt_mut(&session_id).handle_key(key);
         match action {
             ChatAction::CycleFocus { reverse } => {
                 self.cycle_focus(reverse);
             }
             ChatAction::Prompt(_) => {
                 self.record_event_handled();
-                let Some(session_id) = session_id else {
-                    // The launch standby has kept the text as a preview; it is
-                    // handed to the daemon when the session registers.
-                    return Some(DashboardAction::None);
-                };
                 let prompt = self
                     .standby_prompt_mut(&session_id)
                     .latest_startup_prompt()
@@ -449,27 +368,14 @@ impl DashboardState {
                 // preview is gone here already; the daemon must drop its copy
                 // too, or it would send the original when the session is ready.
                 self.record_event_handled();
-                let Some(session_id) = session_id else {
-                    // A launch standby's previews were never handed to the
-                    // daemon, so recalling one changes nothing there.
-                    return Some(DashboardAction::None);
-                };
                 let prompt = self
                     .standby_prompt_mut(&session_id)
                     .recalled_startup_prompt(&id, &text);
                 return Some(DashboardAction::WithdrawStartupPrompt { session_id, prompt });
             }
             action @ (ChatAction::PasteFromClipboard | ChatAction::AttachPaste { .. }) => {
-                match session_id {
-                    Some(session_id) => self
-                        .standby_prompt_mut(&session_id)
-                        .dispatch_composer_action(action),
-                    None => self
-                        .launch_standby
-                        .as_mut()
-                        .expect("launch composer exists")
-                        .dispatch_composer_action(action),
-                }
+                self.standby_prompt_mut(&session_id)
+                    .dispatch_composer_action(action);
             }
             _ => {}
         }
