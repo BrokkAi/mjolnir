@@ -83,6 +83,7 @@ async fn run(
                                     | SubagentToolAction::SendMessage { .. }
                                     | SubagentToolAction::Spawn { .. }
                                     | SubagentToolAction::RequestReview {}
+                                    | SubagentToolAction::OverrideReview { .. }
                                     // A temporary copy is safe to repeat after handoff.
                                     | SubagentToolAction::Fetch { .. }
                             ) {

@@ -18,9 +18,9 @@ You can see both working by running the unit tests named in each milestone, and 
 
 - [x] (2026-11-03) User authorized implementation and pushing; checkout updated to origin/master `60aadd739`, and this plan copied from its authoring session.
 - [x] (2026-11-03) Milestone 1 committed as `7fb6becda`: plaintext verdicts implemented; reviewer parser/driver suite passed (24 tests), controller review host (38), controller API (55), and worker MCP (33) checkpoint tests passed. The affected rubric prompt test passed after final rubric edits.
-- [x] (2026-11-03) Milestone 2 implemented and validated: host override, durable findings trees, storage migration 104. Controller review-host tests passed (44), legacy/storage regression passed (1), core storage tests passed (7). Checkpoint commit pending.
-- [ ] Milestone 3: the `override_review` MCP tool reaches the host from Claude Code, Codex and DSH sessions.
-- [ ] Milestone 4: user-facing text (mailbox verdict message, gate instructions, docs) describes the new contract and tool.
+- [x] (2026-11-03) Milestone 2 committed as `6d5728d85`: host override, durable findings trees, storage migration 104. Controller review-host tests passed (44), legacy/storage regression passed (1), core storage tests passed (7).
+- [x] (2026-11-03) Milestone 3: `override_review` MCP/action/API/allowlist wiring and breaking schema 105 validated. Core subagent tests (36), worker MCP (34), Claude allowlist (1), controller dispatch (1), and all six corrected migration fixtures passed. Checkpoint commit pending.
+- [x] (2026-11-03) Milestone 4: mailbox text/golden (4 tests), gate instructions, and docs are complete. Docs `npm run check` and `npm run build` passed, including 2,304 internal links across 27 HTML files. Guidance checkpoint commit pending.
 - [ ] Follow-up requested by the user: configurable parallel reviewers, default 2, with separate findings attribution and an all-clean gate. The detailed companion plan is `.agents/plans/parallel-reviewers.md`; complete its implementation before final full validation and push.
 
 ## Surprises & Discoveries
@@ -34,6 +34,8 @@ The current upstream schema revision is 103, with compatibility floor 102. Revie
 The host's existing `record_notice` is a detached courtesy operation whose failure is only logged. It cannot provide an audit guarantee for an override that unlocks a push. Override notices must instead be acknowledged before recording a reviewed ref, with wording that describes an override request rather than claiming an operation already succeeded.
 
 Review state writes use a FIFO persistence lane, but preparation reads originally bypass that lane. A cancelled open can release its preparation reservation while its clearing write remains queued. Override loads and saves must go through that lane to prevent an older queued write from overwriting an override. Push verdict delivery also runs concurrently with the lane, so the existing review owner must remain a refusal until its completion has been persisted.
+
+Six historical migration tests manually rewound their revision metadata while retaining the new `push_findings` column. Their first rerun failed with `duplicate column name: push_findings`. The attempted production migration guard was rejected because revision 104 was already committed; the parent restored that SQL verbatim and added one test-only historical review-state restoration helper shared by those fixtures and `stamp_schema_version`. Production migrations remain strict.
 
 ## Decision Log
 
@@ -79,6 +81,8 @@ Review state writes use a FIFO persistence lane, but preparation reads originall
 Milestone 1 replaces model-generated JSON parsing with a plain-text contract and an explicit clean sentinel. Empty reports still fail closed, and JSON-shaped text such as `{}` is now findings. The rubric, reviewer handback instructions, MCP reviewer description, and saved-report fixtures agree on that contract. The parser/driver suite and the affected controller/worker checkpoint tests pass; later milestones remain.
 
 Milestone 2 persists pending findings in SQL, refuses overrides for changed or incomplete repository sets, records an acknowledged audit request before unlocking refs, and completes admitted work through shutdown. Tests cover missing/changed/duplicate roots, audit refusal, failed-save retries, reservation ownership, cancellation, ordered persistence, and shutdown. The first test attempt exposed test-fixture setup mistakes, which were fixed and only the failing cases rerun before the final affected-module checkpoint.
+
+Milestones 3 and 4 expose the audited override through the same push-only MCP gate, preserve its reason across transport/API boundaries, and document its exact-tree behavior. Compatibility revision 105 rejects readers that cannot decode the new durable action. The schema-fixture reruns use restored historical layouts, without changing committed migration 104. All checkpoint checks pass. The user-added parallel-review extension and final whole-workspace checks still remain before pushing.
 
 ## Context and Orientation
 
@@ -249,3 +253,5 @@ Implementation note (2026-11-03): strengthened override ownership and persistenc
 Implementation note (2026-11-03): recorded the validated plaintext checkpoint commit and allowed disjoint implementation slices to overlap without changing commit order or final acceptance requirements.
 
 Implementation note (2026-11-03): corrected the SQL storage assumption and split schema revisions 104 and 105 between the storage and action checkpoints. The user also requested configurable parallel reviewers; a companion ExecPlan tracks that extension, and final validation waits until the extension is implemented.
+
+Implementation note (2026-11-03): fixed historical downgrade fixtures instead of rewriting committed migration 104. Clarified the override tool description to refer to changed tree contents, matching its actual predicate rather than implying commit-message-only amendments invalidate the reviewed snapshot.

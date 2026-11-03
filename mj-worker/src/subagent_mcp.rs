@@ -43,7 +43,7 @@ static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-const REVIEW_GATE_INSTRUCTIONS: &str = "Before `git push` or `gh pr create`, commit your work and call `request_review`. It answers at once whether a review started; the verdict arrives later as a Mjolnir message. The repository's pre-push hook refuses a push of commits that have not been reviewed clean.";
+const REVIEW_GATE_INSTRUCTIONS: &str = "Before `git push` or `gh pr create`, commit your work and call `request_review`. It answers at once whether a review started; the verdict arrives later as a Mjolnir message. The repository's pre-push hook refuses a push of commits that have not been reviewed clean. `override_review` records the exact reviewed trees for findings you judge incorrect or unreasonable; its reason is written into the session transcript.";
 
 /// A child's advice when Mjolnir has not confirmed its report. Calling again
 /// is safe: a report that did arrive is refused as already delivered.
@@ -612,8 +612,9 @@ fn call_with_budget_and_options(
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
     let legacy_alias = params.name == "send_input"
         && matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly);
-    let push_review =
-        params.name == "request_review" && role == SubagentMcpRole::Parent && options.review_gate;
+    let push_review = matches!(params.name.as_str(), "request_review" | "override_review")
+        && role == SubagentMcpRole::Parent
+        && options.review_gate;
     if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias && !push_review {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
@@ -660,6 +661,16 @@ fn call_with_budget_and_options(
             }
         }
         "request_review" => SubagentToolAction::RequestReview {},
+        "override_review" => {
+            let args: OverrideReviewArgs = serde_json::from_value(params.arguments)?;
+            let reason = args.reason.trim();
+            if reason.is_empty() {
+                bail!("override_review reason cannot be empty");
+            }
+            SubagentToolAction::OverrideReview {
+                reason: reason.to_owned(),
+            }
+        }
         "list_agents" => SubagentToolAction::ListAgents,
         "send_message" => {
             if params.arguments.get("child_session_id").is_some() {
@@ -882,8 +893,15 @@ fn tool_definitions_with_options(
     ];
     if options.review_gate {
         tools.push(tool("request_review", "Request review of committed work before pushing. The verdict arrives later as a Mjolnir message.", json!({"type":"object","properties":{},"additionalProperties":false})));
+        tools.push(tool("override_review", "Override the last before-push findings verdict and record the reviewed tree so the push can proceed. Use it only for findings you have judged incorrect or unreasonable; the reason is written into the session transcript. Refused if a review is running or if the reviewed tree contents changed.", json!({"type":"object","properties":{"reason":{"type":"string","description":"Why the findings do not need to be addressed."}},"required":["reason"],"additionalProperties":false})));
     }
     tools
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OverrideReviewArgs {
+    reason: String,
 }
 
 fn send_message_tool() -> Value {
@@ -1082,6 +1100,51 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn override_review_sends_reason_in_durable_action() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("subagents.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: SubagentToolRequest = serde_json::from_str(&line).unwrap();
+            assert_eq!(
+                request.action,
+                SubagentToolAction::OverrideReview {
+                    reason: "finding is unreasonable".into()
+                }
+            );
+            reader
+                .into_inner()
+                .write_all(b"{\"result\":{\"accepted\":true}}\n")
+                .unwrap();
+        });
+        let (value, is_error) = call_with_budget_and_options(
+            &socket,
+            None,
+            SubagentMcpRole::Parent,
+            Some(
+                &json!({"name":"override_review","arguments":{"reason":"finding is unreasonable"}}),
+            ),
+            &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
+            |_| Duration::from_secs(5),
+            ParentTools {
+                review_gate: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        worker.join().unwrap();
+        assert!(!is_error);
+        assert_eq!(value["accepted"], true);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn worker_reply_acknowledgment_follows_the_complete_large_reply() {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
@@ -1168,6 +1231,10 @@ mod tests {
                     tools.iter().any(|tool| tool["name"] == "request_review"),
                     expected
                 );
+                assert_eq!(
+                    tools.iter().any(|tool| tool["name"] == "override_review"),
+                    expected
+                );
                 let instructions =
                     replies.iter().find(|r| r["id"] == 1).unwrap()["result"]["instructions"]
                         .as_str()
@@ -1183,6 +1250,23 @@ mod tests {
                             None,
                             role,
                             Some(&json!({"name":"request_review"})),
+                            &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
+                            |_| Duration::from_millis(1),
+                            ParentTools {
+                                review_gate,
+                                ..Default::default()
+                            }
+                        )
+                        .is_err()
+                    );
+                    assert!(
+                        call_with_budget_and_options(
+                            Path::new("unused.sock"),
+                            None,
+                            role,
+                            Some(
+                                &json!({"name":"override_review","arguments":{"reason":"because"}})
+                            ),
                             &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
                             |_| Duration::from_millis(1),
                             ParentTools {

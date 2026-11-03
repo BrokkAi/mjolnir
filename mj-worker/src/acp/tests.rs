@@ -439,6 +439,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                             );
                             if role == SubagentMcpRole::Parent {
                                 expected.push("mcp__mj-agents__request_review".into());
+                                expected.push("mcp__mj-agents__override_review".into());
                             }
                             assert_eq!(allowed, Some(&serde_json::json!(expected)), "{request}");
                         } else {

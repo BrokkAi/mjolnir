@@ -134,9 +134,19 @@ fn models_probe(offers: &[(&str, &[&str])]) -> Arc<crate::server_runtime::profil
 struct RecordingExports {
     parent: SessionRecord,
     registered: std::sync::Mutex<Option<crate::controller::RegisterSubagentRequest>>,
+    override_call: std::sync::Mutex<Option<(String, String)>>,
 }
 
 impl ExportRuntime for RecordingExports {
+    fn override_review(
+        &self,
+        session_id: String,
+        reason: String,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        *self.override_call.lock().unwrap() = Some((session_id, reason));
+        Box::pin(async { Ok(serde_json::json!({"accepted": true})) })
+    }
+
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         mj_core::config::SubagentConfig {
             straightforward: Some(mj_core::config::SubagentChoice {
@@ -178,6 +188,10 @@ impl RecordingExports {
             .unwrap()
             .clone()
             .expect("the spawn reached registration")
+    }
+
+    fn override_call(&self) -> Option<(String, String)> {
+        self.override_call.lock().unwrap().clone()
     }
 }
 
@@ -222,6 +236,7 @@ async fn selection_backend_refusing(
     let exports = Arc::new(RecordingExports {
         parent: parent_record("parent-1", "parent"),
         registered: std::sync::Mutex::new(None),
+        override_call: std::sync::Mutex::new(None),
     });
     let backend = Arc::new(
         ApiBackend::new(
@@ -306,6 +321,29 @@ async fn legacy_list_profiles_is_refused() {
         )
         .await;
     assert!(result.is_error && result.message.contains("no longer available"));
+}
+
+#[tokio::test]
+async fn override_review_dispatch_forwards_parent_and_reason_to_export() {
+    let (backend, exports) = selection_backend(SAME_MODELS, None).await;
+    let result = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "override-review".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::OverrideReview {
+                    reason: "finding is unreasonable".into(),
+                },
+            },
+        )
+        .await;
+    assert!(!result.is_error, "{}", result.message);
+    assert_eq!(
+        exports.override_call(),
+        Some(("parent-1".into(), "finding is unreasonable".into()))
+    );
 }
 
 /// One login that cannot be discovered drops out on its own; it neither fails
