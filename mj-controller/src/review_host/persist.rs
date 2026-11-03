@@ -8,10 +8,7 @@ impl HostState {
         reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
         prepared: Result<Prepared, StartRefusal>,
     ) {
-        let cancelled = self
-            .preparation_cancellation
-            .get(&session_id)
-            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire));
+        let cancelled = matches!(self.preparing.get(&session_id), Some(PreparingOperation::Review { cancelled }) if cancelled.load(std::sync::atomic::Ordering::Acquire));
         let prepared = if cancelled {
             Err(StartRefusal("review preparation cancelled".into()))
         } else {
@@ -20,7 +17,6 @@ impl HostState {
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(refusal) => {
-                self.preparation_cancellation.remove(&session_id);
                 self.preparing.remove(&session_id);
                 release_prompts(&session_id);
                 if manual || refusal.0 != SUBAGENT_REFUSAL {
@@ -64,7 +60,6 @@ impl HostState {
                 .expect("pending review was just inserted");
             let retry_recovery = pending.prepared.resume_forward.is_some();
             self.preparing.remove(&session_id);
-            self.preparation_cancellation.remove(&session_id);
             self.publish(&session_id);
             if retry_recovery {
                 self.recovery_candidates.insert(session_id.clone());
@@ -103,11 +98,7 @@ impl HostState {
                 let Some(pending) = self.pending_open.remove(&session_id) else {
                     return;
                 };
-                self.preparing.remove(&session_id);
-                let cancelled = self
-                    .preparation_cancellation
-                    .remove(&session_id)
-                    .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire));
+                let cancelled = matches!(self.preparing.remove(&session_id), Some(PreparingOperation::Review { cancelled }) if cancelled.load(std::sync::atomic::Ordering::Acquire));
                 if cancelled && result.is_ok() {
                     let mut state = pending.prepared.state;
                     state.active = None;

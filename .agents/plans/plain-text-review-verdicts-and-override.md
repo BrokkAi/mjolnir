@@ -17,10 +17,11 @@ You can see both working by running the unit tests named in each milestone, and 
 ## Progress
 
 - [x] (2026-11-03) User authorized implementation and pushing; checkout updated to origin/master `60aadd739`, and this plan copied from its authoring session.
-- [x] (2026-11-03) Milestone 1: plaintext verdicts implemented; reviewer parser/driver suite passed (24 tests), controller review host (38), controller API (55), and worker MCP (33) checkpoint tests passed.
-- [ ] Milestone 2: the daemon records the trees of a findings verdict and offers an `override_review` host operation.
+- [x] (2026-11-03) Milestone 1 committed as `7fb6becda`: plaintext verdicts implemented; reviewer parser/driver suite passed (24 tests), controller review host (38), controller API (55), and worker MCP (33) checkpoint tests passed. The affected rubric prompt test passed after final rubric edits.
+- [x] (2026-11-03) Milestone 2 implemented and validated: host override, durable findings trees, storage migration 104. Controller review-host tests passed (44), legacy/storage regression passed (1), core storage tests passed (7). Checkpoint commit pending.
 - [ ] Milestone 3: the `override_review` MCP tool reaches the host from Claude Code, Codex and DSH sessions.
 - [ ] Milestone 4: user-facing text (mailbox verdict message, gate instructions, docs) describes the new contract and tool.
+- [ ] Follow-up requested by the user: configurable parallel reviewers, default 2, with separate findings attribution and an all-clean gate. The detailed companion plan is `.agents/plans/parallel-reviewers.md`; complete its implementation before final full validation and push.
 
 ## Surprises & Discoveries
 
@@ -28,7 +29,7 @@ The current JSON parser defaults omitted fields, so `{}` is classified clean. Re
 
 Cargo package selectors use the published names (`brokk-mj-review`, `brokk-mj-controller`, `brokk-mj-core`, and `brokk-mj-worker`), which differ from their directory names. The commands in this plan use those package names.
 
-The current upstream schema revision is 103, with compatibility floor 102. The new durable action will require a new breaking revision rather than modifying an existing migration.
+The current upstream schema revision is 103, with compatibility floor 102. Review state is stored as individual SQL columns, not as one JSON blob. Milestone 2 therefore needs breaking revision 104 adding nullable `turn_review_state.push_findings TEXT` and its read/write handling. Milestone 3 needs a separate breaking revision 105 for the new durable action. Historical schema fixtures must remove the new column for revisions below 104. Never rewrite a migration after its checkpoint commit.
 
 The host's existing `record_notice` is a detached courtesy operation whose failure is only logged. It cannot provide an audit guarantee for an override that unlocks a push. Override notices must instead be acknowledged before recording a reviewed ref, with wording that describes an override request rather than claiming an operation already succeeded.
 
@@ -44,6 +45,12 @@ Review state writes use a FIFO persistence lane, but preparation reads originall
   Date/Author: 2026-11-03 / implementing agent.
 - Decision: use one typed preparation owner per session for review preparation and override work, and serialize override state loads and saves through the existing persistence lane.
   Rationale: a second override/review must not pass admission on a different snapshot, and review cancellation/shutdown must distinguish cancellable preparation from accepted override mutations.
+  Date/Author: 2026-11-03 / implementing agent.
+- Decision: implement disjoint host, protocol, and messaging slices concurrently while keeping checkpoint commits in milestone order.
+  Rationale: the host API has a settled signature and does not depend on the new action variant; separate file ownership avoids edit conflicts. Compilation and tests wait until the concurrent drafts are complete.
+  Date/Author: 2026-11-03 / implementing agent.
+- Decision: add a storage migration in milestone 2 and a separate durable-action compatibility migration in milestone 3.
+  Rationale: inspecting `database/turn_reviews.rs` showed state fields are SQL columns; each milestone must stand on its own, and older revisions must not silently lose pending findings or misread a queued override action.
   Date/Author: 2026-11-03 / implementing agent.
 - Decision: record and await the override-request audit notice before unlocking the reviewed trees. Acquire labeled daemon upgrade admission only after cancellable recapture finishes, and hold it through the bounded audit, mutation, and persistence work.
   Rationale: the existing best-effort notice could disappear after a successful override; an acknowledged pre-mutation notice prevents that. Its wording remains truthful if the subsequent mutation fails. Long preparation must not delay daemon handoff or cancel accepted mutation work.
@@ -70,6 +77,8 @@ Review state writes use a FIFO persistence lane, but preparation reads originall
 ## Outcomes & Retrospective
 
 Milestone 1 replaces model-generated JSON parsing with a plain-text contract and an explicit clean sentinel. Empty reports still fail closed, and JSON-shaped text such as `{}` is now findings. The rubric, reviewer handback instructions, MCP reviewer description, and saved-report fixtures agree on that contract. The parser/driver suite and the affected controller/worker checkpoint tests pass; later milestones remain.
+
+Milestone 2 persists pending findings in SQL, refuses overrides for changed or incomplete repository sets, records an acknowledged audit request before unlocking refs, and completes admitted work through shutdown. Tests cover missing/changed/duplicate roots, audit refusal, failed-save retries, reservation ownership, cancellation, ordered persistence, and shutdown. The first test attempt exposed test-fixture setup mistakes, which were fixed and only the failing cases rerun before the final affected-module checkpoint.
 
 ## Context and Orientation
 
@@ -236,3 +245,7 @@ Implementation note (2026-11-03): recorded explicit user authorization to push, 
 Implementation note (2026-11-03): corrected Cargo package selectors after the first validation command showed that directory names are not package names.
 
 Implementation note (2026-11-03): strengthened override ownership and persistence ordering after tracing the cancellation/write race, and moved acknowledged audit delivery before reviewed-ref mutation. The ordinary courtesy `record_notice` is not used as the override audit guarantee.
+
+Implementation note (2026-11-03): recorded the validated plaintext checkpoint commit and allowed disjoint implementation slices to overlap without changing commit order or final acceptance requirements.
+
+Implementation note (2026-11-03): corrected the SQL storage assumption and split schema revisions 104 and 105 between the storage and action checkpoints. The user also requested configurable parallel reviewers; a companion ExecPlan tracks that extension, and final validation waits until the extension is implemented.

@@ -11,7 +11,7 @@ pub(super) fn turn_review_state_in(path: &Path, session_id: &str) -> Result<Turn
     let row = connection
         .query_row(
             "SELECT baselines, reviewed_through_ordinal, prior_review, active,
-                    pending_forward, child_session_id
+                    pending_forward, child_session_id, push_findings
              FROM turn_review_state WHERE session_id = ?1",
             [session_id],
             |row| {
@@ -22,11 +22,14 @@ pub(super) fn turn_review_state_in(path: &Path, session_id: &str) -> Result<Turn
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             },
         )
         .optional()?;
-    let Some((baselines, ordinal, prior, active, pending_forward, child_session_id)) = row else {
+    let Some((baselines, ordinal, prior, active, pending_forward, child_session_id, push_findings)) =
+        row
+    else {
         return Ok(TurnReviewState::default());
     };
     Ok(TurnReviewState {
@@ -42,6 +45,10 @@ pub(super) fn turn_review_state_in(path: &Path, session_id: &str) -> Result<Turn
             .map(|pending| serde_json::from_str(&pending))
             .transpose()
             .context("parse the stored pending review handoff")?,
+        push_findings: push_findings
+            .map(|findings| serde_json::from_str(&findings))
+            .transpose()
+            .context("parse stored push review findings")?,
     })
 }
 
@@ -63,15 +70,16 @@ pub(super) fn save_turn_review_state_in(
     connection.execute(
         "INSERT INTO turn_review_state(
              session_id, baselines, reviewed_through_ordinal, prior_review, active,
-             pending_forward, child_session_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             pending_forward, child_session_id, push_findings
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(session_id) DO UPDATE SET
              baselines = excluded.baselines,
              reviewed_through_ordinal = excluded.reviewed_through_ordinal,
              prior_review = excluded.prior_review,
              active = excluded.active,
              pending_forward = excluded.pending_forward,
-             child_session_id = excluded.child_session_id",
+             child_session_id = excluded.child_session_id,
+             push_findings = excluded.push_findings",
         params![
             session_id,
             serde_json::to_string(&state.baselines)?,
@@ -88,6 +96,11 @@ pub(super) fn save_turn_review_state_in(
                 .map(serde_json::to_string)
                 .transpose()?,
             state.child_session_id,
+            state
+                .push_findings
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
         ],
     )?;
     Ok(())

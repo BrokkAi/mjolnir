@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 102;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 104;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1908,6 +1908,20 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older daemons do not maintain SQL-backed pending push
+    // findings when resolving reviews. Refuse their reads and writes.
+    if version < 104 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE turn_review_state ADD COLUMN push_findings TEXT;
+             UPDATE schema_compatibility SET minimum_compatible_version = 104 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (104, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 104;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -3221,6 +3235,11 @@ mod reader_tests {
                 .execute_batch("DROP TABLE IF EXISTS quota_history;")
                 .unwrap();
         }
+        if version < 104 {
+            connection
+                .execute_batch("ALTER TABLE turn_review_state DROP COLUMN push_findings;")
+                .unwrap();
+        }
         // Historical fixtures must remove columns introduced by later revisions.
         if version < 94
             && legacy_schema::table_has_column(
@@ -3394,8 +3413,10 @@ mod reader_tests {
         migrate_schema(&connection).unwrap();
         let schema = read_schema_state(&connection).unwrap();
         assert_eq!(schema.revision, SCHEMA_VERSION);
-        assert_eq!(schema.minimum_compatible, Some(102));
-        schema.ensure_supported_by(102).unwrap();
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        schema
+            .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+            .unwrap();
         assert_eq!(
             connection
                 .query_row(

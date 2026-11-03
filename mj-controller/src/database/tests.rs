@@ -4326,6 +4326,7 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
             // the same "unverified" note after a restart.
             provenance: mj_core::review::driver::FindingsProvenance::SingleReviewer,
         }),
+        push_findings: None,
     };
     save_turn_review_state_in(&database, "session-1", &state).unwrap();
     assert_eq!(turn_review_state_in(&database, "session-1").unwrap(), state);
@@ -4342,6 +4343,37 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
     assert_eq!(restored.baselines, state.baselines);
     assert_eq!(restored.reviewed_through_ordinal, 42);
     assert_eq!(restored.pending_forward, state.pending_forward);
+}
+
+#[test]
+fn old_review_rows_load_without_findings_and_recovery_keeps_new_findings() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    open(&database).unwrap().execute(
+        "INSERT INTO turn_review_state(session_id, baselines, reviewed_through_ordinal) VALUES (?1, ?2, 0)",
+        rusqlite::params!["session-1", "{}"],
+    ).unwrap();
+    let mut state = turn_review_state_in(&database, "session-1").unwrap();
+    assert!(state.push_findings.is_none());
+    state.push_findings = Some(mj_core::storage::PushFindingsRecord {
+        review_id: "review-1".into(),
+        trees: [(
+            std::path::PathBuf::from("/workspace/app"),
+            ("tree-1".into(), "head-1".into()),
+        )]
+        .into(),
+        synthesis: "fix the regression".into(),
+    });
+    state.active = Some("interrupted".into());
+    save_turn_review_state_in(&database, "session-1", &state).unwrap();
+    assert_eq!(
+        clear_interrupted_turn_reviews_in(&database).unwrap(),
+        vec!["session-1"]
+    );
+    let restored = turn_review_state_in(&database, "session-1").unwrap();
+    assert_eq!(restored.push_findings, state.push_findings);
+    assert!(restored.active.is_none());
 }
 
 /// A review interrupted by a daemon restart is cancelled, not resumed, and the
@@ -4375,6 +4407,7 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
                 reviewed_through_ordinal: 42,
                 provenance: Default::default(),
             }),
+            push_findings: None,
         },
     )
     .unwrap();
@@ -4388,6 +4421,7 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
             prior_review: None,
             active: None,
             pending_forward: None,
+            push_findings: None,
         },
     )
     .unwrap();

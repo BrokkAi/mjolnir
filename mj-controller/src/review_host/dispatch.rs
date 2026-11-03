@@ -12,6 +12,15 @@ impl HostState {
             } => self.observe(session_id, snapshot, prompt_driven).await,
             HostEvent::Retain { live } => self.retain_sessions(&live),
             HostEvent::StartPush { session_id, reply } => self.begin_push(session_id, reply),
+            HostEvent::OverridePush {
+                session_id,
+                reason,
+                reply,
+            } => self.override_push(session_id, reason, reply),
+            HostEvent::OverrideValidated { session_id, permit } => {
+                self.override_validated(&session_id, permit)
+            }
+            HostEvent::OverrideFinished { session_id } => self.override_finished(&session_id),
             HostEvent::Start {
                 session_id,
                 manual,

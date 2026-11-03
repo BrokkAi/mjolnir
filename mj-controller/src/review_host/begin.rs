@@ -68,7 +68,7 @@ impl HostState {
             answer(reply, Err(refusal));
             return;
         }
-        if self.preparing.contains(&session_id) {
+        if self.preparing.contains_key(&session_id) {
             answer(
                 reply,
                 Err(StartRefusal("a review is already starting".to_owned())),
@@ -85,9 +85,12 @@ impl HostState {
         // `prepare` reads the actor view; every later prompt sees this hold.
         hold_prompts(&session_id);
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.preparation_cancellation
-            .insert(session_id.clone(), cancelled.clone());
-        self.preparing.insert(session_id.clone());
+        self.preparing.insert(
+            session_id.clone(),
+            PreparingOperation::Review {
+                cancelled: cancelled.clone(),
+            },
+        );
         self.publish(&session_id);
         tokio::spawn(async move {
             let prepared =
@@ -111,7 +114,7 @@ impl HostState {
         } else if crate::controller::move_session::move_owns_session(&session_id) {
             Some("session is moving")
         } else if self.reviews.contains_key(&session_id)
-            || self.preparing.contains(&session_id)
+            || self.preparing.contains_key(&session_id)
             || self.recovery_candidates.contains(&session_id)
             || self.recovery_in_flight.contains(&session_id)
         {
@@ -128,9 +131,12 @@ impl HostState {
         let environment = self.environment.clone();
         let events = self.events.clone();
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.preparation_cancellation
-            .insert(session_id.clone(), cancelled.clone());
-        self.preparing.insert(session_id.clone());
+        self.preparing.insert(
+            session_id.clone(),
+            PreparingOperation::Review {
+                cancelled: cancelled.clone(),
+            },
+        );
         self.publish(&session_id);
         tokio::spawn(async move {
             let prepared = tokio::time::timeout(
@@ -189,7 +195,7 @@ impl HostState {
         if !self.recovery_candidates.contains(session_id)
             || self.recovery_in_flight.contains(session_id)
             || self.reviews.contains_key(session_id)
-            || self.preparing.contains(session_id)
+            || self.preparing.contains_key(session_id)
         {
             return;
         }
@@ -227,7 +233,12 @@ impl HostState {
         match prepared {
             Ok(Some(prepared)) => {
                 self.recovery_candidates.remove(&session_id);
-                self.preparing.insert(session_id.clone());
+                self.preparing.insert(
+                    session_id.clone(),
+                    PreparingOperation::Review {
+                        cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    },
+                );
                 self.prepared(session_id, false, None, Ok(prepared));
             }
             Ok(None) => {

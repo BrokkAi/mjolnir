@@ -8,9 +8,9 @@ impl HostState {
         resolution: Resolution,
     ) -> Result<(), String> {
         if resolution == Resolution::Cancelled
-            && let Some(flag) = self.preparation_cancellation.get(session_id)
+            && let Some(PreparingOperation::Review { cancelled }) = self.preparing.get(session_id)
         {
-            flag.store(true, std::sync::atomic::Ordering::Release);
+            cancelled.store(true, std::sync::atomic::Ordering::Release);
             release_prompts(session_id);
             return Ok(());
         }
@@ -213,6 +213,24 @@ pub(super) async fn finish_push_delivery(
         reviewed_through_ordinal,
         ..
     } = completion;
+    if let ReviewVerdict::Findings { synthesis, .. } = &verdict {
+        state.push_findings = Some(mj_core::storage::PushFindingsRecord {
+            review_id: review_id.clone(),
+            trees: deltas
+                .iter()
+                .map(|delta| {
+                    (
+                        delta.root.clone(),
+                        (
+                            delta.current_tree.clone(),
+                            delta.head_commit.clone().unwrap_or_default(),
+                        ),
+                    )
+                })
+                .collect(),
+            synthesis: synthesis.clone(),
+        });
+    }
     if verdict.is_clean() {
         let trees = deltas
             .iter()
@@ -253,6 +271,7 @@ pub(super) async fn finish_push_delivery(
             }
             state.baselines = trees;
             state.prior_review = None;
+            state.push_findings = None;
         }
     }
     state.active = None;
@@ -282,7 +301,7 @@ pub(super) async fn finish_push_delivery(
     .map_err(|error| format!("push verdict task stopped: {error}"))?
 }
 
-async fn push_action(
+pub(super) async fn push_action(
     control: &SessionManagerControl,
     session: &str,
     action: ReviewerAction,

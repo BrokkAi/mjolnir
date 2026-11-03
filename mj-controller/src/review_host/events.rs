@@ -19,6 +19,18 @@ pub(super) enum HostEvent {
         session_id: String,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     },
+    OverridePush {
+        session_id: String,
+        reason: String,
+        reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
+    },
+    OverrideValidated {
+        session_id: String,
+        permit: oneshot::Sender<Result<crate::upgrade::Work, StartRefusal>>,
+    },
+    OverrideFinished {
+        session_id: String,
+    },
     Start {
         session_id: String,
         manual: bool,
@@ -70,7 +82,9 @@ pub(super) enum HostEvent {
     },
     /// Reviews a daemon restart interrupted, so each session's conversation
     /// says what happened to it.
-    Interrupted { interrupted: Vec<String> },
+    Interrupted {
+        interrupted: Vec<String>,
+    },
     Shutdown {
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -86,6 +100,15 @@ pub(super) enum PersistenceCompletion {
 
 pub(super) enum PersistenceRequest {
     SweepInterrupted,
+    Load {
+        session_id: String,
+        reply: oneshot::Sender<Result<TurnReviewState, String>>,
+    },
+    SaveAcknowledged {
+        session_id: String,
+        state: Box<TurnReviewState>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     FinishPush(Box<PushCompletion>),
     CloseFailedChild {
         session_id: String,
@@ -173,7 +196,7 @@ pub(super) struct HostState {
     /// so without this an automatic trigger and a manual `/review` racing each
     /// other would both create a review and the second would overwrite the
     /// first.
-    pub(super) preparing: BTreeSet<String>,
+    pub(super) preparing: BTreeMap<String, PreparingOperation>,
     /// Reviews whose durable active marker is being written. They are not
     /// visible and start no agents until that write succeeds.
     pub(super) pending_open: BTreeMap<String, PendingOpen>,
@@ -193,11 +216,22 @@ pub(super) struct HostState {
     pub(super) sessions: BTreeMap<String, SessionWatch>,
     /// Sessions already told that no reviewer is configured. One notice per
     /// session, not one per turn.
-    pub(super) preparation_cancellation: BTreeMap<String, Arc<std::sync::atomic::AtomicBool>>,
     /// Sessions whose durable handoff survived a restart and still needs the
     /// primary relay's idempotent acknowledgement reconciled.
     pub(super) recovery_candidates: BTreeSet<String>,
     pub(super) recovery_in_flight: BTreeSet<String>,
+}
+
+pub(super) enum PreparingOperation {
+    Review {
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    },
+    Override {
+        task: tokio::task::JoinHandle<()>,
+        admitted: bool,
+        result: oneshot::Receiver<Result<serde_json::Value, StartRefusal>>,
+        reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
+    },
 }
 
 pub(super) struct SessionWatch {
@@ -258,6 +292,27 @@ pub(super) async fn persistence_loop(
             }
         };
         match request {
+            PersistenceRequest::Load { session_id, reply } => {
+                let load = environment.clone();
+                let result = tokio::task::spawn_blocking(move || load.load_state(&session_id))
+                    .await
+                    .map_err(|error| format!("review state load stopped: {error}"))
+                    .and_then(|result| result);
+                let _ = reply.send(result);
+            }
+            PersistenceRequest::SaveAcknowledged {
+                session_id,
+                state,
+                reply,
+            } => {
+                let save = environment.clone();
+                let result =
+                    tokio::task::spawn_blocking(move || save.save_state(&session_id, &state))
+                        .await
+                        .map_err(|error| format!("review state save stopped: {error}"))
+                        .and_then(|result| result);
+                let _ = reply.send(result);
+            }
             PersistenceRequest::FinishPush(completion) => {
                 let environment = environment.clone();
                 in_flight.insert(completion.session_id.clone(), Vec::new());

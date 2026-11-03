@@ -221,6 +221,16 @@ pub struct TurnReviewState {
     /// be retried and reconciled without losing the findings.
     #[serde(default)]
     pub pending_forward: Option<crate::review::driver::PendingForward>,
+    /// The exact trees covered by the last before-push findings verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_findings: Option<PushFindingsRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PushFindingsRecord {
+    pub review_id: String,
+    pub trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
+    pub synthesis: String,
 }
 
 /// What a bounded prompt search found, and whether it stopped early.

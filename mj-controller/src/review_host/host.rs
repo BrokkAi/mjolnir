@@ -109,13 +109,12 @@ impl TurnReviewHost {
                 persistence: Some(persistence),
                 persistence_task: Some(persistence_task),
                 reviews: BTreeMap::new(),
-                preparing: BTreeSet::new(),
+                preparing: BTreeMap::new(),
                 pending_open: BTreeMap::new(),
                 closing: BTreeSet::new(),
                 awaiting_forward_persistence: BTreeMap::new(),
                 next_epoch: 0,
                 sessions: BTreeMap::new(),
-                preparation_cancellation: BTreeMap::new(),
                 recovery_candidates: BTreeSet::new(),
                 recovery_in_flight: BTreeSet::new(),
             },
@@ -174,6 +173,24 @@ impl TurnReviewHost {
         self.events
             .send(HostEvent::StartPush {
                 session_id: session_id.to_owned(),
+                reply,
+            })
+            .map_err(|_| StartRefusal("the review host stopped".into()))?;
+        answer
+            .await
+            .map_err(|_| StartRefusal("the review host stopped".into()))?
+    }
+
+    pub async fn override_push(
+        &self,
+        session_id: &str,
+        reason: String,
+    ) -> Result<serde_json::Value, StartRefusal> {
+        let (reply, answer) = oneshot::channel();
+        self.events
+            .send(HostEvent::OverridePush {
+                session_id: session_id.to_owned(),
+                reason,
                 reply,
             })
             .map_err(|_| StartRefusal("the review host stopped".into()))?;
