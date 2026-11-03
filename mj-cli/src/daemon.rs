@@ -338,50 +338,98 @@ fn running_placement(pid: u32) -> Option<String> {
     }
 }
 
-/// Where the configuration says the daemon runs: `Some(None)` on the host,
-/// `Some(Some(name))` in that container, and `None` when that cannot be worked
-/// out, which leaves the running daemon where it is.
-fn configured_placement() -> Option<Option<String>> {
-    let config = mj_core::config::Config::load_from(&mj_core::config::config_path()).ok()?;
-    if config.daemon.runtime.engine().is_none() {
-        return Some(None);
+/// Where the configuration puts the daemon on this computer.
+enum DaemonPlacement {
+    /// On the host; `reason` says why when a container was asked for.
+    Host { reason: Option<String> },
+    #[cfg(target_os = "linux")]
+    Container(Box<container::ContainerSpec>),
+}
+
+impl DaemonPlacement {
+    /// The container's name, compared with [`running_placement`].
+    fn container(&self) -> Option<&str> {
+        match self {
+            Self::Host { .. } => None,
+            #[cfg(target_os = "linux")]
+            Self::Container(spec) => Some(&spec.name),
+        }
+    }
+}
+
+/// Resolve `[daemon]` to a placement. Both the launch and the decision to
+/// keep or replace a running daemon ask this, so they cannot disagree about
+/// where the daemon belongs.
+async fn resolve_placement(daemon: &mj_core::config::DaemonConfig) -> Result<DaemonPlacement> {
+    if daemon.runtime.engine().is_none() {
+        return Ok(DaemonPlacement::Host { reason: None });
     }
     #[cfg(target_os = "linux")]
     {
-        match container::container_name(&config.daemon) {
-            Ok(name) => Some(Some(name)),
-            Err(error) => {
-                tracing::warn!(
-                    error = format!("{error:#}"),
-                    "could not name the daemon container"
-                );
-                None
-            }
-        }
+        Ok(match container::placement(daemon).await? {
+            container::Placement::Container(spec) => DaemonPlacement::Container(spec),
+            container::Placement::Host { reason } => DaemonPlacement::Host {
+                reason: Some(reason),
+            },
+        })
     }
     #[cfg(not(target_os = "linux"))]
-    Some(None)
+    Ok(DaemonPlacement::Host {
+        reason: Some(
+            "a daemon container shares the host's network and process namespaces, which only \
+             Linux provides"
+                .to_owned(),
+        ),
+    })
+}
+
+async fn load_daemon_config() -> Result<mj_core::config::DaemonConfig> {
+    tokio::task::spawn_blocking(|| {
+        mj_core::config::Config::load_from(&mj_core::config::config_path())
+            .map(|config| config.daemon)
+    })
+    .await
+    .context("read daemon configuration task failed")?
+}
+
+/// Whether the daemon with `pid`, publishing `build_version`, is this build.
+///
+/// A host daemon is this build when it runs this executable file. A daemon
+/// in a container runs the image's own `mj`, which the launch accepted only
+/// because the image was built from this build's version and revision.
+pub(crate) fn daemon_runs_this_build(pid: u32, build_version: &str) -> Result<Option<bool>> {
+    if running_placement(pid).is_some() {
+        let daemon = mj_client::build_identity::BuildIdentity::parse(build_version)
+            .context("parse daemon build version")?;
+        return Ok(Some(
+            daemon.same_source(mj_client::build_identity::this_build()),
+        ));
+    }
+    process_runs_this_executable(pid)
 }
 
 /// Start `mj daemon-run` where `[daemon] runtime` says: a detached process on
 /// this computer, or a process in this instance's daemon container. Either way
 /// the result is a host PID the caller follows until the daemon answers.
 async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
-    let configured = tokio::task::spawn_blocking(|| {
-        mj_core::config::Config::load_from(&mj_core::config::config_path())
-    })
-    .await
-    .context("read daemon configuration task failed")?;
     // An unreadable file is the daemon's to report: it refuses to start and
     // says why, which is the answer this launch then shows.
-    let daemon = configured.map(|config| config.daemon).unwrap_or_default();
-    if daemon.runtime.engine().is_some() {
+    let daemon = load_daemon_config().await.unwrap_or_default();
+    match resolve_placement(&daemon).await? {
+        DaemonPlacement::Host { reason: None } => {}
+        DaemonPlacement::Host {
+            reason: Some(reason),
+        } => startup_notice(format!(
+            "Settings run the Mjolnir daemon in {}, but {reason}. It runs on this computer \
+             instead.",
+            daemon.runtime.engine().unwrap_or("a container")
+        )),
         #[cfg(target_os = "linux")]
-        {
+        DaemonPlacement::Container(spec) => {
             let log_offset = fs::metadata(log_path)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
-            let launched = container::launch(&daemon, log_path).await?;
+            let launched = container::launch(&spec, log_path).await?;
             tracing::info!(
                 pid = launched.pid,
                 container = %launched.container,
@@ -392,12 +440,6 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
                 log_offset,
             });
         }
-        #[cfg(not(target_os = "linux"))]
-        startup_notice(
-            "A container `[daemon] runtime` needs a Linux host, whose network and process \
-             namespaces the container shares; starting the daemon on this computer instead."
-                .to_owned(),
-        );
     }
     tokio::task::spawn_blocking({
         let log_path = log_path.to_path_buf();
@@ -518,9 +560,16 @@ fn daemon_build(metadata: &DaemonMetadata) -> Result<DaemonBuild> {
     let daemon =
         BuildIdentity::parse(&metadata.build_version).context("parse daemon build version")?;
     let client = this_build();
+    // A daemon in a container runs the image's `mj`, whose file times are the
+    // image's: the same version and revision is the same build.
+    let order = if running_placement(metadata.pid).is_some() && daemon.same_source(client) {
+        DaemonBuildOrder::Same
+    } else {
+        compare_daemon_build(&daemon, client)
+    };
     Ok(DaemonBuild {
         release: daemon.version().cmp_precedence(client.version()),
-        order: compare_daemon_build(&daemon, client),
+        order,
     })
 }
 
@@ -621,12 +670,21 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
             // Settings choose where the daemon runs; the next client of the
             // same build moves it there through the ordinary handoff, which
             // leaves workers running.
-            let pid = metadata.pid;
-            let (running, configured) = tokio::task::spawn_blocking(move || {
-                (running_placement(pid), configured_placement())
-            })
-            .await
-            .context("compare daemon placement task failed")?;
+            let running = running_placement(metadata.pid);
+            // A configuration this client cannot read leaves the daemon be.
+            let configured = match load_daemon_config().await {
+                Ok(daemon) => match resolve_placement(&daemon).await {
+                    Ok(placement) => Some(placement.container().map(str::to_owned)),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = format!("{error:#}"),
+                            "could not resolve where Settings run the daemon"
+                        );
+                        None
+                    }
+                },
+                Err(_) => None,
+            };
             if let Some(configured) = configured
                 && configured != running
             {
@@ -754,7 +812,7 @@ pub async fn restart_daemon() -> Result<RestartedDaemon> {
         }
         let mut client = connect_or_start_holding(&startup).await?;
         let status = client.status().await?;
-        let identity = process_runs_this_executable(status.pid)?;
+        let identity = daemon_runs_this_build(status.pid, &status.build_version)?;
         if identity != Some(false) || attempt == RESTART_ATTEMPTS {
             return restart_verdict(
                 status.pid,
@@ -989,11 +1047,12 @@ async fn maybe_replace_stale_development_daemon() -> Result<()> {
                 return Ok(());
             }
             let pid = metadata.pid;
+            let build_version = metadata.build_version.clone();
             let started: SystemTime = chrono::DateTime::parse_from_rfc3339(&metadata.started_at)
                 .context("parse development daemon start time")?
                 .into();
             let stale = tokio::task::spawn_blocking(move || -> Result<bool> {
-                Ok(process_runs_this_executable(pid)? == Some(false)
+                Ok(daemon_runs_this_build(pid, &build_version)? == Some(false)
                     || development_workers_changed_since(
                         started,
                         mj_controller::controller::worker_binary_prerequisite_for_arch,

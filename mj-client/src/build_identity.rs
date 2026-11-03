@@ -114,6 +114,15 @@ impl BuildIdentity {
         text
     }
 
+    /// Whether `self` and `other` were built from the same release version
+    /// and Git revision, whatever their executable files' times. That is
+    /// what identifies a daemon running an image's own copy of this build.
+    pub fn same_source(&self, other: &Self) -> bool {
+        self.version.cmp_precedence(&other.version) == Ordering::Equal
+            && self.revision.is_some()
+            && self.revision == other.revision
+    }
+
     pub fn version(&self) -> &semver::Version {
         &self.version
     }

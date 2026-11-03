@@ -83,7 +83,10 @@ RUN set -eu \
         echo "the worker reports build $built, but the image is labelled $MJ_WORKER_BUILD_ID" >&2; \
         exit 1; \
     fi \
-    && install -D -m 0755 "$binary" /out/mj-worker \
+    && install -D -m 0755 "$binary" /out/opt/mjolnir/mj-worker \
+    && cargo build --release --locked -p brokk-mjolnir --bin mj \
+    && install -D -m 0755 target/release/mj /out/opt/mjolnir/mj \
+    && ln -s mj-worker "/out/opt/mjolnir/mj-worker-$MUSL" \
     && rm -rf target
 
 FROM ${RUST_IMAGE}
@@ -382,17 +385,24 @@ WORKDIR /workspace
 # The worker is the last filesystem layer. A release that changes only Mjolnir
 # shares every layer above with the previous image, so a host upgrading `mj`
 # downloads just this one. Sessions link their `hel` to it.
-COPY --from=worker /out/mj-worker /opt/mjolnir/mj-worker
+# `mj` itself comes in the same layer: built in the same stage from the same
+# commit against this image's own C library, it is what a daemon run in this
+# image executes (`[daemon] runtime = "podman"` or `"docker"`). The worker is
+# also linked under its portable triple, so that daemon's local and container
+# sessions both find the worker this image carries beside its `mj`.
+COPY --from=worker /out/opt/mjolnir/ /opt/mjolnir/
 
 # Metadata comes last so that editing it never invalidates the cached layers
 # above; a label-only change then republishes an image whose filesystem layers
 # every host already has. Declared here, after every RUN, so the per-commit
 # worker build cannot invalidate a cached RUN layer.
 ARG MJ_WORKER_BUILD_ID
+ARG MJ_BUILD_REVISION
 LABEL org.opencontainers.image.title="Mjolnir agent development environment" \
       org.opencontainers.image.source="https://github.com/BrokkAi/mjolnir" \
       org.opencontainers.image.description="Mjolnir agent development environment with Node, Rust, Go, cargo-nextest, OpenJDK, and the pinned harnesses" \
-      org.brokk.mjolnir.worker-build="${MJ_WORKER_BUILD_ID}"
+      org.brokk.mjolnir.worker-build="${MJ_WORKER_BUILD_ID}" \
+      org.brokk.mjolnir.revision="${MJ_BUILD_REVISION}"
 
 # Hel overrides the command with the same keepalive, but retaining it here also
 # makes the image convenient to inspect directly.

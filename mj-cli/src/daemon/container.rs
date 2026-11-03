@@ -1,21 +1,26 @@
 //! Launching `mj daemon-run` inside a per-instance container.
 //!
-//! The container shares this computer's network and process namespaces and
-//! mounts `$HOME`, the data and configuration directories, `/tmp`, the user's
-//! runtime directory and the `mj` executable at the paths they have here. To
-//! every client the daemon is therefore the process it is on the host: the
-//! loopback address and token in `daemon.json`, a PID that `kill(2)` and
-//! `/proc` reach, and the same store lock. Nothing past the launch knows a
-//! container is involved.
+//! The daemon is the image's own `mj` ([`IMAGE_EXECUTABLE`]), built in the
+//! image's builder stage against the image's C library, and only an image
+//! whose `org.brokk.mjolnir.revision` label is this client's revision is used,
+//! so the daemon in the container is this build. Without such an image the
+//! daemon runs on the host and the launch says why and how to get one.
+//!
+//! The container shares this computer's network and process namespaces, runs
+//! as this user's uid, and mounts `$HOME`, the data and configuration
+//! directories, `/tmp` and the user's runtime directory at the paths they
+//! have here. To every client the daemon is therefore the process it is on
+//! the host: the loopback address and token in `daemon.json`, a PID that
+//! `kill(2)` and `/proc` reach, and the same store lock.
 //!
 //! The container only holds processes; `sleep infinity` keeps it up between
 //! daemons. Local sessions' workers are started by the daemon and so run in
 //! it too, and survive a daemon handoff the way host workers do. A container
 //! is never stopped while anything but that placeholder runs in it. When the
-//! container's specification changes (image, mounts, engine socket, an
-//! executable outside `$HOME`), a new container is created beside the old
-//! one, the new daemon reattaches to the old one's workers through their
-//! sockets and host PIDs, and the old container is removed once it is idle.
+//! container's specification changes (image, mounts, engine socket), a new
+//! container is created beside the old one, the new daemon reattaches to the
+//! old one's workers through their sockets and host PIDs, and the old
+//! container is removed once it is idle.
 
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::{DEFAULT_CONTAINER_IMAGE, DaemonConfig, DaemonRuntime, config_dir, data_dir};
@@ -32,16 +37,10 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 /// Pulling the agent-dev image is gigabytes on a first start.
 const PULL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const OUTPUT_LIMIT: usize = 1024 * 1024;
-/// Directories an image owns; mounting the host's over them would replace the
-/// image's own programs, so an executable there is mounted file by file.
-const SYSTEM_BIN_DIRS: &[&str] = &[
-    "/bin",
-    "/sbin",
-    "/usr/bin",
-    "/usr/sbin",
-    "/usr/local/bin",
-    "/usr/local/sbin",
-];
+/// The `mj` the image's builder stage installs.
+const IMAGE_EXECUTABLE: &str = "/opt/mjolnir/mj";
+/// The Git revision the image's `mj` was built from.
+const REVISION_LABEL: &str = "org.brokk.mjolnir.revision";
 /// Variables that describe the launching shell or the host's file system
 /// layout rather than anything the daemon should inherit.
 const NOT_FORWARDED: &[&str] = &[
@@ -62,47 +61,165 @@ pub(super) struct ContainerLaunch {
     pub(super) container: String,
 }
 
-/// Start a daemon in this instance's container, creating the container first
-/// when it does not exist yet.
-pub(super) async fn launch(config: &DaemonConfig, log_path: &Path) -> Result<ContainerLaunch> {
-    let engine = config.runtime;
-    let program = engine
+/// Where the configuration puts the daemon on this computer, decided once for
+/// both the launch and the check that keeps or replaces a running daemon.
+pub(super) enum Placement {
+    Container(Box<ContainerSpec>),
+    /// No image carries this build; the daemon runs on the host.
+    Host {
+        reason: String,
+    },
+}
+
+/// Resolve `config` (a container runtime) to the container the daemon runs
+/// in, pulling the image when it is not here yet.
+pub(super) async fn placement(config: &DaemonConfig) -> Result<Placement> {
+    let program = config
+        .runtime
         .engine()
         .context("the daemon container launch needs a container runtime")?;
-    ensure!(
-        mj_core::program_path::find_program_on_path(program, std::env::var_os("PATH").as_deref())
-            .is_some(),
-        "`[daemon] runtime = \"{program}\"` runs the daemon with {program}, which is not on PATH"
-    );
-    let spec = ContainerSpec::for_this_host(engine, config)?;
-    ensure_image(program, &spec.image).await?;
+    if mj_core::program_path::find_program_on_path(program, std::env::var_os("PATH").as_deref())
+        .is_none()
+    {
+        return Ok(Placement::Host {
+            reason: format!("{program} is not installed on this computer"),
+        });
+    }
+    let image = match resolve_image(program, config).await? {
+        Ok(image) => image,
+        Err(reason) => return Ok(Placement::Host { reason }),
+    };
+    Ok(Placement::Container(Box::new(
+        ContainerSpec::for_this_host(config.runtime, config, image)?,
+    )))
+}
+
+/// Start a daemon in the container `spec` describes, creating the container
+/// first when it does not exist yet.
+pub(super) async fn launch(spec: &ContainerSpec, log_path: &Path) -> Result<ContainerLaunch> {
+    let program = spec.program();
     // Housekeeping: a container left over must not stop the daemon starting.
-    if let Err(error) = remove_idle_predecessors(program, &spec).await {
+    if let Err(error) = remove_idle_predecessors(program, spec).await {
         tracing::warn!(
             error = format!("{error:#}"),
             "could not remove earlier daemon containers"
         );
     }
-    ensure_running(program, &spec).await?;
+    ensure_running(program, spec).await?;
     prepare_log(log_path)?;
-    let pid = exec_daemon(program, &spec, log_path).await?;
+    let pid = exec_daemon(program, spec, log_path).await?;
     Ok(ContainerLaunch {
         pid,
-        container: spec.name,
+        container: spec.name.clone(),
     })
 }
 
-/// The name of the container `config` runs the daemon in on this computer.
-pub(super) fn container_name(config: &DaemonConfig) -> Result<String> {
-    Ok(ContainerSpec::for_this_host(config.runtime, config)?.name)
+/// This client's Git revision, which the daemon image's label must carry.
+fn this_revision() -> Option<&'static str> {
+    mj_core::worker_build::BUILD_ID
+        .rsplit_once('+')
+        .map(|(_, revision)| revision)
+}
+
+/// An image present here, by id, with the revision its `mj` was built from.
+async fn inspect_image(program: &str, image: &str) -> Result<Option<(String, Option<String>)>> {
+    let format = format!("--format={{{{.Id}}}}|{{{{index .Config.Labels \"{REVISION_LABEL}\"}}}}");
+    let output = engine(program, ["image", "inspect", &format, image], QUERY_TIMEOUT).await?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (id, revision) = text
+        .trim()
+        .split_once('|')
+        .with_context(|| format!("{program} reported {text:?} for image {image}"))?;
+    // Docker prints a missing label as `<no value>`, Podman as nothing.
+    let revision = Some(revision.trim())
+        .filter(|value| !value.is_empty() && *value != "<no value>")
+        .map(str::to_owned);
+    let id = id.trim().to_owned();
+    Ok(Some((id, revision)))
+}
+
+/// The id of an image whose `mj` is this build: the configured image, or
+/// this build's default image, or, with no image configured, any image here
+/// labelled with this revision. `Err` explains why there is none.
+async fn resolve_image(
+    program: &str,
+    config: &DaemonConfig,
+) -> Result<std::result::Result<String, String>> {
+    let Some(wanted) = this_revision() else {
+        return Ok(Err(
+            "this mj build does not know its Git revision, so no image can be matched to it"
+                .to_owned(),
+        ));
+    };
+    let candidate = config
+        .image
+        .clone()
+        .unwrap_or_else(|| DEFAULT_CONTAINER_IMAGE.to_owned());
+    let mut found = inspect_image(program, &candidate).await?;
+    if found
+        .as_ref()
+        .is_some_and(|(_, revision)| revision.as_deref() == Some(wanted))
+    {
+        return Ok(Ok(found.expect("checked").0));
+    }
+    if config.image.is_none() {
+        let listed = engine(
+            program,
+            [
+                "images",
+                "--no-trunc",
+                "--format={{.ID}}",
+                &format!("--filter=label={REVISION_LABEL}={wanted}"),
+            ],
+            QUERY_TIMEOUT,
+        )
+        .await?;
+        if listed.status.success()
+            && let Some(id) = String::from_utf8_lossy(&listed.stdout)
+                .lines()
+                .map(str::trim)
+                .find(|id| !id.is_empty())
+        {
+            return Ok(Ok(id.to_owned()));
+        }
+    }
+    let mut pull_error = None;
+    if found.is_none() {
+        super::startup_notice(format!(
+            "Pulling the daemon container image {candidate}; the first start waits for it."
+        ));
+        let pulled = engine(program, ["pull", &candidate], PULL_TIMEOUT).await?;
+        if pulled.status.success() {
+            found = inspect_image(program, &candidate).await?;
+        } else {
+            pull_error = Some(failure(program, &format!("pull {candidate}"), &pulled));
+        }
+    }
+    Ok(match found {
+        Some((id, revision)) if revision.as_deref() == Some(wanted) => Ok(id),
+        Some((_, revision)) => Err(format!(
+            "image {candidate} carries Mjolnir revision {}, not this build's {wanted}; \
+             `scripts/build-agent-dev-image.sh {program}` builds one for this build from its \
+             checkout",
+            revision.as_deref().unwrap_or("(none)")
+        )),
+        None => Err(format!(
+            "{:#}",
+            pull_error.unwrap_or_else(|| anyhow::anyhow!("image {candidate} is not available"))
+        )),
+    })
 }
 
 /// Everything that decides what the daemon container looks like. Its digest
 /// names the container, so a change creates a new one instead of altering a
 /// container that may still hold workers.
-struct ContainerSpec {
+pub(super) struct ContainerSpec {
     instance: String,
-    name: String,
+    pub(super) name: String,
+    /// The image's id, so a retagged image gets a container of its own.
     image: String,
     engine: DaemonRuntime,
     /// `(host, container)` bind mounts.
@@ -112,15 +229,19 @@ struct ContainerSpec {
     /// Further `run` arguments, such as the user and groups.
     run_args: Vec<String>,
     home: PathBuf,
-    /// The `mj` executable's path inside the container.
-    executable: PathBuf,
     /// Host `PATH` entries inside mounted directories, appended to the
     /// image's `PATH`.
     host_path: Vec<PathBuf>,
 }
 
 impl ContainerSpec {
-    fn for_this_host(engine: DaemonRuntime, config: &DaemonConfig) -> Result<Self> {
+    fn program(&self) -> &'static str {
+        self.engine
+            .engine()
+            .expect("a container spec has an engine")
+    }
+
+    fn for_this_host(engine: DaemonRuntime, config: &DaemonConfig, image: String) -> Result<Self> {
         let home = std::env::var_os("HOME")
             .filter(|home| !home.is_empty())
             .map(PathBuf::from)
@@ -151,8 +272,6 @@ impl ContainerSpec {
                 mounts.push((path.clone(), path));
             }
         }
-
-        let (executable, executable_identity) = mount_executable(&mut mounts)?;
 
         let mut environment = vec![("HOME".to_owned(), home.display().to_string())];
         let mut run_args = Vec::new();
@@ -199,10 +318,6 @@ impl ContainerSpec {
             })
             .unwrap_or_default();
 
-        let image = config
-            .image
-            .clone()
-            .unwrap_or_else(|| DEFAULT_CONTAINER_IMAGE.to_owned());
         let instance = short_digest(data.as_os_str().as_encoded_bytes());
         let mut spec = Self {
             name: String::new(),
@@ -213,7 +328,6 @@ impl ContainerSpec {
             environment,
             run_args,
             home,
-            executable,
             host_path,
         };
         let mut digest = sha2::Sha256::new();
@@ -236,8 +350,6 @@ impl ContainerSpec {
             digest.update([4]);
             digest.update(arg);
         }
-        digest.update([5]);
-        digest.update(executable_identity);
         let digest = mj_core::hex::lower_hex(digest.finalize());
         spec.name = format!("mj-daemon-{}-{}", spec.instance, &digest[..12]);
         Ok(spec)
@@ -271,66 +383,6 @@ impl ContainerSpec {
         args.push(self.image.clone().into());
         args.push("infinity".into());
         args
-    }
-}
-
-/// Make the running `mj` executable reachable inside the container at the
-/// path it has on the host, and return that path with an identity that
-/// changes when an executable mounted file by file is replaced.
-fn mount_executable(mounts: &mut Vec<(PathBuf, PathBuf)>) -> Result<(PathBuf, Vec<u8>)> {
-    let link = std::fs::read_link("/proc/self/exe").context("find the running mj executable")?;
-    let executable = PathBuf::from(
-        link.to_str()
-            .and_then(|text| text.strip_suffix(" (deleted)"))
-            .map_or_else(|| link.clone().into_os_string(), Into::into),
-    );
-    ensure!(
-        same_file(&executable, Path::new("/proc/self/exe")),
-        "the mj executable at {} was replaced after this command started; run it again to start the daemon from the new build",
-        executable.display()
-    );
-    if mounts
-        .iter()
-        .any(|(_, inside)| executable.starts_with(inside))
-    {
-        return Ok((executable, Vec::new()));
-    }
-    let directory = executable
-        .parent()
-        .context("the mj executable has no parent directory")?
-        .to_path_buf();
-    if !SYSTEM_BIN_DIRS
-        .iter()
-        .any(|system| directory == Path::new(system))
-    {
-        mounts.push((directory.clone(), directory));
-        return Ok((executable, Vec::new()));
-    }
-    // A file mount pins the file it was given, so the container must change
-    // when an upgrade replaces one: the identities go into the spec.
-    let mut identity = Vec::new();
-    for entry in
-        std::fs::read_dir(&directory).with_context(|| format!("list {}", directory.display()))?
-    {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name == "mj" || name.starts_with("mj-worker") || entry.path() == executable {
-            use std::os::unix::fs::MetadataExt;
-            let metadata = std::fs::metadata(entry.path())?;
-            identity.extend(metadata.dev().to_le_bytes());
-            identity.extend(metadata.ino().to_le_bytes());
-            mounts.push((entry.path(), entry.path()));
-        }
-    }
-    Ok((executable, identity))
-}
-
-fn same_file(left: &Path, right: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (std::fs::metadata(left), std::fs::metadata(right)) {
-        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
-        _ => false,
     }
 }
 
@@ -377,21 +429,6 @@ fn failure(program: &str, action: &str, output: &std::process::Output) -> anyhow
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     )
-}
-
-async fn ensure_image(program: &str, image: &str) -> Result<()> {
-    let present = engine(program, ["image", "inspect", image], QUERY_TIMEOUT).await?;
-    if present.status.success() {
-        return Ok(());
-    }
-    super::startup_notice(format!(
-        "Pulling the daemon container image {image}; the first start waits for it."
-    ));
-    let pulled = engine(program, ["pull", image], PULL_TIMEOUT).await?;
-    if !pulled.status.success() {
-        return Err(failure(program, &format!("pull {image}"), &pulled));
-    }
-    Ok(())
 }
 
 /// Remove this instance's containers from earlier specifications once nothing
@@ -545,7 +582,7 @@ async fn exec_daemon(program: &str, spec: &ContainerSpec, log_path: &Path) -> Re
     args.push(format!("--workdir={}", spec.home.display()).into());
     args.push(spec.name.clone().into());
     args.extend(["bash".into(), "-c".into(), LAUNCH_SCRIPT.into()]);
-    args.push(spec.executable.clone().into());
+    args.push(IMAGE_EXECUTABLE.into());
     args.push(log_path.into());
     let output = engine(program, args, QUERY_TIMEOUT).await?;
     if !output.status.success() {

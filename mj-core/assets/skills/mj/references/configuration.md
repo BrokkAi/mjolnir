@@ -396,22 +396,26 @@ mounts = ["/srv/projects"]
 | `image` | string | no | this release's agent-dev image | The daemon container's image. |
 | `mounts` | array of absolute paths | no | `[]` | Further host directories the daemon container sees at the same path. |
 
+The daemon in the container is the image's own `mj`, built in the image
+from the same commit as your `mj`. Mjolnir uses an image only when its
+`org.brokk.mjolnir.revision` label is your build's revision: the configured
+`image`, or with none configured this release's agent-dev image or any local
+image carrying that label. Release images always match their release. For a
+development build, `scripts/build-agent-dev-image.sh docker` (or `podman`)
+builds a matching image from the checkout. Without one the daemon runs on
+this computer and says why.
+
 The daemon container is one long-lived container per instance. It uses this
 computer's network and process namespaces and runs as your own user, so
 clients reach the daemon at the same loopback address and the same process ID
 as a host daemon. It mounts your home directory, Mjolnir's data and settings
-directories, `/tmp`, your runtime directory and the `mj` executable at their
-host paths, plus `mounts`. Local sessions run in the container too, with the
-image's tools, and keep running when the daemon is replaced. Container
-sessions reach the host's engine through its socket: Docker's
-`/var/run/docker.sock`, or your Podman socket, which Mjolnir starts with
-`systemctl --user start podman.socket` when it is not running. A change of
-image, mounts or executable gets a new container. The previous container is
-removed once no session runs in it.
-
-The `mj` executable must run on the image's C library. Release builds do. A
-development build linked against a newer glibc than the image's fails to
-start, and the daemon log says why.
+directories, `/tmp` and your runtime directory at their host paths, plus
+`mounts`. Local sessions run in the container too, with the image's tools and
+worker, and keep running when the daemon is replaced. Container sessions reach
+the host's engine through its socket: Docker's `/var/run/docker.sock`, or your
+Podman socket, which Mjolnir starts with `systemctl --user start podman.socket`
+when it is not running. A change of image or mounts gets a new container. The
+previous container is removed once no session runs in it.
 
 ## Hosted Jev service `[jev]`
 
