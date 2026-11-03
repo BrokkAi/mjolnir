@@ -288,12 +288,14 @@ fn view_of(
 /// profile onto a target, so a whole review runs without one.
 struct FakeEnvironment {
     children: Mutex<Vec<(String, ReviewerIdentity, String)>>,
+    child_relations: Mutex<Vec<ReviewerChildRelation>>,
     mailbox: Mutex<Vec<mj_core::mailbox::MailboxEvent>>,
     started: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
     start_error: Mutex<Option<String>>,
     register_error: Mutex<Option<String>>,
     register_gate: Mutex<Option<Arc<SaveGate>>>,
+    registered_gate: Mutex<Option<Arc<SaveGate>>>,
     /// The review bookkeeping, in memory rather than in the developer's
     /// own database.
     state: Mutex<TurnReviewState>,
@@ -302,7 +304,9 @@ struct FakeEnvironment {
     /// restart sweep can name it the way the database's sweep does.
     owner: Mutex<Option<String>>,
     save_gate: Mutex<Option<Arc<SaveGate>>>,
+    sweep_gate: Mutex<Option<Arc<SaveGate>>>,
     save_error: Mutex<Option<String>>,
+    final_save_error: Mutex<Option<String>>,
     subagent: std::sync::atomic::AtomicBool,
     classify_gate: Mutex<Option<Arc<SaveGate>>>,
     review_refusal: Mutex<Option<String>>,
@@ -362,17 +366,21 @@ impl FakeEnvironment {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             children: Mutex::new(Vec::new()),
+            child_relations: Mutex::new(Vec::new()),
             mailbox: Mutex::new(Vec::new()),
             started: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
             start_error: Mutex::new(None),
             register_error: Mutex::new(None),
             register_gate: Mutex::new(None),
+            registered_gate: Mutex::new(None),
             state: Mutex::new(TurnReviewState::default()),
             writes: Mutex::new(Vec::new()),
             owner: Mutex::new(None),
             save_gate: Mutex::new(None),
+            sweep_gate: Mutex::new(None),
             save_error: Mutex::new(None),
+            final_save_error: Mutex::new(None),
             subagent: std::sync::atomic::AtomicBool::new(false),
             classify_gate: Mutex::new(None),
             review_refusal: Mutex::new(None),
@@ -428,6 +436,12 @@ impl FakeEnvironment {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate.clone());
         gate
     }
+
+    fn block_sweep(&self) -> Arc<SaveGate> {
+        let gate = SaveGate::new();
+        *self.sweep_gate.lock().unwrap() = Some(gate.clone());
+        gate
+    }
 }
 
 impl ReviewEnvironment for FakeEnvironment {
@@ -444,18 +458,38 @@ impl ReviewEnvironment for FakeEnvironment {
         _session: &str,
         event: &mj_core::mailbox::MailboxEvent,
     ) -> Result<(), String> {
-        self.mailbox.lock().unwrap().push(event.clone());
+        let mut mailbox = self.mailbox.lock().unwrap();
+        if !mailbox.iter().any(|queued| queued.key == event.key) {
+            mailbox.push(event.clone());
+        }
         Ok(())
     }
-    fn orphaned_children(&self) -> Result<Vec<String>, String> {
-        Ok(self.state().child_session_id.into_iter().collect())
+    fn reviewer_children(&self) -> Result<Vec<ReviewerChildRelation>, String> {
+        Ok(self.child_relations.lock().unwrap().clone())
+    }
+
+    fn active_groups(&self) -> Result<Vec<(String, TurnReviewState)>, String> {
+        if let Some(gate) = self.sweep_gate.lock().unwrap().clone() {
+            gate.wait();
+        }
+        let state = self.state();
+        if state.active_group.is_none() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .owner
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|owner| vec![(owner, state)])
+            .unwrap_or_default())
     }
     fn register_child(
         &self,
         session: &str,
         reviewer: &ReviewerIdentity,
         prompt: String,
-        _request_key: String,
+        request_key: String,
     ) -> Result<String, String> {
         let gate = self.register_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
@@ -464,9 +498,27 @@ impl ReviewEnvironment for FakeEnvironment {
         if let Some(error) = self.register_error.lock().unwrap().take() {
             return Err(error);
         }
+        let canonical_key = mj_core::subagent::SubagentKind::Reviewer.request_key(&request_key);
+        let mut relations = self.child_relations.lock().unwrap();
+        if let Some(existing) = relations.iter().find(|relation| {
+            relation.parent_session_id == session && relation.request_key == canonical_key
+        }) {
+            return Ok(existing.child_session_id.clone());
+        }
         let mut children = self.children.lock().unwrap();
         let child = format!("{session}-child-{}", children.len());
         children.push((child.clone(), reviewer.clone(), prompt));
+        relations.push(ReviewerChildRelation {
+            parent_session_id: session.to_owned(),
+            request_key: canonical_key,
+            child_session_id: child.clone(),
+        });
+        drop(children);
+        drop(relations);
+        let registered_gate = self.registered_gate.lock().unwrap().clone();
+        if let Some(gate) = registered_gate {
+            gate.wait();
+        }
         Ok(child)
     }
     fn start_child<'a>(
@@ -555,6 +607,12 @@ impl ReviewEnvironment for FakeEnvironment {
         if let Some(error) = self.save_error.lock().unwrap().take() {
             return Err(error);
         }
+        if state.active_group.is_none()
+            && state.active.is_none()
+            && let Some(error) = self.final_save_error.lock().unwrap().take()
+        {
+            return Err(error);
+        }
         *self
             .state
             .lock()
@@ -571,8 +629,11 @@ impl ReviewEnvironment for FakeEnvironment {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let interrupted = state.active.is_some() || state.pending_forward.is_some();
-        state.active = None;
+        let interrupted = state.active_group.is_none()
+            && (state.active.is_some() || state.pending_forward.is_some());
+        if state.active_group.is_none() {
+            state.active = None;
+        }
         let owner = self
             .owner
             .lock()
@@ -733,7 +794,52 @@ fn armed(profile: Option<&str>) -> ReviewConfigSource {
         profile: profile.clone(),
         model: None,
         effort: None,
+        count: std::num::NonZeroUsize::new(1).unwrap(),
     })
+}
+
+fn armed_count(count: usize) -> ReviewConfigSource {
+    Arc::new(move |_| ReviewConfig {
+        trigger: mj_core::config::ReviewTrigger::Turn,
+        profile: Some("reviewer".into()),
+        count: std::num::NonZeroUsize::new(count).unwrap(),
+        ..Default::default()
+    })
+}
+
+async fn wait_for_group_children(
+    environment: &FakeEnvironment,
+    host: &TurnReviewHost,
+    session: &str,
+    count: usize,
+) -> Vec<String> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let children: Vec<_> = environment
+                .state()
+                .active_group
+                .as_ref()
+                .map(|group| {
+                    group
+                        .registrations
+                        .iter()
+                        .filter_map(|item| item.child_session_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if children.len() == count
+                && children
+                    .iter()
+                    .all(|child| environment.started.lock().unwrap().contains(child))
+                && host.view(session).is_some()
+            {
+                return children;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("every reviewer child starts")
 }
 
 #[test]
@@ -1202,6 +1308,7 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
         profile: Some("reviewer".to_owned()),
         model: None,
         effort: None,
+        count: std::num::NonZeroUsize::new(1).unwrap(),
     });
     let host = TurnReviewHost::spawn_in(manager.control.clone(), config, environment);
 
@@ -1355,12 +1462,11 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
     );
 }
 
-/// I1-8: `mj daemon restart` during a review left no notice, because the old
-/// daemon cleared its own in-flight marker while shutting down and the new
-/// daemon's startup sweep then found nothing to report.
-// Hard-won: c974a33c: daemon restart erased an open review marker and gave no notice
+/// A restart keeps a durable review open and leaves its baseline untouched
+/// while the busy reviewer continues under the replacement daemon.
+// Hard-won: c974a33c: daemon restart erased an open review marker
 #[tokio::test]
-async fn a_review_open_at_a_restart_is_reported_by_the_next_daemon_and_keeps_its_baseline() {
+async fn a_review_open_at_a_restart_keeps_its_child_and_baseline() {
     let session = session_id("restartnotice");
     let session = session.as_str();
     let mut manager = FakeManager::new(session).await;
@@ -1407,31 +1513,25 @@ async fn a_review_open_at_a_restart_is_reported_by_the_next_daemon_and_keeps_its
         environment.clone(),
     );
     new.observe(session, &view(session, MaterializedExecutionState::Idle));
-    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let RemoteSessionRequest::Submit {
-                command: RelayCommand::RecordNotice { text },
-                reply,
-                ..
-            } = manager.next().await
+            if new
+                .view(session)
+                .is_some_and(|view| view.reviewer_children().any(|id| id == child))
             {
-                let _ = reply.send(Ok(1));
-                return text;
+                break;
             }
+            tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("the new daemon tells the person the review was cancelled");
-    assert_eq!(
-        notice,
-        "Turn review was cancelled when Mjolnir restarted; the next review covers the same changes"
-    );
+    .expect("the new daemon restores the open review");
     let state = environment.state();
     assert!(
-        environment.closed.lock().unwrap().contains(&child),
-        "restart closes the orphaned reviewer"
+        !environment.closed.lock().unwrap().contains(&child),
+        "restart retains the owned reviewer"
     );
-    assert_eq!(state.active, None);
+    assert!(state.active_group.is_some());
     assert_eq!(
         state.baselines[&PathBuf::from("/workspace/app")],
         "before-turn",
@@ -1785,6 +1885,224 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     host.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn reviewer_outcome_is_saved_before_handback_acknowledgement() {
+    let session = session_id("outcome-save");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    let child = open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
+    let gate = environment.block_saves();
+    let finished = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            host.reviewer_finished(session, child, Some("No findings.".into()))
+                .await
+        })
+    };
+    gate.entered().await;
+    assert!(
+        !finished.is_finished(),
+        "handback waits for durable outcome"
+    );
+    assert!(
+        environment
+            .state()
+            .active_group
+            .as_ref()
+            .unwrap()
+            .driver
+            .roles[0]
+            .outcome
+            .is_none()
+    );
+    gate.release();
+    finished.await.unwrap().unwrap();
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_outcome_save_can_retry_same_child_without_losing_coverage() {
+    let session = session_id("outcome-save-retry");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    let child = open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
+    *environment.save_error.lock().unwrap() = Some("database busy".into());
+    let first = host
+        .reviewer_finished(session.clone(), child.clone(), Some("No findings.".into()))
+        .await;
+    assert!(first.unwrap_err().contains("database busy"));
+    host.reviewer_finished(session.clone(), child, Some("No findings.".into()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while environment
+            .state()
+            .baselines
+            .get(&PathBuf::from("/workspace/app"))
+            .map(String::as_str)
+            != Some("new")
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn parallel_findings_keep_launch_order_when_children_finish_out_of_order() {
+    let session = session_id("parallel-order");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), armed_count(2), environment.clone());
+    open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
+    let children = wait_for_group_children(&environment, &host, &session, 2).await;
+    finish_child(
+        &host,
+        &environment,
+        &session,
+        &children[1],
+        Some("second defect"),
+    )
+    .await;
+    assert!(
+        host.view(&session).unwrap().verdict.is_none(),
+        "one unfinished peer cannot complete the group"
+    );
+    finish_child(
+        &host,
+        &environment,
+        &session,
+        &children[0],
+        Some("first defect"),
+    )
+    .await;
+    let prompt = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match manager.next().await {
+                RemoteSessionRequest::Submit {
+                    command: RelayCommand::Prompt { prompt },
+                    reply,
+                    ..
+                } => {
+                    reply.send(Ok(42)).unwrap();
+                    return format!("{prompt:?}");
+                }
+                RemoteSessionRequest::Reviewer { action, reply, .. } => {
+                    reply.send(answer_for(&action)).unwrap();
+                }
+                RemoteSessionRequest::Submit { reply, .. } => {
+                    reply.send(Ok(1)).unwrap();
+                }
+                other => panic!("unexpected request {}", other.session_id()),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(prompt.find("first defect").unwrap() < prompt.find("second defect").unwrap());
+    assert!(prompt.contains(&children[0]) && prompt.contains(&children[1]));
+    assert!(prompt.contains("may overlap"));
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn clean_and_failed_group_releases_prompt_hold_without_advancing_baseline() {
+    let session = session_id("parallel-failed-hold");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), armed_count(2), environment.clone());
+    open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
+    let children = wait_for_group_children(&environment, &host, &session, 2).await;
+    finish_child(
+        &host,
+        &environment,
+        &session,
+        &children[0],
+        Some("No findings."),
+    )
+    .await;
+    finish_child(&host, &environment, &session, &children[1], None).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(view) = host.view(&session)
+                && matches!(
+                    view.verdict,
+                    Some(VerdictView {
+                        kind: VerdictKind::Failed,
+                        ..
+                    })
+                )
+                && !host.refuses_prompt(&session)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(environment.state().baselines.is_empty());
+    assert!(environment.state().active.is_none());
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reviewer_questions_route_through_both_registered_children() {
+    let session = session_id("parallel-questions");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), armed_count(2), environment.clone());
+    open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
+    let children = wait_for_group_children(&environment, &host, &session, 2).await;
+    for child in &children {
+        observe_question(&host, child, "Which file?");
+        let target = host
+            .question_target(&session, &format!("review.{child}.question-1"))
+            .await;
+        assert_eq!(target, Some((child.clone(), "question-1".into())));
+    }
+    assert!(
+        host.question_target(&session, "review.unregistered.question-1")
+            .await
+            .is_none()
+    );
+    let view = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let view = host.view(&session).unwrap();
+            if view.questions.len() == 2 {
+                return view;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        view.questions
+            .iter()
+            .map(|item| item.role.clone())
+            .collect::<Vec<_>>(),
+        children
+    );
+    host.shutdown().await.unwrap();
+}
+
 async fn wait_for_child(
     environment: &FakeEnvironment,
     host: &TurnReviewHost,
@@ -1792,11 +2110,18 @@ async fn wait_for_child(
 ) -> String {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(child) = host.view(session).and_then(|view| view.child_session_id)
+            if let Some(child) = host
+                .view(session)
+                .and_then(|view| view.reviewer_children().next().map(str::to_owned))
                 && environment.started.lock().unwrap().contains(&child)
             {
                 assert_eq!(
-                    environment.state().child_session_id.as_deref(),
+                    environment
+                        .state()
+                        .active_group
+                        .as_ref()
+                        .and_then(|group| group.registrations.first())
+                        .and_then(|item| item.child_session_id.as_deref()),
                     Some(child.as_str()),
                     "the child is durable before it starts"
                 );
@@ -1916,34 +2241,6 @@ async fn a_reviewers_question_is_published_with_its_review() {
     host.shutdown().await.expect("shutdown the host");
 }
 
-/// Answers the host's requests until it records a line in the conversation,
-/// and returns that line.
-async fn next_notice(manager: &mut FakeManager) -> String {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match manager.next().await {
-                RemoteSessionRequest::Submit {
-                    command: RelayCommand::RecordNotice { text },
-                    reply,
-                    ..
-                } => {
-                    let _ = reply.send(Ok(1));
-                    return text;
-                }
-                RemoteSessionRequest::Submit { reply, .. } => {
-                    let _ = reply.send(Ok(1));
-                }
-                RemoteSessionRequest::Reviewer { action, reply, .. } => {
-                    let _ = reply.send(answer_for(&action));
-                }
-                other => panic!("unexpected request {}", other.session_id()),
-            }
-        }
-    })
-    .await
-    .expect("the host records a notice")
-}
-
 /// A review asked for while the open one waits on a person names that
 /// question rather than only saying a review is open.
 #[tokio::test]
@@ -1981,10 +2278,10 @@ async fn a_review_asked_for_while_the_open_one_waits_on_a_question_says_so() {
     host.shutdown().await.expect("shutdown the host");
 }
 
-/// A completed child belongs to the interrupted review, even if its handback
-/// arrives after the replacement host has started.
+/// A saved group's busy child remains owned after a daemon restart; its
+/// handback can race the startup sweep without losing coverage.
 #[tokio::test]
-async fn a_reviewer_handback_arriving_after_restart_does_not_advance_the_baseline() {
+async fn a_reviewer_handback_arriving_after_restart_completes_the_saved_group() {
     let session = session_id("reattachreview");
     let mut manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
@@ -2002,12 +2299,166 @@ async fn a_reviewer_handback_arriving_after_restart_does_not_advance_the_baselin
     );
     new.observe(&session, &view(&session, MaterializedExecutionState::Idle));
     finish_child(&new, &environment, &session, &child, Some("No findings.")).await;
-    let notice = next_notice(&mut manager).await;
-    assert!(notice.contains("cancelled when Mjolnir restarted"));
-    assert!(environment.state().baselines.is_empty());
-    assert!(environment.closed.lock().unwrap().contains(&child));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while new.view(&session).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        environment.state().baselines[&PathBuf::from("/workspace/app")],
+        "new"
+    );
+    assert!(environment.state().active_group.is_none());
     assert!(!new.refuses_prompt(&session));
     new.shutdown().await.unwrap();
+}
+
+/// Registration is durable in the sub-agent index before the review row can
+/// save the returned child ID. Startup must recognize the key in that gap.
+#[tokio::test]
+async fn restart_between_reviewer_registration_and_id_save_keeps_the_adopted_child() {
+    let session = session_id("registrationgap");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let gate = SaveGate::new();
+    *environment.registered_gate.lock().unwrap() = Some(gate.clone());
+    let old = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &old).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    reply
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![mj_core::relay::RepoDelta {
+                root: "/workspace/app".into(),
+                baseline_tree: Some("base".into()),
+                current_tree: "new".into(),
+                patch: "+one".into(),
+                changed_lines: 1,
+                ..Default::default()
+            }],
+        }))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), gate.entered())
+        .await
+        .unwrap();
+    let relation = environment.child_relations.lock().unwrap()[0].clone();
+    let group = environment.state().active_group.unwrap();
+    assert!(group.registrations[0].child_session_id.is_none());
+    assert_eq!(
+        relation.request_key,
+        mj_core::subagent::SubagentKind::Reviewer.request_key(&group.registrations[0].request_key)
+    );
+
+    old.shutdown().await.unwrap();
+    *environment.registered_gate.lock().unwrap() = None;
+    let new = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    let child = wait_for_child(&environment, &new, &session).await;
+    assert_eq!(child, relation.child_session_id);
+    assert_eq!(environment.children.lock().unwrap().len(), 1);
+    gate.release(); // the retired host's event channel is closed now
+    tokio::task::yield_now().await;
+    assert!(environment.closed.lock().unwrap().is_empty());
+    new.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_restores_group_before_push_or_override_admission() {
+    let session = session_id("startup-group-gate");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let seed = mj_core::review::driver::TurnReviewSeed {
+        task: "inspect the push".into(),
+        user_messages: Vec::new(),
+        baselines: Default::default(),
+        through_ordinal: 1,
+        prior_review: None,
+    };
+    let (mut driver, _) = TurnReviewDriver::start(
+        seed,
+        "group-1".into(),
+        std::num::NonZeroUsize::new(1).unwrap(),
+    );
+    driver.delta_captured(vec![push_delta("/workspace/app", "newtree")]);
+    let state = TurnReviewState {
+        active: Some("group-1".into()),
+        active_group: Some(mj_core::storage::ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewer: ReviewerIdentity::default(),
+            scope: mj_core::relay::CaptureScope::PushableCommits,
+            registrations: vec![mj_core::storage::ReviewerRegistration {
+                role: "reviewer-1".into(),
+                request_key: "stable-key".into(),
+                child_session_id: Some("busy-child".into()),
+            }],
+        }),
+        push_findings: Some(mj_core::storage::PushFindingsRecord {
+            review_id: "older-verdict".into(),
+            trees: [(
+                PathBuf::from("/workspace/app"),
+                ("newtree".into(), "bbbbbbb456".into()),
+            )]
+            .into(),
+            synthesis: "older finding".into(),
+        }),
+        ..Default::default()
+    };
+    *environment.state.lock().unwrap() = state;
+    *environment.owner.lock().unwrap() = Some(session.clone());
+    let gate = environment.block_sweep();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    gate.entered().await;
+    let push = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move { host.begin_push(&session).await })
+    };
+    let override_request = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move { host.override_push(&session, "old finding".into()).await })
+    };
+    tokio::task::yield_now().await;
+    assert!(!push.is_finished() && !override_request.is_finished());
+    gate.release();
+    assert!(
+        push.await
+            .unwrap()
+            .unwrap_err()
+            .0
+            .contains("review is already open")
+    );
+    assert!(
+        override_request
+            .await
+            .unwrap()
+            .unwrap_err()
+            .0
+            .contains("review is open")
+    );
+    assert_eq!(
+        environment
+            .state()
+            .active_group
+            .as_ref()
+            .unwrap()
+            .registrations[0]
+            .child_session_id
+            .as_deref(),
+        Some("busy-child")
+    );
+    host.shutdown().await.unwrap();
 }
 
 /// A review someone asked for delivers its findings: a findings verdict is
@@ -2082,7 +2533,13 @@ async fn a_reviewer_child_starts_without_taking_its_parents_reviewer_lease() {
         environment.clone(),
     );
     let child = open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
-    assert!(host.view(&session).unwrap().child_session_id.is_some());
+    assert!(
+        host.view(&session)
+            .unwrap()
+            .reviewer_children()
+            .next()
+            .is_some()
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(100), manager.requests.recv())
             .await
@@ -2200,6 +2657,16 @@ fn push_config() -> ReviewConfigSource {
     Arc::new(|_| ReviewConfig {
         trigger: mj_core::config::ReviewTrigger::Push,
         profile: Some("reviewer".into()),
+        count: std::num::NonZeroUsize::new(1).unwrap(),
+        ..Default::default()
+    })
+}
+
+fn push_config_count(count: usize) -> ReviewConfigSource {
+    Arc::new(move |_| ReviewConfig {
+        trigger: mj_core::config::ReviewTrigger::Push,
+        profile: Some("reviewer".into()),
+        count: std::num::NonZeroUsize::new(count).unwrap(),
         ..Default::default()
     })
 }
@@ -2440,7 +2907,10 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
         assert_eq!(state.prior_review.is_some(), name == "pushfindings");
         assert_eq!(state.push_findings.is_some(), name == "pushfindings");
         if let Some(findings) = &state.push_findings {
-            assert_eq!(findings.synthesis, "A correctness defect needs a fix");
+            assert_eq!(
+                findings.synthesis,
+                format!("Reviewer 1 (session {child})\nA correctness defect needs a fix")
+            );
             assert_eq!(
                 findings.trees[&PathBuf::from("/workspace/app")],
                 ("newtree".into(), "bbbbbbb456".into())
@@ -2449,6 +2919,94 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
         assert!(state.active.is_none());
         host.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn incomplete_push_findings_clear_stale_override_without_advancing_coverage() {
+    let session = session_id("push-partial");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    pending_push_findings(&environment);
+    let original_prior = environment.state().prior_review;
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        push_config_count(2),
+        environment.clone(),
+    );
+    open_push(&mut manager, &host, &environment).await;
+    let children = wait_for_group_children(&environment, &host, &session, 2).await;
+    finish_child(
+        &host,
+        &environment,
+        &session,
+        &children[0],
+        Some("real defect"),
+    )
+    .await;
+    finish_child(&host, &environment, &session, &children[1], None).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.view(&session).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let state = environment.state();
+    assert!(state.push_findings.is_none());
+    assert_eq!(state.prior_review, original_prior);
+    assert!(state.baselines.is_empty());
+    let mailbox = environment.mailbox.lock().unwrap();
+    assert_eq!(mailbox.len(), 1);
+    let mj_core::mailbox::MailboxEventBody::ReviewVerdict { verdict, .. } = &mailbox[0].body else {
+        panic!("push verdict is in the mailbox");
+    };
+    assert!(matches!(verdict, ReviewVerdict::Findings { .. }));
+    assert!(!verdict.is_complete());
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn push_delivery_retries_same_mailbox_key_after_final_state_save_fails() {
+    let session = session_id("push-final-save-retry");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let child = open_push(&mut manager, &host, &environment).await;
+    let review_id = environment
+        .state()
+        .active_group
+        .as_ref()
+        .unwrap()
+        .driver
+        .review_id
+        .clone();
+    *environment.final_save_error.lock().unwrap() = Some("database busy".into());
+    finish_child(
+        &host,
+        &environment,
+        &session,
+        &child,
+        Some("fix the parser"),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.view(&session).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mailbox = environment.mailbox.lock().unwrap();
+    assert_eq!(
+        mailbox.len(),
+        1,
+        "replay keeps the original mailbox idempotency key"
+    );
+    assert!(mailbox[0].key.contains(&review_id));
+    drop(mailbox);
+    assert!(environment.state().active_group.is_none());
+    host.shutdown().await.unwrap();
 }
 
 fn pending_push_findings(environment: &FakeEnvironment) {
@@ -2870,7 +3428,7 @@ async fn push_review_refuses_unsupported_workers_and_non_push_sessions() {
 }
 
 #[tokio::test]
-async fn a_push_review_interrupted_by_restart_closes_its_child_without_a_verdict() {
+async fn a_push_review_restart_keeps_its_busy_child_and_delivers_its_verdict() {
     let session = session_id("pushrestart");
     let mut manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
@@ -2881,16 +3439,31 @@ async fn a_push_review_interrupted_by_restart_closes_its_child_without_a_verdict
     let restarted =
         TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
     tokio::time::timeout(Duration::from_secs(5), async {
-        while environment.state().active.is_some()
-            || !environment.closed.lock().unwrap().contains(&child)
-        {
+        while restarted.view(&session).is_none() {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    assert!(environment.mailbox.lock().unwrap().is_empty());
+    assert!(!environment.closed.lock().unwrap().contains(&child));
+    finish_child(
+        &restarted,
+        &environment,
+        &session,
+        &child,
+        Some("fix the parser"),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while restarted.view(&session).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(environment.mailbox.lock().unwrap().len(), 1);
     assert!(environment.state().baselines.is_empty());
+    assert!(environment.state().active_group.is_none());
     restarted.shutdown().await.unwrap();
 }
 

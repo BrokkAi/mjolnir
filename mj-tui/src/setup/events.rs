@@ -225,6 +225,12 @@ impl DashboardState {
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                 );
             if save_shortcut {
+                if review.parsed_reviewer_count().is_none() {
+                    review.save_error = Some("Enter a positive number of reviewers.".into());
+                    dialog.review_editor = Some(review);
+                    self.mode = Mode::Setup(dialog);
+                    return DashboardAction::None;
+                }
                 dialog.sync_review_validation(&review);
                 let action = dialog.save(&self.profile_capabilities);
                 if dialog.saving || dialog.fields.values().any(|field| field.error.is_some()) {

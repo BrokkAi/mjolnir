@@ -692,6 +692,7 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
         trigger: mj_core::config::ReviewTrigger::Turn,
+        count: mj_core::config::default_review_count(),
         tier: Some("extended".into()),
         profile: Some("reviewer-1".into()),
         model: Some("private-review-model".into()),
@@ -705,6 +706,7 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
         Some(&serde_json::json!({
             "trigger": "turn",
             "profile": "reviewer-1",
+            "count": 2,
         }))
     );
     let json = value.to_string();
@@ -777,6 +779,7 @@ fn public_snapshot_exposes_only_review_status_configuration() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
         trigger: mj_core::config::ReviewTrigger::Turn,
+        count: mj_core::config::default_review_count(),
         tier: Some("extended".into()),
         profile: Some("reviewer-1".into()),
         model: Some("private-review-model".into()),
@@ -791,11 +794,32 @@ fn public_snapshot_exposes_only_review_status_configuration() {
         Some(&serde_json::json!({
             "trigger": "turn",
             "profile": "reviewer-1",
+            "count": 2,
         }))
     );
     let json = value.to_string();
     assert!(!json.contains("private-review-model"));
     assert!(!json.contains("private-review-effort"));
+}
+
+#[test]
+fn session_review_count_overrides_phone_status_projection() {
+    let (mut config, mut state) = sample_config_state();
+    config.review.count = mj_core::config::default_review_count();
+    state.sessions.get_mut("session-1").unwrap().review =
+        Some(mj_core::config::SessionReview::Turn {
+            count: std::num::NonZeroUsize::new(1),
+            model: None,
+            effort: None,
+            tier: None,
+        });
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 9);
+    assert_eq!(snapshot.review_config.count.get(), 2);
+    let session = snapshot.sessions.get("session-1").unwrap();
+    assert_eq!(session.review_trigger, mj_core::config::ReviewTrigger::Turn);
+    assert_eq!(session.review_count.get(), 1);
+    let wire = serde_json::to_value(session).unwrap();
+    assert_eq!(wire["review_count"], 1);
 }
 
 fn sample_elicitation() -> ElicitationRequest {
@@ -2981,11 +3005,20 @@ fn a_running_review_projects_to_the_phone() {
             synthesis: "[P1] src/lib.rs:1 -- unbounded retry".into(),
             evidence: Default::default(),
         }),
-        roles: vec![RoleStatus {
-            role: "reviewer".into(),
-            label: "Reviewer".into(),
-            state: RoleState::Findings,
-        }],
+        roles: vec![
+            RoleStatus {
+                role: "reviewer".into(),
+                label: "Reviewer".into(),
+                state: RoleState::Findings,
+                child_session_id: Some("reviewer-child".into()),
+            },
+            RoleStatus {
+                role: "reviewer-2".into(),
+                label: "Reviewer 2".into(),
+                state: RoleState::Failed,
+                child_session_id: Some("second-child".into()),
+            },
+        ],
         status: "Enter to act".into(),
         verdict: Some(VerdictView {
             kind: VerdictKind::Findings,
@@ -3004,9 +3037,16 @@ fn a_running_review_projects_to_the_phone() {
         projected
             .roles
             .iter()
-            .map(|role| (role.label.as_str(), role.state.as_str()))
+            .map(|role| (
+                role.label.as_str(),
+                role.state.as_str(),
+                role.child_session_id.as_deref()
+            ))
             .collect::<Vec<_>>(),
-        vec![("Reviewer", "findings")]
+        vec![
+            ("Reviewer", "findings", Some("reviewer-child")),
+            ("Reviewer 2", "failed", Some("second-child"))
+        ]
     );
     assert!(
         serde_json::to_value(&projected)

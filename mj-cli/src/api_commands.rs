@@ -172,6 +172,9 @@ pub(crate) struct NewArgs {
     /// `[review]` is off.
     #[arg(long)]
     review_effort: Option<String>,
+    /// Independent reviewers per review. 1–3 is reasonable; more has diminishing returns.
+    #[arg(long)]
+    review_count: Option<std::num::NonZeroUsize>,
     /// Deprecated compatibility option; the value is ignored.
     #[arg(long, hide = true, value_parser = ["quick", "extended"])]
     review_tier: Option<String>,
@@ -1118,6 +1121,7 @@ fn new_session_review(args: &NewArgs) -> Option<mj_core::config::SessionReview> 
         args.review_model.as_deref(),
         args.review_effort.as_deref(),
         args.review_tier.as_deref(),
+        args.review_count,
     )
 }
 
@@ -1127,22 +1131,26 @@ pub(crate) fn session_review(
     model: Option<&str>,
     effort: Option<&str>,
     tier: Option<&str>,
+    count: Option<std::num::NonZeroUsize>,
 ) -> Option<mj_core::config::SessionReview> {
     use mj_core::config::SessionReview;
-    // A model, an effort or the deprecated tier without a trigger has always
-    // meant "review every turn"; the tier's value itself is ignored.
-    let trigger = trigger
-        .or_else(|| (model.is_some() || effort.is_some() || tier.is_some()).then_some("turn"))?;
+    // Review overrides without a trigger select turn review; the deprecated
+    // tier's value itself is ignored.
+    let trigger = trigger.or_else(|| {
+        (model.is_some() || effort.is_some() || tier.is_some() || count.is_some()).then_some("turn")
+    })?;
     let model = model.map(str::to_owned);
     let effort = effort.map(str::to_owned);
     Some(match trigger {
         "off" => SessionReview::Off,
         "push" => SessionReview::Push {
+            count,
             model,
             effort,
             tier: None,
         },
         "turn" => SessionReview::Turn {
+            count,
             model,
             effort,
             tier: None,
@@ -2978,7 +2986,7 @@ mod tests {
         };
         assert_eq!(parse(&[]).unwrap(), None);
         assert_eq!(
-            parse(&["--review", "off"]).unwrap(),
+            parse(&["--review", "off", "--review-count", "3"]).unwrap(),
             Some(SessionReview::Off)
         );
         assert_eq!(
@@ -2991,8 +2999,9 @@ mod tests {
         );
         assert!(parse(&["--review", "on"]).is_err());
         assert_eq!(
-            parse(&["--review-model", "gpt-6-astra"]).unwrap(),
+            parse(&["--review-model", "gpt-6-astra", "--review-count", "3"]).unwrap(),
             Some(SessionReview::Turn {
+                count: std::num::NonZeroUsize::new(3),
                 model: Some("gpt-6-astra".into()),
                 effort: None,
                 tier: None,
@@ -3001,6 +3010,7 @@ mod tests {
         assert_eq!(
             parse(&["--review-effort", "high"]).unwrap(),
             Some(SessionReview::Turn {
+                count: None,
                 model: None,
                 effort: Some("high".into()),
                 tier: None,
@@ -3009,6 +3019,7 @@ mod tests {
         assert_eq!(
             parse(&["--review-tier", "extended", "--review-model", "gpt-6-luna"]).unwrap(),
             Some(SessionReview::Turn {
+                count: None,
                 model: Some("gpt-6-luna".into()),
                 effort: None,
                 tier: None,
@@ -3033,6 +3044,11 @@ mod tests {
             "the deprecated flag still accepts only quick and extended"
         );
         assert!(parse(&["--no-review"]).is_err());
+        let counted = parse(&["--review-count", "4"]).unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(counted).unwrap(),
+            serde_json::json!({"mode":"turn","count":4})
+        );
     }
 
     #[test]

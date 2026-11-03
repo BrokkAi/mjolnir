@@ -73,7 +73,7 @@ fn review_status_omits_the_deprecated_tier() {
     };
     assert_eq!(
         review_status_line(&review, true),
-        "Reviewing every completed turn with [review] profile \"reviewer\". A review is open now."
+        "Reviewing every completed turn with [review] profile \"reviewer\"; 2 reviewers. A review is open now."
     );
 }
 

@@ -113,10 +113,15 @@ impl TurnReviewHost {
                 pending_open: BTreeMap::new(),
                 closing: BTreeSet::new(),
                 awaiting_forward_persistence: BTreeMap::new(),
+                awaiting_capture_persistence: BTreeMap::new(),
                 next_epoch: 0,
                 sessions: BTreeMap::new(),
                 recovery_candidates: BTreeSet::new(),
                 recovery_in_flight: BTreeSet::new(),
+                startup_ready: false,
+                startup_failure: None,
+                deferred_handbacks: Vec::new(),
+                deferred_admissions: Vec::new(),
             },
             receiver,
         ));
@@ -289,15 +294,22 @@ impl TurnReviewHost {
             .cloned()
     }
 
-    pub(crate) fn question_target(
+    pub(crate) async fn question_target(
         &self,
         session_id: &str,
         elicitation_id: &str,
     ) -> Option<(String, String)> {
         let (child, question) = mj_client::review::parse_reviewer_question_id(elicitation_id)?;
-        let review = self.view(session_id)?;
-        (review.child_session_id.as_deref() == Some(child))
-            .then(|| (child.to_owned(), question.to_owned()))
+        let (reply, result) = oneshot::channel();
+        self.events
+            .send(HostEvent::QuestionTarget {
+                session_id: session_id.to_owned(),
+                child_session_id: child.to_owned(),
+                question_id: question.to_owned(),
+                reply,
+            })
+            .ok()?;
+        result.await.ok().flatten()
     }
 
     /// Whether an unresolved review is holding this session's prompts.

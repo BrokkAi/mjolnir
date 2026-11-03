@@ -650,6 +650,9 @@ pre.entry-body {
 
 .turn-review-roles {
   margin: 6px 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
 }
 
 .turn-review-findings {

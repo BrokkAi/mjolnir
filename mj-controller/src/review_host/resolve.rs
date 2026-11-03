@@ -47,6 +47,7 @@ impl HostState {
             if requests.is_empty() {
                 return Err("the review could not be resolved that way".to_owned());
             }
+            slot.sync_group();
             let pending_state = if resolution == Resolution::Forwarded {
                 let Some(pending) = slot.driver.pending_forward() else {
                     return Err("the review handoff has no durable findings".to_owned());
@@ -94,6 +95,7 @@ impl HostState {
         slot.state.active = None;
         let state = slot.state.clone();
         let requests = slot.driver.request_failed(message);
+        slot.sync_group();
         // A failed review remains visible so the person can dismiss it, but it
         // no longer owns the turn or has work capable of progressing.
         release_prompts(session_id);
@@ -151,11 +153,12 @@ impl HostState {
         push.finishing = true;
         let deltas = push.deltas.clone();
         let epoch = slot.epoch;
-        let review_id = new_command_id("push-review");
-        if let ReviewVerdict::Findings {
-            synthesis,
-            evidence,
-        } = &verdict
+        let review_id = slot.driver.snapshot().review_id;
+        if verdict.is_complete()
+            && let ReviewVerdict::Findings {
+                synthesis,
+                evidence,
+            } = &verdict
         {
             slot.state.prior_review = Some(mj_core::review::lanes::PriorReviewContext {
                 synthesis: synthesis.clone(),
@@ -169,19 +172,20 @@ impl HostState {
             } => Some(*reviewed_through_ordinal),
             _ => None,
         });
-        let completion = review_id.and_then(|review_id| {
-            crate::upgrade::activity("push review verdict").map(|admission| PushCompletion {
-                session_id: session_id.to_owned(),
-                epoch,
-                review_id,
-                control: self.control.clone(),
-                state: slot.state.clone(),
-                deltas,
-                verdict,
-                _admission: admission,
-                reviewed_through_ordinal,
-            })
-        });
+        let completion =
+            crate::upgrade::activity_unless_draining("push review verdict").map(|admission| {
+                PushCompletion {
+                    session_id: session_id.to_owned(),
+                    epoch,
+                    review_id,
+                    control: self.control.clone(),
+                    state: slot.state.clone(),
+                    deltas,
+                    verdict,
+                    _admission: admission,
+                    reviewed_through_ordinal,
+                }
+            });
         let queued = completion.and_then(|completion| {
             self.persistence
                 .as_ref()
@@ -190,11 +194,34 @@ impl HostState {
                 .map_err(|_| anyhow::anyhow!("review persistence stopped"))
         });
         if let Err(error) = queued {
-            self.record_notice(session_id, format!("Before-push review failed: {error}"));
-            self.close_reviewer_child(session_id);
-            self.run_one(session_id, ReviewRequest::Close);
+            self.retry_push_delivery(session_id, format!("Before-push review failed: {error}"));
         }
         true
+    }
+
+    pub(super) fn retry_push_delivery(&mut self, session_id: &str, error: impl std::fmt::Display) {
+        let (delay, epoch) = {
+            let Some(slot) = self.reviews.get_mut(session_id) else {
+                return;
+            };
+            let Some(push) = slot.push.as_mut() else {
+                return;
+            };
+            push.finishing = false;
+            let delay = push.retry_delay;
+            push.retry_delay = (delay * 2).min(std::time::Duration::from_secs(30));
+            (delay, slot.epoch)
+        };
+        tracing::warn!(%session_id, %error, retry_in_seconds = delay.as_secs(), "push review delivery will retry");
+        if delay == std::time::Duration::from_secs(1) {
+            self.record_notice(session_id, format!("Before-push review verdict delivery failed: {error}; retrying while the push stays blocked."));
+        }
+        let events = self.events.clone();
+        let session_id = session_id.to_owned();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = events.send(HostEvent::RetryPushDelivery { session_id, epoch });
+        });
     }
 }
 
@@ -213,7 +240,10 @@ pub(super) async fn finish_push_delivery(
         reviewed_through_ordinal,
         ..
     } = completion;
-    if let ReviewVerdict::Findings { synthesis, .. } = &verdict {
+    state.push_findings = None;
+    if verdict.is_complete()
+        && let ReviewVerdict::Findings { synthesis, .. } = &verdict
+    {
         state.push_findings = Some(mj_core::storage::PushFindingsRecord {
             review_id: review_id.clone(),
             trees: deltas
@@ -275,6 +305,7 @@ pub(super) async fn finish_push_delivery(
         }
     }
     state.active = None;
+    state.active_group = None;
     tokio::task::spawn_blocking(move || {
         let _admission = _admission;
         for delta in deltas {

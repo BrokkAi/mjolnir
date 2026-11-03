@@ -906,6 +906,7 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
     let mut context = chat_context("session-review", &[]);
     context.config.review = mj_core::config::ReviewConfig {
         trigger: mj_core::config::ReviewTrigger::Turn,
+        count: mj_core::config::default_review_count(),
         tier: Some("extended".into()),
         profile: Some("reviewer-a".into()),
         model: None,
@@ -925,6 +926,7 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
         chat.state.review_config(),
         mj_core::config::ReviewConfig {
             trigger: mj_core::config::ReviewTrigger::Turn,
+            count: mj_core::config::default_review_count(),
             tier: Some("extended".into()),
             profile: Some("reviewer-a".into()),
             model: None,

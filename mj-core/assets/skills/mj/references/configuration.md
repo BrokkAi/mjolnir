@@ -66,7 +66,7 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 19
+version = 20
 ```
 
 The top-level keys are listed below. The legacy `[mailbox] enabled` switch is
@@ -74,7 +74,7 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `18`. |
+| `version` | integer | yes | none | Configuration schema version; use `20`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -100,7 +100,7 @@ and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
 
-A missing or empty file is treated as an empty version 19 configuration. Older
+A missing or empty file is treated as an empty version 20 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -337,6 +337,7 @@ precedence. See [Web viewer and desktop app](/web-viewer/) for access and login.
 ```toml
 [review]
 trigger = "turn"
+count = 2
 profile = "reviewer"
 # model = "provider-model-id"
 # effort = "high"
@@ -345,6 +346,7 @@ profile = "reviewer"
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
 | `trigger` | string enum | no | `"off"` | `"off"` disables automatic review, `"turn"` reviews eligible completed turns after queued work drains, and `"push"` reviews commits before push. An unchanged turn delta resolves without a review prompt. |
+| `count` | positive integer | no | `2` | Independent reviewer sessions per review. 1–3 reviewers are reasonable; more have diminishing returns. Counts above 3 are allowed. |
 | `tier` | string | no | unset | Deprecated compatibility field. Existing `quick` or `extended` values are accepted but ignored. |
 | `profile` | string | no | Auto (unset) | Auto tries Terra, DeepSeek Flash, Haiku, and Grok on subscriptions, then API billing, then other models by price; always at High effort. A named enabled review-capable profile is honored, including the primary profile. |
 | `model` | string | no | unset (harness default) | Reviewer model override for a named profile. `[review]` refuses it with Auto, which uses fixed model-family defaults; a session's `--review-model` still works with Auto. |
@@ -354,6 +356,8 @@ Auto prefers a different model family from the primary within each billing group
 profile, model, and effort, and show their transcripts in the review view. See
 [Code review](/turn-review/).
 
+The reviewers use the same resolved profile and model in separate conversations. Findings from every reviewer are labeled with their session and may overlap. A group is clean only when every reviewer finishes cleanly; a failed or missing reviewer keeps the push gate blocked.
+
 Push review is available for Claude Code, Codex, and DSH primaries, the harnesses that receive Mjolnir delegation tools. They receive `request_review` and a pre-push gate; other harnesses run without review and receive a transcript notice.
 
 An older configuration with `enabled = true` still loads as `trigger = "turn"`;
@@ -362,8 +366,7 @@ writes `trigger`, not `enabled`.
 
 `mj new --review off|turn|push` and `mj import <harness> --review off|turn|push`
 set the trigger for one session, overriding `[review]`. `--review-model <model>`
-and `--review-effort <effort>` set reviewer choices. Without `--review`, either
-option selects `turn`. In Auto, Mjolnir picks an enabled profile that offers
+and `--review-effort <effort>` set reviewer choices. `--review-count <count>` overrides the number of reviewers for that session. Without `--review`, any of these options selects `turn`; an explicit `--review off` remains off. In Auto, Mjolnir picks an enabled profile that offers
 the model, including DSH or any other enabled profile. Auto always uses High effort; the effort override applies only to a named reviewer profile.
 `/review` remains available when the trigger is `off`.
 

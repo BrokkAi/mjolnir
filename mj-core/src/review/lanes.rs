@@ -4,7 +4,7 @@ use super::verdict::ReviewPassEvidence;
 
 /// One user-authored message captured from the primary session, in
 /// chronological order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UserMessage {
     pub text: String,
 }

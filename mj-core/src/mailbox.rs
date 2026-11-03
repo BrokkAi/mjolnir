@@ -447,6 +447,13 @@ pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
                     "Review clean for commits {range}. Tree {} is recorded as reviewed; you may push.",
                     short(tree)
                 ),
+                crate::review::verdict::ReviewVerdict::Findings { synthesis, .. }
+                    if !verdict.is_complete() =>
+                {
+                    format!(
+                        "Review incomplete for commits {range}:\n{synthesis}\nAddress valid findings and call request_review again. The push stays blocked; override_review is unavailable while any reviewer has failed."
+                    )
+                }
                 crate::review::verdict::ReviewVerdict::Findings { synthesis, .. } => format!(
                     "Review of commits {range} found:\n{synthesis}\nFix these, commit, and call request_review again before pushing. If you judge these findings incorrect or unreasonable, call override_review with your reason instead."
                 ),
@@ -778,7 +785,8 @@ mod tests {
     fn golden_mailbox_agent_context() {
         let events = vec![
             event(MailboxEventBody::ReviewVerdict { review_id: "clean-review".into(), repository: "/workspace/app".into(), base_commit: "aaaaaaa123".into(), head_commit: "bbbbbbb456".into(), tree: "ccccccc789".into(), verdict: crate::review::verdict::ReviewVerdict::Clean }),
-            event(MailboxEventBody::ReviewVerdict { review_id: "findings-review".into(), repository: "/workspace/app".into(), base_commit: "aaaaaaa123".into(), head_commit: "bbbbbbb456".into(), tree: "ccccccc789".into(), verdict: crate::review::verdict::ReviewVerdict::Findings { synthesis: "Fix the parser race.".into(), evidence: Default::default() } }),
+            event(MailboxEventBody::ReviewVerdict { review_id: "findings-review".into(), repository: "/workspace/app".into(), base_commit: "aaaaaaa123".into(), head_commit: "bbbbbbb456".into(), tree: "ccccccc789".into(), verdict: crate::review::verdict::ReviewVerdict::Findings { synthesis: "Independent reviewer reports may overlap.\n\nReviewer 1 (session reviewer-one)\nFix the parser race.\n\nReviewer 2 (session reviewer-two)\nPreserve requests during retries.".into(), evidence: Default::default() } }),
+            event(MailboxEventBody::ReviewVerdict { review_id: "incomplete-review".into(), repository: "/workspace/app".into(), base_commit: "aaaaaaa123".into(), head_commit: "bbbbbbb456".into(), tree: "ccccccc789".into(), verdict: crate::review::verdict::ReviewVerdict::Findings { synthesis: "Reviewer 1 (session reviewer-one)\nFix the parser race.\n\nReviewer 2 (session reviewer-two)\nReview failed: worker disconnected".into(), evidence: crate::review::verdict::ReviewPassEvidence { reviewer_failures: vec![crate::review::verdict::ReviewerFailure { label: "Reviewer 2 (session reviewer-two)".into(), reason: "worker disconnected".into() }], ..Default::default() } } }),
             event(MailboxEventBody::ReviewVerdict { review_id: "failed-review".into(), repository: "/workspace/app".into(), base_commit: "aaaaaaa123".into(), head_commit: "bbbbbbb456".into(), tree: "ccccccc789".into(), verdict: crate::review::verdict::ReviewVerdict::Failed { reason: "reviewer disconnected".into() } }),
             event(MailboxEventBody::SubagentFinished { report: Box::new(serde_json::from_value(serde_json::json!({
                 "child_session_id":"child-1", "task_name":"Check parser", "state":"completed", "finished":true,

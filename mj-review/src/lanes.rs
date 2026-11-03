@@ -1,4 +1,4 @@
-//! Turn-review prompt construction for the sole reviewer.
+//! Turn-review prompt construction shared by each independent reviewer.
 
 use std::path::PathBuf;
 
@@ -83,7 +83,7 @@ pub fn user_messages_packet(messages: &[UserMessage], current_task: &str) -> Str
     bound_review_section(&rendered, USER_MESSAGES_LIMIT, "older user messages")
 }
 
-/// Build the sole reviewer's plain-text rubric prompt without embedding a diff.
+/// Build the common plain-text rubric prompt without embedding a diff.
 #[must_use]
 pub fn review_prompt(job: &ReviewJob) -> String {
     let repositories = job

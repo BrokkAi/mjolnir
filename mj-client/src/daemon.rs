@@ -2513,7 +2513,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Per-profile remembered subagent preferences change runtime metadata shape.
 // Explicit Ignore and Suspend preserves checkpoint verification while omitting nested repositories.
 // Web viewer access includes the bound local connection address.
-pub const PROTOCOL_VERSION: u32 = 70;
+// Review role rows carry their child session IDs; older strict clients reject them.
+pub const PROTOCOL_VERSION: u32 = 71;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

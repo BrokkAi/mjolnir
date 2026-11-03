@@ -535,36 +535,43 @@ test('a failed review resolution restores every action allowed by the snapshot',
 
 test('phone review status exactly mirrors the shared status sentences', () => {
   const statusSource = sourceBetween(
-    'function reviewStatusLine(review, open) {',
+    'function sessionReviewStatusConfig(snapshot, session) {',
     '\n/// Run a local command, or report that nothing here can.',
   );
   const context = vm.createContext({});
-  vm.runInContext(`${statusSource}\nglobalThis.reviewStatusLineForTest = reviewStatusLine;`, context);
+  vm.runInContext(`${statusSource}\nglobalThis.reviewStatusLineForTest = reviewStatusLine;\nglobalThis.sessionReviewStatusConfigForTest = sessionReviewStatusConfig;`, context);
   const status = context.reviewStatusLineForTest;
 
+  const snapshot = { review_config: { trigger: 'turn', profile: 'reviewer', count: 2 } };
+  const session = { review_trigger: 'turn', review_count: 1 };
   assert.equal(
-    status({ trigger: 'turn', profile: 'reviewer' }, false),
-    'Reviewing every completed turn with [review] profile "reviewer"',
+    status(context.sessionReviewStatusConfigForTest(snapshot, session), false),
+    'Reviewing every completed turn with [review] profile "reviewer"; 1 reviewer',
+  );
+
+  assert.equal(
+    status({ trigger: 'turn', profile: 'reviewer', count: 2 }, false),
+    'Reviewing every completed turn with [review] profile "reviewer"; 2 reviewers',
   );
   assert.equal(
-    status({ trigger: 'turn' }, false),
-    'Reviewing every completed turn with Auto',
+    status({ trigger: 'turn', count: 2 }, false),
+    'Reviewing every completed turn with Auto; 2 reviewers',
   );
   assert.equal(
-    status({ trigger: 'off', profile: 'reviewer' }, false),
-    'Automatic review is off; /review reviews one turn with "reviewer"',
+    status({ trigger: 'off', profile: 'reviewer', count: 2 }, false),
+    'Automatic review is off; /review reviews one turn with "reviewer"; 2 reviewers',
   );
   assert.equal(
-    status({ trigger: 'off', profile: null }, false),
-    'Automatic review is off; /review uses Auto',
+    status({ trigger: 'off', profile: null, count: 2 }, false),
+    'Automatic review is off; /review uses Auto; 2 reviewers',
   );
   assert.equal(
-    status({ trigger: 'push', profile: 'reviewer' }, false),
-    'Review trigger is before push',
+    status({ trigger: 'push', profile: 'reviewer', count: 2 }, false),
+    'Review trigger is before push; 2 reviewers',
   );
   assert.equal(
-    status({ trigger: 'off', profile: 'reviewer' }, true),
-    'Automatic review is off; /review reviews one turn with "reviewer". A review is open now.',
+    status({ trigger: 'off', profile: 'reviewer', count: 2 }, true),
+    'Automatic review is off; /review reviews one turn with "reviewer"; 2 reviewers. A review is open now.',
   );
 });
 

@@ -150,6 +150,7 @@ DSH sessions are not importable yet either.
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
 | `--review <off\|turn\|push>` | Set the imported session's review trigger, overriding `[review]`. |
+| `--review-count <count>` | Independent reviewer sessions, overriding the configured count (default 2). 1–3 is reasonable; more has diminishing returns. Used alone selects turn review. |
 | `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Set the reviewer model or a named profile's effort. Auto always uses High. Without `--review`, these options select `turn`. The deprecated tier option still accepts either value but ignores it. |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
@@ -289,7 +290,7 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--model <name>] [--effort <name>] [--subagents native|mjolnir|none]
        [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
        [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
-       [--review <off|turn|push>] [--review-model <name>] [--review-effort <name>]
+       [--review <off|turn|push>] [--review-count <count>] [--review-model <name>] [--review-effort <name>]
        [--review-tier quick|extended] [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>]
@@ -383,8 +384,9 @@ mj new --workspace eval --bundle product --target builder \
 - `mj new --review off|turn|push` sets the session's trigger, overriding
   `[review]`. `mj import <harness>` takes the same option for the session it
   adopts. `--review-model <name>` and `--review-effort <name>` set reviewer
-  choices; Auto always uses High effort. Without `--review`, either option
-  selects `turn`. The deprecated
+  choices; Auto always uses High effort. `--review-count <count>` selects the
+  number of independent reviewers (default 2). 1–3 is reasonable; more has
+  diminishing returns. Without `--review`, any of these options selects `turn`. The deprecated
   `--review-tier quick|extended` also selects `turn` when used alone, but its
   value is ignored. See
   [per-session settings](/turn-review/#per-session-settings).

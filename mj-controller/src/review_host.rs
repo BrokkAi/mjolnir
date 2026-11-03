@@ -62,6 +62,7 @@ mod resolve;
 mod roles;
 mod slots;
 use slots::*;
+mod recovery;
 mod reviewer;
 mod reviewer_child;
 pub use reviewer::*;

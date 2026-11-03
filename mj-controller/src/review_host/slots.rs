@@ -1,6 +1,12 @@
 use super::*;
 
 impl ReviewSlot {
+    pub(super) fn sync_group(&mut self) {
+        if let Some(group) = self.state.active_group.as_mut() {
+            group.driver = self.driver.snapshot();
+        }
+    }
+
     pub(super) fn view(&self, session_id: &str) -> RuntimeReviewView {
         let mut verdict = match self.driver.phase() {
             TurnReviewPhase::Forwarding { synthesis, .. } => Some(VerdictView {
@@ -49,12 +55,22 @@ impl ReviewSlot {
                 vec![Resolution::Cancelled]
             };
         }
+        let mut roles = self.driver.roles();
+        if let Some(group) = &self.state.active_group {
+            for role in &mut roles {
+                role.child_session_id = group
+                    .registrations
+                    .iter()
+                    .find(|item| item.role == role.role)
+                    .and_then(|item| item.child_session_id.clone());
+            }
+        }
         RuntimeReviewView {
             session_id: session_id.to_owned(),
             questions: Vec::new(),
-            child_session_id: self.state.child_session_id.clone(),
+            child_session_id: None,
             phase: self.driver.phase().clone(),
-            roles: self.driver.roles(),
+            roles,
             // A review that needed no reviewer (nothing changed, or only a
             // handoff to finish) has no reviewer to describe.
             status: if self.reviewer.profile.is_empty() {

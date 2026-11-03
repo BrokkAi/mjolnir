@@ -14,14 +14,26 @@ The current plaintext contract remains: the exact trimmed ASCII-case-insensitive
 
 - [x] (2026-11-03) User requested parallel reviews during the plaintext/override work; parent stated the assumption that the saved count applies to both turn and push reviews.
 - [x] (2026-11-03) Mapped driver, host, durable registration, configuration/session/CLI, terminal/web presentation, and restart assumptions; approved the typed snapshot and per-role registration design below.
-- [ ] Add the saved count, default two, to every existing review setting surface and document the one-to-three guidance.
-- [ ] Launch independent reviewer children concurrently and combine outcomes without discarding findings or approving an incomplete group.
-- [ ] Cover group ordering, partial failures, cancellation/recovery, attribution, and push-gate behavior at existing integration/golden surfaces.
+- [x] Saved-count core/CLI/docs and numeric TUI/presentation implementation complete; focused state tests and inspected golden updates pass.
+- [x] Pure driver fan-in, durable emitted-work replay, and host group recovery implementation complete; integrated compilation and focused host/driver regressions pass after corrections.
+- [x] Cover group ordering, partial failures, cancellation/recovery, attribution, and push-gate behavior at existing integration/golden surfaces.
 - [ ] Complete final validation, commit coherent checkpoints on the current branch, and push to `origin/master`.
 
 ## Surprises & Discoveries
 
 The current review host has one `ReviewSlot` per primary, one configured reviewer identity, and a scalar reviewer child id. The driver currently reaches a verdict on its first completion. Existing startup clears active markers and closes orphan reviewer children; new groups need durable snapshots and reattachment instead. The terminal caches only one reviewer pane, and web links to one scalar child. Each of these assumptions needs an explicit per-role representation.
+
+Saving a final outcome without its emitted work leaves a crash window before baseline, forward cleanup, or close dispatch. The snapshot now stores the exact `ReviewRequest` stage payloads and exposes driver-owned `recovery_requests()`, preserving original prompts and command ids rather than regenerating them after an upgrade. The host must persist before acknowledging the result, then dispatch or recover that saved work. Push mailbox verdicts use the stable group id on replay.
+
+The original count-settings child failed restart. Its replacement returned only partial core edits twice; the parent completed core config, CLI, contracts, and documentation, while the presentation owner added the numeric TUI editor. No partially completed slice is accepted as finished.
+
+Independent review found a registration recovery race: a child can be registered before its id is saved in the group. Startup now retains children by the group's durable parent/request-key relation, including registrations whose child id is not yet saved. A retired host no longer closes a child merely because its result channel disappeared; the current durable group owner reconciles it. A controlled restart test covers this gap.
+
+The host checkpoint exposed a second durability gap for failed groups: the handback was acknowledged with the active marker still saved, then the prompt hold was released before a later save cleared the marker. The terminal outcome save now clears that marker before acknowledging and releasing the hold, and failed saves restore the prior driver and state. Recovery only restores a hold when the durable active marker requires one.
+
+The terminal transcript's final-event barrier must accept an interrupted prompt as well as a completed one: closing a reviewer after handback suspends its session and can interrupt its harness turn. Polling now requires a matching child, a started prompt, a terminal Completed/Interrupted outcome, and its applied journal ordinal. This covers suspension without accepting prestart idle or polling forever; the existing barrier regression includes both outcomes and an unapplied-terminal case.
+
+This host lacks GTK/WebKit development packages (`pkg-config` cannot find `gtk+-3.0` or `webkit2gtk-4.1`), matching prior project feedback to exclude `brokk-mj-desktop`. ALSA is available. Final Rust checks cover every buildable workspace crate with an explicit desktop exclusion; no host package installation or build-target/cache redirection is needed.
 
 ## Decision Log
 
@@ -46,10 +58,16 @@ The current review host has one `ReviewSlot` per primary, one configured reviewe
 - Decision: do not add timeouts that cancel a busy reviewer merely for taking too long.
   Rationale: project rules require accepted worker turns to survive daemon replacement and prohibit using a timeout as permission to stop a busy worker. Explicit harness/lifecycle failures or user cancellation determine terminal failure.
   Date/Author: 2026-11-03 / implementing agent.
+- Decision: persist the driver's exact emitted stage requests and replay them through the driver after restart.
+  Rationale: snapshot phase alone loses cleanup/coverage work in a crash window and cannot guarantee an identical prompt payload for an existing command id. The driver remains the single owner of those decisions.
+  Date/Author: 2026-11-03 / implementing agent.
+- Decision: exclude only `brokk-mj-desktop` from the full workspace checks on this host.
+  Rationale: required GTK/WebKit development libraries are absent and existing user feedback explicitly records this limitation. All touched crates and other buildable workspace crates remain included.
+  Date/Author: 2026-11-03 / implementing agent.
 
 ## Outcomes & Retrospective
 
-Implementation has not started. Initial research and completion of the existing plaintext/override checkpoints are underway.
+The plaintext and audited-override companion checkpoints are committed. Parallel review implementation is complete across configuration, driver, durable orchestration, terminal, and browser surfaces. Initial integrated compilation is in progress; acceptance still requires targeted regressions, inspected goldens, final workspace checks, and push.
 
 ## Context and Orientation
 
@@ -85,7 +103,7 @@ Keep checkpoint validation focused on the affected module/test filters. Do not r
 
 The user can select the number of independent reviewer sessions in existing review settings, sees a default of two, and sees the one-to-three recommendation and diminishing-returns explanation. Both automatic turn review and before-push review honor the setting. All reviewer findings reach the primary with separate session labels and the redundancy notice. A group unlocks the gate as clean only when every child reports the clean sentinel. Failure and recovery tests prove that missing outcomes cannot become a clean verdict.
 
-After the final implementation round run `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` in the dev profile, plus applicable docs/frontend checks. Reuse passing docs validation unless later edits invalidate it. Record exact commands, results, log paths, and checkpoint commits here.
+After the final implementation round run `cargo test --workspace --exclude brokk-mj-desktop` and `cargo clippy --workspace --exclude brokk-mj-desktop --all-targets -- -D warnings` in the dev profile, plus applicable docs/frontend checks. The explicit exclusion is the verified host limitation above. Reuse passing docs validation unless later edits invalidate it. Record exact commands, results, log paths, and checkpoint commits here.
 
 ## Idempotence and Recovery
 
@@ -95,11 +113,19 @@ Persisted review groups must retain which child sessions belong to them and thei
 
 Research handbacks and validation evidence will be added here as the design is settled.
 
+Initial integrated check: `cargo check --workspace --exclude brokk-mj-desktop --all-targets` passed in the dev profile after cross-slice type/literal fixes. Log: `.mj/agents/15c4b40f651b0c5ef4f6ac34f01339ed/initial-cargo-check-third.log`. It reported two obsolete controller items, scheduled for removal before Clippy. `cargo test -p brokk-mj-review` passed all 29 tests and doc tests; log: `.mj/agents/15c4b40f651b0c5ef4f6ac34f01339ed/checkpoint-review-test.log`. Focused host, configuration, MCP, CLI, presentation, and golden checks are in progress.
+
+`cargo test -p brokk-mj-controller review_host` initially passed 51 tests and failed two: a stale attribution expectation and the failed-group durability gap above. Both failing filters passed after correction; logs `.mj/agents/6a2b350443f8aad357629ebf6f6210ae/clean-failed-group-rerun.log` and `push-verdict-attribution-rerun.log`. Obsolete warning-producing variant/helper were removed. Database filters `active_review_group_survives_interrupted_sweep_with_registered_children` and `old_review_rows_load_without_findings_and_recovery_keeps_new_findings` each passed; logs `.mj/agents/15c4b40f651b0c5ef4f6ac34f01339ed/checkpoint-active-review-group.log` and `checkpoint-old-review-rows.log`.
+
+Focused core/CLI checks passed: `cargo test -p brokk-mj-core config` (120 selected), `cargo test -p brokk-mj-core storage` (7), CLI filters `new_review_flags_choose_the_sessions_own_review` and `an_import_can_choose_the_sessions_review` (one each). The mailbox golden update and ordinary verification each passed; inspected changes preserve both separately attributed findings and incomplete-group instructions. Logs: `.mj/agents/57bbea10c099c4902c60532570967dcb/{core-config-test,core-storage-test,cli-new-review-flags-test,cli-import-review-test,core-mailbox-golden-update,core-mailbox-golden-normal}.log`. The worker MCP filter initially passed 33/34 tests and exposed the 2,048-character combined-instruction limit; the gate text was shortened while preserving its contract (1,938 characters, or 2,037 with the Codex hint). Its failing filter passed on rerun; log `worker-review-gate-rerun.log` in the same report directory.
+
+Focused UI checks passed individually: TUI invalid-count save transition; chat reviewer tabs, per-child questions, final journal barrier; controller effective session count and public status projection. Scoped golden update plus ordinary verification passed for `golden_review_settings`, `golden_turn_review_pane`, and `golden_phone_session_snapshot`; the chat golden was byte-identical. Only review-settings and phone-session-snapshot expected output changed. Logs: `.mj/agents/b24130a99cf76839673ff79da9a2a39e/`, named after each test with `-update`, `-verify`, or `-rerun` suffixes as appropriate. The initial TUI count-transition test passed in tool output without a saved log. Existing web Node and documentation checks remain valid.
+
 ## Interfaces and Dependencies
 
 No new workspace crate is needed. The pure driver/core slice owns `mj-core/src/review/{driver,verdict,lanes}.rs` as needed and `mj-review` driver/prompt tests. The host slice owns active-group storage/schema and `mj-controller/src/review_host/**`, preserving the earlier override changes. The settings slice owns core config/session choices, CLI flags, global TUI review settings, and configuration/CLI docs. The presentation slice owns `mj-client` review projections, terminal review panes and attachments, viewer role/count projection, web review view, and its goldens. Coordinate explicit struct literals and exhaustive matches between those owners; do not let concurrent writers edit shared files.
 
-The agreed core snapshot is `ReviewDriverSnapshot { review_id: String, seed: TurnReviewSeed, phase: TurnReviewPhase, last_verdict: Option<ReviewVerdict>, deltas: Vec<RepoDelta>, roles: Vec<ReviewerOutcomeSlot>, provenance: FindingsProvenance, sequence: u64 }`. Make `TurnReviewSeed` and its user-message values serializable. Each `ReviewerOutcomeSlot` has `role`, `command_id`, and `outcome: Option<ReviewVerdict>`; its position is the frozen launch order. Derive awaited commands, started roles, display status, and count from those owned slots instead of persisting parallel flags. `ReviewPassEvidence.reviewer_failures` is a default-empty vector of `ReviewerFailure { label, reason }`.
+The agreed core snapshot is `ReviewDriverSnapshot { review_id: String, seed: TurnReviewSeed, phase: TurnReviewPhase, last_verdict: Option<ReviewVerdict>, deltas: Vec<RepoDelta>, roles: Vec<ReviewerOutcomeSlot>, provenance: FindingsProvenance, sequence: u64, replay_requests: Vec<ReviewRequest> }`. Make `TurnReviewSeed`, its user-message values, and `ReviewRequest` serializable. Each `ReviewerOutcomeSlot` has `role`, `command_id`, and `outcome: Option<ReviewVerdict>`; its position is the frozen launch order. Derive awaited commands, started roles, display status, and count from those owned slots instead of persisting parallel flags. `ReviewPassEvidence.reviewer_failures` is a default-empty vector of `ReviewerFailure { label, reason }`.
 
 The only new-review constructor is `TurnReviewDriver::start(seed, review_id: String, count: NonZeroUsize)`. Provide `snapshot() -> ReviewDriverSnapshot`, `restore(snapshot) -> Result<Self, String>`, `role_turn_completed(command_id, child_session_id, answer)`, and `role_failed(role, child_session_id: Option<&str>, reason)`. Returned work remains `Vec<ReviewRequest>`. The host validates child membership before passing its id into completion. The driver embeds historical attribution in terminal report text but does not own a second live identity map. Keep `resume_forward(seed, pending)` solely for historical durable primary-handoff records. Mixed-failure forwarding preserves the existing baseline and prior-review context; it must not replace them with this incomplete group's result.
 
@@ -114,3 +140,5 @@ Plan note (2026-11-03): recorded the discovery results, positive count setting a
 Plan note (2026-11-03): fixed exact driver snapshot and callback interfaces and recorded the required daemon/client protocol 71 boundary and isolated upgrade acceptance checks.
 
 Plan note (2026-11-03): centralized completeness semantics in the verdict type, retained the driver as the only coverage decision owner, and selected actor-owned asynchronous reviewer-question routing.
+
+Plan note (2026-11-03): recorded driver-owned durable emitted-work replay, stable push-verdict identity, the parent takeover of incomplete count edits, current implementation progress, and the verified desktop build exclusion.

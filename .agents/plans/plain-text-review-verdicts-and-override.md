@@ -19,8 +19,8 @@ You can see both working by running the unit tests named in each milestone, and 
 - [x] (2026-11-03) User authorized implementation and pushing; checkout updated to origin/master `60aadd739`, and this plan copied from its authoring session.
 - [x] (2026-11-03) Milestone 1 committed as `7fb6becda`: plaintext verdicts implemented; reviewer parser/driver suite passed (24 tests), controller review host (38), controller API (55), and worker MCP (33) checkpoint tests passed. The affected rubric prompt test passed after final rubric edits.
 - [x] (2026-11-03) Milestone 2 committed as `6d5728d85`: host override, durable findings trees, storage migration 104. Controller review-host tests passed (44), legacy/storage regression passed (1), core storage tests passed (7).
-- [x] (2026-11-03) Milestone 3: `override_review` MCP/action/API/allowlist wiring and breaking schema 105 validated. Core subagent tests (36), worker MCP (34), Claude allowlist (1), controller dispatch (1), and all six corrected migration fixtures passed. Checkpoint commit pending.
-- [x] (2026-11-03) Milestone 4: mailbox text/golden (4 tests), gate instructions, and docs are complete. Docs `npm run check` and `npm run build` passed, including 2,304 internal links across 27 HTML files. Guidance checkpoint commit pending.
+- [x] (2026-11-03) Milestone 3 committed as `ed653d5c1`: `override_review` MCP/action/API/allowlist wiring and breaking schema 105 validated. Core subagent tests (36), worker MCP (34), Claude allowlist (1), controller dispatch (1), and all six corrected migration fixtures passed.
+- [x] (2026-11-03) Milestone 4 committed as `8ab292b85`: mailbox text/golden (4 tests), gate instructions, and docs are complete. Docs `npm run check` and `npm run build` passed, including 2,304 internal links across 27 HTML files.
 - [ ] Follow-up requested by the user: configurable parallel reviewers, default 2, with separate findings attribution and an all-clean gate. The detailed companion plan is `.agents/plans/parallel-reviewers.md`; complete its implementation before final full validation and push.
 
 ## Surprises & Discoveries
@@ -255,3 +255,5 @@ Implementation note (2026-11-03): recorded the validated plaintext checkpoint co
 Implementation note (2026-11-03): corrected the SQL storage assumption and split schema revisions 104 and 105 between the storage and action checkpoints. The user also requested configurable parallel reviewers; a companion ExecPlan tracks that extension, and final validation waits until the extension is implemented.
 
 Implementation note (2026-11-03): fixed historical downgrade fixtures instead of rewriting committed migration 104. Clarified the override tool description to refer to changed tree contents, matching its actual predicate rather than implying commit-message-only amendments invalidate the reviewed snapshot.
+
+Implementation note (2026-11-03): recorded the completed MCP and guidance checkpoint hashes. The companion plan documents final full-workspace validation with only the verified unbuildable desktop crate excluded on this host.

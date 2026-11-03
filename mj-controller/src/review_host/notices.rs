@@ -83,26 +83,26 @@ impl HostState {
         let changed = match self.reviews.get(session_id) {
             Some(slot) => {
                 let mut next = slot.view(session_id);
-                if let Some(session) = slot
-                    .state
-                    .child_session_id
-                    .as_ref()
-                    .and_then(|child| self.sessions.get(child))
-                    .and_then(|watch| watch.materialized.as_ref())
-                {
-                    next.questions = session
-                        .pending_elicitations
-                        .iter()
-                        .filter(|request| !mj_core::acp::is_plan_review_id(&request.id))
-                        .map(|request| ReviewerQuestion {
-                            role: slot
-                                .state
-                                .child_session_id
-                                .clone()
-                                .expect("reviewer child exists"),
-                            request: request.clone(),
-                        })
-                        .collect();
+                if let Some(group) = &slot.state.active_group {
+                    for registration in &group.registrations {
+                        if let Some(child) = &registration.child_session_id
+                            && let Some(session) = self
+                                .sessions
+                                .get(child)
+                                .and_then(|watch| watch.materialized.as_ref())
+                        {
+                            next.questions.extend(
+                                session
+                                    .pending_elicitations
+                                    .iter()
+                                    .filter(|request| !mj_core::acp::is_plan_review_id(&request.id))
+                                    .map(|request| ReviewerQuestion {
+                                        role: child.clone(),
+                                        request: request.clone(),
+                                    }),
+                            );
+                        }
+                    }
                 }
                 if views.get(session_id) == Some(&next) {
                     false

@@ -1279,6 +1279,7 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
     record.review = Some(mj_core::config::SessionReview::Turn {
+        count: None,
         model: Some("gpt-6-astra".into()),
         effort: Some("high".into()),
         tier: Some("extended".into()),
@@ -1291,6 +1292,7 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     assert_eq!(
         loaded.sessions["session-1"].review,
         Some(mj_core::config::SessionReview::Turn {
+            count: None,
             model: Some("gpt-6-astra".into()),
             effort: Some("high".into()),
             tier: None,
@@ -4327,6 +4329,7 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
             provenance: mj_core::review::driver::FindingsProvenance::SingleReviewer,
         }),
         push_findings: None,
+        active_group: None,
     };
     save_turn_review_state_in(&database, "session-1", &state).unwrap();
     assert_eq!(turn_review_state_in(&database, "session-1").unwrap(), state);
@@ -4356,6 +4359,7 @@ fn old_review_rows_load_without_findings_and_recovery_keeps_new_findings() {
     ).unwrap();
     let mut state = turn_review_state_in(&database, "session-1").unwrap();
     assert!(state.push_findings.is_none());
+    assert!(state.active_group.is_none());
     state.push_findings = Some(mj_core::storage::PushFindingsRecord {
         review_id: "review-1".into(),
         trees: [(
@@ -4408,6 +4412,7 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
                 provenance: Default::default(),
             }),
             push_findings: None,
+            active_group: None,
         },
     )
     .unwrap();
@@ -4422,6 +4427,7 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
             active: None,
             pending_forward: None,
             push_findings: None,
+            active_group: None,
         },
     )
     .unwrap();
@@ -4441,6 +4447,61 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
         clear_interrupted_turn_reviews_in(&database).unwrap(),
         vec!["session-1".to_string()],
         "a pending handoff remains recoverable until its command is accepted"
+    );
+}
+
+#[test]
+fn active_review_group_survives_interrupted_sweep_with_registered_children() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-group", "project-1")).unwrap();
+    let seed = mj_core::review::driver::TurnReviewSeed {
+        task: "inspect the parser".into(),
+        user_messages: Vec::new(),
+        baselines: Default::default(),
+        through_ordinal: 17,
+        prior_review: None,
+    };
+    let (driver, _) = mj_review::driver::TurnReviewDriver::start(
+        seed,
+        "group-1".into(),
+        std::num::NonZeroUsize::new(2).unwrap(),
+    );
+    let group = mj_core::storage::ActiveReviewGroup {
+        driver: driver.snapshot(),
+        reviewer: Default::default(),
+        scope: mj_core::relay::CaptureScope::TurnDelta,
+        registrations: vec![
+            mj_core::storage::ReviewerRegistration {
+                role: "reviewer-1".into(),
+                request_key: "key-1".into(),
+                child_session_id: Some("child-1".into()),
+            },
+            mj_core::storage::ReviewerRegistration {
+                role: "reviewer-2".into(),
+                request_key: "key-2".into(),
+                child_session_id: None,
+            },
+        ],
+    };
+    let state = TurnReviewState {
+        active: Some("group-1".into()),
+        active_group: Some(group),
+        ..Default::default()
+    };
+    save_turn_review_state_in(&database, "session-group", &state).unwrap();
+    assert_eq!(
+        active_review_groups_in(&database).unwrap(),
+        vec![("session-group".into(), state.clone())]
+    );
+    assert!(
+        clear_interrupted_turn_reviews_in(&database)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        turn_review_state_in(&database, "session-group").unwrap(),
+        state
     );
 }
 

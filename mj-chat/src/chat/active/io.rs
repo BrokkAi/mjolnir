@@ -93,10 +93,9 @@ impl ActiveChat {
     /// reviewer's journal to show its transcript, and sends resolutions back.
     /// A review therefore survives this view closing.
     pub fn apply_review_view(&mut self, view: Option<mj_client::review::RuntimeReviewView>) {
-        let role = view.as_ref().and_then(|view| view.child_session_id.clone());
         self.state.set_turn_review(view);
         if self.state.turn_review().is_none() {
-            self.reviewed_role = None;
+            self.reviewed_roles.clear();
             // The daemon's review projection is also the authority for
             // reviewer elicitations. Reconcile here so a form disappears as
             // soon as an external answer closes the review, even when no
@@ -104,15 +103,17 @@ impl ActiveChat {
             self.surface_reviewer_elicitations();
             return;
         }
-        if let Some(role) = role
-            && self
-                .state
-                .turn_review()
-                .is_some_and(|review| review.view.is_working() || !review.view.questions.is_empty())
-            && self.reviewed_role.as_deref() != Some(role.as_str())
-        {
-            self.reviewed_role = Some(role.clone());
-            self.poll_turn_review_role(&role);
+        let children: std::collections::BTreeSet<String> = self
+            .state
+            .turn_review()
+            .into_iter()
+            .flat_map(|review| review.view.reviewer_children().map(str::to_owned))
+            .collect();
+        self.reviewed_roles.retain(|child| children.contains(child));
+        for child in children {
+            if self.reviewed_roles.insert(child.clone()) {
+                self.poll_turn_review_role(&child);
+            }
         }
         self.surface_reviewer_elicitations();
     }

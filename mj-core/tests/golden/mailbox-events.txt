@@ -1,8 +1,22 @@
 Review clean for commits aaaaaaa..bbbbbbb in /workspace/app. Tree ccccccc is recorded as reviewed; you may push.
 
 Review of commits aaaaaaa..bbbbbbb in /workspace/app found:
+Independent reviewer reports may overlap.
+
+Reviewer 1 (session reviewer-one)
 Fix the parser race.
+
+Reviewer 2 (session reviewer-two)
+Preserve requests during retries.
 Fix these, commit, and call request_review again before pushing. If you judge these findings incorrect or unreasonable, call override_review with your reason instead.
+
+Review incomplete for commits aaaaaaa..bbbbbbb in /workspace/app:
+Reviewer 1 (session reviewer-one)
+Fix the parser race.
+
+Reviewer 2 (session reviewer-two)
+Review failed: worker disconnected
+Address valid findings and call request_review again. The push stays blocked; override_review is unavailable while any reviewer has failed.
 
 Review of commits aaaaaaa..bbbbbbb in /workspace/app failed: reviewer disconnected. Call request_review again; the push stays blocked until a review is clean.
 

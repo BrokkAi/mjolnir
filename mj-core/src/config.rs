@@ -138,11 +138,14 @@ impl PhoneConfig {
 /// what they set. `profile` names a harness profile defined in this same file
 /// -- or Auto when absent. A reviewer always has its own conversation, even
 /// when it uses the primary session's profile.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "ReviewConfigInput")]
 pub struct ReviewConfig {
     #[serde(default)]
     pub trigger: ReviewTrigger,
+    /// Number of independent reviewers to launch for each review.
+    #[serde(default = "default_review_count")]
+    pub count: std::num::NonZeroUsize,
     /// Deprecated review tier. Accepted for old configurations and ignored.
     #[serde(default, skip_serializing)]
     pub tier: Option<String>,
@@ -154,6 +157,24 @@ pub struct ReviewConfig {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+}
+
+/// Independent review sessions assigned when a configuration omits the count.
+pub fn default_review_count() -> std::num::NonZeroUsize {
+    std::num::NonZeroUsize::new(2).expect("two is nonzero")
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            trigger: ReviewTrigger::Off,
+            count: default_review_count(),
+            tier: None,
+            profile: None,
+            model: None,
+            effort: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +201,8 @@ impl std::fmt::Display for ReviewTrigger {
 struct ReviewConfigInput {
     #[serde(default)]
     trigger: Option<ReviewTrigger>,
+    #[serde(default = "default_review_count")]
+    count: std::num::NonZeroUsize,
     #[serde(default)]
     enabled: Option<bool>,
     #[serde(default)]
@@ -200,6 +223,7 @@ impl From<ReviewConfigInput> for ReviewConfig {
             } else {
                 ReviewTrigger::Off
             }),
+            count: input.count,
             tier: input.tier,
             profile: input.profile,
             model: input.model,
@@ -222,6 +246,8 @@ pub enum SessionReview {
     #[serde(alias = "on")]
     Turn {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<std::num::NonZeroUsize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
@@ -231,6 +257,8 @@ pub enum SessionReview {
         tier: Option<String>,
     },
     Push {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<std::num::NonZeroUsize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,8 +297,18 @@ impl ReviewConfig {
             None => {}
             Some(SessionReview::Off) => config.trigger = ReviewTrigger::Off,
             Some(
-                choice @ (SessionReview::Turn { model, effort, .. }
-                | SessionReview::Push { model, effort, .. }),
+                choice @ (SessionReview::Turn {
+                    model,
+                    effort,
+                    count,
+                    ..
+                }
+                | SessionReview::Push {
+                    model,
+                    effort,
+                    count,
+                    ..
+                }),
             ) => {
                 config.trigger = choice.trigger();
                 if model.is_some() {
@@ -278,6 +316,9 @@ impl ReviewConfig {
                 }
                 if effort.is_some() {
                     config.effort.clone_from(effort);
+                }
+                if let Some(count) = count {
+                    config.count = *count;
                 }
             }
         }
@@ -646,9 +687,8 @@ impl Config {
     }
 }
 
-// Breaking: older writers drop a runtime's `enabled = false`, and older readers
-// refuse it on a bare runtime.
-pub const CONFIG_VERSION: u32 = 19;
+// Version 20 adds review counts, which older strict configuration readers reject.
+pub const CONFIG_VERSION: u32 = 20;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
@@ -1058,8 +1098,8 @@ impl TryFrom<StoredConfig> for Config {
             // 16 adds native tool cache storage; 17 replaces per-profile
             // delegation selectors with global task choices, without migrating them;
             // 18 moves the GitHub event switch to github.watch.enabled; 19 adds
-            // `enabled` to runtimes.
-            version: if matches!(version, 1..=18) {
+            // `enabled` to runtimes; 20 adds the compatible review count default.
+            version: if matches!(version, 1..=19) {
                 CONFIG_VERSION
             } else {
                 version

@@ -24,7 +24,14 @@ impl HostState {
         let parents: Vec<_> = self
             .reviews
             .iter()
-            .filter(|(_, slot)| slot.state.child_session_id.as_deref() == Some(&session_id))
+            .filter(|(_, slot)| {
+                slot.state.active_group.as_ref().is_some_and(|group| {
+                    group
+                        .registrations
+                        .iter()
+                        .any(|item| item.child_session_id.as_deref() == Some(&session_id))
+                })
+            })
             .map(|(parent, _)| parent.clone())
             .collect();
         for parent in parents {
@@ -44,6 +51,14 @@ impl HostState {
                 && matches!(watch.execution, MaterializedExecutionState::Running { .. })
         }) && matches!(execution, MaterializedExecutionState::Idle);
         if !finished_turn || !(self.config)(&session_id).arms_turn_review() {
+            return;
+        }
+        if !self.startup_ready {
+            self.deferred_admissions.push(HostEvent::Start {
+                session_id,
+                manual: false,
+                reply: None,
+            });
             return;
         }
         self.begin(session_id, false, None);
@@ -263,13 +278,16 @@ impl HostState {
         if let Some(slot) = self.reviews.get(session_id) {
             // Name what the open review waits for when it waits on a person,
             // since that is what lets the next one start.
-            let question = slot
-                .state
-                .child_session_id
-                .as_ref()
-                .and_then(|child| self.sessions.get(child))
-                .and_then(|watch| watch.materialized.as_ref())
-                .and_then(|session| session.pending_elicitations.first());
+            let question = slot.state.active_group.as_ref().and_then(|group| {
+                group
+                    .registrations
+                    .iter()
+                    .filter_map(|item| item.child_session_id.as_ref())
+                    .filter_map(|child| self.sessions.get(child))
+                    .filter_map(|watch| watch.materialized.as_ref())
+                    .flat_map(|session| session.pending_elicitations.iter())
+                    .next()
+            });
             return Some(StartRefusal(match question {
                 Some(question) => format!(
                     "the previous review is waiting for your answer to a question ({}); \

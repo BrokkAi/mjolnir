@@ -1488,6 +1488,7 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
 
     let review = ReviewConfig {
         trigger: ReviewTrigger::Turn,
+        count: std::num::NonZeroUsize::new(3).unwrap(),
         tier: None,
         profile: Some("codex-1".into()),
         model: Some("review-model".into()),
@@ -2284,6 +2285,7 @@ fn a_disabled_profile_loads_instead_of_failing() {
 fn a_session_review_choice_is_stored_in_a_stable_shape() {
     // Stored in `sessions.review_json`; older and newer releases read it.
     let on = SessionReview::Turn {
+        count: None,
         model: Some("gpt-6-astra".into()),
         effort: None,
         tier: None,
@@ -2299,6 +2301,7 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
     assert_eq!(
         serde_json::from_str::<SessionReview>(r#"{"mode":"on"}"#).unwrap(),
         SessionReview::Turn {
+            count: None,
             model: None,
             effort: None,
             tier: None,
@@ -2311,12 +2314,14 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
         )
         .unwrap(),
         SessionReview::Turn {
+            count: None,
             model: Some("gpt-6-luna".into()),
             effort: Some("max".into()),
             tier: None,
         }
     );
     let extended = SessionReview::Turn {
+        count: None,
         model: None,
         effort: None,
         tier: Some("extended".into()),
@@ -2337,6 +2342,16 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
             ReviewConfig::default().for_session(Some(&choice)).trigger,
             choice.trigger()
         );
+        let global = ReviewConfig {
+            count: std::num::NonZeroUsize::new(4).unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(global.for_session(Some(&choice)).count, global.count);
+        let explicit =
+            format!(r#"{{"mode":"{trigger}","count":3,"model":"astra","effort":"high"}}"#);
+        let counted: SessionReview = serde_json::from_str(&explicit).unwrap();
+        assert_eq!(serde_json::to_string(&counted).unwrap(), explicit);
+        assert_eq!(global.for_session(Some(&counted)).count.get(), 3);
     }
     assert_eq!(
         serde_json::from_str::<SessionReview>(r#"{"mode":"off"}"#).unwrap(),

@@ -28,6 +28,16 @@ impl ReviewVerdict {
     pub const fn is_clean(&self) -> bool {
         matches!(self, Self::Clean)
     }
+
+    /// Whether every assigned reviewer reached a usable verdict for coverage.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        match self {
+            Self::Clean => true,
+            Self::Findings { evidence, .. } => evidence.reviewer_failures.is_empty(),
+            Self::Failed { .. } => false,
+        }
+    }
 }
 
 /// Legacy lane evidence retained so persisted pending forwards still decode.
@@ -36,6 +46,16 @@ impl ReviewVerdict {
 pub struct ReviewPassEvidence {
     /// Specialist lane outcomes from older review records.
     pub lanes: Vec<ReviewLaneEvidence>,
+    /// Reviewers that did not complete, even when other reviewers found issues.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reviewer_failures: Vec<ReviewerFailure>,
+}
+
+/// A reviewer whose absence keeps an otherwise useful findings report incomplete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewerFailure {
+    pub label: String,
+    pub reason: String,
 }
 
 /// A specialist lane outcome from a legacy review record.

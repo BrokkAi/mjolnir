@@ -6,24 +6,24 @@ impl HostState {
     pub(super) fn register_reviewer_child(
         &mut self,
         session_id: &str,
-        command_id: String,
+        role: String,
         prompt: String,
     ) {
-        let Some(slot) = self.reviews.get_mut(session_id) else {
+        let Some(slot) = self.reviews.get(session_id) else {
             return;
         };
-        slot.command_id = Some(command_id);
-        let request_key = match new_command_id("reviewer-child") {
-            Ok(key) => key,
-            Err(error) => {
-                self.fail(
-                    session_id,
-                    format!("could not allocate reviewer request: {error:#}"),
-                );
-                return;
-            }
+        let Some(group) = slot.state.active_group.as_ref() else {
+            return;
         };
-        let reviewer = slot.reviewer.clone();
+        let Some(registration) = group.registrations.iter().find(|item| item.role == role) else {
+            return;
+        };
+        if registration.child_session_id.is_some() {
+            self.launch_reviewer_child(session_id, &role, false);
+            return;
+        }
+        let request_key = registration.request_key.clone();
+        let reviewer = group.reviewer.clone();
         let epoch = slot.epoch;
         let environment = self.environment.clone();
         let events = self.events.clone();
@@ -45,13 +45,12 @@ impl HostState {
             if let Err(error) = events.send(HostEvent::ChildRegistered {
                 session_id,
                 epoch,
+                role,
                 result,
-            }) && let HostEvent::ChildRegistered {
-                result: Ok(child), ..
-            } = error.0
-                && let Err(error) = environment.close_child(&child).await
-            {
-                tracing::warn!(child, %error, "could not close a reviewer registered during shutdown");
+            }) {
+                // A replacement daemon may already have adopted this durable
+                // request key. Only that owner may decide whether to close it.
+                tracing::warn!(%error, "reviewer registration finished after host shutdown; startup reconciliation owns the child");
             }
         });
     }
@@ -60,18 +59,13 @@ impl HostState {
         &mut self,
         session_id: String,
         epoch: u64,
+        role: String,
         result: Result<String, String>,
     ) {
         let child = match result {
             Ok(child) => child,
             Err(error) => {
-                if self
-                    .reviews
-                    .get(&session_id)
-                    .is_some_and(|slot| slot.epoch == epoch)
-                {
-                    self.fail(&session_id, error);
-                }
+                self.role_failed(&session_id, epoch, &role, None, error);
                 return;
             }
         };
@@ -81,12 +75,21 @@ impl HostState {
             self.close_child(child);
             return;
         };
-        slot.state.child_session_id = Some(child);
+        let Some(registration) = slot.state.active_group.as_mut().and_then(|group| {
+            group
+                .registrations
+                .iter_mut()
+                .find(|item| item.role == role)
+        }) else {
+            self.close_child(child);
+            return;
+        };
+        registration.child_session_id = Some(child);
         let state = slot.state.clone();
         if let Err(error) = self.persist(
             session_id.clone(),
             state,
-            Some(PersistenceCompletion::LaunchChild),
+            Some(PersistenceCompletion::LaunchChild { role }),
         ) {
             self.fail(&session_id, error);
             self.close_reviewer_child(&session_id);
@@ -94,58 +97,75 @@ impl HostState {
         self.publish(&session_id);
     }
 
-    pub(super) fn launch_reviewer_child(&self, session_id: &str) {
+    pub(super) fn launch_reviewer_child(&self, session_id: &str, role: &str, fresh: bool) {
         let Some(slot) = self.reviews.get(session_id) else {
             return;
         };
-        let Some(child) = slot.state.child_session_id.clone() else {
+        let Some(child) = slot
+            .state
+            .active_group
+            .as_ref()
+            .and_then(|group| group.registrations.iter().find(|item| item.role == role))
+            .and_then(|registration| registration.child_session_id.clone())
+        else {
             return;
         };
-        if !matches!(slot.driver.phase(), TurnReviewPhase::Running { .. }) {
-            self.close_child(child);
+        if !slot
+            .driver
+            .awaited_commands()
+            .iter()
+            .any(|(name, _)| name == role)
+        {
             return;
         }
         let epoch = slot.epoch;
+        let role = role.to_owned();
         let environment = self.environment.clone();
         let events = self.events.clone();
         let session_id = session_id.to_owned();
         tokio::spawn(async move {
             if let Err(error) = environment.start_child(&child).await {
-                let delivered = events.send(HostEvent::Step {
-                    session_id,
-                    epoch,
-                    step: ReviewStep::Failed(format!("the reviewer failed to start: {error}")),
-                });
-                tracing::warn!(child, %error, "reviewer child failed to start");
-                if delivered.is_err()
-                    && let Err(error) = environment.close_child(&child).await
-                {
-                    tracing::warn!(child, %error, "could not close failed reviewer after host shutdown");
+                // A restored child may already be running its worker turn.
+                // Startup readiness timing cannot turn that work into a failed review.
+                if fresh {
+                    tracing::warn!(child, %error, "reviewer child failed to start");
+                    let _ = events.send(HostEvent::RoleFailed {
+                        session_id,
+                        epoch,
+                        role,
+                        child_session_id: Some(child),
+                        reason: format!("the reviewer failed to start: {error}"),
+                    });
+                } else {
+                    tracing::warn!(child, %error, "reviewer child startup reconciliation did not finish");
                 }
             }
         });
     }
 
-    pub(super) fn close_failed_reviewer_after_persistence(&self, session_id: &str) {
-        if let Some(child) = self
+    pub(super) fn close_reviewer_child(&self, session_id: &str) {
+        if let Some(group) = self
             .reviews
             .get(session_id)
-            .and_then(|slot| slot.state.child_session_id.clone())
-            && let Some(persistence) = &self.persistence
-            && let Err(error) = persistence.send(PersistenceRequest::CloseFailedChild {
-                session_id: session_id.to_owned(),
-                child,
-            })
+            .and_then(|slot| slot.state.active_group.as_ref())
         {
-            tracing::warn!(%session_id, %error, "could not queue failed reviewer cleanup");
+            for child in group
+                .registrations
+                .iter()
+                .filter_map(|item| item.child_session_id.clone())
+            {
+                self.close_child(child);
+            }
         }
     }
 
-    pub(super) fn close_reviewer_child(&self, session_id: &str) {
+    pub(super) fn close_reviewer_role(&self, session_id: &str, role: &str) {
         if let Some(child) = self
             .reviews
             .get(session_id)
-            .and_then(|slot| slot.state.child_session_id.clone())
+            .and_then(|slot| slot.state.active_group.as_ref())
+            .and_then(|group| group.registrations.iter().find(|item| item.role == role))
+            .and_then(|item| item.child_session_id.clone())
         {
             self.close_child(child);
         }
@@ -160,6 +180,42 @@ impl HostState {
         });
     }
 
+    pub(super) fn role_failed(
+        &mut self,
+        session_id: &str,
+        epoch: u64,
+        role: &str,
+        child: Option<&str>,
+        reason: String,
+    ) {
+        let Some(slot) = self
+            .reviews
+            .get_mut(session_id)
+            .filter(|slot| slot.epoch == epoch)
+        else {
+            return;
+        };
+        let requests = slot.driver.role_failed(role, child, reason);
+        if let Some(group) = slot.state.active_group.as_mut() {
+            group.driver = slot.driver.snapshot();
+        }
+        let failure = match slot.driver.verdict() {
+            Some(ReviewVerdict::Failed { reason }) => Some(reason.clone()),
+            _ => None,
+        };
+        if let Some(reason) = &failure {
+            answer(slot.start_reply.take(), Err(StartRefusal(reason.clone())));
+            slot.state.active = None;
+            release_prompts(session_id);
+        }
+        let state = slot.state.clone();
+        if let Err(error) = self.persist(session_id.to_owned(), state, None) {
+            self.fail(session_id, error);
+            return;
+        }
+        self.run(session_id, requests);
+    }
+
     pub(super) fn reviewer_finished(
         &mut self,
         session_id: String,
@@ -167,47 +223,125 @@ impl HostState {
         answer: Option<String>,
         reply: oneshot::Sender<Result<(), String>>,
     ) {
-        let Some(slot) = self
-            .reviews
-            .get_mut(&session_id)
-            .filter(|slot| slot.state.child_session_id.as_deref() == Some(&child_session_id))
+        let Some(slot) = self.reviews.get_mut(&session_id) else {
+            let _ = reply.send(Ok(()));
+            return;
+        };
+        let Some(group) = slot.state.active_group.as_ref() else {
+            let _ = reply.send(Ok(()));
+            return;
+        };
+        let Some(registration) = group
+            .registrations
+            .iter()
+            .find(|item| item.child_session_id.as_deref() == Some(&child_session_id))
         else {
             let _ = reply.send(Ok(()));
             return;
         };
-        if matches!(slot.driver.phase(), TurnReviewPhase::Running { .. }) {
-            let requests = match answer {
-                Some(answer) => match slot.command_id.as_deref() {
-                    Some(command_id) => slot.driver.role_turn_completed(command_id, &answer),
-                    None => {
-                        self.fail(
-                            &session_id,
-                            "the reviewer finished without a registered review command",
-                        );
-                        Vec::new()
-                    }
-                },
-                None => {
-                    self.fail(
-                        &session_id,
-                        "the reviewer finished without calling handback",
-                    );
-                    Vec::new()
-                }
-            };
-            self.run(&session_id, requests);
+        if slot.pending_outcome.is_some() {
+            slot.queued_outcomes.push((child_session_id, answer, reply));
+            return;
         }
-        // All verdict writes precede this acknowledgement in the persistence lane.
-        if let Some(persistence) = &self.persistence {
-            if let Err(error) = persistence.send(PersistenceRequest::AcknowledgeReviewer {
-                session_id: session_id.clone(),
-                reply,
-            }) && let PersistenceRequest::AcknowledgeReviewer { reply, .. } = error.0
-            {
-                let _ = reply.send(Err("review persistence stopped".to_owned()));
+        let role = registration.role.clone();
+        let command_id = group
+            .driver
+            .roles
+            .iter()
+            .find(|item| item.role == role)
+            .map(|item| item.command_id.clone());
+        let Some(command_id) = command_id else {
+            let _ = reply.send(Err("review command is missing".into()));
+            return;
+        };
+        let prior = slot.state.clone();
+        let prior_driver = slot.driver.snapshot();
+        let requests = match answer {
+            Some(answer) => {
+                slot.driver
+                    .role_turn_completed(&command_id, &child_session_id, &answer)
             }
-        } else {
-            let _ = reply.send(Err("review persistence stopped".to_owned()));
+            None => slot.driver.role_failed(
+                &role,
+                Some(&child_session_id),
+                "the reviewer finished without calling handback",
+            ),
+        };
+        if prior_driver == slot.driver.snapshot() {
+            let _ = reply.send(Ok(()));
+            return;
+        }
+        if let Some(group) = slot.state.active_group.as_mut() {
+            group.driver = slot.driver.snapshot();
+        }
+        if matches!(slot.driver.verdict(), Some(ReviewVerdict::Failed { .. })) {
+            slot.state.active = None;
+        }
+        slot.pending_outcome = Some(prior);
+        let state = slot.state.clone();
+        let epoch = slot.epoch;
+        let request = PersistenceRequest::SaveReviewerOutcome {
+            session_id: session_id.clone(),
+            epoch,
+            state: Box::new(state),
+            requests,
+            reply,
+        };
+        match self.persistence.as_ref() {
+            Some(lane) => {
+                if let Err(error) = lane.send(request)
+                    && let PersistenceRequest::SaveReviewerOutcome { reply, .. } = error.0
+                {
+                    let _ = reply.send(Err("review persistence stopped".into()));
+                    self.fail(&session_id, "review persistence stopped");
+                }
+            }
+            None => {
+                if let PersistenceRequest::SaveReviewerOutcome { reply, .. } = request {
+                    let _ = reply.send(Err("review persistence stopped".into()));
+                    self.fail(&session_id, "review persistence stopped");
+                }
+            }
+        }
+    }
+
+    pub(super) fn reviewer_outcome_saved(
+        &mut self,
+        session_id: String,
+        epoch: u64,
+        requests: Vec<ReviewRequest>,
+        result: Result<(), String>,
+    ) {
+        if let Some(slot) = self
+            .reviews
+            .get_mut(&session_id)
+            .filter(|slot| slot.epoch == epoch)
+        {
+            let prior = slot.pending_outcome.take();
+            if result.is_err()
+                && let Some(prior) = prior
+                && let Some(group) = prior.active_group.as_ref()
+            {
+                if let Ok(driver) = TurnReviewDriver::restore(group.driver.clone()) {
+                    slot.driver = driver;
+                    slot.state = prior;
+                }
+            }
+            if result.is_ok() && matches!(slot.driver.verdict(), Some(ReviewVerdict::Failed { .. }))
+            {
+                release_prompts(&session_id);
+            }
+            if result.is_ok() {
+                self.run(&session_id, requests);
+            }
+            let queued = self
+                .reviews
+                .get_mut(&session_id)
+                .map(|slot| std::mem::take(&mut slot.queued_outcomes))
+                .unwrap_or_default();
+            for (child, answer, reply) in queued {
+                self.reviewer_finished(session_id.clone(), child, answer, reply);
+            }
         }
     }
 }

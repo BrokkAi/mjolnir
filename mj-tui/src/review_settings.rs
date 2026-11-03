@@ -9,7 +9,10 @@ use std::collections::BTreeSet;
 use std::time::Instant;
 
 use crossterm::event::Event;
-use mj_chat::components::{ComboBox, ComboBoxState, ControlKind, Dialog, Interaction, PopupSide};
+use mj_chat::components::{
+    ComboBox, ComboBoxState, ControlKind, Dialog, Interaction, PopupSide, TextField,
+};
+use mj_chat::text_input::TextInput;
 use mj_chat::theme;
 use mj_core::acp::SessionConfigChoice;
 use mj_core::config::{Config, ReviewConfig, ReviewTrigger, SpinnerStyle};
@@ -52,6 +55,7 @@ pub(crate) enum ReviewSettingsFocus {
     Profile,
     Model,
     Effort,
+    Reviewers,
     Back,
     Cancel,
     Refresh,
@@ -96,6 +100,7 @@ pub(crate) struct ReviewSettingsDialog {
     pub(crate) profiles: Vec<Option<String>>,
     pub(crate) form: RefCell<Dialog<ReviewSettingsFocus>>,
     combo: ComboBoxState<ReviewSettingsFocus>,
+    reviewer_count: TextInput,
     pub(crate) model_choices: Vec<SessionConfigChoice>,
     pub(crate) effort_choices: Vec<SessionConfigChoice>,
     /// Whether the model list came from a successful discovery. This remains
@@ -157,6 +162,7 @@ impl ReviewSettingsDialog {
             profiles,
             form: RefCell::new(Dialog::default()),
             combo: ComboBoxState::default(),
+            reviewer_count: TextInput::from_value(config.review.count.get().to_string()),
             model_choices: Vec::new(),
             effort_choices: Vec::new(),
             model_choices_discovered: false,
@@ -285,6 +291,7 @@ impl ReviewSettingsDialog {
                 !self.saving && (self.review.profile.is_some() || !matches!(id, Model | Effort)),
             );
         }
+        form.declare_with_enabled(Reviewers, ControlKind::TextField, !self.saving);
         form.declare_with_enabled(Cancel, ControlKind::Button, true);
         form.declare_with_enabled(Back, ControlKind::Button, true);
         form.declare_with_enabled(Refresh, ControlKind::Button, !self.saving);
@@ -293,7 +300,7 @@ impl ReviewSettingsDialog {
     }
 
     fn can_save(&self) -> bool {
-        if self.saving {
+        if self.saving || self.parsed_reviewer_count().is_none() {
             return false;
         }
         // A disabled review remains a useful draft even while discovery is
@@ -333,6 +340,14 @@ impl ReviewSettingsDialog {
             return false;
         }
         true
+    }
+
+    pub(crate) fn parsed_reviewer_count(&self) -> Option<std::num::NonZeroUsize> {
+        self.reviewer_count
+            .value()
+            .parse::<usize>()
+            .ok()
+            .and_then(std::num::NonZeroUsize::new)
     }
 
     pub(crate) fn validation_snapshot(&self) -> ReviewSettingsValidation {
@@ -620,6 +635,15 @@ impl ReviewSettingsDialog {
                 }
                 DashboardAction::None
             }
+            Some(Interaction::Edit(Reviewers, edit)) => {
+                TextField::apply(&mut self.reviewer_count, edit);
+                self.save_error = None;
+                if let Some(count) = self.parsed_reviewer_count() {
+                    self.review.count = count;
+                }
+                DashboardAction::None
+            }
+            Some(Interaction::Activate(Reviewers)) => DashboardAction::None,
             Some(Interaction::Activate(id @ (Enabled | Profile | Model | Effort))) => {
                 if let Some((_, _, _, selected)) = self
                     .selectors()
@@ -825,6 +849,16 @@ pub(crate) fn render_review_settings(
             Style::default().fg(theme::palette().warning),
         ));
     }
+    notes.push(Line::styled(
+        "1–3 reviewers are reasonable; more have diminishing returns.",
+        theme::muted(),
+    ));
+    if dialog.parsed_reviewer_count().is_none() {
+        notes.push(Line::styled(
+            "Enter a positive number of reviewers.",
+            Style::default().fg(theme::palette().warning),
+        ));
+    }
     if dialog.review.profile.is_none() {
         for line in [
             "Auto prefers another provider, then another profile, then the primary.",
@@ -865,6 +899,7 @@ pub(crate) fn render_review_settings(
         Profile => 1,
         Model => 2,
         Effort => 3,
+        Reviewers => 4,
         _ => 0,
     };
     let mut form = dialog.form.borrow_mut();
@@ -886,7 +921,7 @@ pub(crate) fn render_review_settings(
     );
     let viewport = form.viewport(
         body,
-        (notes.len() as u16).saturating_add(6),
+        (notes.len() as u16).saturating_add(7),
         Some(focus_row..focus_row + 1),
     );
     let row = |index: u16| viewport.row(index, 1);
@@ -930,8 +965,26 @@ pub(crate) fn render_review_settings(
             expanded_combo = Some((*id, field, value, options, selected));
         }
     }
+    let count_area = row(4);
+    let label_width = 10.min(count_area.width);
+    frame.render_widget(
+        Line::raw("Reviewers"),
+        Rect::new(count_area.x, count_area.y, label_width, count_area.height),
+    );
+    TextField::render(
+        frame,
+        Rect::new(
+            count_area.x + label_width,
+            count_area.y,
+            count_area.width - label_width,
+            count_area.height,
+        ),
+        &dialog.reviewer_count,
+        &mut form,
+        Reviewers,
+    );
     for (index, line) in notes.into_iter().enumerate() {
-        frame.render_widget(line, row(index as u16 + 6));
+        frame.render_widget(line, row(index as u16 + 7));
     }
     let footer = Rect::new(
         inner.x,

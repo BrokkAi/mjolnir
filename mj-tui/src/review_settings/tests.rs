@@ -156,8 +156,26 @@ fn golden_review_settings() {
     );
     writeln!(output, "action: {entry_action:?}").expect("write entry action");
 
-    // Enabled -> Profile, then choose the first configured profile.
-    dashboard.handle_key(key(KeyCode::Tab));
+    // Show the saved reviewer count in the same form as trigger and profile.
+    while dialog(&dashboard).focused() != ReviewSettingsFocus::Reviewers {
+        dashboard.handle_key(key(KeyCode::Tab));
+    }
+    dashboard.handle_key(key(KeyCode::Backspace));
+    dashboard.handle_key(key(KeyCode::Char('4')));
+    append_golden_state(
+        &mut output,
+        "four reviewers remain selectable",
+        100,
+        30,
+        &rendered(&mut dashboard, 100, 30),
+    );
+    assert_eq!(dialog(&dashboard).review.count.get(), 4);
+
+    // Return to Profile, then choose the first configured profile.
+    dialog(&dashboard)
+        .form
+        .borrow_mut()
+        .focus(ReviewSettingsFocus::Profile);
     let probe = choose_next(&mut dashboard);
     while dialog(&dashboard).focused() != ReviewSettingsFocus::Save {
         dashboard.handle_key(key(KeyCode::Tab));
@@ -220,6 +238,41 @@ fn golden_review_settings() {
         "review-settings",
         output.trim_end(),
     );
+}
+
+#[test]
+fn invalid_reviewer_count_blocks_save_until_a_positive_count_is_entered() {
+    let mut dashboard = dashboard_with_session(running_session());
+    open(&mut dashboard);
+    while dialog(&dashboard).focused() != ReviewSettingsFocus::Reviewers {
+        dashboard.handle_key(key(KeyCode::Tab));
+    }
+    dashboard.handle_key(key(KeyCode::Backspace));
+    dashboard.handle_key(key(KeyCode::Char('0')));
+    assert_eq!(dialog(&dashboard).reviewer_count.value(), "0");
+    assert!(!dialog(&dashboard).can_save());
+    assert_eq!(dialog(&dashboard).focused(), ReviewSettingsFocus::Reviewers);
+    assert_eq!(
+        dashboard.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('s'),
+            crossterm::event::KeyModifiers::CONTROL,
+        )),
+        DashboardAction::None
+    );
+    assert!(dialog(&dashboard).save_error.is_some());
+    dashboard.handle_key(key(KeyCode::Backspace));
+    dashboard.handle_key(key(KeyCode::Char('4')));
+    assert!(dialog(&dashboard).can_save());
+    assert_eq!(dialog(&dashboard).review.count.get(), 4);
+    while dialog(&dashboard).focused() != ReviewSettingsFocus::Save {
+        dashboard.handle_key(key(KeyCode::Tab));
+    }
+    let DashboardAction::SaveSetup { updated, .. } = dashboard.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("valid reviewer count should save the Settings draft");
+    };
+    let saved: serde_json::Value = serde_json::from_str(&updated).expect("saved config");
+    assert_eq!(saved["review"]["count"], 4);
 }
 
 #[test]
