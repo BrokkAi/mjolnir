@@ -41,6 +41,8 @@ pub fn format_turn_clock(now_epoch_seconds: u64, current_turn_started_at: Option
 /// activity facts from this, so they agree on what "idle" means.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionActivity {
+    /// Whether the worker can durably dismiss an inferred question.
+    pub dismiss_question_supported: bool,
     pub pursuing_goal: bool,
     pub checking_response: bool,
     pub capacity_retry: Option<mj_core::relay::CapacityRetry>,
@@ -78,6 +80,9 @@ impl SessionActivity {
     /// Read the activity out of what a session's relay last reported.
     pub fn of(operational: &mj_core::relay::RelayOperationalState) -> Self {
         Self {
+            dismiss_question_supported: operational
+                .relay_protocol_version
+                .is_some_and(|version| version >= mj_core::relay::RELAY_DISMISS_QUESTION_PROTOCOL),
             pursuing_goal: operational.goal.active(),
             // The control flag also holds waits open after a failed request.
             // Only pending assessments belong in the activity display.
@@ -679,6 +684,7 @@ mod tests {
 
     fn background(started_at_ms: i64, command: &str) -> SessionActivity {
         SessionActivity {
+            dismiss_question_supported: false,
             pursuing_goal: false,
             checking_response: false,
             quota_recovery: None,

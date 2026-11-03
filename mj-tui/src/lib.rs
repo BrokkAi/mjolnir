@@ -541,6 +541,10 @@ pub enum DashboardAction {
     MarkAllRead {
         receipts: Vec<(String, u64)>,
     },
+    DismissQuestion {
+        session_id: String,
+        question: mj_core::assessment::InferredQuestion,
+    },
     OpenResumeDialog,
     ImportSession {
         profile_id: String,

@@ -1636,6 +1636,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
     assert!(prompt_title(&chat).is_empty());
 
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
+        dismiss_question_supported: false,
         pursuing_goal: Default::default(),
         checking_response: false,
         quota_recovery: None,
@@ -1659,6 +1660,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
     assert!(!prompt_title(&chat).contains("Background"));
 
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
+        dismiss_question_supported: false,
         pursuing_goal: Default::default(),
         checking_response: false,
         quota_recovery: None,
@@ -3002,6 +3004,7 @@ async fn golden_active_chat_render() {
         let mut controls = ChatState::new(&snapshot(), &[]);
         controls.set_subagent_count(2);
         controls.set_session_activity(SessionActivity {
+            dismiss_question_supported: false,
             pursuing_goal: Default::default(),
             checking_response: false,
             quota_recovery: None,

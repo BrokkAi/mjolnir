@@ -19,13 +19,13 @@ use mj_tui::{DashboardAction, SessionOperationKind};
 use crate::daemon;
 use crate::dashboard::io::{
     ConfigRenameRequest, ContainerSettingsRequest, DashboardIoUpdate, LifecycleOperationRequest,
-    ResumeRepositoryPreflightApply, config_only_controller, report, spawn_cancellable_io,
-    spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
-    spawn_create_bundle, spawn_dashboard_change_workspace, spawn_dashboard_container_settings,
-    spawn_dashboard_create_session, spawn_dashboard_rename, spawn_lifecycle_operation,
-    spawn_remove_bundle, spawn_review_settings_discovery, spawn_workspace_close,
-    spawn_workspace_close_cancel, spawn_workspace_create, spawn_workspace_draft_recovery,
-    spawn_workspace_management_load, spawn_workspace_rename,
+    ResumeRepositoryPreflightApply, config_only_controller, report, spawn_async_job,
+    spawn_cancellable_io, spawn_cancellable_io_with_token, spawn_clipboard_read,
+    spawn_config_rename, spawn_create_bundle, spawn_dashboard_change_workspace,
+    spawn_dashboard_container_settings, spawn_dashboard_create_session, spawn_dashboard_rename,
+    spawn_lifecycle_operation, spawn_remove_bundle, spawn_review_settings_discovery,
+    spawn_workspace_close, spawn_workspace_close_cancel, spawn_workspace_create,
+    spawn_workspace_draft_recovery, spawn_workspace_management_load, spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -250,6 +250,35 @@ pub(crate) async fn apply_dashboard_action(
             });
         }
         DashboardAction::OpenSubagents { parent_id } => context.open_subagents(parent_id),
+        DashboardAction::DismissQuestion {
+            session_id,
+            question,
+        } => {
+            let result_session = session_id.clone();
+            let result_question = question.clone();
+            spawn_async_job(
+                Some(context.critical_operations.clone()),
+                "question dismissal",
+                context.dashboard_io_tx.clone(),
+                std::time::Duration::from_secs(30),
+                async move {
+                    let mut client = daemon::connect_existing().await?;
+                    client
+                        .submit_session_command(
+                            session_id,
+                            format!("dismiss-question-{}", question.completed_ordinal),
+                            mj_core::relay::RelayCommand::DismissQuestion { question },
+                            None,
+                        )
+                        .await
+                },
+                move |result| DashboardIoUpdate::QuestionDismissed {
+                    session_id: result_session,
+                    question: result_question,
+                    result,
+                },
+            );
+        }
         DashboardAction::InterruptAll { targets } => {
             let updates = context.dashboard_io_tx.clone();
             tokio::spawn(async move {
