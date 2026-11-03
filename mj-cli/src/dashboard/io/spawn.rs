@@ -942,7 +942,7 @@ pub(crate) fn spawn_lifecycle_reload(
     spawn_io(
         "reload lifecycle state",
         updates,
-        move || crate::dashboard::io::stored_session_metadata(),
+        crate::dashboard::io::stored_session_metadata,
         move |result| {
             DashboardIoUpdate::LifecycleReloaded(Box::new(LifecycleReloaded { reload, result }))
         },
