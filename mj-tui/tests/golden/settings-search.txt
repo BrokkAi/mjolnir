@@ -100,14 +100,14 @@ matching paths: [["profiles", "claude-1", "context_window_bytes"], ["profiles", 
 === search result includes its section, label, and current value (140x30) ===
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
-╰───────────────────  ╭ × Settings ────────────────────────────────────────────────────────────────────── 2 settings ╮                     │
+╰───────────────────  ╭ × Settings ────────────────────────────────────────────────────────────────────── 3 settings ╮                     │
 ╭ Sessions ─────────  │ Search every setting by name, by what it does, or by its value. Esc returns to the list.     │                     │
 │ Create   Open   Fi  │                                                                                              │                     │
 │hel ───────────────  │ image                                                                                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │ Container image                 Runtimes › podman               ubuntu:24.04                 │                     │
 │  │ No messages yet  │ Download image policy           Runtimes › podman               Pull if missing ▾            │                     │
-│  │                  │                                                                                              │                     │
+│  │                  │ Quota checks                                                    Auto · container when avail… │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -128,4 +128,4 @@ matching paths: [["profiles", "claude-1", "context_window_bytes"], ["profiles", 
 │                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
-matching paths: [["targets", "podman", "image"], ["targets", "podman", "pull_policy"]]
+matching paths: [["targets", "podman", "image"], ["targets", "podman", "pull_policy"], ["quota"]]

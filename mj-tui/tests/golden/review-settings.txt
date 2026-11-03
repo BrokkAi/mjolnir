@@ -115,6 +115,7 @@ action: None
   │   Code Review                     Off                                                        │
   │   Continuation                    On · 3 continuations plus quota recovery                   │
   │   Sub-agents                      Up to 6 at once                                            │
+  │   Quota checks                    Auto · container when available                            │
   │   SessionWiki                     Keeps every session                                        │
   │   Web Access                      On · 127.0.0.1:3765                                        │
   │                                                                                              │
@@ -123,7 +124,6 @@ action: None
   │   Notifications                   Terminal                                                   │
   │   Advanced                        All off                                                    │
   │                                                                                              │
-  │   Privacy                                                                                    │
   │ Saving settings…                                                                             │
   │   Saving…                                                                                    │
   ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯

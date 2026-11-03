@@ -406,6 +406,7 @@ fn probeless_request(id: &str) -> QuotaRefreshRequest {
             host: "example.invalid".into(),
             api_key: "key".into(),
         }),
+        runtime: crate::quota::QuotaRuntimeConfig::host(),
     }
 }
 

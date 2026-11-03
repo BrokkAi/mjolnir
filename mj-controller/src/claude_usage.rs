@@ -76,9 +76,14 @@ impl fmt::Display for ClaudeUsageError {
 /// the credentials in the Keychain, where only Claude Code itself reads them.
 /// The API has no token to send there, so its print-mode `/usage` output is
 /// the only quota macOS can report.
+///
+/// With `container`, a login refresh runs the agent-dev image's `claude`
+/// instead of one on this host. macOS never uses it: the image cannot read
+/// the Keychain.
 pub async fn query(
     home: PathBuf,
     environment: HashMap<String, String>,
+    container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
     let executor = Arc::new(CancellableProcessExecutor::with_timeout(
         USAGE_TIMEOUT + REFRESH_LOCK_WAIT + REFRESH_TIMEOUT,
@@ -87,7 +92,7 @@ pub async fn query(
     if cfg!(target_os = "macos") {
         return query_cli_with(environment, executor).await;
     }
-    query_with(home, environment, USAGE_URL, executor).await
+    query_with_runtime(home, environment, USAGE_URL, executor, container).await
 }
 
 /// Read the quota out of Claude Code's own `/usage` output.
@@ -126,11 +131,22 @@ async fn query_cli_with(
     Err(ClaudeUsageError::Parse)
 }
 
+#[cfg(test)]
 async fn query_with(
     home: PathBuf,
     environment: HashMap<String, String>,
     usage_url: &str,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
+) -> Result<ClaudeUsageReport, ClaudeUsageError> {
+    query_with_runtime(home, environment, usage_url, executor, None).await
+}
+
+async fn query_with_runtime(
+    home: PathBuf,
+    environment: HashMap<String, String>,
+    usage_url: &str,
+    executor: Arc<dyn CommandExecutor + Send + Sync>,
+    container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
     let client = reqwest::Client::builder()
         .timeout(USAGE_TIMEOUT)
@@ -147,13 +163,23 @@ async fn query_with(
                     environment,
                     executor,
                     Some(token.to_owned()),
+                    container,
                 )
                 .await
             }
             result => result,
         },
         Err(ClaudeUsageError::LoginExpired) if oauth_has_refresh_token(&credentials) => {
-            refresh_and_retry(&client, usage_url, home, environment, executor, None).await
+            refresh_and_retry(
+                &client,
+                usage_url,
+                home,
+                environment,
+                executor,
+                None,
+                container,
+            )
+            .await
         }
         Err(error) => Err(error),
     }
@@ -214,6 +240,7 @@ async fn refresh_and_retry(
     environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
     rejected_token: Option<String>,
+    container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
     // Claude 2.1.312 takes these two proper-lockfile directory locks during
     // its own refresh. auth login's explicit exchange does not take them.
@@ -255,7 +282,7 @@ async fn refresh_and_retry(
         "CLAUDE_CONFIG_DIR".into(),
         home.to_string_lossy().into_owned(),
     );
-    let refresh_error = run_claude_refresh(active, environment, executor, locks)
+    let refresh_error = run_claude_refresh(active, environment, executor, locks, container)
         .await
         .err();
     let credentials = match read_credentials(&home).await {
@@ -307,6 +334,7 @@ async fn run_claude_refresh(
     mut environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
     locks: Vec<crate::oauth_lock::OAuthRefreshLock>,
+    container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<(), ClaudeUsageError> {
     let oauth = &credentials["claudeAiOauth"];
     let refresh = oauth["refreshToken"]
@@ -329,16 +357,37 @@ async fn run_claude_refresh(
         "CLAUDE_CODE_OAUTH_CLIENT_ID".into(),
         oauth["clientId"].as_str().unwrap_or_default().to_owned(),
     );
-    let mut command = CommandSpec::new(
-        if cfg!(windows) {
-            "claude.cmd"
-        } else {
-            "claude"
-        },
-        ["auth", "login"],
-    )
-    .purpose("refresh Claude login");
-    command.env.extend(environment);
+    let (mut command, quota_container) = match &container {
+        None => {
+            let mut command = CommandSpec::new(
+                if cfg!(windows) {
+                    "claude.cmd"
+                } else {
+                    "claude"
+                },
+                ["auth", "login"],
+            );
+            command.env.extend(environment);
+            (command, None)
+        }
+        Some(check) => {
+            check
+                .runtime
+                .ensure_image_async()
+                .await
+                .map_err(|error| ClaudeUsageError::Refresh(format!("{error:#}")))?;
+            let launch = check.launch(
+                "claude",
+                &["auth", "login"],
+                &environment.into_iter().collect(),
+            );
+            let mut command =
+                CommandSpec::new(mj_core::target_path::text(&launch.program), launch.args);
+            command.env.extend(launch.env);
+            (command, Some(launch.container))
+        }
+    };
+    command.purpose = "refresh Claude login".to_owned();
     command.sensitive_output = true;
     let output = tokio::task::spawn_blocking(move || {
         // Keep the leases until the executor has reaped its child, even if
@@ -346,9 +395,13 @@ async fn run_claude_refresh(
         let _locks = locks;
         executor.execute(&command)
     })
-    .await
-    .map_err(|error| ClaudeUsageError::Refresh(format!("worker failed: {error}")))?
-    .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
+    .await;
+    if let Some(container) = quota_container {
+        container.remove().await;
+    }
+    let output = output
+        .map_err(|error| ClaudeUsageError::Refresh(format!("worker failed: {error}")))?
+        .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
     successful_refresh_output(output)
 }
 

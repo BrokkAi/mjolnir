@@ -48,6 +48,8 @@ impl GrokUsageReport {
 pub enum GrokUsageError {
     NotInstalled,
     Launch(String),
+    /// The container engine does not hold the agent-dev image yet.
+    ImageUnavailable(String),
     TimedOut,
     /// The agent exited before answering. Grok Build tears the process down
     /// when its stdin closes, so this also catches an early hangup.
@@ -64,6 +66,7 @@ impl fmt::Display for GrokUsageError {
         match self {
             Self::NotInstalled => write!(f, "Grok Build executable not found"),
             Self::Launch(error) => write!(f, "launch grok agent stdio: {error}"),
+            Self::ImageUnavailable(detail) => f.write_str(detail),
             Self::TimedOut => write!(f, "grok usage request timed out"),
             Self::Closed => write!(
                 f,
@@ -77,12 +80,26 @@ impl fmt::Display for GrokUsageError {
 }
 
 /// Ask a profile's Grok Build for its current billing period.
+///
+/// With `container`, the agent-dev image's `grok` answers instead of one on
+/// this host.
 pub async fn query(
     home: PathBuf,
     cwd: PathBuf,
     env: HashMap<String, String>,
+    container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<GrokUsageReport, GrokUsageError> {
-    let mut session = GrokUsageSession::spawn(&home, cwd, env)?;
+    let mut session = match container {
+        None => GrokUsageSession::spawn(&home, cwd, env)?,
+        Some(check) => {
+            check
+                .runtime
+                .ensure_image_async()
+                .await
+                .map_err(|error| GrokUsageError::ImageUnavailable(format!("{error:#}")))?;
+            GrokUsageSession::spawn_in_container(&check, env)?
+        }
+    };
     // The exchange is bounded as a whole: a stalled agent must not hold the
     // quota refresh open, and its child must still be reaped.
     let result = tokio::time::timeout(REQUEST_TIMEOUT, session.exchange()).await;
@@ -101,6 +118,8 @@ fn grok_programs(home: &Path) -> Vec<PathBuf> {
 
 struct GrokUsageSession {
     child: Child,
+    /// The container the agent runs in, removed at shutdown.
+    container: Option<crate::quota_runtime::QuotaContainer>,
     /// Held for the whole exchange on purpose: Grok Build stops when its stdin
     /// closes, so dropping this early kills the agent before it answers.
     stdin: ChildStdin,
@@ -150,6 +169,35 @@ impl GrokUsageSession {
             .ok_or_else(|| GrokUsageError::Protocol("agent stdout unavailable".into()))?;
         Ok(Self {
             child,
+            container: None,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    fn spawn_in_container(
+        check: &crate::quota_runtime::ContainerCheck,
+        env: HashMap<String, String>,
+    ) -> Result<Self, GrokUsageError> {
+        let env = env.into_iter().collect();
+        let launch = check.launch("grok", &["agent", "stdio"], &env);
+        let mut command = crate::quota_runtime::ContainerCheck::piped_command(&launch);
+        command.stderr(Stdio::null());
+        let mut child = command.spawn().map_err(|error| {
+            GrokUsageError::Launch(format!("{}: {error}", launch.program.display()))
+        })?;
+        let container = Some(launch.container);
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| GrokUsageError::Protocol("agent stdin unavailable".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| GrokUsageError::Protocol("agent stdout unavailable".into()))?;
+        Ok(Self {
+            child,
+            container,
             stdin,
             stdout: BufReader::new(stdout),
         })
@@ -226,6 +274,9 @@ impl GrokUsageSession {
         }
         if let Err(error) = self.child.wait().await {
             tracing::warn!(%error, "could not reap the Grok usage process");
+        }
+        if let Some(container) = self.container {
+            container.remove().await;
         }
     }
 }
@@ -374,6 +425,7 @@ mod tests {
                 "PATH".to_owned(),
                 directory.path().to_string_lossy().into_owned(),
             )]),
+            None,
         )
         .await
         .unwrap_err();

@@ -6,7 +6,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "github":{}, "jev":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "github":{}, "jev":{}, "quota":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":mj_core::config::PhoneConfig::default().bind,"tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -30,6 +30,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             json!({"enabled":watch.enabled,"interval_seconds":watch.interval_seconds,"api_base":watch.api_base})
         }
         "jev" => json!({"enabled":true}),
+        "quota" => json!({"runtime":"auto"}),
         "sessionwiki" => {
             json!({"archive_after_days":null})
         }
@@ -260,6 +261,8 @@ pub fn label(key: &str) -> String {
         "continuation" => "Continuation",
         "watch" => "Watcher",
         "jev" => "Jev (hosted service)",
+        "quota" => "Quota checks",
+        "runtime" => "Run in",
         "sessionwiki" => "SessionWiki",
         "archive_after_days" => "Archive after (days)",
         "subagents" => "Sub-agents",
@@ -532,6 +535,12 @@ pub fn section_summary(
                 "On · GitHub activity".to_owned()
             }
         }
+        "quota" => match section["runtime"].as_str() {
+            Some("podman") => "Podman".to_owned(),
+            Some("docker") => "Docker".to_owned(),
+            Some("host") => "Host".to_owned(),
+            _ => "Auto · container when available".to_owned(),
+        },
         "jev" => {
             if section["enabled"] == Value::Bool(false) {
                 "Off · new sessions send nothing".to_owned()
@@ -714,6 +723,7 @@ pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         "session_order" => &["project", "priority"],
         "symbols" => &["unicode", "ascii"],
         "tool_output" => &["grouped", "inline"],
+        "runtime" if path == ["quota", "runtime"] => &["auto", "podman", "docker", "host"],
         "mode" if path.first().is_some_and(|key| key == "notify") => &["off", "terminal", "system"],
         "spinner" => &[], // Use the canonical animation list below.
         "permissions" => &["guardian", "yolo"],
@@ -931,6 +941,12 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         "review" => "Used by turn review. Auto picks another provider with quota.",
         "continuation" => {
             "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
+        }
+        "quota" => {
+            "Codex, Grok and Claude quota checks start the agent. Auto runs it in your local Podman or Docker runtime's image when one is enabled, else on this machine."
+        }
+        "runtime" if path.first().is_some_and(|key| key == "quota") => {
+            "Auto: an enabled local Podman runtime, else Docker, else this machine. Podman or Docker: always that engine. Host: never a container."
         }
         "jev" => {
             "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart."

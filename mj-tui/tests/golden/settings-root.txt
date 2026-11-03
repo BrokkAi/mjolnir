@@ -17,6 +17,7 @@
 │                     │   Code Review                     Off                                                        │                     │
 │                     │   Continuation                    On · 3 continuations plus quota recovery                   │                     │
 │                     │   Sub-agents                      Up to 6 at once                                            │                     │
+│                     │   Quota checks                    Auto · container when available                            │                     │
 │                     │   SessionWiki                     Keeps every session                                        │                     │
 │                     │   Web Access                      On · 127.0.0.1:3765                                        │                     │
 │                     │                                                                                              │                     │
@@ -25,12 +26,11 @@
 │                     │   Notifications                   Terminal                                                   │                     │
 │                     │   Advanced                        All off                                                    │                     │
 │                     │                                                                                              │                     │
-│                     │   Privacy                                                                                    │                     │
-│                     │   Jev (hosted service)            On · sends turn text for classification                    │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
+│                     │   Privacy                                                                                    │  ───────────────────╯
+│                     │   Jev (hosted service)            On · sends turn text for classification                    │  ───────────────────╮
+│                     │                                                                                              │                     │
 │                     │   Other                                                                                      │                     │
-│                     │   GitHub events                   On · GitHub activity                                       │                     │
-│                     │                                                                                              │  ───────────────────╯
+│                     │   GitHub events                   On · GitHub activity                                       │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
@@ -157,6 +157,7 @@ draft paths: theme="light"; interface.theme present=false; keys.prefix="ctrl+b"
   │   Code Review                     Off                                                        │
   │   Continuation                    On · 3 continuations plus quota recovery                   │
   │   Sub-agents                      Up to 6 at once                                            │
+  │   Quota checks                    Auto · container when available                            │
   │   SessionWiki                     Keeps every session                                        │
   │   Web Access                      On · 127.0.0.1:3765                                        │
   │                                                                                              │
@@ -166,7 +167,6 @@ draft paths: theme="light"; interface.theme present=false; keys.prefix="ctrl+b"
   │   Advanced                        All off                                                    │
   │                                                                                              │
   │   Privacy                                                                                    │
-  │   Jev (hosted service)            On · sends turn text for classification                    │
   │   Save and Close                                                                             │
   ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
@@ -355,6 +355,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │   Code Review                     Off                                                        │
   │   Continuation                    On · 3 continuations plus quota recovery                   │
   │   Sub-agents                      Up to 6 at once                                            │
+  │   Quota checks                    Auto · container when available                            │
   │   SessionWiki                     Keeps every session                                        │
   │   Web Access                      On · 127.0.0.1:3765                                        │
   │                                                                                              │
@@ -364,7 +365,6 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │   Advanced                        All off                                                    │
   │                                                                                              │
   │   Privacy                                                                                    │
-  │   Jev (hosted service)            On · sends turn text for classification                    │
   │   Save and Close                                                                             │
   ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 

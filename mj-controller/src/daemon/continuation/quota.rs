@@ -169,7 +169,7 @@ pub(super) async fn prepare(
 ) -> Result<Plan> {
     let snapshot = view.snapshot.as_ref().context("missing quota snapshot")?;
     let turn = ended_turn(snapshot).context("missing quota completion")?;
-    let (profile_id, profile) = {
+    let (profile_id, profile, runtime) = {
         let controller_owner = state.owner();
         let controller = controller_owner.controller();
         let session = controller
@@ -185,6 +185,7 @@ pub(super) async fn prepare(
                 .get(&session.last_profile)
                 .context("profile was removed")?
                 .clone(),
+            crate::quota::QuotaRuntimeConfig::of(&controller.config),
         )
     };
     let harness = profile.kind;
@@ -194,6 +195,7 @@ pub(super) async fn prepare(
             &profile_name,
             &profile,
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            runtime,
         )
     })
     .await
