@@ -1,6 +1,6 @@
 use super::*;
 
-const HANDBACK_INSTRUCTION: &str = "\n\nReturn the rubric's JSON result as the complete text of a single handback call. Do not edit files or push. After calling handback, stop.";
+const HANDBACK_INSTRUCTION: &str = "\n\nReturn your plain-text findings, or exactly `No findings.` when there are none, as the complete text of a single handback call. Do not edit files or push. After calling handback, stop.";
 
 impl HostState {
     pub(super) fn register_reviewer_child(

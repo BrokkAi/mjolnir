@@ -1490,7 +1490,7 @@ async fn a_child_that_owes_its_report_is_reminded_once() {
 /// A child hands back one report per turn. The report is recorded against the
 /// turn that is running, a repeat in the same turn is refused without being an
 /// error, and a session that is not such a child cannot hand anything back.
-// Hard-won: cba38b09c: ordinary report limits rejected complete reviewer JSON.
+// Hard-won: cba38b09c: ordinary report limits rejected a complete reviewer report.
 #[tokio::test]
 async fn a_child_hands_back_one_report_per_turn() {
     if std::env::var_os(HANDBACK_TEST_CHILD).is_none() {
@@ -1634,10 +1634,8 @@ async fn a_child_hands_back_one_report_per_turn() {
         running_states(),
         Arc::new(NoExports),
     ));
-    let mut output = serde_json::json!({"findings": [{"title": "[P1] Preserve the complete finding", "body": ""}]});
-    let padding = 20_000 - output.to_string().chars().count();
-    output["findings"][0]["body"] = "é".repeat(padding).into();
-    let message = output.to_string();
+    let title = "- [P1] Preserve the complete finding — src/lib.rs:1\n";
+    let message = format!("{title}{}", "é".repeat(20_000 - title.chars().count()));
     assert_eq!(message.chars().count(), 20_000);
     let accepted = backend
         .execute_subagent_tool(

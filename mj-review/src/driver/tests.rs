@@ -154,7 +154,7 @@ fn a_workspace_with_no_baseline_starts_coverage_rather_than_reviewing_nothing() 
 
 fn a_clean_review_runs_one_reviewer_and_advances_the_baseline_itself() {
     let (mut driver, command_id) = running();
-    let requests = driver.role_turn_completed(&command_id, r#"{"findings":[]}"#);
+    let requests = driver.role_turn_completed(&command_id, "No findings.");
     assert_eq!(
         requests,
         vec![
@@ -380,7 +380,7 @@ fn a_completion_for_another_command_is_ignored() {
     let (mut driver, _) = running();
     assert!(
         driver
-            .role_turn_completed("turn-review-reviewer-999", r#"{"findings":[]}"#)
+            .role_turn_completed("turn-review-reviewer-999", "No findings.")
             .is_empty(),
         "a replayed completion for another command cannot advance the review"
     );
@@ -416,7 +416,7 @@ fn a_verification_pass_consumes_the_prior_review_when_it_resolves() {
         "a review after a forward verifies the prior findings"
     );
     let command_id = prompted(&requests, REVIEWER_ROLE);
-    let requests = driver.role_turn_completed(&command_id, r#"{"findings":[]}"#);
+    let requests = driver.role_turn_completed(&command_id, "No findings.");
     assert!(
         requests.contains(&ReviewRequest::ClearPriorReview),
         "a resolved verification pass consumes the prior review: {requests:?}"

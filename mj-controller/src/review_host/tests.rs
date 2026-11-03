@@ -1763,14 +1763,7 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     assert!(!children[0].2.contains("+one"));
     assert!(children[0].2.contains("single handback call"));
     assert!(children[0].2.contains("Do not edit files or push"));
-    finish_child(
-        &host,
-        &environment,
-        &session,
-        &child,
-        Some(r#"{"findings":[],"overall_explanation":"No issues found."}"#),
-    )
-    .await;
+    finish_child(&host, &environment, &session, &child, Some("No findings.")).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while host.view(&session).is_some() || host.refuses_prompt(&session) {
             tokio::task::yield_now().await;
@@ -2003,14 +1996,7 @@ async fn a_reviewer_handback_arriving_after_restart_does_not_advance_the_baselin
         environment.clone(),
     );
     new.observe(&session, &view(&session, MaterializedExecutionState::Idle));
-    finish_child(
-        &new,
-        &environment,
-        &session,
-        &child,
-        Some(r#"{"findings":[]}"#),
-    )
-    .await;
+    finish_child(&new, &environment, &session, &child, Some("No findings.")).await;
     let notice = next_notice(&mut manager).await;
     assert!(notice.contains("cancelled when Mjolnir restarted"));
     assert!(environment.state().baselines.is_empty());
@@ -2377,7 +2363,7 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
     for (name, report, expected) in [
         (
             "pushclean",
-            Some(r#"{"findings":[],"overall_explanation":"fine"}"#),
+            Some("No findings."),
             "Review clean for commits",
         ),
         (

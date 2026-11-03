@@ -7,7 +7,8 @@
 //! split pane and either forwards the findings to the primary, dismisses them,
 //! or cancels.
 //!
-//! The reviewer follows Codex's `/review` rubric and JSON output contract,
+//! The reviewer follows Codex's `/review` rubric and returns plain-text findings,
+//! or exactly `No findings.` when there are none,
 //! while the driver owns capture, forwarding, cancellation and restart recovery.
 //!
 //! Terms used throughout:

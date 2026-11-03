@@ -437,7 +437,7 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         .is_some_and(|launch| !launch["reviewer_launch"].is_null());
     static REVIEWER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
         format!(
-            "You are a Mjolnir reviewer child. Call handback once as your last action with the complete rubric JSON. Your report may contain up to {} characters.",
+            "You are a Mjolnir reviewer child. Call handback once as your last action with your plain-text findings, or exactly `No findings.` if there are none. Your report may contain up to {} characters.",
             mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS
         )
     });
@@ -1222,7 +1222,7 @@ mod tests {
         let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         assert!(output.contains(&mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS.to_string()));
         assert!(!output.contains("4,000"));
-        assert!(output.contains("complete rubric JSON"));
+        assert!(output.contains("plain-text findings"));
     }
 
     struct ContractWriter(Arc<Mutex<Vec<u8>>>);
