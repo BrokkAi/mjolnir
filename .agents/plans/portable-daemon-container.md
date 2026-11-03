@@ -171,7 +171,7 @@ Each milestone ends with a commit pushed to master, as `AGENTS.md` requires. Pla
 - [x] (2026-11-03) Milestone 1b: client attachments are leases renewed by the two-second heartbeat and expired after 15 seconds (`ATTACHMENT_LEASE`), not client PIDs probed with `kill(2)`.
 - [ ] Milestone 1c: daemon liveness, exit waits, build identity and placement asked of the daemon (a non-frozen `Identity` action, since `Status` is frozen) instead of its PID, `/proc/<pid>/exe` and `/proc/<pid>/environ`.
 - [ ] Milestone 1d: configuration ownership. Clients read and write `config.toml` in about fifteen places (`Config::load`, `Config::update`, `mj_client::settings::save`). Decide which settings are the client's own (theme, spinner, splash symbols) and route the rest through the daemon's settings API.
-- [ ] Milestone 2: node prototype (framing, flow control, 64KB+ test).
+- [x] (2026-11-03) Milestone 2: node prototype in `mj-core/src/node.rs`. The node protocol is HTTP/2 (the `h2` crate, already in the lock file) over the connection the node opens; the daemon is the HTTP/2 client and each exec is one stream. Tested with megabytes both ways through concurrent execs past a stalled reader, and with a reset killing the child's process group.
 - [ ] Milestone 2: all local exec and relay through the node; host-reading call sites moved.
 - [ ] Milestone 3: portable launcher, `--listen`, daemon image, store copy and tombstone, config version 22, 2.65.0 legacy handoff.
 - [ ] Milestone 4: hand validation on macOS and Windows, docs, Kubernetes manifest.
@@ -188,6 +188,8 @@ The dashboard was a second writer. Repairing a stopped session's repository orig
 
 `DaemonStatus` is part of the frozen management subset and cannot gain fields, so the daemon's instance identity and placement need a separate, non-frozen action.
 
+The first prototype deadlocked in exactly the test meant to catch it. HTTP/2 counts unread bytes against the whole connection as well as the stream, and the default connection window is 64KB, so one exec nobody reads stalled every other exec. The connection window is now the per-stream window times the stream limit (256KB times 256), so a stalled stream can only ever stall itself.
+
 ## Decision Log
 
 The daemon shares no directory with the host. The alternative considered, bind-mounting declared host directories and translating paths at the protocol boundary, was rejected because it keeps the daemon dependent on host paths. It also cannot work in Kubernetes and adds a translation table every path-handling site must agree with. The owner asked why the daemon needs to share any directories at all, and the honest answer was that it does not once local work moves to the host. (2026-11-03)
@@ -195,6 +197,8 @@ The daemon shares no directory with the host. The alternative considered, bind-m
 Local work always goes through the node, including with a host daemon. A direct-exec path for host daemons would be a second way to do the same thing and would leave the container path untested on Linux CI. (2026-11-03)
 
 The node dials the daemon. TCP carries both directions, so only reachability decides who dials. The daemon's address is the one stable, published endpoint in every placement; a laptop's is not. (2026-11-03)
+
+The node protocol is HTTP/2 rather than a hand-written multiplexer. The workspace already depends on `h2` through hyper; it provides per-stream flow control, resets and a stream limit, which are exactly the parts a hand-written framing would get wrong. (2026-11-03)
 
 SSH runs on the node, because the user's keys, agent and configuration are there. A Kubernetes daemon without a connected node therefore cannot reach SSH targets. That is accepted for now and stated in the Kubernetes docs. (2026-11-03)
 
