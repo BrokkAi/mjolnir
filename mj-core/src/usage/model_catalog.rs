@@ -5,17 +5,17 @@
 //! list is used for every period, so an alias the harness has since moved is
 //! priced as its current model.
 use super::pricing;
-use mj_core::acp::SessionConfigChoice;
+use crate::acp::SessionConfigChoice;
 use std::collections::BTreeMap;
 
 /// The newest discovered model list of each profile.
 #[derive(Default)]
-pub(super) struct ModelCatalogs(pub(super) BTreeMap<String, Vec<SessionConfigChoice>>);
+pub struct ModelCatalogs(pub BTreeMap<String, Vec<SessionConfigChoice>>);
 
 impl ModelCatalogs {
     /// The model id to price `model` as: itself when it has a rate, else the
     /// priced model its profile's catalog says it runs, else itself.
-    pub(super) fn priced_model(&self, profile: Option<&str>, model: String) -> String {
+    pub fn priced_model(&self, profile: Option<&str>, model: String) -> String {
         if pricing::is_priced(&model) {
             return model;
         }
@@ -93,13 +93,32 @@ fn choice_model_id(choice: &SessionConfigChoice) -> Option<String> {
     if pricing::is_priced(value) {
         return Some(value.to_owned());
     }
-    let (family, version) = family_version(choice)?;
-    let version = version.iter().map(u32::to_string).collect::<Vec<_>>();
-    Some(format!(
-        "claude-{}-{}",
-        family.to_ascii_lowercase(),
-        version.join("-")
-    ))
+    match family_version(choice) {
+        Some((family, version))
+            if matches!(
+                family.to_ascii_lowercase().as_str(),
+                "opus" | "sonnet" | "haiku" | "fable" | "mythos"
+            ) =>
+        {
+            let version = version.iter().map(u32::to_string).collect::<Vec<_>>();
+            Some(format!(
+                "claude-{}-{}",
+                family.to_ascii_lowercase(),
+                version.join("-")
+            ))
+        }
+        _ => Some(value.to_owned()),
+    }
+}
+
+/// Resolve a selected value or family alias through its advertised catalog.
+/// Unknown IDs retain their identity; an unknown price does not mean free.
+pub fn model_id(choices: &[SessionConfigChoice], wanted: &str) -> String {
+    pricing::normalize_model(
+        &matching_choice(choices, wanted)
+            .and_then(choice_model_id)
+            .unwrap_or_else(|| wanted.to_owned()),
+    )
 }
 
 #[cfg(test)]

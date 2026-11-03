@@ -16,17 +16,18 @@ Auto is the default. In `config.toml`, omit `profile`, `model`, and `effort`:
 trigger = "turn"
 ```
 
-Auto first tries profiles from a different provider, then other profiles from the primary provider, then the primary profile itself. Within each group it ranks healthy quota before reserve quota before unknown quota, then uses provider order **Codex → Claude → DeepSeek → Kimi**. Remaining quota and profile ID break ties. A known 0% quota window excludes a profile, 1–10% is reserve, above 10% is healthy, API billing is healthy, and missing or failed quota readings remain eligible as unknown.
+Auto uses this priority list, always at **High** reasoning effort:
 
-| Provider | Auto reviewer |
-| --- | --- |
-| OpenAI Codex | Astra / medium |
-| Claude | Fable / medium |
-| DeepSeek | Flash / max |
-| Kimi | Newest K-series / max |
-| Other review-capable providers | Manual selection, or a session's `--review-model` |
+1. GPT Terra
+2. DeepSeek Flash
+3. Claude Haiku
+4. Grok
 
-Model families resolve to the newest advertised matching model. DeepSeek through a Codex harness counts as DeepSeek, not OpenAI. Effort values must be supported exactly. Auto skips unusable candidates and explains why if none can run. A manually selected profile fails visibly instead of changing profiles.
+It first tries these families on subscriptions, then the same list on usage-priced API profiles. Within either group it moves the primary session's model family to the end: a Terra primary prefers Flash, and a Flash primary prefers Terra. A subscription option still wins over an API option even when it shares the primary's family. Each family resolves to its newest advertised version, such as GPT 6.1 Terra when that is the newest available Terra.
+
+If none of the preferred families can run, Auto tries the other advertised models by estimated price, while preferring a different model from the primary. Price compares equal amounts of ordinary input and output tokens using the same base API rates as usage reports. Unknown prices sort after known prices; if only unpriced models can run, the reviewer selection says `price unavailable`.
+
+An exhausted quota window excludes the models it applies to. Missing or failed quota readings stay eligible; quota headroom does not change the priority list. Auto checks exact model and `high` effort support, skips unusable candidates, and explains why if none can run. Discovery remains cancellable. A manually selected profile fails visibly instead of changing profiles.
 
 To choose a profile, model, or effort manually:
 
@@ -42,7 +43,7 @@ profile = "reviewer"
 | `trigger` | `"off"` | `"off"` disables automatic review, `"turn"` reviews completed turns, and `"push"` reviews commits before push. |
 | `profile` | Auto | Omit for Auto or name an enabled review-capable profile. |
 | `model` | harness default for a named profile | Optional reviewer model override. `[review]` accepts it only with a named profile; a session's `--review-model` also works with Auto. |
-| `effort` | harness default for a named profile | Optional reviewer effort override. `[review]` accepts it only with a named profile; a session's `--review-effort` also works with Auto. |
+| `effort` | harness default for a named profile | Optional reviewer effort override for a named profile. Auto always uses `high`, including when a session specifies another effort. |
 
 The old `tier` configuration field is deprecated and ignored. Existing
 `quick` and `extended` values remain readable for compatibility.
@@ -54,7 +55,7 @@ An older configuration with `enabled = true` still loads as `trigger = "turn"`; 
 `mj new` and `mj import <harness>` can override these settings for one session:
 
 - `--review off|turn|push` selects that session's trigger, overriding `[review]`.
-- `--review-model <model>` and `--review-effort <effort>` replace the reviewer model and effort for that session. If you omit `--review`, either option selects `turn`. With Auto, a named model lets Auto choose any enabled profile that offers it, including a profile whose provider has no Auto policy, such as DSH.
+- `--review-model <model>` pins the reviewer model for that session. With Auto, any enabled profile offering it can qualify; Auto still tries subscriptions before API billing and always uses High effort. `--review-effort <effort>` overrides effort for a named reviewer profile; Auto keeps High. If you omit `--review`, either option selects `turn`.
 - `--review-tier quick|extended` is deprecated. It still accepts either value
   and selects `turn` when you omit `--review`, but the value has no effect.
 

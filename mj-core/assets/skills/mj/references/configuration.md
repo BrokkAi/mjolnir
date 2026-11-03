@@ -346,13 +346,11 @@ profile = "reviewer"
 | --- | --- | --- | --- | --- |
 | `trigger` | string enum | no | `"off"` | `"off"` disables automatic review, `"turn"` reviews eligible completed turns after queued work drains, and `"push"` reviews commits before push. An unchanged turn delta resolves without a review prompt. |
 | `tier` | string | no | unset | Deprecated compatibility field. Existing `quick` or `extended` values are accepted but ignored. |
-| `profile` | string | no | Auto (unset) | Auto selects an eligible profile by provider and quota. A named enabled review-capable profile is honored, including the primary profile. |
+| `profile` | string | no | Auto (unset) | Auto tries Terra, DeepSeek Flash, Haiku, and Grok on subscriptions, then API billing, then other models by price; always at High effort. A named enabled review-capable profile is honored, including the primary profile. |
 | `model` | string | no | unset (harness default) | Reviewer model override for a named profile. `[review]` refuses it with Auto, which uses fixed model-family defaults; a session's `--review-model` still works with Auto. |
-| `effort` | string | no | unset (harness default) | Reviewer effort override for a named profile. `[review]` refuses it with Auto; a session's `--review-effort` still works with Auto. Required effort is checked against the selected model. |
+| `effort` | string | no | unset (harness default) | Reviewer effort override for a named profile. Auto always requires `high`, including when a session requests another effort. Required effort is checked against the selected model. |
 
-Auto prefers
-another provider, falling back to another profile or the primary profile when
-needed. Reviewers run as hidden child sessions, use the configured review
+Auto prefers a different model family from the primary within each billing group. It selects the newest advertised version of each preferred family, skips exhausted quota and unsupported High effort, and uses the shared usage-report prices for its cheapest-model fallback. Unknown prices sort after known prices and are disclosed if selected. Reviewers run as hidden child sessions, use the configured review
 profile, model, and effort, and show their transcripts in the review view. See
 [Code review](/turn-review/).
 
@@ -366,7 +364,7 @@ writes `trigger`, not `enabled`.
 set the trigger for one session, overriding `[review]`. `--review-model <model>`
 and `--review-effort <effort>` set reviewer choices. Without `--review`, either
 option selects `turn`. In Auto, Mjolnir picks an enabled profile that offers
-the model, including a profile whose provider has no Auto policy, such as DSH.
+the model, including DSH or any other enabled profile. Auto always uses High effort; the effort override applies only to a named reviewer profile.
 `/review` remains available when the trigger is `off`.
 
 The deprecated `mj new --review-tier quick|extended` option still accepts

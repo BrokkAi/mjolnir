@@ -5,8 +5,7 @@ use mj_core::usage::{
     UsageScope, add_cost, descending_cost,
 };
 
-mod model_catalog;
-mod pricing;
+use mj_core::usage::{model_catalog, pricing};
 
 /// `models` is each profile's newest advertised model list, used to price
 /// model aliases.

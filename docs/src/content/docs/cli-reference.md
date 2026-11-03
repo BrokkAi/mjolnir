@@ -150,7 +150,7 @@ DSH sessions are not importable yet either.
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
 | `--review <off\|turn\|push>` | Set the imported session's review trigger, overriding `[review]`. |
-| `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Set the reviewer model or effort. Without `--review`, these options select `turn`. The deprecated tier option still accepts either value but ignores it. |
+| `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Set the reviewer model or a named profile's effort. Auto always uses High. Without `--review`, these options select `turn`. The deprecated tier option still accepts either value but ignores it. |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
 Import leaves the source checkout and the harness's source transcript unchanged. The imported session starts suspended and is available through `prefix+g`.
@@ -383,7 +383,8 @@ mj new --workspace eval --bundle product --target builder \
 - `mj new --review off|turn|push` sets the session's trigger, overriding
   `[review]`. `mj import <harness>` takes the same option for the session it
   adopts. `--review-model <name>` and `--review-effort <name>` set reviewer
-  choices; without `--review`, either option selects `turn`. The deprecated
+  choices; Auto always uses High effort. Without `--review`, either option
+  selects `turn`. The deprecated
   `--review-tier quick|extended` also selects `turn` when used alone, but its
   value is ignored. See
   [per-session settings](/turn-review/#per-session-settings).

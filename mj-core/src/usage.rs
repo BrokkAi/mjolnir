@@ -1,6 +1,8 @@
 //! Provider-reported consumption. Context occupancy is deliberately excluded.
 use serde::{Deserialize, Serialize};
 
+pub mod model_catalog;
+pub mod pricing;
 mod report;
 pub use report::*;
 

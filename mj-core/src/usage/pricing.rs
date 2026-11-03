@@ -8,12 +8,12 @@
 //! https://docs.x.ai/developers/pricing
 //! https://platform.kimi.ai/docs/pricing/chat
 //! Default 5-minute writes; excludes tools, speed/region/context premiums.
+use crate::storage::UsageCounterTotal;
 use anyhow::{Context, Result};
-use mj_core::storage::UsageCounterTotal;
 use std::collections::BTreeMap;
 
-// One rate unit is 0.001 USD per million, or ten USD ticks per token.
-fn rates(model: &str) -> Option<[u64; 4]> {
+/// Normalize provider qualifiers and context hints without losing versions.
+pub fn normalize_model(model: &str) -> String {
     let lowercase = model.to_ascii_lowercase();
     let model = lowercase.as_str();
     // Known provider-qualified ids and dated snapshots share a base rate.
@@ -40,6 +40,12 @@ fn rates(model: &str) -> Option<[u64; 4]> {
         Some((base, _)) => base,
         None => model,
     };
+    model.to_owned()
+}
+
+fn base_model(model: &str) -> String {
+    let model = normalize_model(model);
+    let model = model.as_str();
     let base = model.strip_suffix("-latest").unwrap_or(model);
     let base = if let Some((name, date)) = base.rsplit_once('-') {
         if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) {
@@ -50,8 +56,14 @@ fn rates(model: &str) -> Option<[u64; 4]> {
     } else {
         base
     };
-    // [ordinary input, output, cache read, cache write]. Exact aliases only.
-    Some(match base {
+    base.to_owned()
+}
+
+/// [ordinary input, output, cache read, cache write], in 0.001 USD per
+/// million tokens (ten USD ticks per token). Unknown rates stay unknown.
+pub fn rates(model: &str) -> Option<[u64; 4]> {
+    let base = base_model(model);
+    Some(match base.as_str() {
         "gpt-6.1-sol" => [2000, 10000, 100, 2500],
         "gpt-6-sol" => [2000, 10000, 200, 2500],
         "gpt-6-astra" => [10000, 50000, 1000, 12500],
@@ -95,11 +107,11 @@ fn rates(model: &str) -> Option<[u64; 4]> {
     })
 }
 
-pub(super) fn is_priced(model: &str) -> bool {
+pub fn is_priced(model: &str) -> bool {
     rates(model).is_some()
 }
 
-pub(super) fn estimate(
+pub fn estimate(
     model: Option<&str>,
     totals: &BTreeMap<String, UsageCounterTotal>,
 ) -> Result<Option<u64>> {

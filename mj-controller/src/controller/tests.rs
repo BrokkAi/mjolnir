@@ -2064,7 +2064,7 @@ fn a_session_named_review_model_takes_a_baseline_for_the_reviewer_auto_will_choo
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    // DSH is the only profile, and Auto has no model policy for it.
+    // DSH is the only profile; both a pinned model and the price fallback can use it.
     let mut config = registration_config();
     let mut dsh = config.profiles.remove("codex").unwrap();
     dsh.kind = HarnessKind::Dsh;
@@ -2099,32 +2099,11 @@ fn a_session_named_review_model_takes_a_baseline_for_the_reviewer_auto_will_choo
             .unwrap()
             .review_capture
     };
-    let auto_candidates = |id: &str| {
-        let settings = controller
-            .config
-            .review
-            .for_session(controller.state.sessions[id].review.as_ref());
-        let (providers, mut reasons) =
-            crate::review_selection::inspect_providers(&controller.config);
-        let auto = crate::review_selection::auto_profiles(
-            &controller.config,
-            &providers,
-            &settings,
-            None,
-            &mut reasons,
-        );
-        assert!(reasons.is_empty(), "{reasons:?}");
-        auto.supported
-            .into_iter()
-            .map(|(profile, _)| profile.to_owned())
-            .collect::<Vec<_>>()
-    };
-
     assert!(takes_baseline(&named));
-    assert_eq!(auto_candidates(&named), ["dsh"]);
-    // Without a named model Auto cannot use DSH, so no baseline is spent.
-    assert!(!takes_baseline(&unnamed));
-    assert!(auto_candidates(&unnamed).is_empty());
+    assert!(
+        takes_baseline(&unnamed),
+        "the cheapest-model fallback can use DSH without a named model"
+    );
 }
 
 fn durable_remote_template(host: &str) -> TargetTemplate {
