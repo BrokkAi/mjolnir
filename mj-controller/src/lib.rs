@@ -47,6 +47,7 @@ pub mod targets;
 pub mod termination;
 
 pub mod daemon;
+pub mod node_registry;
 pub mod pollers;
 pub(crate) mod project_memory_merge;
 pub mod server_runtime;

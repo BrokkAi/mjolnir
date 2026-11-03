@@ -954,6 +954,7 @@ dependencies = [
  "clap",
  "crossterm",
  "futures",
+ "getrandom 0.3.4",
  "libc",
  "portable-pty",
  "ratatui",

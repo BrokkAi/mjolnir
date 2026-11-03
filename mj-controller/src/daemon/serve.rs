@@ -240,6 +240,22 @@ pub(super) async fn serve_client(
             // they touch no store, and a client asking a stopping daemon to
             // stop should not be refused.
             Err("daemon is shutting down; retry to reach a fresh daemon".to_owned())
+        } else if let DaemonAction::NodeConnect { node_id } = request.action {
+            // The connection stops being a request stream here: after this
+            // reply it carries the node protocol.
+            write_response(
+                &mut stream,
+                ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id,
+                    result: Ok(DaemonReply::Done),
+                },
+            )
+            .await?;
+            drop(activity);
+            return crate::node_registry::registry()
+                .adopt(stream, node_id)
+                .await;
         } else {
             // Lifecycle actions contain large checkpoint/restore futures. Keep
             // them off the connection task's stack, including in debug builds.

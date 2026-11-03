@@ -17,6 +17,7 @@ mod go;
 mod hints;
 mod import;
 mod logging;
+mod node;
 mod pollers;
 mod session_presentation;
 mod simple;
@@ -101,6 +102,9 @@ enum Command {
     /// Internal persistent controller process.
     #[command(hide = true)]
     DaemonRun,
+    /// Internal process that runs the daemon's work on this computer.
+    #[command(hide = true)]
+    Node,
     /// Serve the Agent Client Protocol on standard input and output, running
     /// each session it creates through this daemon.
     Acp(acp::AcpArgs),
@@ -808,7 +812,7 @@ fn install_panic_logging() {
 /// short CLI invocations never push a long-running process's log out of it.
 fn process_kind(command: Option<&Command>) -> logging::ProcessKind {
     match command {
-        Some(Command::DaemonRun) => logging::ProcessKind::Daemon,
+        Some(Command::DaemonRun) | Some(Command::Node) => logging::ProcessKind::Daemon,
         None
         | Some(Command::Go(_))
         | Some(Command::Simple(_))
@@ -828,6 +832,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::DesktopBootstrap) => "desktop-bootstrap",
         Some(Command::Daemon(_)) => "daemon",
         Some(Command::DaemonRun) => "daemon-run",
+        Some(Command::Node) => "node",
         Some(Command::Acp(_)) => "acp",
         Some(Command::Doctor(_)) => "doctor",
         Some(Command::Setup(_)) => "setup",
@@ -999,6 +1004,7 @@ async fn run_command(
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
             .map(|()| DashboardExit::Normal),
+        Some(Command::Node) => node::run_node().await.map(|()| DashboardExit::Normal),
         Some(Command::Acp(args)) => {
             let Some(workspace) = args.workspace.or(requested_workspace) else {
                 return Err(workspace_required("mj acp").await);
@@ -1947,9 +1953,10 @@ pub(crate) async fn workspace_required(command: &str) -> anyhow::Error {
     anyhow::anyhow!(workspace_required_message(command, workspaces.as_deref()))
 }
 
-/// The workspaces as a running daemon lists them. Never starts a daemon, and
-/// never opens the store, which only the daemon may reach. `None` when no
-/// list could be read.
+/// The workspaces as a running daemon lists them or, when none runs and the
+/// daemon's store lives on this computer, as that store holds them. Never
+/// starts a daemon. `None` when no list could be read, which includes a store
+/// in a daemon container's volume.
 async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
     match daemon::connect_existing().await {
         Ok(mut daemon) => daemon
@@ -1965,12 +1972,38 @@ async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::
                 tracing::warn!(%error, "could not list workspaces for the refusal");
             })
             .ok(),
-        Err(error) if daemon::daemon_not_running(&error).is_some() => None,
+        Err(error) if daemon::daemon_not_running(&error).is_some() => {
+            tokio::task::spawn_blocking(stored_workspaces_on_this_computer)
+                .await
+                .ok()
+                .flatten()
+        }
         Err(error) => {
             tracing::warn!(%error, "could not reach the daemon to list workspaces");
             None
         }
     }
+}
+
+/// The workspaces in a host daemon's store, read while no daemon runs. Only
+/// a host placement has its store here; a container's is in its volume. A
+/// store that does not exist yet has none; one that cannot be read answers
+/// `None`.
+fn stored_workspaces_on_this_computer() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
+    let placement = mj_core::config::Config::load_from(&mj_core::config::config_path())
+        .map(|config| config.daemon.runtime)
+        .unwrap_or_default();
+    if placement.engine().is_some() {
+        return None;
+    }
+    if !mj_controller::database::database_path().exists() {
+        return Some(Vec::new());
+    }
+    mj_controller::database::list_workspaces()
+        .map_err(|error| {
+            tracing::warn!(%error, "could not read the workspaces from the store");
+        })
+        .ok()
 }
 
 /// Refuse a `--workspace` name that no workspace carries, before anything

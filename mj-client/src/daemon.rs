@@ -522,6 +522,12 @@ pub enum DaemonAction {
     DeleteWorkspace {
         workspace_id: String,
     },
+    /// Turn this connection into a node connection (`mj_core::node`). After
+    /// the `Done` reply the daemon speaks HTTP/2 on it as the client and the
+    /// node serves.
+    NodeConnect {
+        node_id: String,
+    },
     /// Take or renew a client's attachment lease.
     Attach {
         client_id: String,
@@ -2714,6 +2720,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Review role rows carry their child session IDs; older strict clients reject them.
 // Dashboards read stored state through the daemon instead of opening the store,
 // and client attachments are renewable leases rather than client process IDs.
+// Nodes connect with NodeConnect and then speak the node protocol.
 pub const PROTOCOL_VERSION: u32 = 72;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.

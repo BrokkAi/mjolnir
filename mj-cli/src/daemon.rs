@@ -200,6 +200,7 @@ pub async fn connect_or_start() -> Result<DaemonClient> {
     if std::env::var_os(DEV_RESTART_STALE_DAEMON_ENV).is_none() {
         let shared = acquire_shared_start_guard(lock_path.clone()).await?;
         if let ExistingDaemon::Use(client) = inspect_existing_daemon(&shared).await? {
+            crate::node::ensure_node().await;
             return Ok(client);
         }
     }
@@ -449,8 +450,19 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
             let executable = daemon_launch_executable()?;
+            // This launch owns the daemon's endpoint, so the node can find
+            // the daemon while it is still starting: startup recovery runs
+            // its commands on the node.
+            let endpoint = crate::node::NodeEndpoint {
+                address: free_loopback_address()?,
+                token: random_token()?,
+                build_version: mj_client::build_identity::this_build().published(),
+            };
+            crate::node::write_endpoint(&endpoint)?;
             let mut command = std::process::Command::new(executable);
             command
+                .env("MJ_DAEMON_LISTEN", endpoint.address.to_string())
+                .env("MJ_DAEMON_TOKEN", &endpoint.token)
                 .arg("daemon-run")
                 // This switch makes the invoking development client authoritative. It
                 // has no meaning inside the persistent daemon or its child processes.
@@ -465,11 +477,28 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
             #[cfg(unix)]
             std::os::unix::process::CommandExt::arg0(&mut command, "mj");
             let pid = mj_core::subprocess::spawn_detached(&mut command, &log_path)?;
+            crate::node::spawn_node()?;
             Ok(LaunchedDaemon { pid, log_offset })
         }
     })
     .await
     .context("spawn daemon task failed")?
+}
+
+/// A loopback port nothing listens on now. The daemon binds it moments later;
+/// if something else took it in between, the daemon fails to start and says
+/// which address was taken.
+fn free_loopback_address() -> Result<std::net::SocketAddr> {
+    let probe = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .context("find a free loopback port for the daemon")?;
+    probe.local_addr().context("read the free loopback port")
+}
+
+fn random_token() -> Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("generate the daemon token: {error}"))?;
+    Ok(mj_core::hex::lower_hex(bytes))
 }
 
 async fn check_store_readiness() -> Result<()> {

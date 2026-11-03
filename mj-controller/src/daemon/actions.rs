@@ -130,6 +130,11 @@ pub(super) async fn handle_action(
             state.close_workspace(workspace_id).await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::NodeConnect { .. } => {
+            bail!(
+                "a node connection is taken over by the connection loop, not handled as a request"
+            )
+        }
         DaemonAction::Attach { client_id } => {
             state.attachments().insert(
                 client_id,
@@ -902,6 +907,9 @@ pub(super) fn upgrade_request_activity(
     if matches!(
         action,
         DaemonAction::RecordOperatorActivity
+            // A draining daemon still needs its node to finish the bounded
+            // work the handoff waits for.
+            | DaemonAction::NodeConnect { .. }
             | DaemonAction::Ping
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status

@@ -172,7 +172,9 @@ Each milestone ends with a commit pushed to master, as `AGENTS.md` requires. Pla
 - [ ] Milestone 1c: daemon liveness, exit waits, build identity and placement asked of the daemon (a non-frozen `Identity` action, since `Status` is frozen) instead of its PID, `/proc/<pid>/exe` and `/proc/<pid>/environ`.
 - [ ] Milestone 1d: configuration ownership. Clients read and write `config.toml` in about fifteen places (`Config::load`, `Config::update`, `mj_client::settings::save`). Decide which settings are the client's own (theme, spinner, splash symbols) and route the rest through the daemon's settings API.
 - [x] (2026-11-03) Milestone 2: node prototype in `mj-core/src/node.rs`. The node protocol is HTTP/2 (the `h2` crate, already in the lock file) over the connection the node opens; the daemon is the HTTP/2 client and each exec is one stream. Tested with megabytes both ways through concurrent execs past a stalled reader, and with a reset killing the child's process group.
-- [ ] Milestone 2: all local exec and relay through the node; host-reading call sites moved.
+- [x] (2026-11-03) Milestone 2: `mj node` runs beside every daemon this build launches. The launcher chooses the daemon's endpoint and token (`MJ_DAEMON_LISTEN`, `MJ_DAEMON_TOKEN`), writes them to `node-endpoint.json` and starts the node, which connects while the daemon is still starting (the daemon serves only `NodeConnect` until it is ready). `mj_controller::node_registry` owns which node is connected. The `mj daemon-run` process installs a command host, so every `ProcessExecutor` and `CancellableProcessExecutor` command runs on the node with the node's own executor; commands on the daemon's own data opt out with `CommandSpec::in_daemon()`. Verified live in an isolated instance: `mj recover scan` ran `sh`, `docker`, `ps` and `podman` on the node.
+- [ ] Milestone 2: the relay proxy to workers through the node's `/exec` stream, with SSH leases and admission on the node.
+- [ ] Milestone 2: mark daemon-data commands `in_daemon()` (checkpoint archives, bundles); move the direct `std::process` and host-file uses in the daemon (credentials, quota, import, SessionWiki, caches, path completion, Tailscale) to the node.
 - [ ] Milestone 3: portable launcher, `--listen`, daemon image, store copy and tombstone, config version 22, 2.65.0 legacy handoff.
 - [ ] Milestone 4: hand validation on macOS and Windows, docs, Kubernetes manifest.
 
@@ -203,6 +205,8 @@ The node protocol is HTTP/2 rather than a hand-written multiplexer. The workspac
 SSH runs on the node, because the user's keys, agent and configuration are there. A Kubernetes daemon without a connected node therefore cannot reach SSH targets. That is accepted for now and stated in the Kubernetes docs. (2026-11-03)
 
 The 2.65.0 design is replaced, not kept as a Linux fast path, per the owner. (2026-11-03)
+
+With no daemon running, `mj new` refuses an unknown or missing `--workspace` without starting one (launch findings R2-14 and R5-9). Only the store knows the workspaces then. For the host placement the client reads its local store read-only while no daemon runs, as before; for a container placement the store is in the volume, so the name is let through and the daemon refuses it. Starting a daemon only to refuse a typo was judged a worse regression than this split. (2026-11-03)
 
 Attachment leases expire after 15 seconds. A client renews every two seconds and each renewal may take up to five, so a live client never comes close; a daemon set to exit when idle now exits up to 15 seconds after its last client stops rather than on its next idle tick. (2026-11-03)
 
