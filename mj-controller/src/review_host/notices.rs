@@ -145,18 +145,17 @@ impl HostState {
         // A validated override has accepted daemon-owned work. It must finish
         // while the persistence lane and the worker connection are still live.
         for operation in self.preparing.values_mut() {
-            if let PreparingOperation::Override { task, admitted, .. } = operation {
-                if !*admitted {
-                    task.abort();
-                }
+            if let PreparingOperation::Override { task, admitted, .. } = operation
+                && !*admitted
+            {
+                task.abort();
             }
         }
         let override_ids: Vec<_> = self
             .preparing
             .iter()
-            .filter_map(|(id, operation)| {
-                matches!(operation, PreparingOperation::Override { .. }).then(|| id.clone())
-            })
+            .filter(|(_, operation)| matches!(operation, PreparingOperation::Override { .. }))
+            .map(|(id, _)| id.clone())
             .collect();
         for session_id in override_ids {
             if let Some(PreparingOperation::Override {

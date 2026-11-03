@@ -149,8 +149,14 @@ impl HostState {
                 reply,
             } => {
                 if !self.startup_ready && !self.reviews.contains_key(&session_id) {
-                    self.deferred_handbacks
-                        .push((session_id, child_session_id, answer, reply));
+                    self.deferred_handbacks.push((
+                        session_id,
+                        ReviewerHandback {
+                            child_session_id,
+                            answer,
+                            reply,
+                        },
+                    ));
                 } else {
                     self.reviewer_finished(session_id, child_session_id, answer, reply);
                 }
@@ -187,10 +193,13 @@ impl HostState {
                     }
                 }
                 self.startup_ready = true;
-                for (session_id, child, answer, reply) in
-                    std::mem::take(&mut self.deferred_handbacks)
-                {
-                    self.reviewer_finished(session_id, child, answer, reply);
+                for (session_id, handback) in std::mem::take(&mut self.deferred_handbacks) {
+                    self.reviewer_finished(
+                        session_id,
+                        handback.child_session_id,
+                        handback.answer,
+                        handback.reply,
+                    );
                 }
                 for event in std::mem::take(&mut self.deferred_admissions) {
                     let _ = Box::pin(self.handle(event)).await;
@@ -199,8 +208,10 @@ impl HostState {
             HostEvent::StartupRecoveryFailed(error) => {
                 self.startup_failure = Some(format!("review startup recovery failed: {error}"));
                 self.startup_ready = true;
-                for (_, _, _, reply) in std::mem::take(&mut self.deferred_handbacks) {
-                    let _ = reply.send(Err(format!("review startup recovery failed: {error}")));
+                for (_, handback) in std::mem::take(&mut self.deferred_handbacks) {
+                    let _ = handback
+                        .reply
+                        .send(Err(format!("review startup recovery failed: {error}")));
                 }
                 for event in std::mem::take(&mut self.deferred_admissions) {
                     match event {
@@ -308,10 +319,9 @@ impl HostState {
                 });
                 if requests.is_empty()
                     && let Some(state) = state
+                    && let Err(error) = self.persist(session_id.clone(), state, None)
                 {
-                    if let Err(error) = self.persist(session_id.clone(), state, None) {
-                        tracing::warn!(%session_id, %error, "could not save review handoff retry state");
-                    }
+                    tracing::warn!(%session_id, %error, "could not save review handoff retry state");
                 }
                 self.run(&session_id, requests);
             }

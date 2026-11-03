@@ -197,6 +197,12 @@ pub(super) struct PendingOpen {
 
 pub(super) type ReviewerIdentity = mj_core::review::settings::ResolvedReviewSettings;
 
+pub(super) struct ReviewerHandback {
+    pub(super) child_session_id: String,
+    pub(super) answer: Option<String>,
+    pub(super) reply: oneshot::Sender<Result<(), String>>,
+}
+
 /// One open review and its execution context.
 pub(super) struct ReviewSlot {
     /// Which review this is. Asynchronous results name it, and results that
@@ -210,7 +216,7 @@ pub(super) struct ReviewSlot {
     pub(super) push: Option<PushReview>,
     pub(super) start_reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
     pub(super) pending_outcome: Option<TurnReviewState>,
-    pub(super) queued_outcomes: Vec<(String, Option<String>, oneshot::Sender<Result<(), String>>)>,
+    pub(super) queued_outcomes: Vec<ReviewerHandback>,
 }
 
 pub(super) struct HostState {
@@ -253,12 +259,7 @@ pub(super) struct HostState {
     pub(super) recovery_in_flight: BTreeSet<String>,
     pub(super) startup_ready: bool,
     pub(super) startup_failure: Option<String>,
-    pub(super) deferred_handbacks: Vec<(
-        String,
-        String,
-        Option<String>,
-        oneshot::Sender<Result<(), String>>,
-    )>,
+    pub(super) deferred_handbacks: Vec<(String, ReviewerHandback)>,
     pub(super) deferred_admissions: Vec<HostEvent>,
 }
 

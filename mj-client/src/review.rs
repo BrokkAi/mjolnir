@@ -61,7 +61,6 @@ pub fn parse_reviewer_question_id(id: &str) -> Option<(&str, &str)> {
 impl RuntimeReviewView {
     /// Child sessions in the host's stable reviewer order. A role without an
     /// assigned child is status only and has no transcript to attach to.
-    #[must_use]
     pub fn reviewer_children(&self) -> impl Iterator<Item = &str> {
         self.roles
             .iter()

@@ -716,6 +716,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
     let connection = rusqlite::Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
+    schema::restore_review_state_schema(&connection, 65);
     connection
         .execute_batch(
             "ALTER TABLE sessions ADD COLUMN expected_runtime_identity TEXT;
@@ -787,6 +788,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
     let connection = rusqlite::Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
+    schema::restore_review_state_schema(&connection, 53);
     connection
         .execute_batch(
         "ALTER TABLE sessions DROP COLUMN checkout_json;
@@ -885,6 +887,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
     let connection = rusqlite::Connection::open(&database).unwrap();
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
+    schema::restore_review_state_schema(&connection, 46);
     connection
         .execute_batch(
             "ALTER TABLE sessions DROP COLUMN publication_json;
@@ -5663,6 +5666,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
     let raw = Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&raw);
     schema::restore_pre101_subagent_preference(&raw);
+    schema::restore_review_state_schema(&raw, 43);
     raw.execute_batch(
         "DROP TABLE quota_reset_cache;
         DELETE FROM schema_migrations WHERE version >= 44;
@@ -6342,6 +6346,7 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     let raw = Connection::open(&database).unwrap();
     schema::restore_github_v84_schema(&raw);
     schema::restore_pre101_subagent_preference(&raw);
+    schema::restore_review_state_schema(&raw, 52);
     raw.execute_batch(
         "PRAGMA writable_schema = ON;
          UPDATE sqlite_schema

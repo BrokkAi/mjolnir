@@ -2955,13 +2955,16 @@ async fn incomplete_push_findings_clear_stale_override_without_advancing_coverag
     assert!(state.push_findings.is_none());
     assert_eq!(state.prior_review, original_prior);
     assert!(state.baselines.is_empty());
-    let mailbox = environment.mailbox.lock().unwrap();
-    assert_eq!(mailbox.len(), 1);
-    let mj_core::mailbox::MailboxEventBody::ReviewVerdict { verdict, .. } = &mailbox[0].body else {
-        panic!("push verdict is in the mailbox");
-    };
-    assert!(matches!(verdict, ReviewVerdict::Findings { .. }));
-    assert!(!verdict.is_complete());
+    {
+        let mailbox = environment.mailbox.lock().unwrap();
+        assert_eq!(mailbox.len(), 1);
+        let mj_core::mailbox::MailboxEventBody::ReviewVerdict { verdict, .. } = &mailbox[0].body
+        else {
+            panic!("push verdict is in the mailbox");
+        };
+        assert!(matches!(verdict, ReviewVerdict::Findings { .. }));
+        assert!(!verdict.is_complete());
+    }
     host.shutdown().await.unwrap();
 }
 
@@ -2997,14 +3000,15 @@ async fn push_delivery_retries_same_mailbox_key_after_final_state_save_fails() {
     })
     .await
     .unwrap();
-    let mailbox = environment.mailbox.lock().unwrap();
-    assert_eq!(
-        mailbox.len(),
-        1,
-        "replay keeps the original mailbox idempotency key"
-    );
-    assert!(mailbox[0].key.contains(&review_id));
-    drop(mailbox);
+    {
+        let mailbox = environment.mailbox.lock().unwrap();
+        assert_eq!(
+            mailbox.len(),
+            1,
+            "replay keeps the original mailbox idempotency key"
+        );
+        assert!(mailbox[0].key.contains(&review_id));
+    }
     assert!(environment.state().active_group.is_none());
     host.shutdown().await.unwrap();
 }

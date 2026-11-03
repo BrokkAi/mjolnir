@@ -244,9 +244,12 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // Hard-won: #1302: the old-store fixture must also remove the notification epoch.
     // Hard-won: 5f5e74082: kept current GitHub watch tables, so migration 85 found no v84 columns to drop.
     // Restore the singleton preference table used before schema 101.
+    // Restore the review table before migrations 104 and 106 add these columns.
     connection
         .execute_batch(
-            "ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;
+            "ALTER TABLE turn_review_state DROP COLUMN active_group;
+         ALTER TABLE turn_review_state DROP COLUMN push_findings;
+         ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;
          ALTER TABLE mailbox_outbox DROP COLUMN failure;
          DROP TABLE quota_reset_cache;
          DROP TABLE subagent_accounting;

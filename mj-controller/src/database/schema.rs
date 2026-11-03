@@ -2420,6 +2420,26 @@ pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
         .unwrap();
 }
 
+/// Historical fixtures must remove review columns introduced afterward.
+#[cfg(test)]
+pub(super) fn restore_review_state_schema(connection: &Connection, version: i64) {
+    if version < 106
+        && legacy_schema::table_has_column(connection, "turn_review_state", "active_group").unwrap()
+    {
+        connection
+            .execute_batch("ALTER TABLE turn_review_state DROP COLUMN active_group;")
+            .unwrap();
+    }
+    if version < 104
+        && legacy_schema::table_has_column(connection, "turn_review_state", "push_findings")
+            .unwrap()
+    {
+        connection
+            .execute_batch("ALTER TABLE turn_review_state DROP COLUMN push_findings;")
+            .unwrap();
+    }
+}
+
 #[cfg(test)]
 mod reader_tests {
     use super::*;
@@ -3213,26 +3233,6 @@ mod reader_tests {
             read_schema_state(&writer).unwrap().minimum_compatible,
             Some(MINIMUM_COMPATIBLE_VERSION)
         );
-    }
-
-    /// Historical fixtures must remove review columns introduced afterward.
-    fn restore_review_state_schema(connection: &Connection, version: i64) {
-        if version < 106
-            && legacy_schema::table_has_column(connection, "turn_review_state", "active_group")
-                .unwrap()
-        {
-            connection
-                .execute_batch("ALTER TABLE turn_review_state DROP COLUMN active_group;")
-                .unwrap();
-        }
-        if version < 104
-            && legacy_schema::table_has_column(connection, "turn_review_state", "push_findings")
-                .unwrap()
-        {
-            connection
-                .execute_batch("ALTER TABLE turn_review_state DROP COLUMN push_findings;")
-                .unwrap();
-        }
     }
 
     /// Rewrites a store's recorded schema version the way another build's

@@ -17,7 +17,8 @@ The current plaintext contract remains: the exact trimmed ASCII-case-insensitive
 - [x] Saved-count core/CLI/docs and numeric TUI/presentation implementation complete; focused state tests and inspected golden updates pass.
 - [x] Pure driver fan-in, durable emitted-work replay, and host group recovery implementation complete; integrated compilation and focused host/driver regressions pass after corrections.
 - [x] Cover group ordering, partial failures, cancellation/recovery, attribution, and push-gate behavior at existing integration/golden surfaces.
-- [ ] Complete final validation, commit coherent checkpoints on the current branch, and push to `origin/master`.
+- [x] Complete final workspace coverage, targeted failure reruns, formatting, Clippy, documentation, and frontend validation; commit coherent checkpoints on the current branch.
+- [ ] Push the validated delivery to `origin/master` and record the result.
 
 ## Surprises & Discoveries
 
@@ -67,7 +68,7 @@ This host lacks GTK/WebKit development packages (`pkg-config` cannot find `gtk+-
 
 ## Outcomes & Retrospective
 
-The plaintext and audited-override companion checkpoints are committed. Parallel review implementation is complete across configuration, driver, durable orchestration, terminal, and browser surfaces. Initial integrated compilation is in progress; acceptance still requires targeted regressions, inspected goldens, final workspace checks, and push.
+The plaintext and audited-override companion checkpoints are committed, as is the integrated parallel feature (`f61b30a62`). Upstream is merged (`5a5a2d17b`). Every buildable workspace test target has been exercised; identified failures were fixed or verified in focused reruns, without repeating passing suites. Formatting and final workspace Clippy pass, as do documentation and web checks. Delivery is ready to push.
 
 ## Context and Orientation
 
@@ -120,6 +121,20 @@ Initial integrated check: `cargo check --workspace --exclude brokk-mj-desktop --
 Focused core/CLI checks passed: `cargo test -p brokk-mj-core config` (120 selected), `cargo test -p brokk-mj-core storage` (7), CLI filters `new_review_flags_choose_the_sessions_own_review` and `an_import_can_choose_the_sessions_review` (one each). The mailbox golden update and ordinary verification each passed; inspected changes preserve both separately attributed findings and incomplete-group instructions. Logs: `.mj/agents/57bbea10c099c4902c60532570967dcb/{core-config-test,core-storage-test,cli-new-review-flags-test,cli-import-review-test,core-mailbox-golden-update,core-mailbox-golden-normal}.log`. The worker MCP filter initially passed 33/34 tests and exposed the 2,048-character combined-instruction limit; the gate text was shortened while preserving its contract (1,938 characters, or 2,037 with the Codex hint). Its failing filter passed on rerun; log `worker-review-gate-rerun.log` in the same report directory.
 
 Focused UI checks passed individually: TUI invalid-count save transition; chat reviewer tabs, per-child questions, final journal barrier; controller effective session count and public status projection. Scoped golden update plus ordinary verification passed for `golden_review_settings`, `golden_turn_review_pane`, and `golden_phone_session_snapshot`; the chat golden was byte-identical. Only review-settings and phone-session-snapshot expected output changed. Logs: `.mj/agents/b24130a99cf76839673ff79da9a2a39e/`, named after each test with `-update`, `-verify`, or `-rerun` suffixes as appropriate. The initial TUI count-transition test passed in tool output without a saved log. Existing web Node and documentation checks remain valid.
+
+Checkpoint `f61b30a62` commits the integrated parallel feature after focused validation and `cargo fmt --all -- --check`. Merge `5a5a2d17b` incorporates upstream `1dfc0a4e1` without conflicts. Final dev-profile workspace tests and Clippy are running against that merged checkpoint, with only the verified desktop dependency exclusion.
+
+The first final workspace test command stopped at the chat library: 419 passed, two ignored, and `golden_transcript_navigation` differed only by the host timezone (18:00 versus the UTC golden's 00:00). The failing filter is being verified with `TZ=UTC`; passing crates will be excluded from the continuation so all unrun suites still execute. The first final Clippy run found a redundant `#[must_use]` on an iterator-returning method; it is being removed before the incremental rerun. Logs: `.mj/agents/15c4b40f651b0c5ef4f6ac34f01339ed/final-workspace-{test,clippy}.log`.
+
+The UTC transcript-filter rerun passed (`tz-utc-transcript-golden.log`). No other test binary had run before that chat failure. Continue with chat doc tests alone and `TZ=UTC cargo test --workspace --exclude brokk-mj-desktop --exclude brokk-mj-chat --no-fail-fast`; this completes unrun crates while retaining the 419 passing chat cases. The incremental Clippy rerun passed the client crate, then exposed eight host warnings: tuple type complexity, collapsible conditions, a bool-then filter-map, and two test lock scopes across await. These are being cleaned up before the final lint rerun; log `final-workspace-clippy-rerun.log` in the same report directory.
+
+Clippy passes after those fixes (`final-workspace-clippy-after-fixes.log`), without suppressions. The continuation executed every remaining target and doc tests; chat has no doc tests. Remaining failures are seven more manually rewound controller migration fixtures, three daemon-startup fixtures with the same retained-column problem, the settings-root nested review golden, and a container credential-check test whose agent-dev image is unavailable. Fix the historical fixture layouts through shared test helpers; production migrations remain unchanged. The container prerequisite is being independently diagnosed. Run only these failing filters after all fixture edits finish, avoiding compilation while sources change. Continuation evidence: `continuation-{workspace-tests,chat-doc-tests}.log` in the validation report directory. The log also contains a nested child invocation of the parked-state regression, so aggregate result-summary counts include that repeated failure.
+
+Final acceptance: all seven controller migration filters and three isolated daemon-startup filters passed after historical fixtures restored the table layouts they claim (16 matching cases, including the concurrent-clients parameterized subprocess cases). Logs are `rerun-<filter>.log` in `.mj/agents/15c4b40f651b0c5ef4f6ac34f01339ed/`. Both `cargo fmt --all -- --check` and `cargo clippy --workspace --exclude brokk-mj-desktop --all-targets -- -D warnings` pass after the final fixture edits; logs `final-rustfmt-after-migrations.log` and `final-workspace-clippy-after-fixture-move.log`.
+
+The settings-root golden was updated only for the reviewer field and guidance, then passed ordinary verification; logs `.mj/agents/b24130a99cf76839673ff79da9a2a39e/golden_settings_root-{update,verify}.log`. The credential-check failure actually used a private fake engine and required no real image. Its single elevated UTC rerun passed in 0.06 seconds; `.mj/agents/03872a5a6e7a0673da18c2aff7e8ffee/codex-container-check-rerun.log`. That indicates a transient full-suite interaction but does not identify its cause. No image was downloaded and no unrelated production code was changed.
+
+Documentation: `npm run check` passed with no errors, warnings, or hints; `npm run build` passed with 27 pages and 2,304 valid internal links. Web: `node --test tests/e2e/web/viewer.unit.test.mjs` passed. The old JSON review parser symbols are absent from review, controller, worker, and core source. The desktop crate remains the sole workspace exclusion because this host lacks GTK/WebKit development libraries.
 
 ## Interfaces and Dependencies
 

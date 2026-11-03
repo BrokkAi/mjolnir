@@ -240,7 +240,11 @@ impl HostState {
             return;
         };
         if slot.pending_outcome.is_some() {
-            slot.queued_outcomes.push((child_session_id, answer, reply));
+            slot.queued_outcomes.push(ReviewerHandback {
+                child_session_id,
+                answer,
+                reply,
+            });
             return;
         }
         let role = registration.role.clone();
@@ -321,11 +325,10 @@ impl HostState {
             if result.is_err()
                 && let Some(prior) = prior
                 && let Some(group) = prior.active_group.as_ref()
+                && let Ok(driver) = TurnReviewDriver::restore(group.driver.clone())
             {
-                if let Ok(driver) = TurnReviewDriver::restore(group.driver.clone()) {
-                    slot.driver = driver;
-                    slot.state = prior;
-                }
+                slot.driver = driver;
+                slot.state = prior;
             }
             if result.is_ok() && matches!(slot.driver.verdict(), Some(ReviewVerdict::Failed { .. }))
             {
@@ -339,8 +342,13 @@ impl HostState {
                 .get_mut(&session_id)
                 .map(|slot| std::mem::take(&mut slot.queued_outcomes))
                 .unwrap_or_default();
-            for (child, answer, reply) in queued {
-                self.reviewer_finished(session_id.clone(), child, answer, reply);
+            for handback in queued {
+                self.reviewer_finished(
+                    session_id.clone(),
+                    handback.child_session_id,
+                    handback.answer,
+                    handback.reply,
+                );
             }
         }
     }

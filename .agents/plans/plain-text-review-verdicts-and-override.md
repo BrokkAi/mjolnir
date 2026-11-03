@@ -21,7 +21,9 @@ You can see both working by running the unit tests named in each milestone, and 
 - [x] (2026-11-03) Milestone 2 committed as `6d5728d85`: host override, durable findings trees, storage migration 104. Controller review-host tests passed (44), legacy/storage regression passed (1), core storage tests passed (7).
 - [x] (2026-11-03) Milestone 3 committed as `ed653d5c1`: `override_review` MCP/action/API/allowlist wiring and breaking schema 105 validated. Core subagent tests (36), worker MCP (34), Claude allowlist (1), controller dispatch (1), and all six corrected migration fixtures passed.
 - [x] (2026-11-03) Milestone 4 committed as `8ab292b85`: mailbox text/golden (4 tests), gate instructions, and docs are complete. Docs `npm run check` and `npm run build` passed, including 2,304 internal links across 27 HTML files.
-- [ ] Follow-up requested by the user: configurable parallel reviewers, default 2, with separate findings attribution and an all-clean gate. The detailed companion plan is `.agents/plans/parallel-reviewers.md`; complete its implementation before final full validation and push.
+- [x] Follow-up requested by the user: configurable parallel reviewers, default 2, with separate findings attribution and an all-clean gate. Implemented in `f61b30a62`; the companion plan `.agents/plans/parallel-reviewers.md` records durable recovery, presentation, and validation evidence.
+- [x] Final workspace coverage, isolated upgrade regressions, targeted failure reruns, formatting, Clippy, docs, and web validation complete. Desktop excluded only for missing GTK/WebKit development libraries.
+- [ ] Push the completed implementation to `origin/master` and record delivery.
 
 ## Surprises & Discoveries
 
@@ -82,7 +84,7 @@ Milestone 1 replaces model-generated JSON parsing with a plain-text contract and
 
 Milestone 2 persists pending findings in SQL, refuses overrides for changed or incomplete repository sets, records an acknowledged audit request before unlocking refs, and completes admitted work through shutdown. Tests cover missing/changed/duplicate roots, audit refusal, failed-save retries, reservation ownership, cancellation, ordered persistence, and shutdown. The first test attempt exposed test-fixture setup mistakes, which were fixed and only the failing cases rerun before the final affected-module checkpoint.
 
-Milestones 3 and 4 expose the audited override through the same push-only MCP gate, preserve its reason across transport/API boundaries, and document its exact-tree behavior. Compatibility revision 105 rejects readers that cannot decode the new durable action. The schema-fixture reruns use restored historical layouts, without changing committed migration 104. All checkpoint checks pass. The user-added parallel-review extension and final whole-workspace checks still remain before pushing.
+Milestones 3 and 4 expose the audited override through the same push-only MCP gate, preserve its reason across transport/API boundaries, and document its exact-tree behavior. Compatibility revision 105 rejects readers that cannot decode the new durable action. The schema-fixture reruns use restored historical layouts, without changing committed migration 104. The parallel-review extension is also implemented and validated: complete findings groups remain overridable; incomplete groups retain finished findings, preserve coverage, and cannot be overridden. Final workspace coverage and focused failure reruns are complete, and Clippy, formatting, docs, and web checks pass. The companion plan contains final commands, limits, and evidence.
 
 ## Context and Orientation
 
