@@ -13,9 +13,11 @@ The user requested release 2.65.0. The prepared release commit is `2f3c0c88f`, w
 - [x] Diagnosed all completed failures and implemented the three minimal repairs; targeted verification passes.
 - [x] Removed the four obsolete Auto-policy lines from the Code Review settings dialog, retaining reviewer-count guidance; both scoped goldens pass.
 - [x] Ran only checks justified by the fixes; prepared the coherent repair checkpoint for commit.
-- [ ] Commit and push the repair on the current branch after required review.
-- [ ] Request the now-required before-push review of the committed repair and address its verdict before pushing.
-- [ ] Confirm the release is unpublished, replace the unpublished tag according to the runbook, and monitor the new release through GitHub, crates.io, and npm publication.
+- [x] Committed and pushed the repair as `fe6711857` on the current branch.
+- [x] Required before-push review returned Clean for tree `c8fbfe0` before pushing.
+- [x] Reconfirmed the release was absent, replaced only the unpublished tag at `fe6711857`, and started the new release run.
+- [x] Release retry passed, GitHub release is published, crates.io publication passed, and the manual platform nightly passed.
+- [x] Npm stable publication passed; final delivery is complete.
 
 ## Surprises & Discoveries
 
@@ -34,7 +36,7 @@ During repair the user explicitly requested removal of the four outdated Auto-po
 
 ## Outcomes & Retrospective
 
-Release is not yet published. Investigation is in progress.
+The CI repairs and requested settings copy removal are committed, reviewed, and pushed. Release retry `41698016483` passed at `fe6711857`; GitHub, crates.io, and npm stable publication are complete. Manual macOS/Windows nightly checks passed. No published tag was moved. The user's four obsolete Auto-policy lines are absent from the released Code Review dialog, while reviewer-count guidance remains.
 
 ## Context and Orientation
 
@@ -67,6 +69,12 @@ Both scoped terminal goldens passed update and ordinary verification (four comma
 `cargo metadata --offline --format-version 1 --filter-platform x86_64-unknown-linux-gnu` refreshed Cargo.lock by removing only the `serde` edge from `brokk-mj-review`; package versions remain 2.65.0. Cargo-machete 0.9.2 is already installed and matches CI's pin. Targeted dependency, review, and Clippy checks are running after all source writers finished.
 
 Targeted repair verification passes: `cargo machete`; elevated dev-profile `TZ=UTC cargo test -p brokk-mj-review` (29 tests); `cargo clippy -p brokk-mj-controller -p brokk-mj-tui --all-targets -- -D warnings` (no warnings); `cargo fmt --all -- --check`. Logs `.mj/agents/15c4b40f651b0c5ef4f6ac34f01339ed/repair-{cargo-machete,review-tests,controller-tui-clippy,rustfmt}.log`. No test or build commands remain active before committing.
+
+Repair commit `fe6711857` passed the required review, then pushed to master. GitHub release absence was reconfirmed immediately before deleting the failed remote tag. `v2.65.0` was recreated and pushed at that repair commit. Retry: <https://github.com/BrokkAi/mjolnir/actions/runs/41698016483>. The platform-sensitive helper fix also triggered the required manual nightly dispatch on master: <https://github.com/BrokkAi/mjolnir/actions/runs/41698027454>. Manual nightly runs do not publish releases. Monitoring now reports any failed job promptly rather than waiting for an entire long build window.
+
+The retry, all platform archives, and platform nightly passed. Published GitHub release: <https://github.com/BrokkAi/mjolnir/releases/tag/v2.65.0>. Crates workflow completed successfully: <https://github.com/BrokkAi/mjolnir/actions/runs/41705977414>. Npm workflow completed successfully, including verification, packaging, and publishing platform packages before the wrapper: <https://github.com/BrokkAi/mjolnir/actions/runs/41706002125>. Its checkout resolved `v2.65.0`. Its metadata branch is `master` because it is a `workflow_run` trigger; filtering all workflow runs only by `headBranch == "v2.65.0"` incorrectly hides this publication. The workflow resolves its release tag from the triggering release workflow's head branch.
+
+Final acceptance: tag `v2.65.0` remains at reviewed repair commit `fe6711857dd12f5a4ea1763ef8a1d760b386a318`. All release and package-channel workflows succeeded; no approval wait or active monitoring process remains. The initial failed attempt was never published and was replaced only after confirming GitHub release absence.
 
 ## Interfaces and Dependencies
 
