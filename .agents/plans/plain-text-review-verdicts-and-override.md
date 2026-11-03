@@ -23,7 +23,7 @@ You can see both working by running the unit tests named in each milestone, and 
 - [x] (2026-11-03) Milestone 4 committed as `8ab292b85`: mailbox text/golden (4 tests), gate instructions, and docs are complete. Docs `npm run check` and `npm run build` passed, including 2,304 internal links across 27 HTML files.
 - [x] Follow-up requested by the user: configurable parallel reviewers, default 2, with separate findings attribution and an all-clean gate. Implemented in `f61b30a62`; the companion plan `.agents/plans/parallel-reviewers.md` records durable recovery, presentation, and validation evidence.
 - [x] Final workspace coverage, isolated upgrade regressions, targeted failure reruns, formatting, Clippy, docs, and web validation complete. Desktop excluded only for missing GTK/WebKit development libraries.
-- [ ] Push the completed implementation to `origin/master` and record delivery.
+- [x] Pushed the completed implementation through `46cf31c63` to `origin/master`; the companion plan records delivery and final merge validation.
 
 ## Surprises & Discoveries
 
@@ -85,6 +85,8 @@ Milestone 1 replaces model-generated JSON parsing with a plain-text contract and
 Milestone 2 persists pending findings in SQL, refuses overrides for changed or incomplete repository sets, records an acknowledged audit request before unlocking refs, and completes admitted work through shutdown. Tests cover missing/changed/duplicate roots, audit refusal, failed-save retries, reservation ownership, cancellation, ordered persistence, and shutdown. The first test attempt exposed test-fixture setup mistakes, which were fixed and only the failing cases rerun before the final affected-module checkpoint.
 
 Milestones 3 and 4 expose the audited override through the same push-only MCP gate, preserve its reason across transport/API boundaries, and document its exact-tree behavior. Compatibility revision 105 rejects readers that cannot decode the new durable action. The schema-fixture reruns use restored historical layouts, without changing committed migration 104. The parallel-review extension is also implemented and validated: complete findings groups remain overridable; incomplete groups retain finished findings, preserve coverage, and cannot be overridden. Final workspace coverage and focused failure reruns are complete, and Clippy, formatting, docs, and web checks pass. The companion plan contains final commands, limits, and evidence.
+
+Delivery completed: `origin/master` includes all milestones and the parallel extension through `46cf31c63`. A newer upstream daemon-placement feature was merged, with configuration version 21 preserving both settings; focused merge and isolated startup checks pass. No release or live default-store upgrade was performed.
 
 ## Context and Orientation
 

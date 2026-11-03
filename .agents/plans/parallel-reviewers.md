@@ -18,7 +18,7 @@ The current plaintext contract remains: the exact trimmed ASCII-case-insensitive
 - [x] Pure driver fan-in, durable emitted-work replay, and host group recovery implementation complete; integrated compilation and focused host/driver regressions pass after corrections.
 - [x] Cover group ordering, partial failures, cancellation/recovery, attribution, and push-gate behavior at existing integration/golden surfaces.
 - [x] Complete final workspace coverage, targeted failure reruns, formatting, Clippy, documentation, and frontend validation; commit coherent checkpoints on the current branch.
-- [ ] Push the validated delivery to `origin/master` and record the result.
+- [x] Pushed the validated delivery through `46cf31c63` to `origin/master`; recorded the successful fast-forward from `ec3c0a3cb`.
 
 ## Surprises & Discoveries
 
@@ -70,7 +70,7 @@ This host lacks GTK/WebKit development packages (`pkg-config` cannot find `gtk+-
 
 ## Outcomes & Retrospective
 
-The plaintext and audited-override companion checkpoints are committed, as is the integrated parallel feature (`f61b30a62`). Upstream is merged (`5a5a2d17b`). Every buildable workspace test target has been exercised; identified failures were fixed or verified in focused reruns, without repeating passing suites. Formatting and final workspace Clippy pass, as do documentation and web checks. Delivery is ready to push.
+The plaintext and audited-override companion checkpoints and the integrated parallel feature are implemented, validated, and pushed to `origin/master` through `46cf31c63`. Upstream daemon placement is retained, with combined configuration version 21. Every buildable workspace test target has been exercised; identified failures were fixed or verified in focused reruns, without repeating passing suites. Formatting and final workspace Clippy pass, as do documentation and web checks. The host's missing desktop libraries and the single transient fake-engine test failure are documented below.
 
 ## Context and Orientation
 
@@ -143,6 +143,8 @@ Delivery checkpoint `c76130124` contains final lint, migration-fixture, and nest
 All three ordinary post-merge golden checks pass without expected-output edits: review-settings, settings-root, and the viewer-settings exchange (exact controller filter `settings_routes_hide_literal_secrets_and_save_through_the_shared_model`). Logs `.mj/agents/b24130a99cf76839673ff79da9a2a39e/*-postmerge-verify.log`. The existing `save_review_reloads_latest_config_and_preserves_unrelated_sections` integration test now begins with nondefault daemon runtime/image/mounts and a version-20 file, then checks that review save upgrades to 21, keeps the daemon value, and saves review count 3. Its focused elevated UTC test passes; `.mj/agents/57bbea10c099c4902c60532570967dcb/core-save-review-config21-test.log`.
 
 Final post-extension workspace Clippy and formatting both pass without warnings or errors; `.mj/agents/15c4b40f651b0c5ef4f6ac34f01339ed/last-{workspace-clippy,rustfmt}.log`. No Cargo commands remain active before the final commit and push.
+
+Delivery: `git push origin HEAD:master` succeeded, advancing `origin/master` from `ec3c0a3cb` to `46cf31c63`. Implementation checkpoints are `7fb6becda`, `6d5728d85`, `ed653d5c1`, `8ab292b85`, `f61b30a62`, `c76130124`, and `46cf31c63`; merge commits retain upstream work. This final documentation update records the completed delivery.
 
 ## Interfaces and Dependencies
 
