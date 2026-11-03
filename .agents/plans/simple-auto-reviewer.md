@@ -14,9 +14,11 @@ Auto code review should be predictable: try GPT Terra, DeepSeek Flash, Claude Ha
 - [x] (2026-11-03) Full core/controller suites passed: controller 2,231 passed with 19 ignored; core 553 passed with 4 ignored; three Jev scenarios passed. Formatting and diff checks passed.
 - [x] (2026-11-03) Workspace `cargo clippy --all-targets -- -D warnings` passed. Final reviewer-selection rerun passed all five tests after the unknown-price ordering correction. Source review is complete.
 
+- [x] (2026-11-03) Committed the implementation as `f5026b9dc`, merged upstream without conflicts, and passed reviewer/quota checks and workspace Clippy on the combined tree.
+
 ## Surprises & Discoveries
 
-The existing implementation chooses providers before models and excludes every provider outside its fixed list unless a model is explicitly named. The new cheapest-model fallback requires every enabled profile to be eligible for a review baseline. Pricing and Claude alias resolution already exist under `mj-controller/src/database/usage_report/`; reuse their interpretation instead of inventing another model identity parser. The current docs incorrectly describe API billing as healthy quota.
+The previous implementation chose providers before models and excluded every provider outside its fixed list unless a model was explicitly named. The new cheapest-model fallback requires every enabled profile to be eligible for a review baseline. Pricing and Claude alias resolution existed under `mj-controller/src/database/usage_report/`; both now live in `mj-core/src/usage/` and serve usage reports and reviewer selection. The previous docs incorrectly described API billing as healthy quota; the updated docs describe the implemented billing tiers.
 
 ## Decision Log
 
@@ -36,7 +38,7 @@ The simpler selector and documentation are implemented. The full affected-crate 
 
 ## Context and Orientation
 
-`mj-controller/src/review_selection.rs` resolves reviewer identities before the hidden child launches. `mj-core/src/review/settings.rs` owns shared policy and determines whether new sessions capture the baseline tree needed for later review. `mj-controller/src/server_runtime/profile_catalog.rs` is the daemon-owned cache of advertised model IDs and their efforts. `mj-controller/src/utility_llm.rs` supplies shared quota readings. Usage-report pricing and Claude alias resolution currently live beneath `mj-controller/src/database/usage_report/`; move these reusable helpers to `mj-core/src/usage/` and keep usage reports using the same implementations.
+`mj-controller/src/review_selection.rs` resolves reviewer identities before the hidden child launches. `mj-core/src/review/settings.rs` owns shared policy and determines whether new sessions capture the baseline tree needed for later review. `mj-controller/src/server_runtime/profile_catalog.rs` is the daemon-owned cache of advertised model IDs and their efforts. `mj-controller/src/utility_llm.rs` supplies shared quota readings. Shared usage pricing and Claude alias resolution live in `mj-core/src/usage/pricing.rs` and `mj-core/src/usage/model_catalog.rs`; usage reports and reviewer selection both consume them.
 
 ## Plan of Work
 
@@ -68,4 +70,4 @@ Initial plan created after confirming the user's priority list and subsequent Hi
 
 2026-11-03: Implementation now reuses model-scoped quota matching and retains the known-profile-first discovery rule for a session-pinned model, so a broken unknown profile does not delay a confirmed match. Package names use the `brokk-` prefix; validation commands above reflect Cargo metadata.
 
-2026-11-03: Final review clarified that known fallback prices precede unknown prices even when this repeats the primary model. Fetched upstream has four concurrent quota-runtime commits; merge and validate their interaction with reviewer selection during delivery.
+2026-11-03: Final review clarified that known fallback prices precede unknown prices even when this repeats the primary model. Implementation commit `f5026b9dc` was merged cleanly with four concurrent upstream quota-runtime commits in `0617b2c46`. On the merged source, all five reviewer-selection tests and 72 quota tests passed (one live-service quota test ignored), followed by successful workspace Clippy and formatting checks.
