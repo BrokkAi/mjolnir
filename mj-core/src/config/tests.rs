@@ -833,6 +833,7 @@ fn sample_config() -> Config {
         spinner: SpinnerStyle::default(),
         theme: Default::default(),
         phone: PhoneConfig::default(),
+        daemon: Default::default(),
         github: GithubConfig::default(),
         continuation: Default::default(),
         review: ReviewConfig::default(),

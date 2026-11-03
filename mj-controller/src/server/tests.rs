@@ -80,6 +80,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        daemon: Default::default(),
         github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),

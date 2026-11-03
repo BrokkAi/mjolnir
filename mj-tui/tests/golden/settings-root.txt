@@ -12,6 +12,7 @@
 │                     │   Projects                        hel                                                        │                     │
 │                     │   Runtimes                        podman                                                     │                     │
 │                     │   Machines                        local                                                      │                     │
+│                     │   Daemon                          Host                                                       │                     │
 │                     │                                                                                              │                     │
 │                     │   Sessions                                                                                   │                     │
 │                     │   Code Review                     Off                                                        │                     │
@@ -25,13 +26,12 @@
 │                     │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │                     │
 │                     │   Notifications                   Terminal                                                   │                     │
 │                     │   Advanced                        All off                                                    │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │   Privacy                                                                                    │  ───────────────────╮
+│                     │   Jev (hosted service)            On · sends turn text for classification                    │                     │
 │                     │                                                                                              │                     │
-│                     │   Privacy                                                                                    │  ───────────────────╯
-│                     │   Jev (hosted service)            On · sends turn text for classification                    │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │   Other                                                                                      │                     │
-│                     │   GitHub events                   On · GitHub activity                                       │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │   Other                                                                                      │  ───────────────────╯
+│                     │   GitHub events                   On · GitHub activity                                       │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │   Save and Close                                                                             │  ──────────── ▁   ▄ ╮
@@ -152,6 +152,7 @@ draft paths: theme="light"; interface.theme present=false; keys.prefix="ctrl+b"
   │   Projects                        hel                                                        │
   │   Runtimes                        podman                                                     │
   │   Machines                        local                                                      │
+  │   Daemon                          Host                                                       │
   │                                                                                              │
   │   Sessions                                                                                   │
   │   Code Review                     Off                                                        │
@@ -166,7 +167,6 @@ draft paths: theme="light"; interface.theme present=false; keys.prefix="ctrl+b"
   │   Notifications                   Terminal                                                   │
   │   Advanced                        All off                                                    │
   │                                                                                              │
-  │   Privacy                                                                                    │
   │   Save and Close                                                                             │
   ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
@@ -350,6 +350,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │   Projects                        hel                                                        │
   │   Runtimes                        podman                                                     │
   │   Machines                        local                                                      │
+  │   Daemon                          Host                                                       │
   │                                                                                              │
   │   Sessions                                                                                   │
   │   Code Review                     Off                                                        │
@@ -364,7 +365,6 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │   Notifications                   Terminal                                                   │
   │   Advanced                        All off                                                    │
   │                                                                                              │
-  │   Privacy                                                                                    │
   │   Save and Close                                                                             │
   ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 

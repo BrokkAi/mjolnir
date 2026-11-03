@@ -110,6 +110,7 @@ action: None
   │   Projects                        hel                                                        │
   │   Runtimes                        podman                                                     │
   │   Machines                        local                                                      │
+  │   Daemon                          Host                                                       │
   │                                                                                              │
   │   Sessions                                                                                   │
   │   Code Review                     Off                                                        │
@@ -123,7 +124,6 @@ action: None
   │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │
   │   Notifications                   Terminal                                                   │
   │   Advanced                        All off                                                    │
-  │                                                                                              │
   │ Saving settings…                                                                             │
   │   Saving…                                                                                    │
   ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯

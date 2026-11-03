@@ -15,6 +15,9 @@ pub(crate) use mj_client::executable::{
     process_runs_this_executable, running_executable_path,
 };
 pub(crate) use mj_controller::daemon::run_daemon_process;
+
+#[cfg(target_os = "linux")]
+mod container;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -267,34 +270,7 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
     }
 
     let log_path = data_dir().join("daemon.log");
-    let launched = tokio::task::spawn_blocking({
-        let log_path = log_path.clone();
-        move || -> Result<LaunchedDaemon> {
-            // Everything the daemon writes from here on belongs to this launch.
-            let log_offset = fs::metadata(&log_path)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
-            let executable = daemon_launch_executable()?;
-            let mut command = std::process::Command::new(executable);
-            command
-                .arg("daemon-run")
-                // This switch makes the invoking development client authoritative. It
-                // has no meaning inside the persistent daemon or its child processes.
-                .env_remove(DEV_RESTART_STALE_DAEMON_ENV);
-            command.env_remove("MJ_UPGRADE_RESUME_FILE");
-            // The program runs through `/proc/self/exe` on Linux, which `ps`
-            // would otherwise show as the daemon's name. `mj daemon-run` is
-            // what a person looks for (launch finding R13-9); nothing reads
-            // the daemon's argv[0], and the checks that recognize a daemon
-            // read argv[1].
-            #[cfg(unix)]
-            std::os::unix::process::CommandExt::arg0(&mut command, "mj");
-            let pid = mj_core::subprocess::spawn_detached(&mut command, &log_path)?;
-            Ok(LaunchedDaemon { pid, log_offset })
-        }
-    })
-    .await
-    .context("spawn daemon task failed")??;
+    let launched = launch_daemon(&log_path).await?;
     let launched_at = Instant::now();
     tracing::info!(pid = launched.pid, "launched the daemon");
 
@@ -338,6 +314,120 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
     };
     let (log_path, output) = launched.output_since_launch(&log_path).await;
     Err(launched.failure(reason, output, &log_path))
+}
+
+/// The environment variable naming the container a daemon was launched in.
+/// Clients read it from the daemon's `/proc` entry to see where it runs.
+pub(crate) const DAEMON_CONTAINER_ENV: &str = "MJ_DAEMON_CONTAINER";
+
+/// The container the daemon with `pid` runs in, or `None` on the host.
+fn running_placement(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let environ = fs::read(format!("/proc/{pid}/environ")).ok()?;
+        let prefix = format!("{DAEMON_CONTAINER_ENV}=");
+        environ
+            .split(|byte| *byte == 0)
+            .find_map(|entry| entry.strip_prefix(prefix.as_bytes()))
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Where the configuration says the daemon runs: `Some(None)` on the host,
+/// `Some(Some(name))` in that container, and `None` when that cannot be worked
+/// out, which leaves the running daemon where it is.
+fn configured_placement() -> Option<Option<String>> {
+    let config = mj_core::config::Config::load_from(&mj_core::config::config_path()).ok()?;
+    if config.daemon.runtime.engine().is_none() {
+        return Some(None);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match container::container_name(&config.daemon) {
+            Ok(name) => Some(Some(name)),
+            Err(error) => {
+                tracing::warn!(
+                    error = format!("{error:#}"),
+                    "could not name the daemon container"
+                );
+                None
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    Some(None)
+}
+
+/// Start `mj daemon-run` where `[daemon] runtime` says: a detached process on
+/// this computer, or a process in this instance's daemon container. Either way
+/// the result is a host PID the caller follows until the daemon answers.
+async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
+    let configured = tokio::task::spawn_blocking(|| {
+        mj_core::config::Config::load_from(&mj_core::config::config_path())
+    })
+    .await
+    .context("read daemon configuration task failed")?;
+    // An unreadable file is the daemon's to report: it refuses to start and
+    // says why, which is the answer this launch then shows.
+    let daemon = configured.map(|config| config.daemon).unwrap_or_default();
+    if daemon.runtime.engine().is_some() {
+        #[cfg(target_os = "linux")]
+        {
+            let log_offset = fs::metadata(log_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let launched = container::launch(&daemon, log_path).await?;
+            tracing::info!(
+                pid = launched.pid,
+                container = %launched.container,
+                "launched the daemon in its container"
+            );
+            return Ok(LaunchedDaemon {
+                pid: launched.pid,
+                log_offset,
+            });
+        }
+        #[cfg(not(target_os = "linux"))]
+        startup_notice(
+            "A container `[daemon] runtime` needs a Linux host, whose network and process \
+             namespaces the container shares; starting the daemon on this computer instead."
+                .to_owned(),
+        );
+    }
+    tokio::task::spawn_blocking({
+        let log_path = log_path.to_path_buf();
+        move || -> Result<LaunchedDaemon> {
+            // Everything the daemon writes from here on belongs to this launch.
+            let log_offset = fs::metadata(&log_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let executable = daemon_launch_executable()?;
+            let mut command = std::process::Command::new(executable);
+            command
+                .arg("daemon-run")
+                // This switch makes the invoking development client authoritative. It
+                // has no meaning inside the persistent daemon or its child processes.
+                .env_remove(DEV_RESTART_STALE_DAEMON_ENV);
+            command.env_remove("MJ_UPGRADE_RESUME_FILE");
+            command.env_remove(DAEMON_CONTAINER_ENV);
+            // The program runs through `/proc/self/exe` on Linux, which `ps`
+            // would otherwise show as the daemon's name. `mj daemon-run` is
+            // what a person looks for (launch finding R13-9); nothing reads
+            // the daemon's argv[0], and the checks that recognize a daemon
+            // read argv[1].
+            #[cfg(unix)]
+            std::os::unix::process::CommandExt::arg0(&mut command, "mj");
+            let pid = mj_core::subprocess::spawn_detached(&mut command, &log_path)?;
+            Ok(LaunchedDaemon { pid, log_offset })
+        }
+    })
+    .await
+    .context("spawn daemon task failed")?
 }
 
 async fn check_store_readiness() -> Result<()> {
@@ -527,7 +617,33 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
         });
     }
     match build.order {
-        DaemonBuildOrder::Same => {}
+        DaemonBuildOrder::Same => {
+            // Settings choose where the daemon runs; the next client of the
+            // same build moves it there through the ordinary handoff, which
+            // leaves workers running.
+            let pid = metadata.pid;
+            let (running, configured) = tokio::task::spawn_blocking(move || {
+                (running_placement(pid), configured_placement())
+            })
+            .await
+            .context("compare daemon placement task failed")?;
+            if let Some(configured) = configured
+                && configured != running
+            {
+                let notice = match &configured {
+                    Some(container) => format!(
+                        "Settings run the Mjolnir daemon in container {container}; moving it there."
+                    ),
+                    None => "Settings run the Mjolnir daemon on this computer; moving it out of \
+                             its container."
+                        .to_owned(),
+                };
+                return Ok(ExistingDaemon::Replace {
+                    metadata,
+                    notice: Some(notice),
+                });
+            }
+        }
         DaemonBuildOrder::Older => {
             let notice = daemon_build_notice(
                 &metadata,

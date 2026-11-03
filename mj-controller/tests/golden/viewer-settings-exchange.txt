@@ -79,6 +79,15 @@
                 "help": "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings.",
                 "control": "page",
                 "summary": "local"
+              },
+              {
+                "path": [
+                  "daemon"
+                ],
+                "label": "Daemon",
+                "help": "Where the background daemon runs. Saving a change moves it there; running sessions keep going.",
+                "control": "page",
+                "summary": "Host"
               }
             ]
           },
@@ -415,6 +424,15 @@
                 "help": "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings.",
                 "control": "page",
                 "summary": "local"
+              },
+              {
+                "path": [
+                  "daemon"
+                ],
+                "label": "Daemon",
+                "help": "Where the background daemon runs. Saving a change moves it there; running sessions keep going.",
+                "control": "page",
+                "summary": "Host"
               }
             ]
           },
@@ -757,6 +775,15 @@
                 "help": "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings.",
                 "control": "page",
                 "summary": "local"
+              },
+              {
+                "path": [
+                  "daemon"
+                ],
+                "label": "Daemon",
+                "help": "Where the background daemon runs. Saving a change moves it there; running sessions keep going.",
+                "control": "page",
+                "summary": "Host"
               }
             ]
           },

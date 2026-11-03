@@ -119,6 +119,7 @@ RUN apt-get update \
         clang \
         cmake \
         curl \
+        docker-cli \
         eatmydata \
         fd-find \
         file \
@@ -136,6 +137,7 @@ RUN apt-get update \
         openssh-client \
         patch \
         pkg-config \
+        podman-remote \
         procps \
         python3 \
         python3-dev \
@@ -147,7 +149,13 @@ RUN apt-get update \
         tmux \
         unzip \
         zip \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/bin/podman-remote /usr/local/bin/podman
+
+# `docker-cli` and `podman-remote` (as `podman`) are clients only. A daemon run
+# in this image with `[daemon] runtime = "docker"` or `"podman"` reaches the
+# host's engine through its mounted socket (`CONTAINER_HOST` for Podman), so
+# container sessions launch on the host exactly as from a host daemon.
 
 # Astral's distroless image provides native binaries for both supported
 # architectures. Keep uv on the shared PATH, including unprivileged sessions.

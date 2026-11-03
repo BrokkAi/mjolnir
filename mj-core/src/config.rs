@@ -16,6 +16,7 @@
 //! * `loading` -- instance names, directories, and atomic file writes.
 //! * `secrets` -- environment entries that name a secret held elsewhere.
 
+mod daemon;
 mod document;
 mod dsh_credentials;
 mod github;
@@ -27,6 +28,7 @@ mod secrets;
 mod targets;
 mod ui;
 
+pub use daemon::*;
 pub use github::*;
 pub use harness::*;
 pub use keys::*;
@@ -646,9 +648,9 @@ impl Config {
     }
 }
 
-// Breaking: older writers drop a runtime's `enabled = false`, and older readers
-// refuse it on a bare runtime.
-pub const CONFIG_VERSION: u32 = 19;
+// Breaking: older readers refuse the `[daemon]` table, so they cannot start a
+// daemon on the host while this file asks for a container.
+pub const CONFIG_VERSION: u32 = 20;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
@@ -730,6 +732,8 @@ pub struct Config {
     pub spinner: SpinnerStyle,
     pub theme: ThemeChoice,
     pub phone: PhoneConfig,
+    /// Where the daemon runs: on this computer or in a container.
+    pub daemon: DaemonConfig,
     pub github: GithubConfig,
     pub review: ReviewConfig,
     pub continuation: crate::continuation::ContinuationConfig,
@@ -778,6 +782,8 @@ struct StoredConfig {
     theme: ThemeChoice,
     #[serde(default, skip_serializing_if = "PhoneConfig::is_default")]
     phone: PhoneConfig,
+    #[serde(default, skip_serializing_if = "DaemonConfig::is_default")]
+    daemon: DaemonConfig,
     #[serde(default, skip_serializing_if = "GithubConfig::is_default")]
     github: GithubConfig,
     #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
@@ -970,6 +976,7 @@ impl TryFrom<StoredConfig> for Config {
             spinner,
             theme,
             phone,
+            daemon,
             mut github,
             review,
             continuation,
@@ -1050,7 +1057,7 @@ impl TryFrom<StoredConfig> for Config {
             sessions_side,
             advanced,
             notify,
-            // Versions 1 through 17 acquire this build's defaults in memory
+            // Versions 1 through 19 acquire this build's defaults in memory
             // and upgrade on the next ordinary save. Version 12 splits
             // machines from runtimes; version 13 adds automatic continuation;
             // version 14 moves the global cache opt-out onto machines; version
@@ -1058,8 +1065,8 @@ impl TryFrom<StoredConfig> for Config {
             // 16 adds native tool cache storage; 17 replaces per-profile
             // delegation selectors with global task choices, without migrating them;
             // 18 moves the GitHub event switch to github.watch.enabled; 19 adds
-            // `enabled` to runtimes.
-            version: if matches!(version, 1..=18) {
+            // `enabled` to runtimes; 20 adds `[daemon]`.
+            version: if matches!(version, 1..=19) {
                 CONFIG_VERSION
             } else {
                 version
@@ -1067,6 +1074,7 @@ impl TryFrom<StoredConfig> for Config {
             spinner,
             theme,
             phone,
+            daemon,
             github,
             review,
             continuation,
@@ -1116,6 +1124,7 @@ impl From<Config> for StoredConfig {
             spinner: config.spinner,
             theme: config.theme,
             phone: config.phone,
+            daemon: config.daemon,
             github: config.github,
             review: config.review,
             continuation: config.continuation,
@@ -1145,6 +1154,7 @@ impl Default for Config {
             spinner: SpinnerStyle::default(),
             theme: Default::default(),
             phone: PhoneConfig::default(),
+            daemon: DaemonConfig::default(),
             github: GithubConfig::default(),
             review: ReviewConfig::default(),
             continuation: crate::continuation::ContinuationConfig::enabled(),

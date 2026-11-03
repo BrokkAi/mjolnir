@@ -9,7 +9,10 @@ use serde_json::Value;
 /// A root key no group names is still listed, under `Other`, so a setting
 /// added to the configuration can never go missing by being forgotten here.
 pub const ROOT_GROUPS: &[(&str, &[&str])] = &[
-    ("Setup", &["profiles", "bundles", "targets", "machines"]),
+    (
+        "Setup",
+        &["profiles", "bundles", "targets", "machines", "daemon"],
+    ),
     (
         "Sessions",
         &[

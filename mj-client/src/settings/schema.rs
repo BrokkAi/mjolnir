@@ -6,7 +6,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "github":{}, "jev":{}, "quota":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "github":{}, "jev":{}, "quota":{}, "daemon":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":mj_core::config::PhoneConfig::default().bind,"tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -31,6 +31,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
         }
         "jev" => json!({"enabled":true}),
         "quota" => json!({"runtime":"auto"}),
+        "daemon" => json!({"runtime":"host","image":null,"mounts":[]}),
         "sessionwiki" => {
             json!({"archive_after_days":null})
         }
@@ -262,6 +263,8 @@ pub fn label(key: &str) -> String {
         "watch" => "Watcher",
         "jev" => "Jev (hosted service)",
         "quota" => "Quota checks",
+        "daemon" => "Daemon",
+        "mounts" => "Extra host directories",
         "runtime" => "Run in",
         "sessionwiki" => "SessionWiki",
         "archive_after_days" => "Archive after (days)",
@@ -541,6 +544,11 @@ pub fn section_summary(
             Some("host") => "Host".to_owned(),
             _ => "Auto · container when available".to_owned(),
         },
+        "daemon" => match section["runtime"].as_str() {
+            Some("podman") => "Podman container".to_owned(),
+            Some("docker") => "Docker container".to_owned(),
+            _ => "Host".to_owned(),
+        },
         "jev" => {
             if section["enabled"] == Value::Bool(false) {
                 "Off · new sessions send nothing".to_owned()
@@ -724,6 +732,7 @@ pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         "symbols" => &["unicode", "ascii"],
         "tool_output" => &["grouped", "inline"],
         "runtime" if path == ["quota", "runtime"] => &["auto", "podman", "docker", "host"],
+        "runtime" if path == ["daemon", "runtime"] => &["host", "podman", "docker"],
         "mode" if path.first().is_some_and(|key| key == "notify") => &["off", "terminal", "system"],
         "spinner" => &[], // Use the canonical animation list below.
         "permissions" => &["guardian", "yolo"],
@@ -948,6 +957,18 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         "runtime" if path.first().is_some_and(|key| key == "quota") => {
             "Auto: an enabled local Podman runtime, else Docker, else this machine. Podman or Docker: always that engine. Host: never a container."
         }
+        "daemon" => {
+            "Where the background daemon runs. Saving a change moves it there; running sessions keep going."
+        }
+        "runtime" if path.first().is_some_and(|key| key == "daemon") => {
+            "Host: a process on this computer. Podman or Docker: a container sharing this computer's network and processes, where local sessions run too. Linux only."
+        }
+        "image" if path.first().is_some_and(|key| key == "daemon") => {
+            "The daemon container's image. Blank uses this release's agent-dev image."
+        }
+        "mounts" if path.first().is_some_and(|key| key == "daemon") => {
+            "Directories the daemon container sees, beside your home, Mjolnir's data and settings, and /tmp. Add local projects kept elsewhere."
+        }
         "jev" => {
             "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart."
         }
@@ -1017,7 +1038,8 @@ pub fn path_kind(path: &[String]) -> Option<PathKind> {
         ["profiles", _, "home"]
         | ["phone", "tls_cert" | "tls_key"]
         | ["machines", _, "identity_file"]
-        | ["bundles", _, "repositories", _, "local"] => Some(Local),
+        | ["bundles", _, "repositories", _, "local"]
+        | ["daemon", "mounts", _] => Some(Local),
         ["machines", _, "workspace_prefix"]
         | [
             "machines",
