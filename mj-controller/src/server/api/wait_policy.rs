@@ -135,11 +135,10 @@ impl WaitObservation {
         {
             return None;
         }
-        let verdict = self.turn_assessment.as_ref().filter(|assessment| {
-            assessment.turn_id == outcome.command_id
-                && assessment.completed_ordinal == outcome.completed_ordinal
-                && assessment.current()
-        });
+        let verdict = self
+            .turn_assessment
+            .as_ref()
+            .filter(|assessment| assessment.applies_to(outcome));
         // Only a request Jev has yet to answer holds the turn. A failed check
         // waits minutes to retry, with no limit on retries, so holding on it
         // would let a broken Jev profile keep every turn wait open; the turn
@@ -158,7 +157,7 @@ impl WaitObservation {
             if let Some(recovery) = recovery {
                 result.message = Some(recovery.notice.clone());
             }
-        } else if result.outcome == WaitOutcome::Finished && action == Some(Action::AwaitInput) {
+        } else if result.outcome == WaitOutcome::Finished && outcome.requires_input(verdict) {
             result.outcome = WaitOutcome::InputRequired;
             result.stop_reason = Some(mj_core::acp::AWAITING_INPUT_STOP_REASON.into());
         }

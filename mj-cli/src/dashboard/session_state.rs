@@ -54,22 +54,22 @@ impl DashboardContext {
 
     pub(crate) fn request_materialized_projection(
         &mut self,
-        materialized: MaterializedSession,
+        projection: MaterializedProjection,
         viewed_through_event_ordinal: u64,
     ) {
-        let Some((materialized, viewed_through_event_ordinal)) = enqueue_materialized_projection(
+        let Some((projection, viewed_through_event_ordinal)) = enqueue_materialized_projection(
             &mut self.materialized_projections_in_flight,
             &mut self.pending_materialized_projections,
-            materialized,
+            projection,
             viewed_through_event_ordinal,
         ) else {
             return;
         };
 
-        let session_id = materialized.session_id.clone();
+        let session_id = projection.materialized.session_id.clone();
         let previous = self.dashboard.take_projection_cache(&session_id);
         spawn_materialized_session_projection(
-            materialized,
+            projection,
             viewed_through_event_ordinal,
             previous,
             self.dashboard_io_tx.clone(),

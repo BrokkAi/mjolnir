@@ -23,7 +23,7 @@ const WORKER_DIAGNOSIS_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) fn apply_worker_poll_update(
     dashboard: &mut DashboardState,
     update: WorkerPollUpdate,
-) -> Option<mj_core::state::MaterializedSession> {
+) -> Option<crate::dashboard::MaterializedProjection> {
     match update.view.error {
         Some(ViewError::Unreachable(detail)) => {
             dashboard.mark_transcript_unavailable(&update.session_id);
@@ -47,7 +47,7 @@ pub(crate) fn apply_worker_poll_update(
         }
         None => dashboard.report_session_reachable(&update.session_id),
     }
-    update.view.snapshot.map(|snapshot| snapshot.materialized)
+    update.view.snapshot.map(Into::into)
 }
 
 pub(crate) fn spawn_worker_diagnosis(

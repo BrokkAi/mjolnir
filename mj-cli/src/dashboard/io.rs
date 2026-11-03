@@ -805,7 +805,10 @@ impl DashboardContext {
                     .sessions
                     .get(&materialized.session_id)
                     .map_or(0, |session| session.viewed_through_event_ordinal);
-                self.request_materialized_projection(*materialized, viewed_through_event_ordinal);
+                self.request_materialized_projection(
+                    (*materialized).into(),
+                    viewed_through_event_ordinal,
+                );
             }
             DashboardIoUpdate::StoppedSubagentTranscript { session_id, result } => {
                 self.dashboard

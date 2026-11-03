@@ -121,6 +121,20 @@ impl TurnOutcomeKind {
 }
 
 impl MaterializedTurnOutcome {
+    /// Interpret a completed reply using the worker's assessment of that turn.
+    /// Harness questions remain authoritative when no usable assessment exists.
+    pub fn requires_input(&self, assessment: Option<&crate::assessment::TurnAssessment>) -> bool {
+        match self.result().kind {
+            TurnResultKind::InputRequired => true,
+            TurnResultKind::Completed => assessment
+                .filter(|assessment| assessment.applies_to(self))
+                .is_some_and(|assessment| {
+                    assessment.action == Some(crate::assessment::Action::AwaitInput)
+                }),
+            _ => false,
+        }
+    }
+
     pub fn result(&self) -> TurnResult {
         let mut result = self.outcome.result();
         if let Some(diagnostic) = &self.diagnostic {
