@@ -319,6 +319,17 @@ impl PreparedMaterializedSessionDetail {
         viewed_through_event_ordinal: u64,
         previous: MaterializedProjectionCache,
     ) -> Self {
+        Self::from_assessed_materialized(session, None, viewed_through_event_ordinal, previous)
+    }
+
+    /// Keep the worker's verdict paired with the projection it describes, so
+    /// delayed background projections cannot attach it to a different turn.
+    pub fn from_assessed_materialized(
+        session: MaterializedSession,
+        assessment: Option<&mj_core::assessment::TurnAssessment>,
+        viewed_through_event_ordinal: u64,
+        previous: MaterializedProjectionCache,
+    ) -> Self {
         let current_turn_started_at = match session.execution {
             MaterializedExecutionState::Running { started_at_ms } => {
                 u64::try_from(started_at_ms).ok().map(|value| value / 1_000)
@@ -431,10 +442,7 @@ impl PreparedMaterializedSessionDetail {
         let awaiting_input = session.active_turn.is_none()
             && session.queued_prompts.is_empty()
             && session.last_turn_outcome.as_ref().is_some_and(|outcome| {
-                matches!(&outcome.outcome,
-                    mj_core::state::TurnOutcomeKind::Completed { stop_reason }
-                    if mj_core::state::classify_prompt_completion(stop_reason)
-                        == mj_core::state::PromptCompletion::InputRequired)
+                outcome.requires_input(assessment)
                     && !session.transcript.iter().any(|item| {
                         matches!(item.body, TranscriptBody::User { .. })
                             && item.position > outcome.completed_ordinal

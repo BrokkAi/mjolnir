@@ -293,6 +293,12 @@ impl TurnAssessment {
     pub fn current(&self) -> bool {
         !matches!(self.status, Status::Consumed | Status::Superseded)
     }
+    /// Only the assessment of this exact completion may interpret its reply.
+    pub fn applies_to(&self, outcome: &crate::state::MaterializedTurnOutcome) -> bool {
+        self.turn_id == outcome.command_id
+            && self.completed_ordinal == outcome.completed_ordinal
+            && self.current()
+    }
     pub fn needs_classification(&self, now: i64) -> bool {
         matches!(self.status, Status::Pending | Status::Failed)
             && self.retry_at_ms.is_none_or(|at| at <= now)

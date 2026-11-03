@@ -421,7 +421,7 @@ pub(crate) struct DashboardContext {
     pub(crate) web_request_cancel: Option<tokio_util::sync::DropGuard>,
     materialized_projection_permits: Arc<tokio::sync::Semaphore>,
     materialized_projections_in_flight: BTreeSet<String>,
-    pending_materialized_projections: BTreeMap<String, (MaterializedSession, u64)>,
+    pending_materialized_projections: BTreeMap<String, (MaterializedProjection, u64)>,
     project_sources_in_flight: BTreeSet<String>,
     read_receipts: read_receipts::ReadReceipts,
 
@@ -440,23 +440,48 @@ type AwsResourceOptions = (
 );
 type AwsResourceOptionsSender = UnboundedSender<AwsResourceOptions>;
 
+/// One worker publication, kept together while background projections coalesce.
+pub(crate) struct MaterializedProjection {
+    materialized: MaterializedSession,
+    assessment: Option<Box<mj_core::assessment::TurnAssessment>>,
+}
+
+impl From<MaterializedSession> for MaterializedProjection {
+    fn from(materialized: MaterializedSession) -> Self {
+        Self {
+            materialized,
+            assessment: None,
+        }
+    }
+}
+
+impl From<mj_core::state::ManagedSessionSnapshot> for MaterializedProjection {
+    fn from(snapshot: mj_core::state::ManagedSessionSnapshot) -> Self {
+        Self {
+            materialized: snapshot.materialized,
+            assessment: snapshot.operational.assessment,
+        }
+    }
+}
+
 fn enqueue_materialized_projection(
     in_flight: &mut BTreeSet<String>,
-    pending: &mut BTreeMap<String, (MaterializedSession, u64)>,
-    materialized: MaterializedSession,
+    pending: &mut BTreeMap<String, (MaterializedProjection, u64)>,
+    projection: MaterializedProjection,
     viewed_through_event_ordinal: u64,
-) -> Option<(MaterializedSession, u64)> {
-    let session_id = materialized.session_id.clone();
+) -> Option<(MaterializedProjection, u64)> {
+    let session_id = projection.materialized.session_id.clone();
     if !in_flight.insert(session_id.clone()) {
         let replace = pending.get(&session_id).is_none_or(|(queued, _)| {
-            materialized.applied_event_ordinal >= queued.applied_event_ordinal
+            projection.materialized.applied_event_ordinal
+                >= queued.materialized.applied_event_ordinal
         });
         if replace {
-            pending.insert(session_id, (materialized, viewed_through_event_ordinal));
+            pending.insert(session_id, (projection, viewed_through_event_ordinal));
         }
         return None;
     }
-    Some((materialized, viewed_through_event_ordinal))
+    Some((projection, viewed_through_event_ordinal))
 }
 
 /// The top level of the Git worktree `mj` was started in, or `None` outside

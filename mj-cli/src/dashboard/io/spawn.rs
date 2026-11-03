@@ -847,19 +847,20 @@ pub(crate) fn spawn_lifecycle_operation(
 }
 
 pub(crate) fn spawn_materialized_session_projection(
-    materialized: MaterializedSession,
+    projection: crate::dashboard::MaterializedProjection,
     viewed_through_event_ordinal: u64,
     previous: mj_tui::MaterializedProjectionCache,
     updates: UnboundedSender<DashboardIoUpdate>,
     permits: Arc<tokio::sync::Semaphore>,
 ) {
-    let session_id = materialized.session_id.clone();
+    let session_id = projection.materialized.session_id.clone();
     tokio::spawn(async move {
         let result = match permits.acquire_owned().await {
             Ok(permit) => {
                 let result = tokio::task::spawn_blocking(move || {
-                    PreparedMaterializedSessionDetail::from_materialized(
-                        materialized,
+                    PreparedMaterializedSessionDetail::from_assessed_materialized(
+                        projection.materialized,
+                        projection.assessment.as_deref(),
                         viewed_through_event_ordinal,
                         previous,
                     )
