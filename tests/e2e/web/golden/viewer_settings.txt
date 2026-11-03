@@ -12,6 +12,8 @@ Runtimes
 apple-container, docker, +3 more
 Machines
 local
+Daemon
+Host
 SESSIONS
 Code Review
 Off
@@ -19,6 +21,8 @@ Continuation
 On · 3 continuations plus quota recovery
 Sub-agents
 Up to 6 at once
+Quota checks
+Auto · container when available
 SessionWiki
 Keeps every session
 Web Access

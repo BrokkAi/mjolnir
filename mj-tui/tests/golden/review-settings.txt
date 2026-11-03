@@ -12,10 +12,10 @@
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
   │1–3 reviewers are reasonable; more have diminishing returns.                                  │
-  │Auto prefers another provider, then another profile, then the primary.                        │
-  │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
-  │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
-  │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -79,10 +79,10 @@ Setup command available: true
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
   │1–3 reviewers are reasonable; more have diminishing returns.                                  │
-  │Auto prefers another provider, then another profile, then the primary.                        │
-  │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
-  │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
-  │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -112,10 +112,10 @@ action: None
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
   │1–3 reviewers are reasonable; more have diminishing returns.                                  │
-  │Auto prefers another provider, then another profile, then the primary.                        │
-  │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
-  │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
-  │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -178,10 +178,10 @@ saved global review: {"trigger":"off","count":4,"profile":"claude-1"}
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
   │1–3 reviewers are reasonable; more have diminishing returns.                                  │
-  │Auto prefers another provider, then another profile, then the primary.                        │
-  │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
-  │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
-  │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -211,10 +211,10 @@ profile: Auto; model enabled: false; effort enabled: false; save enabled: true
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
   │1–3 reviewers are reasonable; more have diminishing returns.                                  │
-  │Auto prefers another provider, then another profile, then the primary.                        │
-  │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
-  │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
-  │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -243,10 +243,10 @@ profile: Auto; model enabled: false; effort enabled: false; save enabled: true
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
   │1–3 reviewers are reasonable; more have diminishing returns.                                  │
-  │Auto prefers another provider, then another profile, then the primary.                        │
-  │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
-  │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
-  │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │

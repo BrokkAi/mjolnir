@@ -859,16 +859,7 @@ pub(crate) fn render_review_settings(
             Style::default().fg(theme::palette().warning),
         ));
     }
-    if dialog.review.profile.is_none() {
-        for line in [
-            "Auto prefers another provider, then another profile, then the primary.",
-            "Healthy quota before reserve/unknown; exhausted profiles are skipped.",
-            "Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.",
-            "Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.",
-        ] {
-            notes.push(Line::raw(line));
-        }
-    } else if dialog.review.trigger != ReviewTrigger::Off {
+    if dialog.review.profile.is_some() && dialog.review.trigger != ReviewTrigger::Off {
         if dialog.model_choices_discovered
             && dialog.review.model.as_deref().is_some_and(|model| {
                 !dialog
