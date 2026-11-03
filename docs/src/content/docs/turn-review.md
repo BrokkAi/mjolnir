@@ -69,7 +69,7 @@ changes.
 
 ## What the reviewer reads
 
-The reviewer follows the Codex `/review` rubric and returns Codex's JSON review format. Mj renders that output as readable findings text before displaying or storing it. An empty findings list is a clean review; findings include their title, location, and explanation.
+The reviewer follows the Codex `/review` rubric and answers in plain text. The exact reply `No findings.` means the review is clean. Any other non-empty reply is shown as the findings, and an empty reply is a failed review.
 
 The initial prompt includes the user's messages and a per-file diffstat, not the full diff. For each repository it gives the reviewer the root, the baseline tree, the captured tree, and the command:
 
@@ -95,7 +95,9 @@ The review starts from the last cleanly reviewed commit when that commit is stil
 
 The verdict arrives later as a message in the agent's conversation. A clean verdict records the reviewed tree in the Git ref `refs/mj/reviewed/<tree>`. A move keeps every ref under `refs/mj/`: these records, the session's start commit and the turn-review baseline. A managed checkout's checkpoint carries them with their objects. A raw session's checkpoint records their names and object IDs, and restoring it recreates each ref whose object the repository still has. A findings verdict tells the agent to fix the findings, commit the changes, and call `request_review` again. Push review does not hold prompts or send findings as a corrective prompt.
 
-Mjolnir installs a pre-push hook in the session checkout. For pushes made by the agent, the hook refuses any commit tree that has not passed review and prints `mj: <ref> (tree <short>) has not been reviewed.` The hook is enabled only in the harness environment, so pushes from your own terminal are not affected. If the repository already has a pre-push hook, Mjolnir keeps it as `pre-push.before-mj` and runs it after its own check. If `core.hooksPath` points to a directory inside the work tree that Git does not ignore, Mjolnir skips installing the gate and reports that in the transcript. The gate can be skipped with `git push --no-verify`; the agent must follow the request to call `request_review`.
+If the agent judges the findings incorrect or unreasonable, it can call `override_review` with a reason. The override applies to the whole findings verdict and only to the same reviewed trees captured for that verdict. Before the reviewed refs are unlocked, Mjolnir records an “override requested” notice in the session transcript with the reason and findings, so that record remains visible even if a later operation fails. An override is refused while a review is running.
+
+Mjolnir installs a pre-push hook in the session checkout. For pushes made by the agent, the hook refuses any commit tree that has not passed review or been accepted through a recorded override, and prints `mj: <ref> (tree <short>) has not been reviewed.` The hook is enabled only in the harness environment, so pushes from your own terminal are not affected. If the repository already has a pre-push hook, Mjolnir keeps it as `pre-push.before-mj` and runs it after its own check. If `core.hooksPath` points to a directory inside the work tree that Git does not ignore, Mjolnir skips installing the gate and reports that in the transcript. The gate can be skipped with `git push --no-verify`; the agent must follow the request to call `request_review`.
 
 Other harnesses do not receive `request_review` or the push gate. Push mode continues without review, and Mjolnir adds a notice to the transcript.
 

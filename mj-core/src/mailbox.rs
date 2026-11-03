@@ -448,7 +448,7 @@ pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
                     short(tree)
                 ),
                 crate::review::verdict::ReviewVerdict::Findings { synthesis, .. } => format!(
-                    "Review of commits {range} found:\n{synthesis}\nFix these, commit, and call request_review again before pushing."
+                    "Review of commits {range} found:\n{synthesis}\nFix these, commit, and call request_review again before pushing. If you judge these findings incorrect or unreasonable, call override_review with your reason instead."
                 ),
                 crate::review::verdict::ReviewVerdict::Failed { reason } => format!(
                     "Review of commits {range} failed: {reason}. Call request_review again; the push stays blocked until a review is clean."

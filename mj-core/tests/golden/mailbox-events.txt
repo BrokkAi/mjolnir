@@ -2,7 +2,7 @@ Review clean for commits aaaaaaa..bbbbbbb in /workspace/app. Tree ccccccc is rec
 
 Review of commits aaaaaaa..bbbbbbb in /workspace/app found:
 Fix the parser race.
-Fix these, commit, and call request_review again before pushing.
+Fix these, commit, and call request_review again before pushing. If you judge these findings incorrect or unreasonable, call override_review with your reason instead.
 
 Review of commits aaaaaaa..bbbbbbb in /workspace/app failed: reviewer disconnected. Call request_review again; the push stays blocked until a review is clean.
 
