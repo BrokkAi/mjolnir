@@ -49,6 +49,8 @@ pub(crate) struct SessionDetail {
     pub(crate) materialized_applied_event_ordinal: Option<u64>,
     pub(crate) current_turn_started_at: Option<u64>,
     pub(crate) awaiting_input: bool,
+    pub(crate) dismissible_question: Option<mj_core::assessment::InferredQuestion>,
+    pub(crate) question_dismissal: Option<QuestionDismissal>,
     pub(crate) last_activity_at_ms: Option<u64>,
     pub(crate) last_agent_message: Option<Arc<str>>,
     pub(crate) last_user_message: Option<Arc<str>>,
@@ -81,6 +83,15 @@ pub(crate) struct SessionDetail {
     pub(crate) projection: MaterializedProjectionCache,
     /// The Sessions row's rendering of the message it shows.
     pub(crate) output_preview: crate::render::OutputPreviewCache,
+}
+
+#[derive(Debug)]
+pub(crate) enum QuestionDismissal {
+    Submitting(mj_core::assessment::InferredQuestion),
+    Accepted {
+        question: mj_core::assessment::InferredQuestion,
+        ordinal: u64,
+    },
 }
 
 impl SessionDetail {
@@ -236,6 +247,7 @@ pub struct PreparedMaterializedSessionDetail {
     pub(crate) applied_event_ordinal: u64,
     pub(crate) current_turn_started_at: Option<u64>,
     pub(crate) awaiting_input: bool,
+    pub(crate) dismissible_question: Option<mj_core::assessment::InferredQuestion>,
     pub(crate) last_activity_at_ms: Option<u64>,
     pub(crate) last_agent_message: Option<Arc<str>>,
     pub(crate) last_user_message: Option<Arc<str>>,
@@ -448,6 +460,18 @@ impl PreparedMaterializedSessionDetail {
                             && item.position > outcome.completed_ordinal
                     })
             });
+        let dismissible_question = awaiting_input
+            .then(|| {
+                assessment
+                    .filter(|a| {
+                        session
+                            .last_turn_outcome
+                            .as_ref()
+                            .is_some_and(|o| a.applies_to(o))
+                    })
+                    .and_then(|a| a.inferred_question())
+            })
+            .flatten();
         let pending_elicitations = session.pending_elicitations.clone();
         let session_id = session.session_id.clone();
         let applied_event_ordinal = session.applied_event_ordinal;
@@ -466,6 +490,7 @@ impl PreparedMaterializedSessionDetail {
             applied_event_ordinal,
             current_turn_started_at,
             awaiting_input,
+            dismissible_question,
             last_activity_at_ms,
             last_agent_message: last_agent_message
                 .as_ref()
@@ -1182,6 +1207,12 @@ impl DashboardState {
         detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
         detail.current_turn_started_at = prepared.current_turn_started_at;
         detail.awaiting_input = prepared.awaiting_input;
+        detail.dismissible_question = prepared.dismissible_question;
+        if matches!(&detail.question_dismissal,
+            Some(QuestionDismissal::Accepted { ordinal, .. }) if prepared.applied_event_ordinal >= *ordinal)
+        {
+            detail.question_dismissal = None;
+        }
         detail.last_activity_at_ms = prepared.last_activity_at_ms;
         detail.last_agent_message = prepared.last_agent_message;
         detail.last_user_message = prepared.last_user_message;
@@ -1243,6 +1274,63 @@ impl DashboardState {
         detail.unread_interruptions = prepared.unread_interruptions;
         detail.update_unread(through);
         true
+    }
+
+    pub(crate) fn question_dismissal_pending(&self, session_id: &str) -> bool {
+        self.session_details
+            .get(session_id)
+            .is_some_and(|detail| detail.question_dismissal.is_some())
+    }
+
+    pub(crate) fn begin_dismiss_question(&mut self) -> crate::DashboardAction {
+        let Some(session_id) = self.command_session_id().map(str::to_owned) else {
+            return crate::DashboardAction::None;
+        };
+        let Some(detail) = self.session_details.get_mut(&session_id) else {
+            return crate::DashboardAction::None;
+        };
+        let Some(question) = detail.dismissible_question.clone() else {
+            return crate::DashboardAction::None;
+        };
+        detail.question_dismissal = Some(QuestionDismissal::Submitting(question.clone()));
+        crate::DashboardAction::DismissQuestion {
+            session_id,
+            question,
+        }
+    }
+
+    pub fn question_dismissal_finished(
+        &mut self,
+        session_id: &str,
+        question: mj_core::assessment::InferredQuestion,
+        result: Result<u64, String>,
+    ) {
+        let Some(detail) = self.session_details.get_mut(session_id) else {
+            return;
+        };
+        let current = match &detail.question_dismissal {
+            Some(QuestionDismissal::Submitting(current))
+            | Some(QuestionDismissal::Accepted {
+                question: current, ..
+            }) => current == &question,
+            None => false,
+        };
+        if !current {
+            return;
+        }
+        match result {
+            Ok(ordinal) => {
+                detail.question_dismissal = detail
+                    .materialized_applied_event_ordinal
+                    .is_none_or(|applied| applied < ordinal)
+                    .then_some(QuestionDismissal::Accepted { question, ordinal });
+                self.set_notice("Question dismissed.");
+            }
+            Err(error) => {
+                detail.question_dismissal = None;
+                self.set_notice(format!("Could not dismiss question: {error}"));
+            }
+        }
     }
 
     pub fn set_current_step_start(&mut self, session_id: &str, timestamp_ms: Option<i64>) {

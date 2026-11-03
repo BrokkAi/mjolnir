@@ -124,6 +124,9 @@ impl MaterializedTurnOutcome {
     /// Interpret a completed reply using the worker's assessment of that turn.
     /// Harness questions remain authoritative when no usable assessment exists.
     pub fn requires_input(&self, assessment: Option<&crate::assessment::TurnAssessment>) -> bool {
+        if assessment.is_some_and(|a| a.matches_completion(self) && a.question_dismissed()) {
+            return false;
+        }
         match self.result().kind {
             TurnResultKind::InputRequired => true,
             TurnResultKind::Completed => assessment

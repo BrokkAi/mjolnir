@@ -206,6 +206,17 @@ impl DurableRelay {
 
     fn validate_turn_control(&self, command: &RelayCommand) -> Result<(), String> {
         match command {
+            RelayCommand::DismissQuestion { question } => {
+                if self.snapshot.assessment.as_ref().and_then(|a| a.inferred_question()).as_ref()
+                    != Some(question)
+                    || self.snapshot.active_prompt.is_some()
+                    || self.snapshot.harness_turn.is_some()
+                    || !self.snapshot.queued_prompts.is_empty()
+                    || !self.snapshot.assessment_questions.is_empty()
+                {
+                    return Err("The prose question is no longer active".into());
+                }
+            }
             RelayCommand::BeginCheckpoint { .. } if self.snapshot.steering.as_ref().is_some_and(|s| s.holds_queue()) => return Err("Resolve uncertain steering delivery before checkpointing or moving this session".into()),
             RelayCommand::Steer { .. }
             | RelayCommand::ApplyQueuedFor { .. }
@@ -1002,6 +1013,7 @@ impl DurableRelay {
             | RelayCommand::SetSubagentWait { .. }
             | RelayCommand::SetQuotaRecovery { .. }
             | RelayCommand::SeedAssessmentContext { .. }
+            | RelayCommand::DismissQuestion { .. }
             | RelayCommand::InstallPromptContext { .. }
             | RelayCommand::DeliverMailboxEvent { .. }
             | RelayCommand::ResolveSteering { .. } => RelayCommandOutcome::NoticeRecorded,

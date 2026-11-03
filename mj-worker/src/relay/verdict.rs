@@ -646,6 +646,167 @@ mod settled_task_tests {
         relay
     }
 
+    #[test]
+    fn dismissed_questions_survive_journal_replay_and_reject_stale_requests() {
+        use crate::relay::test_support::{finish_prompt, prompt, relay_request, submit_relay};
+        use mj_core::assessment::{Failure, Input, Judgment, Verdict, Work};
+
+        let required = || Verdict {
+            failure: Judgment {
+                choice: Failure::None,
+                confidence: 0.99,
+                probabilities: Default::default(),
+            },
+            input: Judgment {
+                choice: Input::Required,
+                confidence: 0.99,
+                probabilities: [("required".into(), 1.0)].into(),
+            },
+            work: Judgment {
+                choice: Work::Waiting,
+                confidence: 0.99,
+                probabilities: Default::default(),
+            },
+            background: None,
+            reply: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.acp_ready = true;
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: vec![],
+            })
+            .unwrap();
+        submit_relay(&mut relay, "first-turn", prompt("Choose a target."));
+        relay.claim_pending_commands(true).unwrap();
+        finish_prompt(&mut relay, "first-turn");
+        relay.prepare_pending_assessment().unwrap();
+        let (revision, _, _) = relay.pending_replied_verdict().unwrap();
+        relay.apply_turn_assessment(revision, required()).unwrap();
+        let question = relay
+            .snapshot
+            .assessment
+            .as_ref()
+            .unwrap()
+            .inferred_question()
+            .unwrap();
+        let context = serde_json::to_value(&relay.snapshot.assessment_context).unwrap();
+        let command = RelayCommand::DismissQuestion {
+            question: question.clone(),
+        };
+        let accepted = submit_relay(&mut relay, "dismiss-first", command.clone());
+        assert!(
+            relay
+                .snapshot
+                .assessment
+                .as_ref()
+                .unwrap()
+                .question_dismissed()
+        );
+        assert_eq!(
+            submit_relay(&mut relay, "dismiss-first", command.clone()),
+            accepted
+        );
+        assert!(
+            relay.claim_pending_commands(true).unwrap().is_empty(),
+            "dismissal never reaches the harness"
+        );
+        assert_eq!(
+            serde_json::to_value(&relay.snapshot.assessment_context).unwrap(),
+            context,
+            "dismissal grants no new authorization"
+        );
+        assert_eq!(
+            relay.apply_turn_assessment(revision, required()).unwrap(),
+            "stale_turn"
+        );
+
+        // Force reconstruction from the journal, rather than merely reading
+        // the latest snapshot, to exercise serialization and replay together.
+        drop(relay);
+        std::fs::remove_file(dir.path().join(RELAY_STATE_FILE)).unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.acp_ready = true;
+        assert!(
+            relay
+                .snapshot
+                .assessment
+                .as_ref()
+                .unwrap()
+                .question_dismissed()
+        );
+        relay.prepare_pending_assessment().unwrap();
+        assert!(relay.pending_replied_verdict().is_none());
+        assert_eq!(
+            submit_relay(&mut relay, "dismiss-first", command.clone()),
+            accepted
+        );
+
+        submit_relay(
+            &mut relay,
+            "second-turn",
+            prompt("What about the other target?"),
+        );
+        relay.claim_pending_commands(true).unwrap();
+        finish_prompt(&mut relay, "second-turn");
+        relay.prepare_pending_assessment().unwrap();
+        let (revision, _, _) = relay.pending_replied_verdict().unwrap();
+        relay.apply_turn_assessment(revision, required()).unwrap();
+        let next = relay
+            .snapshot
+            .assessment
+            .as_ref()
+            .unwrap()
+            .inferred_question()
+            .unwrap();
+        assert_ne!(question, next);
+        let response = relay.handle(relay_request(
+            "stale-dismissal",
+            RelayRequest::Submit {
+                command_id: "delayed-dismissal".into(),
+                command,
+            },
+        ));
+        assert!(
+            matches!(response.body, RelayResponseBody::Error { .. }),
+            "{response:?}"
+        );
+        assert_eq!(
+            relay
+                .snapshot
+                .assessment
+                .as_ref()
+                .unwrap()
+                .inferred_question(),
+            Some(next.clone())
+        );
+        relay
+            .record_observation(RelayObservation::ElicitationRequested {
+                request: mj_core::elicitation::ElicitationRequest {
+                    id: "permission".into(),
+                    message: "May I deploy?".into(),
+                    title: None,
+                    description: None,
+                    fields: Vec::new(),
+                    tool_permission: None,
+                },
+            })
+            .unwrap();
+        let response = relay.handle(relay_request(
+            "form-owns-input",
+            RelayRequest::Submit {
+                command_id: "dismiss-form".into(),
+                command: RelayCommand::DismissQuestion { question: next },
+            },
+        ));
+        assert!(
+            matches!(response.body, RelayResponseBody::Error { .. }),
+            "{response:?}"
+        );
+        assert!(relay.snapshot.assessment_questions.contains("permission"));
+    }
+
     fn task(id: &str) -> crate::relay::AirTaskFixture {
         crate::relay::AirTaskFixture {
             task_id: id.into(),

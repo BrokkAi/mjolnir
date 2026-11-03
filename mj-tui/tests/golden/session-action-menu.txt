@@ -5,15 +5,15 @@
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│› · ACP pretty                                                                                                        │
 │  Idle  podman                                                                                                        │
-│  │ No message                                                                                                        │
-│  │             ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│                │  Sub-agents Native                                                                 │                │
+│  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │             │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Dismiss question — No prose question is active.                                   │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -55,6 +55,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Dismiss question — No prose question is active.                                   │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -64,16 +65,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
 │                │  Suspend…                                                          ctrl+b shift+x  │                │
-│                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
-│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Restart                                                                           │  ──────────────╯
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╮
+│                │  ────────────────────────────────────────────────────────────────────────────────  │                │
 │                │  Copy session ID                                                                   │                │
-│                │  Destroy…                                                                          │                │
-│                │Give the selected session your own title.                                           │  ──────────────╯
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
-│                                                                                                                      │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Give the selected session your own title.                                           │  ─────── ▁   ▄ ╮
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                        ──────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                                                                                        ─────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -96,6 +96,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Dismiss question — No prose question is active.                                   │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -105,16 +106,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
 │                │  Suspend…                                                          ctrl+b shift+x  │                │
-│                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
-│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Restart                                                                           │  ──────────────╯
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╮
+│                │  ────────────────────────────────────────────────────────────────────────────────  │                │
 │                │  Copy session ID                                                                   │                │
-│                │  Destroy…                                                                          │                │
-│                │Give the selected session your own title.                                           │  ──────────────╯
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
-│                                                                                                                      │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Give the selected session your own title.                                           │  ─────── ▁   ▄ ╮
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                        ──────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                                                                                        ─────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -128,15 +128,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name           23% ◇ ⋯ ││                                                                              │
+│› · ACP pretty                                                                                                        │
 │  Idle  podman                                                                                                        │
-│  │ No message                                                                                                        │
-│  │             ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│                │  Sub-agents Native                                                                 │                │
+│  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │             │  Sub-agents Native                                                                 │                │
 │                │  CPU        10% hourly / 23% recent                                                │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Dismiss question — No prose question is active.                                   │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -169,15 +169,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│› · ACP pretty                                                                                                        │
 │  Idle  podman                                                                                                        │
-│  │ No message                                                                                                        │
-│  │             ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│                │  Sub-agents Native                                                                 │                │
+│  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │             │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Dismiss question — No prose question is active.                                   │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -210,15 +210,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│› · ACP pretty                                                                                                        │
 │  Idle  podman                                                                                                        │
-│  │ No message                                                                                                        │
-│  │             ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│                │  Sub-agents Native                                                                 │                │
+│  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │             │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Dismiss question — No prose question is active.                                   │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -297,15 +297,15 @@ selection after disabled click: Some(ContainerSettings)
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│› · ACP pretty                                                                                                        │
 │  Idle  podman                                                                                                        │
-│  │ No message                                                                                                        │
-│  │             ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│                │  Sub-agents Native                                                                 │                │
+│  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │             │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Dismiss question — No prose question is active.                                   │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -331,3 +331,129 @@ selection after disabled click: Some(ContainerSettings)
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+=== active prose question (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default !1                         ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› ! ACP pretty                                                                                                        │
+│  Question  po                                                                                                        │
+│  │ Waiting on  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │             │  Sub-agents Native                                                                 │                │
+│                │  CPU        no CPU data yet                                                        │                │
+│                │                                                                                    │                │
+│                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
+│                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │› Dismiss question                                                                  │                │
+│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
+│                │  Rename…                                                           ctrl+b shift+t  │                │
+│                │  Pin…                                                                              │                │
+│                │  Unpin — This session is not pinned.                                               │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Container settings                                                                │                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)…                                              │  ──────────────╯
+│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Copy session ID                                                                   │                │
+│                │  Destroy…                                                                          │                │
+│                │Dismiss this question without sending input or granting approval.                   │  ──────────────╯
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
+│                                                                                                                      │
+│                                                                                                        ──────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+dismiss exact question: DismissQuestion { session_id: "session-1", question: InferredQuestion { turn_id: "prompt-1", completed_ordinal: 3 } }
+=== dismissal in flight (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default !1                         ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› ! ACP pretty                                                                                                        │
+│  Question  po                                                                                                        │
+│  │ Waiting on  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │             │  Sub-agents Native                                                                 │                │
+│                │  CPU        no CPU data yet                                                        │                │
+│                │                                                                                    │                │
+│                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
+│                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Dismiss question — Dismissing question.                                           │                │
+│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
+│                │› Rename…                                                           ctrl+b shift+t  │                │
+│                │  Pin…                                                                              │                │
+│                │  Unpin — This session is not pinned.                                               │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Container settings                                                                │                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)…                                              │  ──────────────╯
+│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Copy session ID                                                                   │                │
+│                │  Destroy…                                                                          │                │
+│                │Give the selected session your own title.                                           │  ──────────────╯
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
+│                                                                                                                      │
+│                                                                                                        ──────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+dismissal failure: Some("Could not dismiss question: Worker disconnected")
+=== question dismissed (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default ✓1                         ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› ✓ ACP pretty                                                                                                        │
+│  Idle  podman                                                                                                        │
+│  │ Waiting on  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │             │  Sub-agents Native                                                                 │                │
+│                │  CPU        no CPU data yet                                                        │                │
+│                │                                                                                    │                │
+│                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
+│                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Dismiss question — No prose question is active.                                   │                │
+│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
+│                │› Rename…                                                           ctrl+b shift+t  │                │
+│                │  Pin…                                                                              │                │
+│                │  Unpin — This session is not pinned.                                               │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Container settings                                                                │                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Copy session ID                                                                   │                │
+│                │  Destroy…                                                                          │                │
+│                │Give the selected session your own title.                                           │  ──────────────╯
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
+│                                                                                                                      │
+│                                                                                                        ──────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Question dismissed.
+publication before acknowledgement: Some("Question dismissed.")
