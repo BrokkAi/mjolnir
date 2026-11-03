@@ -167,7 +167,10 @@ Each milestone ends with a commit pushed to master, as `AGENTS.md` requires. Pla
 ## Progress
 
 - [x] (2026-11-03) Diagnosed the 2.65.0 design and wrote this plan.
-- [ ] Milestone 1: clients use only the API; PID uses replaced; attachment leases.
+- [x] (2026-11-03) Milestone 1a: the terminal dashboard and CLI no longer open the store. New daemon actions `DashboardStartup`, `WorkspaceLayouts`, `StoredSessionMetadata`, `StoredProjectionTail`, `StoredSessionSummary`, `SaveSetup`, `ArchiveSpacePreview`, `ResumeRepositoryPreflight` and `ReplaceResumeRepositoryOrigin` (protocol 72). Git status and working context use the dashboard's live runtime state; the new-session preflight uses a configuration-only controller. The remaining store access in clients is the host-daemon launcher (`ControllerStoreGuard`, `check_read_compatibility` in `mj-cli/src/daemon.rs`), which Milestone 3 confines to the host placement.
+- [x] (2026-11-03) Milestone 1b: client attachments are leases renewed by the two-second heartbeat and expired after 15 seconds (`ATTACHMENT_LEASE`), not client PIDs probed with `kill(2)`.
+- [ ] Milestone 1c: daemon liveness, exit waits, build identity and placement asked of the daemon (a non-frozen `Identity` action, since `Status` is frozen) instead of its PID, `/proc/<pid>/exe` and `/proc/<pid>/environ`.
+- [ ] Milestone 1d: configuration ownership. Clients read and write `config.toml` in about fifteen places (`Config::load`, `Config::update`, `mj_client::settings::save`). Decide which settings are the client's own (theme, spinner, splash symbols) and route the rest through the daemon's settings API.
 - [ ] Milestone 2: node prototype (framing, flow control, 64KB+ test).
 - [ ] Milestone 2: all local exec and relay through the node; host-reading call sites moved.
 - [ ] Milestone 3: portable launcher, `--listen`, daemon image, store copy and tombstone, config version 22, 2.65.0 legacy handoff.
@@ -181,6 +184,10 @@ Clients read the SQLite store directly (dashboard state, workspace layout, mount
 Local container sessions bind-mount host paths (project workspaces, build caches, the git cache, attachments). A daemon in a container cannot name those paths for the host engine, so the engine commands that create them must run on the node, not in the daemon.
 
 
+The dashboard was a second writer. Repairing a stopped session's repository origin before resume (`replace_resume_repository_origin`) ran in the terminal process and saved the session record and `config.toml` itself. It now runs in the daemon. Most other `Controller::load()` calls in the dashboard loaded the whole store and then ignored it: lifecycle closures never used the controller they were given, and reloads only needed mount history and container sizes.
+
+`DaemonStatus` is part of the frozen management subset and cannot gain fields, so the daemon's instance identity and placement need a separate, non-frozen action.
+
 ## Decision Log
 
 The daemon shares no directory with the host. The alternative considered, bind-mounting declared host directories and translating paths at the protocol boundary, was rejected because it keeps the daemon dependent on host paths. It also cannot work in Kubernetes and adds a translation table every path-handling site must agree with. The owner asked why the daemon needs to share any directories at all, and the honest answer was that it does not once local work moves to the host. (2026-11-03)
@@ -192,6 +199,8 @@ The node dials the daemon. TCP carries both directions, so only reachability dec
 SSH runs on the node, because the user's keys, agent and configuration are there. A Kubernetes daemon without a connected node therefore cannot reach SSH targets. That is accepted for now and stated in the Kubernetes docs. (2026-11-03)
 
 The 2.65.0 design is replaced, not kept as a Linux fast path, per the owner. (2026-11-03)
+
+Attachment leases expire after 15 seconds. A client renews every two seconds and each renewal may take up to five, so a live client never comes close; a daemon set to exit when idle now exits up to 15 seconds after its last client stops rather than on its next idle tick. (2026-11-03)
 
 
 ## Outcomes & Retrospective

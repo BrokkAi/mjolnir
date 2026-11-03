@@ -814,7 +814,6 @@ async fn client_presence_is_global_and_detach_and_prune_remove_it() {
     handle_action(
         DaemonAction::Attach {
             client_id: "client-a".into(),
-            pid: std::process::id(),
         },
         &metadata,
         &state,
@@ -822,9 +821,12 @@ async fn client_presence_is_global_and_detach_and_prune_remove_it() {
     )
     .await
     .expect("attach presence");
-    state
-        .attachments()
-        .insert("dead-client".into(), Attachment { pid: u32::MAX });
+    state.attachments().insert(
+        "dead-client".into(),
+        Attachment {
+            renewed: std::time::Instant::now() - ATTACHMENT_LEASE,
+        },
+    );
 
     let DaemonReply::Status(status) =
         handle_action(DaemonAction::Status, &metadata, &state, &cancellation)
@@ -928,7 +930,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
     state.attachments().insert(
         "client-a".into(),
         Attachment {
-            pid: std::process::id(),
+            renewed: std::time::Instant::now(),
         },
     );
     assert!(!state.workspace_has_active_resume("workspace-a"));

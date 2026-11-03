@@ -369,7 +369,8 @@ pub struct MaterializedSession {
 
 /// The small portion of a durable projection needed to populate dashboard
 /// rows before the live session delivers its full transcript snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaterializedSessionSummary {
     pub session_id: String,
     pub applied_event_ordinal: u64,
@@ -3044,6 +3045,32 @@ pub struct RecoveryScan {
     /// them and the scan was not widened to all instances.
     #[serde(default)]
     pub hidden_other_instances: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ResumeRepositorySourceMismatch {
+    pub session_id: String,
+    pub bundle_id: String,
+    pub repository_id: String,
+    pub missing_commit: String,
+    pub archived_origin: String,
+    pub configured_origin: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResumeRepositorySourcePreflight {
+    Ready(ResumeRepositorySourceReceipt),
+    RepositoryMoved(ResumeRepositorySourceMismatch),
+    /// The resume converts a local checkout into an isolated workspace. The
+    /// receipt is already valid; the preview is what a person has to confirm
+    /// before the checkout is snapshotted and the session moves off this
+    /// machine.
+    ConvertingRawCheckout {
+        receipt: ResumeRepositorySourceReceipt,
+        preview: Box<RawConversionPreview>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

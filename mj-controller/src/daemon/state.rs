@@ -706,7 +706,7 @@ impl RuntimeState {
 
     pub(super) fn prune_dead_clients(&self) {
         self.attachments()
-            .retain(|_, attachment| process_is_alive(attachment.pid));
+            .retain(|_, attachment| attachment.renewed.elapsed() < ATTACHMENT_LEASE);
     }
 
     pub(super) fn workspace_has_active_resume(&self, workspace_id: &str) -> bool {

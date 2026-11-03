@@ -181,6 +181,19 @@ pub(crate) fn spawn_workspace_management_load(
     })
 }
 
+/// Stored layouts of these workspaces, read by the daemon, which alone opens
+/// the store. Called from blocking tasks.
+fn stored_workspace_layouts(
+    workspace_ids: Vec<String>,
+) -> Result<mj_client::daemon::WorkspaceLayouts> {
+    mj_core::runtime::block_on(async {
+        daemon::connect_or_start()
+            .await?
+            .workspace_layouts(workspace_ids)
+            .await
+    })?
+}
+
 /// Reads layouts for workspace ids discovered after the dashboard opened.
 /// Loading is deliberately separate from the runtime snapshot so a late
 /// result cannot overwrite a pane size the local client already edited.
@@ -192,13 +205,10 @@ pub(crate) fn spawn_workspace_pane_sizes_load(
         "load workspace pane sizes",
         updates,
         move || {
-            workspace_ids
+            Ok(stored_workspace_layouts(workspace_ids)?
+                .pane_sizes
                 .into_iter()
-                .map(|workspace_id| {
-                    let sizes = mj_controller::database::load_workspace_pane_sizes(&workspace_id)?;
-                    Ok((workspace_id, sizes))
-                })
-                .collect()
+                .collect())
         },
         |result| DashboardIoUpdate::WorkspacePaneSizes { result },
     )
@@ -214,13 +224,10 @@ pub(crate) fn spawn_workspace_layouts_load(
         "load workspace layouts",
         updates,
         move || {
-            workspace_ids
+            Ok(stored_workspace_layouts(workspace_ids)?
+                .conversation_layouts
                 .into_iter()
-                .map(|workspace_id| {
-                    let layout = mj_controller::database::load_workspace_layout(&workspace_id)?;
-                    Ok((workspace_id, layout))
-                })
-                .collect()
+                .collect())
         },
         |result| DashboardIoUpdate::WorkspaceLayouts { result },
     )
@@ -700,6 +707,7 @@ pub(crate) fn spawn_setup_discovery(
     )
 }
 
+#[cfg(test)]
 pub(crate) use mj_client::settings::save::save_at as save_setup_at;
 
 pub(crate) fn spawn_setup_save(
@@ -715,8 +723,14 @@ pub(crate) fn spawn_setup_save(
         "saving setup",
         updates,
         move || {
-            let state = mj_controller::database::load_state()?;
-            save_setup_at(&mj_core::config::config_path(), &original, &updated, &state)
+            // The daemon checks the edit against the stored sessions it would
+            // disturb; only it opens the store.
+            mj_core::runtime::block_on(async {
+                daemon::connect_or_start()
+                    .await?
+                    .save_setup(original, updated)
+                    .await
+            })?
         },
         move |result| DashboardIoUpdate::SetupSaved {
             generation,
@@ -796,13 +810,12 @@ pub(crate) struct LifecycleOperationRequest {
 
 /// Runs one session lifecycle operation on a blocking task.
 ///
-/// Every one of them reloads the controller so it acts on durable state, then
-/// answers on the lifecycle channel whatever happens. The daemon owns
-/// lifecycle/recovery serialization.
+/// Every one of them asks the daemon, which owns lifecycle/recovery
+/// serialization, and answers on the lifecycle channel whatever happens.
 pub(crate) fn spawn_lifecycle_operation(
     request: LifecycleOperationRequest,
     tracker: CriticalOperationTracker,
-    work: impl FnOnce(&mut Controller, Arc<AtomicBool>) -> Result<LifecycleSuccess> + Send + 'static,
+    work: impl FnOnce(Arc<AtomicBool>) -> Result<LifecycleSuccess> + Send + 'static,
 ) {
     let LifecycleOperationRequest {
         session_id,
@@ -819,11 +832,7 @@ pub(crate) fn spawn_lifecycle_operation(
         cancelled.clone(),
     );
     tokio::task::spawn_blocking(move || {
-        let result = (|| -> Result<LifecycleSuccess> {
-            let mut controller = Controller::load()?;
-            work(&mut controller, cancelled.clone())
-        })()
-        .map_err(|error| format!("{error:#}"));
+        let result = work(cancelled.clone()).map_err(|error| format!("{error:#}"));
         report(
             "session lifecycle operation",
             &updates,
@@ -882,11 +891,12 @@ pub(crate) fn spawn_stopped_subagent_transcript(
         "load a stopped sub-agent's transcript",
         updates,
         move || {
-            Ok(mj_controller::database::load_materialized_projection_tail(
-                &session_id,
-                mj_chat::chat::TAIL_SEED_ITEMS,
-            )?
-            .map(|(session, _)| session))
+            mj_core::runtime::block_on(async {
+                daemon::connect_or_start()
+                    .await?
+                    .stored_projection_tail(session_id, mj_chat::chat::TAIL_SEED_ITEMS)
+                    .await
+            })?
         },
         move |result| DashboardIoUpdate::StoppedSubagentTranscript {
             session_id: reported_session_id,
@@ -905,8 +915,13 @@ pub(crate) fn spawn_stored_session_summary(
         "load stored session summary",
         updates,
         move || {
-            let summary = mj_controller::database::load_materialized_session_summary(&session_id)?
-                .with_context(|| format!("session {session_id} has no stored projection"))?;
+            let summary = mj_core::runtime::block_on(async {
+                daemon::connect_or_start()
+                    .await?
+                    .stored_session_summary(session_id.clone())
+                    .await
+            })??
+            .with_context(|| format!("session {session_id} has no stored projection"))?;
             Ok(PreparedMaterializedSessionSummary::from_materialized(
                 summary,
                 viewed_through_event_ordinal,
@@ -921,27 +936,14 @@ pub(crate) fn spawn_stored_session_summary(
 
 pub(crate) fn spawn_lifecycle_reload(
     reload: LifecycleReload,
-    workspace_id: String,
-    client_id: String,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
     spawn_io(
         "reload lifecycle state",
         updates,
-        move || {
-            let mut controller = Controller::load()?;
-            crate::dashboard::retain_workspace_sessions(
-                &mut controller,
-                &workspace_id,
-                &client_id,
-            )?;
-            Ok(controller)
-        },
+        move || crate::dashboard::io::stored_session_metadata(),
         move |result| {
-            DashboardIoUpdate::LifecycleReloaded(Box::new(LifecycleReloaded {
-                reload,
-                result: result.map(DashboardMetadata::from),
-            }))
+            DashboardIoUpdate::LifecycleReloaded(Box::new(LifecycleReloaded { reload, result }))
         },
     );
 }
@@ -1001,8 +1003,6 @@ pub(crate) struct ConfigRenameRequest {
     pub(crate) old_id: String,
     pub(crate) new_id: String,
     pub(crate) profile: bool,
-    pub(crate) workspace_id: String,
-    pub(crate) client_id: String,
 }
 
 pub(crate) fn spawn_config_rename(
@@ -1015,8 +1015,6 @@ pub(crate) fn spawn_config_rename(
         old_id,
         new_id,
         profile,
-        workspace_id,
-        client_id,
     } = request;
     spawn_critical_async(
         tracker,
@@ -1030,22 +1028,12 @@ pub(crate) fn spawn_config_rename(
             } else {
                 daemon.rename_target(old_id, new_id).await?;
             }
-            tokio::task::spawn_blocking(move || {
-                let mut controller = Controller::load()?;
-                crate::dashboard::retain_workspace_sessions(
-                    &mut controller,
-                    &workspace_id,
-                    &client_id,
-                )?;
-                Ok::<_, anyhow::Error>(controller)
-            })
-            .await
-            .context("configuration reload task panicked")?
+            daemon
+                .stored_session_metadata()
+                .await
+                .map(DashboardMetadata::from)
         },
-        move |result| DashboardIoUpdate::ConfigRename {
-            what,
-            result: result.map(DashboardMetadata::from),
-        },
+        move |result| DashboardIoUpdate::ConfigRename { what, result },
     );
 }
 
@@ -1069,8 +1057,6 @@ pub(crate) struct ContainerSettingsRequest {
     pub(crate) memory: Option<String>,
     pub(crate) additional_mounts: Vec<mj_controller::targets::AdditionalMount>,
     pub(crate) mount_history: Vec<std::path::PathBuf>,
-    pub(crate) workspace_id: String,
-    pub(crate) client_id: String,
 }
 
 pub(crate) fn spawn_dashboard_container_settings(
@@ -1090,8 +1076,6 @@ pub(crate) fn spawn_dashboard_container_settings(
                 memory,
                 additional_mounts,
                 mount_history,
-                workspace_id,
-                client_id,
             } = request;
             mj_core::runtime::block_on(async {
                 daemon::connect_or_start()
@@ -1108,18 +1092,9 @@ pub(crate) fn spawn_dashboard_container_settings(
             // Return a fresh durable snapshot so the dashboard can update its
             // state without synchronously reloading the database while it is
             // applying the worker result.
-            let mut controller = Controller::load()?;
-            crate::dashboard::retain_workspace_sessions(
-                &mut controller,
-                &workspace_id,
-                &client_id,
-            )?;
-            Ok(controller)
+            crate::dashboard::io::stored_session_metadata()
         },
-        move |result| DashboardIoUpdate::ContainerSettings {
-            session_id,
-            result: result.map(DashboardMetadata::from),
-        },
+        move |result| DashboardIoUpdate::ContainerSettings { session_id, result },
     );
 }
 
@@ -1425,7 +1400,9 @@ pub(crate) fn spawn_dashboard_create_session(
                 )
                 .context("save fast-start setup; session has not been started")?;
             }
-            let controller = Controller::load()?;
+            // The new-session preflight reads configuration and runs git; it
+            // never needs the store, which only the daemon opens.
+            let controller = mj_controller::controller::config_only_controller(Config::load()?);
             let executor = CancellableProcessExecutor::new(cancelled.clone())
                 .with_deadline(Duration::from_secs(30));
             if project_directory.is_none() {

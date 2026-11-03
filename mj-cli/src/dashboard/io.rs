@@ -535,13 +535,25 @@ pub(crate) struct DashboardMetadata {
     container_sizes: mj_core::snapshot_map::SnapshotMap<String, mj_core::state::HostContainerSize>,
 }
 
-impl From<Controller> for DashboardMetadata {
-    fn from(controller: Controller) -> Self {
+impl From<mj_client::daemon::StoredSessionMetadata> for DashboardMetadata {
+    fn from(stored: mj_client::daemon::StoredSessionMetadata) -> Self {
         Self {
-            mount_history: controller.state.mount_history,
-            container_sizes: controller.state.container_sizes,
+            mount_history: stored.mount_history,
+            container_sizes: stored.container_sizes,
         }
     }
+}
+
+/// The store's session metadata, read by the daemon, which alone opens the
+/// store. Called from blocking tasks.
+pub(crate) fn stored_session_metadata() -> Result<DashboardMetadata> {
+    mj_core::runtime::block_on(async {
+        crate::daemon::connect_or_start()
+            .await?
+            .stored_session_metadata()
+            .await
+    })?
+    .map(DashboardMetadata::from)
 }
 
 impl DashboardMetadata {
@@ -2568,126 +2580,6 @@ mod tests {
             "app-2"
         );
         assert_eq!(config.bundles.len(), 2);
-    }
-
-    const LIFECYCLE_RELOAD_CHILD: &str = "MJ_TEST_LIFECYCLE_RELOAD_CHILD";
-
-    /// A load started before a runtime update must not resurrect old records
-    /// or remove a newer session when the lifecycle completion arrives.
-    #[tokio::test]
-    async fn a_lifecycle_reload_preserves_newer_runtime_records() {
-        if crate::test_support::rerun_in_isolated_child(
-            LIFECYCLE_RELOAD_CHILD,
-            "dashboard::io::tests::a_lifecycle_reload_preserves_newer_runtime_records",
-        ) {
-            return;
-        }
-        let _writer = mj_controller::database::install_isolated_test_writer();
-
-        let mut config = Config::default();
-        config.profiles.insert(
-            "codex".into(),
-            mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Codex,
-                home: PathBuf::from("/home/dev/.codex"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
-            },
-        );
-        config.bundles.insert(
-            "project".into(),
-            ProjectBundle {
-                primary_repo: "project".into(),
-                repositories: vec![ProjectRepository {
-                    id: "project".into(),
-                    github: Some("owner/project".into()),
-                    local: None,
-                    destination: PathBuf::from("project"),
-                    git_ref: None,
-                }],
-            },
-        );
-        config.targets.insert(
-            "podman".into(),
-            mj_core::config::TargetTemplate::LocalPodman {
-                container: mj_core::config::ContainerTemplate {
-                    build_cache: None,
-                    image: "example.invalid/hel-test:latest".into(),
-                    pull_policy: Default::default(),
-                    platform: None,
-                    cpus: None,
-                    memory: None,
-                    environment: Default::default(),
-                    workspace_storage: Default::default(),
-                },
-            },
-        );
-        config.save().unwrap();
-
-        let database = mj_controller::database::database_path();
-        let alpha = mj_controller::database::create_workspace_at(&database, "alpha").unwrap();
-        let beta = mj_controller::database::create_workspace_at(&database, "beta").unwrap();
-        mj_controller::database::save_session(&lifecycle_session(
-            "session-alpha-live",
-            &alpha.id,
-            SessionState::Running,
-        ))
-        .unwrap();
-        mj_controller::database::save_session(&lifecycle_session(
-            "session-alpha-stopped",
-            &alpha.id,
-            SessionState::Stopped,
-        ))
-        .unwrap();
-        mj_controller::database::save_session(&lifecycle_session(
-            "session-beta-live",
-            &beta.id,
-            SessionState::Running,
-        ))
-        .unwrap();
-
-        let (updates_tx, mut updates_rx) =
-            tokio::sync::mpsc::unbounded_channel::<DashboardIoUpdate>();
-        spawn_lifecycle_reload(
-            LifecycleReload {
-                update: DashboardLifecycleUpdate {
-                    session_id: "session-beta-live".into(),
-                    result: Ok(LifecycleSuccess::Created),
-                    operation: Arc::new(AtomicBool::new(false)),
-                },
-                operation: None,
-            },
-            beta.id.clone(),
-            "client-1".into(),
-            updates_tx,
-        );
-
-        let DashboardIoUpdate::LifecycleReloaded(reloaded) =
-            updates_rx.recv().await.expect("the reload reports back")
-        else {
-            panic!("the reload reports through LifecycleReloaded");
-        };
-        let loaded = reloaded.result.expect("the reload succeeds");
-        let mut current = State::default();
-        current.sessions.insert(
-            "newer-session".into(),
-            lifecycle_session("newer-session", &beta.id, SessionState::Running),
-        );
-        loaded.apply(&mut current);
-        assert_eq!(
-            current
-                .sessions
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec!["newer-session"],
-            "a completed background load cannot replace newer runtime records"
-        );
     }
 
     fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {

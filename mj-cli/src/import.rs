@@ -284,8 +284,9 @@ fn import_native(
     let transcript = read_native_transcript(harness, &located.source_path)?;
     println!("Original cwd: {}", transcript.cwd.display());
 
-    let mut state = mj_controller::database::load_state()?;
-    state.validate()?;
+    // Import only adds its session; the daemon persists it. The store is the
+    // daemon's alone.
+    let mut state = State::default();
     let targets = session_edit_targets(&transcript, &home)?;
     if !confirm_import_safety(&targets, args.allow_dirty_local, args.allow_omitted_non_git)? {
         println!("{IMPORT_CANCELLED_MESSAGE}");

@@ -1366,11 +1366,7 @@ pub struct Attachment {
 /// That is exactly how a stopped daemon used to come back on an old build,
 /// beating the restart that had just stopped it. When no daemon answers, the
 /// surface says so and offers its explicit restart instead.
-pub fn maintain_attachment(
-    client_id: String,
-    pid: u32,
-    cancellation: CancellationToken,
-) -> Attachment {
+pub fn maintain_attachment(client_id: String, cancellation: CancellationToken) -> Attachment {
     let (presence_tx, presence) = tokio::sync::watch::channel(DaemonPresence::Attached);
     let task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
@@ -1381,7 +1377,7 @@ pub fn maintain_attachment(
                 _ = interval.tick() => {
                     let observed = tokio::select! {
                         _ = cancellation.cancelled() => return,
-                        result = tokio::time::timeout(Duration::from_secs(5), observe_attachment(&client_id, pid)) => {
+                        result = tokio::time::timeout(Duration::from_secs(5), observe_attachment(&client_id)) => {
                             match result {
                                 Ok(Ok(presence)) => presence,
                                 result => {
@@ -1408,7 +1404,7 @@ pub fn maintain_attachment(
     Attachment { task, presence }
 }
 
-async fn observe_attachment(client_id: &str, pid: u32) -> Result<DaemonPresence> {
+async fn observe_attachment(client_id: &str) -> Result<DaemonPresence> {
     if let Some(target) = tokio::task::spawn_blocking(upgraded_daemon_executable)
         .await
         .context("inspect upgraded daemon task failed")??
@@ -1417,7 +1413,7 @@ async fn observe_attachment(client_id: &str, pid: u32) -> Result<DaemonPresence>
     }
     connect_existing()
         .await?
-        .attach(client_id.to_owned(), pid)
+        .attach(client_id.to_owned())
         .await?;
     Ok(DaemonPresence::Attached)
 }
@@ -1744,11 +1740,7 @@ mod tests {
             "this isolated store starts without a daemon"
         );
         let cancellation = CancellationToken::new();
-        let attachment = maintain_attachment(
-            "keep-alive-test".to_owned(),
-            std::process::id(),
-            cancellation.clone(),
-        );
+        let attachment = maintain_attachment("keep-alive-test".to_owned(), cancellation.clone());
         let mut presence = attachment.presence.clone();
         tokio::time::timeout(Duration::from_secs(20), presence.changed())
             .await

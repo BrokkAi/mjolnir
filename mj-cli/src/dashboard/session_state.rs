@@ -17,28 +17,21 @@ impl DashboardContext {
         let session_id = session_id.to_owned();
         let updates = self.dashboard_io_tx.clone();
         tokio::spawn(async move {
-            let seeded = tokio::task::spawn_blocking({
-                let session_id = session_id.clone();
-                move || {
-                    mj_controller::database::load_materialized_projection_tail(
-                        &session_id,
-                        mj_chat::chat::TAIL_SEED_ITEMS,
-                    )
-                }
-            })
+            let seeded = async {
+                crate::daemon::connect_or_start()
+                    .await?
+                    .stored_projection_tail(session_id.clone(), mj_chat::chat::TAIL_SEED_ITEMS)
+                    .await
+            }
             .await;
             // A failed seed costs a blank conversation until the next poll,
             // which is where the full projection comes from anyway. It is not
             // worth failing a resume that otherwise succeeded.
             let materialized = match seeded {
-                Ok(Ok(Some((materialized, _)))) => materialized,
-                Ok(Ok(None)) => return,
-                Ok(Err(error)) => {
-                    tracing::debug!(%session_id, %error, "transcript tail seed failed");
-                    return;
-                }
+                Ok(Some(materialized)) => materialized,
+                Ok(None) => return,
                 Err(error) => {
-                    tracing::debug!(%session_id, %error, "transcript tail seed task failed");
+                    tracing::debug!(%session_id, error = %format!("{error:#}"), "transcript tail seed failed");
                     return;
                 }
             };
@@ -291,6 +284,7 @@ impl DashboardContext {
         self.go_context_in_flight = true;
         self.go_context_refresh = Some((session_id.clone(), std::time::Instant::now()));
         let report_id = session_id.clone();
+        let controller = self.live_controller_snapshot();
         io::spawn_io(
             "reading session working context",
             self.dashboard_io_tx.clone(),
@@ -298,7 +292,7 @@ impl DashboardContext {
                 let executor = mj_controller::targets::CancellableProcessExecutor::with_timeout(
                     Duration::from_secs(3),
                 );
-                Controller::load()?.session_working_context(&session_id, &executor)
+                controller.session_working_context(&session_id, &executor)
             },
             move |result| io::DashboardIoUpdate::GoContext {
                 session_id: report_id,
@@ -326,6 +320,7 @@ impl DashboardContext {
             return;
         }
         let report_id = session_id.clone();
+        let controller = self.live_controller_snapshot();
         io::spawn_io(
             "reading session git status",
             self.dashboard_io_tx.clone(),
@@ -333,13 +328,23 @@ impl DashboardContext {
                 let executor = mj_controller::targets::CancellableProcessExecutor::with_timeout(
                     Duration::from_secs(8),
                 );
-                Controller::load()?.session_git_status(&session_id, &executor)
+                controller.session_git_status(&session_id, &executor)
             },
             move |result| io::DashboardIoUpdate::GitStatus {
                 session_id: report_id,
                 result,
             },
         );
+    }
+
+    /// The sessions as the runtime feed last delivered them, for work that
+    /// runs off the event loop. The maps are persistent, so this is cheap, and
+    /// it never opens the store, which only the daemon may read.
+    fn live_controller_snapshot(&self) -> Controller {
+        Controller {
+            config: self.controller.config.clone(),
+            state: self.controller.state.clone(),
+        }
     }
 
     pub(crate) fn remember_go_selection(&mut self) {

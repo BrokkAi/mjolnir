@@ -1782,13 +1782,10 @@ async fn run_workspace_dashboard(
 
     // Attach only once the dashboard is certain to run, so a startup that
     // fails or is cancelled never leaves an attachment behind.
-    daemon.attach(client_id.clone(), std::process::id()).await?;
+    daemon.attach(client_id.clone()).await?;
     let attachment_cancellation = tokio_util::sync::CancellationToken::new();
-    let attachment = daemon::maintain_attachment(
-        client_id.clone(),
-        std::process::id(),
-        attachment_cancellation.clone(),
-    );
+    let attachment =
+        daemon::maintain_attachment(client_id.clone(), attachment_cancellation.clone());
     let result = match loaded {
         Some(loaded) => {
             let screen = match screen {
@@ -1890,13 +1887,13 @@ async fn start_dashboard(
             .into_iter()
             .map(|listing| listing.workspace)
             .collect();
-        Some(
-            tokio::task::spawn_blocking(move || {
-                dashboard::LoadedDashboard::load(&selected, &client_id, workspaces)
-            })
+        let startup = daemon.dashboard_startup(client_id.clone()).await?;
+        let config = tokio::task::spawn_blocking(mj_core::config::Config::load)
             .await
-            .context("load dashboard state task failed")??,
-        )
+            .context("load configuration task failed")??;
+        Some(dashboard::LoadedDashboard::from_daemon(
+            &selected, &client_id, workspaces, startup, config,
+        ))
     } else {
         None
     };
@@ -1950,9 +1947,9 @@ pub(crate) async fn workspace_required(command: &str) -> anyhow::Error {
     anyhow::anyhow!(workspace_required_message(command, workspaces.as_deref()))
 }
 
-/// The workspaces as a running daemon lists them or, when no daemon runs, as
-/// the store holds them. Never starts a daemon. `None` when no list could be
-/// read.
+/// The workspaces as a running daemon lists them. Never starts a daemon, and
+/// never opens the store, which only the daemon may reach. `None` when no
+/// list could be read.
 async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
     match daemon::connect_existing().await {
         Ok(mut daemon) => daemon
@@ -1968,12 +1965,7 @@ async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::
                 tracing::warn!(%error, "could not list workspaces for the refusal");
             })
             .ok(),
-        Err(error) if daemon::daemon_not_running(&error).is_some() => {
-            tokio::task::spawn_blocking(stored_workspaces)
-                .await
-                .ok()
-                .flatten()
-        }
+        Err(error) if daemon::daemon_not_running(&error).is_some() => None,
         Err(error) => {
             tracing::warn!(%error, "could not reach the daemon to list workspaces");
             None
@@ -1998,19 +1990,6 @@ pub(crate) async fn refuse_unknown_workspace(name: &str) -> Result<()> {
         return Ok(());
     }
     Err(unknown_workspace(name, &workspaces))
-}
-
-/// The workspaces in the store, read without a daemon. A store that does not
-/// exist yet has none; one that cannot be read answers `None`.
-fn stored_workspaces() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
-    if !mj_controller::database::database_path().exists() {
-        return Some(Vec::new());
-    }
-    mj_controller::database::list_workspaces()
-        .map_err(|error| {
-            tracing::warn!(%error, "could not read the workspaces from the store");
-        })
-        .ok()
 }
 
 fn workspace_required_message(command: &str, workspaces: Option<&[(String, u64)]>) -> String {

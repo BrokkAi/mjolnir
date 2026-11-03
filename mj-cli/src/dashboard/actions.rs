@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use mj_core::config::is_bare_project_target;
 use mj_core::state::{MoveSelection, MoveSessionRequest};
 
-use mj_controller::controller::{Controller, ResumeRepositorySourceReceipt};
+use mj_controller::controller::ResumeRepositorySourceReceipt;
 use mj_controller::review_settings::ReviewDiscoveryRequest;
 use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::WebViewerAccess;
@@ -90,7 +90,7 @@ fn start_suspension(
     spawn_lifecycle_operation(
         request,
         context.critical_operations.clone(),
-        move |_controller, _cancelled| {
+        move |_cancelled| {
             mj_core::runtime::block_on(async {
                 let mut client = daemon::connect_or_start().await?;
                 if ignore_nested_repositories {
@@ -212,11 +212,12 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             let updates = context.dashboard_io_tx.clone();
             tokio::spawn(async move {
-                let result = mj_controller::pollers::load_native_agent_history(
-                    owner.clone(),
-                    child.clone(),
-                    before,
-                )
+                let result = async {
+                    daemon::connect_or_start()
+                        .await?
+                        .native_agent_history(owner.clone(), child.clone(), before)
+                        .await
+                }
                 .await
                 .map_err(|error: anyhow::Error| format!("{error:#}"));
                 if let Err(error) = updates.send(DashboardIoUpdate::NativeAgentHistory {
@@ -550,7 +551,12 @@ pub(crate) async fn apply_dashboard_action(
                 "estimating archive space",
                 context.dashboard_io_tx.clone(),
                 move |_cancelled| {
-                    mj_controller::sessionwiki::archive_space_preview(older_than_days)
+                    mj_core::runtime::block_on(async {
+                        daemon::connect_or_start()
+                            .await?
+                            .archive_space_preview(older_than_days)
+                            .await
+                    })?
                 },
                 move |result| DashboardIoUpdate::ArchiveSpacePreviewed {
                     generation,
@@ -678,11 +684,21 @@ pub(crate) async fn apply_dashboard_action(
                 context.dashboard_io_tx.clone(),
                 std::time::Duration::from_secs(125),
                 async move {
-                    let history =
-                        tokio::task::spawn_blocking(mj_controller::database::load_mount_history)
+                    let history = async {
+                        daemon::connect_or_start()
+                            .await?
+                            .stored_session_metadata()
                             .await
-                            .context("recent project history task failed")?
-                            .map_err(|error| format!("{error:#}"));
+                    }
+                    .await
+                    .map(|metadata| {
+                        metadata
+                            .mount_history
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect()
+                    })
+                    .map_err(|error| format!("{error:#}"));
                     // Publish the history before requesting discovery. A late
                     // history snapshot cannot erase locations discovery adds.
                     history_tx
@@ -768,8 +784,6 @@ pub(crate) async fn apply_dashboard_action(
                     old_id,
                     new_id,
                     profile: true,
-                    workspace_id: context.workspace_id.clone(),
-                    client_id: context.client_id.clone(),
                 },
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
@@ -783,8 +797,6 @@ pub(crate) async fn apply_dashboard_action(
                     old_id,
                     new_id,
                     profile: false,
-                    workspace_id: context.workspace_id.clone(),
-                    client_id: context.client_id.clone(),
                 },
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
@@ -981,8 +993,6 @@ pub(crate) async fn apply_dashboard_action(
                     memory,
                     additional_mounts,
                     mount_history,
-                    workspace_id: context.workspace_id.clone(),
-                    client_id: context.client_id.clone(),
                 },
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
@@ -1126,16 +1136,17 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 format!("updating repository for {}", short_id(&session_id)),
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled);
-                    let mut controller = Controller::load()?;
-                    let preflight =
-                        mj_core::runtime::block_on(controller.replace_resume_repository_origin(
-                            &session_id,
-                            &repository_id,
-                            &replacement,
-                            &executor,
-                        ))??;
+                move |_cancelled| {
+                    let preflight = mj_core::runtime::block_on(async {
+                        daemon::connect_or_start()
+                            .await?
+                            .replace_resume_repository_origin(
+                                session_id,
+                                repository_id,
+                                replacement,
+                            )
+                            .await
+                    })??;
                     Ok(ResumeRepositoryPreflightApply { preflight })
                 },
                 move |result| DashboardIoUpdate::ResumeRepositoryPreflight {
@@ -1278,7 +1289,7 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_controller, _cancelled| {
+                move |_cancelled| {
                     mj_core::runtime::block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
                         dispatch_restart(&mut daemon, session_id, acknowledge_container_recreation)
@@ -1357,7 +1368,7 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_controller, cancelled| {
+                move |cancelled| {
                     mj_core::runtime::block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
                         let operation = daemon.move_session(MoveSessionRequest {
@@ -1429,7 +1440,7 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_controller, cancelled| {
+                move |cancelled| {
                     let selection = operation.selection.clone();
                     let queue = Some(operation.queue);
                     let operation_id = operation.operation_id.clone();
@@ -1540,7 +1551,7 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_controller, _cancelled| {
+                move |_cancelled| {
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
@@ -1561,7 +1572,7 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_controller, _cancelled| {
+                move |_cancelled| {
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
@@ -1582,7 +1593,7 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_controller, _cancelled| {
+                move |_cancelled| {
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
@@ -1701,12 +1712,13 @@ pub(crate) fn start_resume_repository_preflight(
         context.critical_operations.clone(),
         format!("checking repositories for {}", short_id(&session_id)),
         context.dashboard_io_tx.clone(),
-        move |cancelled| {
-            let executor = CancellableProcessExecutor::new(cancelled);
-            let controller = Controller::load()?;
-            let preflight = mj_core::runtime::block_on(
-                controller.preflight_resume_repository_sources(&session_id, &target_id, &executor),
-            )??;
+        move |_cancelled| {
+            let preflight = mj_core::runtime::block_on(async {
+                daemon::connect_or_start()
+                    .await?
+                    .resume_repository_preflight(session_id, target_id)
+                    .await
+            })??;
             Ok(ResumeRepositoryPreflightApply { preflight })
         },
         move |result| DashboardIoUpdate::ResumeRepositoryPreflight {
@@ -1852,7 +1864,7 @@ fn start_session_launch_with_repository_preflight(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_controller, _cancelled| {
+                move |_cancelled| {
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
