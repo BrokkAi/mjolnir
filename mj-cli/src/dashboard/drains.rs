@@ -755,8 +755,6 @@ impl DashboardContext {
             }
             spawn_lifecycle_reload(
                 LifecycleReload { update, operation },
-                self.workspace_id.clone(),
-                self.client_id.clone(),
                 self.dashboard_io_tx.clone(),
             );
         }

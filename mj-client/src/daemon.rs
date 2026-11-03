@@ -251,6 +251,40 @@ pub struct WikiRestoreRequest {
     pub resource_allocation: Option<SessionResourceAllocation>,
 }
 
+/// What the terminal dashboard reads from the store before it takes the
+/// terminal. The daemon assembles it, so a client never opens the store, which
+/// may live in a container volume the client cannot reach.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DashboardStartup {
+    /// Live sessions and sub-agents, plus durably moving ones, with each
+    /// session's read frontier for this client applied.
+    pub state: State,
+    pub pane_sizes: std::collections::BTreeMap<String, mj_core::workspace::PaneSizes>,
+    pub conversation_layouts:
+        std::collections::BTreeMap<String, mj_core::workspace::ConversationLayout>,
+    pub queued_prompts: std::collections::BTreeMap<String, Vec<mj_core::relay::QueuedPrompt>>,
+    /// Computed before stopped sessions are set aside.
+    pub launch_recency: Vec<crate::runtime_feed::LaunchRecency>,
+}
+
+/// Stored per-workspace layouts, keyed by workspace id.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceLayouts {
+    pub pane_sizes: std::collections::BTreeMap<String, mj_core::workspace::PaneSizes>,
+    pub conversation_layouts:
+        std::collections::BTreeMap<String, mj_core::workspace::ConversationLayout>,
+}
+
+/// The store-wide metadata the dashboard keeps beside its session rows.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredSessionMetadata {
+    pub mount_history: mj_core::snapshot_map::SnapshotMap<String, Vec<PathBuf>>,
+    pub container_sizes: mj_core::snapshot_map::SnapshotMap<String, HostContainerSize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSnapshot {
@@ -488,9 +522,9 @@ pub enum DaemonAction {
     DeleteWorkspace {
         workspace_id: String,
     },
+    /// Take or renew a client's attachment lease.
     Attach {
         client_id: String,
-        pid: u32,
     },
     Detach {
         client_id: String,
@@ -605,6 +639,49 @@ pub enum DaemonAction {
     },
     Snapshot {
         workspace_id: String,
+    },
+    /// Everything the terminal dashboard reads from the store at startup.
+    DashboardStartup {
+        client_id: String,
+    },
+    /// Stored pane sizes and conversation layouts of these workspaces.
+    WorkspaceLayouts {
+        workspace_ids: Vec<String>,
+    },
+    /// Mount history and remembered container sizes.
+    StoredSessionMetadata,
+    /// The stored tail of a session's projection, at most `items` transcript
+    /// entries, or `None` when the session has no stored projection.
+    StoredProjectionTail {
+        session_id: String,
+        items: usize,
+    },
+    /// The stored projection summary of one session.
+    StoredSessionSummary {
+        session_id: String,
+    },
+    /// Check that a stopped session's checkpointed repositories can be
+    /// fetched again before it resumes on `target_id`.
+    ResumeRepositoryPreflight {
+        session_id: String,
+        target_id: String,
+    },
+    /// Point one of a stopped session's repositories at a new origin, then
+    /// check the sources again.
+    ReplaceResumeRepositoryOrigin {
+        session_id: String,
+        repository_id: String,
+        replacement: String,
+    },
+    /// How much session storage an archive age would free.
+    ArchiveSpacePreview {
+        older_than_days: Option<u32>,
+    },
+    /// Save the terminal Setup editor's configuration, checked against the
+    /// stored sessions it would disturb. Both are configuration JSON.
+    SaveSetup {
+        original: String,
+        updated: String,
     },
     RuntimeChanges {
         cursor: Option<crate::runtime_feed::RuntimeCursor>,
@@ -842,6 +919,14 @@ pub enum DaemonReply {
     Workspaces(Vec<WorkspaceListing>),
     Workspace(WorkspaceRecord),
     Snapshot(WorkspaceSnapshot),
+    DashboardStartup(Box<DashboardStartup>),
+    WorkspaceLayouts(WorkspaceLayouts),
+    StoredSessionMetadata(StoredSessionMetadata),
+    StoredProjectionTail(Option<Box<MaterializedSession>>),
+    StoredSessionSummary(Option<Box<MaterializedSessionSummary>>),
+    SavedSetup(Box<Config>),
+    ArchiveSpacePreview(ArchiveSpacePreview),
+    ResumeRepositoryPreflight(Box<ResumeRepositorySourcePreflight>),
     RuntimeChanges(Box<crate::runtime_feed::RuntimeFrame>),
     SessionTail(Box<crate::runtime_feed::SessionTailReply>),
     ResumeCandidates(Box<ResumeCandidates>),
@@ -1587,11 +1672,8 @@ impl DaemonClient {
         }
     }
 
-    pub async fn attach(&mut self, client_id: String, pid: u32) -> Result<()> {
-        match self
-            .request(DaemonAction::Attach { client_id, pid })
-            .await?
-        {
+    pub async fn attach(&mut self, client_id: String) -> Result<()> {
+        match self.request(DaemonAction::Attach { client_id }).await? {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected attach reply {reply:?}"),
         }
@@ -1981,6 +2063,122 @@ impl DaemonClient {
         {
             DaemonReply::Snapshot(snapshot) => Ok(snapshot),
             reply => bail!("unexpected snapshot reply {reply:?}"),
+        }
+    }
+
+    pub async fn dashboard_startup(&mut self, client_id: String) -> Result<DashboardStartup> {
+        match self
+            .request(DaemonAction::DashboardStartup { client_id })
+            .await?
+        {
+            DaemonReply::DashboardStartup(startup) => Ok(*startup),
+            reply => bail!("unexpected dashboard startup reply {reply:?}"),
+        }
+    }
+
+    pub async fn workspace_layouts(
+        &mut self,
+        workspace_ids: Vec<String>,
+    ) -> Result<WorkspaceLayouts> {
+        match self
+            .request(DaemonAction::WorkspaceLayouts { workspace_ids })
+            .await?
+        {
+            DaemonReply::WorkspaceLayouts(layouts) => Ok(layouts),
+            reply => bail!("unexpected workspace layouts reply {reply:?}"),
+        }
+    }
+
+    pub async fn stored_session_metadata(&mut self) -> Result<StoredSessionMetadata> {
+        match self.request(DaemonAction::StoredSessionMetadata).await? {
+            DaemonReply::StoredSessionMetadata(metadata) => Ok(metadata),
+            reply => bail!("unexpected stored session metadata reply {reply:?}"),
+        }
+    }
+
+    pub async fn stored_projection_tail(
+        &mut self,
+        session_id: String,
+        items: usize,
+    ) -> Result<Option<MaterializedSession>> {
+        match self
+            .request(DaemonAction::StoredProjectionTail { session_id, items })
+            .await?
+        {
+            DaemonReply::StoredProjectionTail(tail) => Ok(tail.map(|tail| *tail)),
+            reply => bail!("unexpected stored projection tail reply {reply:?}"),
+        }
+    }
+
+    pub async fn stored_session_summary(
+        &mut self,
+        session_id: String,
+    ) -> Result<Option<MaterializedSessionSummary>> {
+        match self
+            .request(DaemonAction::StoredSessionSummary { session_id })
+            .await?
+        {
+            DaemonReply::StoredSessionSummary(summary) => Ok(summary.map(|summary| *summary)),
+            reply => bail!("unexpected stored session summary reply {reply:?}"),
+        }
+    }
+
+    pub async fn resume_repository_preflight(
+        &mut self,
+        session_id: String,
+        target_id: String,
+    ) -> Result<ResumeRepositorySourcePreflight> {
+        match self
+            .request(DaemonAction::ResumeRepositoryPreflight {
+                session_id,
+                target_id,
+            })
+            .await?
+        {
+            DaemonReply::ResumeRepositoryPreflight(preflight) => Ok(*preflight),
+            reply => bail!("unexpected resume repository preflight reply {reply:?}"),
+        }
+    }
+
+    pub async fn replace_resume_repository_origin(
+        &mut self,
+        session_id: String,
+        repository_id: String,
+        replacement: String,
+    ) -> Result<ResumeRepositorySourcePreflight> {
+        match self
+            .request(DaemonAction::ReplaceResumeRepositoryOrigin {
+                session_id,
+                repository_id,
+                replacement,
+            })
+            .await?
+        {
+            DaemonReply::ResumeRepositoryPreflight(preflight) => Ok(*preflight),
+            reply => bail!("unexpected repository origin replacement reply {reply:?}"),
+        }
+    }
+
+    pub async fn archive_space_preview(
+        &mut self,
+        older_than_days: Option<u32>,
+    ) -> Result<ArchiveSpacePreview> {
+        match self
+            .request(DaemonAction::ArchiveSpacePreview { older_than_days })
+            .await?
+        {
+            DaemonReply::ArchiveSpacePreview(preview) => Ok(preview),
+            reply => bail!("unexpected archive space preview reply {reply:?}"),
+        }
+    }
+
+    pub async fn save_setup(&mut self, original: String, updated: String) -> Result<Config> {
+        match self
+            .request(DaemonAction::SaveSetup { original, updated })
+            .await?
+        {
+            DaemonReply::SavedSetup(config) => Ok(*config),
+            reply => bail!("unexpected setup save reply {reply:?}"),
         }
     }
 
@@ -2514,7 +2712,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Explicit Ignore and Suspend preserves checkpoint verification while omitting nested repositories.
 // Web viewer access includes the bound local connection address.
 // Review role rows carry their child session IDs; older strict clients reject them.
-pub const PROTOCOL_VERSION: u32 = 71;
+// Dashboards read stored state through the daemon instead of opening the store,
+// and client attachments are renewable leases rather than client process IDs.
+pub const PROTOCOL_VERSION: u32 = 72;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

@@ -69,9 +69,8 @@ use crate::import::{
 };
 use crate::pollers::{
     CapacityPollUpdate, DashboardLifecycleUpdate, Feed, RuntimeStateUpdate, WorkerDiagnosisTracker,
-    apply_worker_poll_update, complete_manual_quota_refresh, projected_queued_prompts,
-    session_target_is_pollable, spawn_dashboard_capacity_poller,
-    spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
+    apply_worker_poll_update, complete_manual_quota_refresh, session_target_is_pollable,
+    spawn_dashboard_capacity_poller, spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
 };
 use crate::session_presentation::{apply_lifecycle_display, apply_worker_activity, lifecycle_kind};
 use crate::{TerminalGuard, short_id};
@@ -483,34 +482,6 @@ fn enqueue_materialized_projection(
         return None;
     }
     Some((projection, viewed_through_event_ordinal))
-}
-
-pub(super) fn retain_workspace_sessions(
-    controller: &mut Controller,
-    _workspace_id: &str,
-    client_id: &str,
-) -> Result<()> {
-    let active: Vec<_> = controller
-        .state
-        .sessions
-        .values()
-        .filter(|session| session.state.is_active())
-        .map(|session| session.id.clone())
-        .collect();
-    for id in active {
-        let session = controller
-            .state
-            .sessions
-            .get_mut(&id)
-            .expect("active session exists");
-        let frontier = mj_controller::database::client_read_frontier(
-            client_id,
-            &session.workspace_id,
-            &session.id,
-        )?;
-        session.viewed_through_event_ordinal = frontier;
-    }
-    Ok(())
 }
 
 /// The top level of the Git worktree `mj` was started in, or `None` outside
@@ -1873,55 +1844,32 @@ pub(crate) struct LoadedDashboard {
 }
 
 impl LoadedDashboard {
-    pub(crate) fn load(
+    /// Builds the dashboard's starting state from what the daemon read from
+    /// the store and this client's own configuration.
+    pub(crate) fn from_daemon(
         workspace_id: &str,
         client_id: &str,
         workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
-    ) -> Result<Self> {
-        let mut controller = Controller::load()?;
-        retain_workspace_sessions(&mut controller, workspace_id, client_id)?;
-        let launch_recency = mj_client::runtime_feed::launch_recency(&controller.state.sessions);
-        // Start from what the runtime feed will send, which is live sessions
-        // only; the resume dialog asks for the stopped ones. No lifecycle
-        // operation is known yet, so only a durable move keeps a stopped
-        // session live here.
-        let moving = mj_controller::database::load_move_operations()?
-            .into_iter()
-            .filter(|operation| operation.is_active())
-            .map(|operation| operation.selection.session_id)
-            .collect();
-        let live = mj_core::state::live_session_ids(
-            &controller.state.sessions,
-            &controller.state.subagents,
-            &moving,
-        );
-        controller.state.sessions.retain(|id, _| live.contains(id));
-        controller.state.subagents.retain(|id, _| live.contains(id));
-        let layouts = workspaces
-            .iter()
-            .map(|workspace| {
-                mj_controller::database::load_workspace_pane_sizes(&workspace.id)
-                    .map(|sizes| (workspace.id.clone(), sizes))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        let conversation_layouts = workspaces
-            .iter()
-            .map(|workspace| {
-                mj_controller::database::load_workspace_layout(&workspace.id)
-                    .map(|layout| (workspace.id.clone(), layout))
-            })
-            .collect::<Result<BTreeMap<String, ConversationLayout>>>()?;
-        let queued_prompts = projected_queued_prompts(&controller)?;
-        Ok(Self {
-            workspace_id: workspace_id.to_owned(),
-            client_id: client_id.to_owned(),
-            controller,
-            workspaces,
-            layouts,
+        startup: mj_client::daemon::DashboardStartup,
+        config: mj_core::config::Config,
+    ) -> Self {
+        let mj_client::daemon::DashboardStartup {
+            state,
+            pane_sizes,
             conversation_layouts,
             queued_prompts,
             launch_recency,
-        })
+        } = startup;
+        Self {
+            workspace_id: workspace_id.to_owned(),
+            client_id: client_id.to_owned(),
+            controller: Controller { config, state },
+            workspaces,
+            layouts: pane_sizes,
+            conversation_layouts,
+            queued_prompts,
+            launch_recency,
+        }
     }
 
     /// The color the dashboard's first frame paints behind everything.

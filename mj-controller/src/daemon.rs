@@ -175,9 +175,15 @@ impl LifecycleControl {
 }
 
 #[derive(Debug, Clone)]
+/// A client's presence, renewed by its heartbeat. The daemon never inspects a
+/// client's process: in a container it cannot see one.
 struct Attachment {
-    pid: u32,
+    renewed: std::time::Instant,
 }
+
+/// Clients renew every two seconds, each try bounded by five. A lease this old
+/// belongs to a client that has stopped.
+const ATTACHMENT_LEASE: Duration = Duration::from_secs(15);
 
 #[derive(Default)]
 struct QuotaBoard {
@@ -756,6 +762,7 @@ mod actions;
 use actions::*;
 mod guards;
 pub(crate) use guards::*;
+mod dashboard_reads;
 
 #[cfg(test)]
 mod tests;
