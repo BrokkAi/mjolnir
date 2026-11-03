@@ -399,7 +399,16 @@ fn enter_during_a_starting_transition_queues_the_prompt_for_delivery() {
     session.state = SessionState::Running;
     let mut dashboard = dashboard_with_session(session);
     dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Launching, None);
-    dashboard.focus_prompt();
+    dashboard.focus_sessions();
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert_eq!(dashboard.focus(), Focus::Prompt);
+    assert_eq!(
+        dashboard.session_operation_kind("session-1"),
+        Some(SessionOperationKind::Launching)
+    );
     dashboard.handle_key(key(KeyCode::Char('h')));
 
     match dashboard.handle_key(key(KeyCode::Enter)) {
@@ -594,121 +603,6 @@ fn a_command_in_the_standby_composer_keeps_its_draft() {
     assert!(dashboard.notice().is_none());
     assert_eq!(standby.draft(), "/help");
     assert!(standby.queued_prompt_texts().is_empty());
-}
-
-/// A creation that has not registered yet has no session to key a standby by,
-/// so the launch standby takes the typing instead of the session that was
-/// selected before. Enter there keeps the text as a preview, because there is
-/// no session id to queue it against yet.
-#[test]
-fn typing_before_a_launch_registers_edits_the_launch_standby() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-    dashboard.begin_launch_standby(mj_chat::chat::SessionHeaderIdentity {
-        target: "/tmp/project".into(),
-        profile: "profile-1".into(),
-        title: String::new(),
-        harness_kind: None,
-        subagent_count: 0,
-    });
-
-    for character in "hello".chars() {
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char(character))),
-            DashboardAction::None
-        );
-    }
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    dashboard.handle_paste("later");
-
-    assert!(dashboard.has_launch_standby());
-    assert!(dashboard.launch_standby_capturing());
-    assert!(dashboard.standby_prompts.is_empty());
-    let standby = dashboard.launch_standby.as_ref().expect("launch standby");
-    assert_eq!(standby.draft(), "later");
-    assert_eq!(standby.queued_prompt_texts(), vec!["hello".to_owned()]);
-}
-
-/// Registration hands the launch standby to the new session: the draft and the
-/// queued previews move into that session's standby, and the queued texts come
-/// back oldest first so the host can have the daemon deliver each one.
-#[test]
-fn adopting_the_launch_standby_moves_its_draft_and_prompts() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-    dashboard.begin_launch_standby(mj_chat::chat::SessionHeaderIdentity {
-        target: "/tmp/project".into(),
-        profile: "profile-1".into(),
-        title: String::new(),
-        harness_kind: None,
-        subagent_count: 0,
-    });
-    for character in "first".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
-    }
-    dashboard.handle_key(key(KeyCode::Enter));
-    for character in "second".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
-    }
-    dashboard.handle_key(key(KeyCode::Enter));
-    for character in "still typing".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
-    }
-
-    assert_eq!(
-        dashboard.adopt_launch_standby("session-1"),
-        vec!["first".to_owned(), "second".to_owned()]
-    );
-
-    assert!(!dashboard.has_launch_standby());
-    assert!(!dashboard.launch_standby_capturing());
-    let standby = dashboard
-        .standby_prompts
-        .get("session-1")
-        .expect("adopted standby composer");
-    assert_eq!(standby.draft(), "still typing");
-    assert_eq!(
-        standby.queued_prompt_texts(),
-        vec!["first".to_owned(), "second".to_owned()]
-    );
-}
-
-/// Selecting another session while a launch is being prepared hands the keys
-/// back to that session, and the launch standby keeps its text for the session
-/// that is still on its way.
-#[test]
-fn selecting_a_session_stops_the_launch_standby_from_capturing() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-    dashboard.begin_launch_standby(mj_chat::chat::SessionHeaderIdentity {
-        target: "/tmp/project".into(),
-        profile: "profile-1".into(),
-        title: String::new(),
-        harness_kind: None,
-        subagent_count: 0,
-    });
-    dashboard.handle_key(key(KeyCode::Char('h')));
-
-    let mut other = running_session();
-    other.id = "session-other".into();
-    dashboard.state.sessions.insert(other.id.clone(), other);
-    dashboard.select_active_session("session-other");
-
-    assert!(dashboard.has_launch_standby());
-    assert!(!dashboard.launch_standby_capturing());
-    assert_eq!(
-        dashboard
-            .launch_standby
-            .as_ref()
-            .map(|standby| standby.draft()),
-        Some("h".into())
-    );
 }
 
 /// Retiring transitions have no conversation to type toward, so their
@@ -1447,6 +1341,8 @@ fn enter_on_a_failed_session_offers_recovery_and_the_transcript() {
     session.state = SessionState::Error;
     session.last_error = Some("worker bootstrap failed: upload failed".into());
     let mut dashboard = dashboard_with_session(session);
+    // The failure can arrive before an outstanding attach finishes.
+    dashboard.set_opening_session(Some("session-1"));
 
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
@@ -1525,48 +1421,50 @@ fn dashboard_with_two_sessions() -> DashboardState {
     dashboard
 }
 
-/// Launch finding B-4: a launch that finishes after the user selected
-/// another row must not take the selection back, or the next session
-/// command (such as close) acts on a session the user did not choose.
+/// Lifecycle updates can complete after focus moved to another pane. The
+/// old pane keeps its session and draft; completion only changes readiness.
 // Hard-won: 4d523f1: launch completion replaced the user’s newer selection and focus.
 #[test]
-fn a_finished_launch_leaves_a_selection_the_user_moved_elsewhere() {
-    let mut dashboard = dashboard_with_two_sessions();
-    // The launch selected its session when it started.
-    dashboard.select_active_session("session-1");
-    // While it launches, the user picks the other session.
-    dashboard.select_active_session("session-2");
-    dashboard.focus_sessions();
-
-    dashboard.finish_new_session("session-1");
-
-    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
-    assert_eq!(dashboard.focus(), Focus::Sessions);
-}
-
-/// R4-11: a Kimi session made in the wizard took about 30 seconds to launch
-/// and then did not open; the selection sat on the first row, which is where
-/// the clamp puts it when a refresh does not carry the selected session.
-/// Nobody chose that row, so finishing the launch still opens the session.
-// Hard-won: 0d95dcf: refreshing during launch lost the session the user had started.
-#[test]
-fn a_finished_launch_opens_the_session_a_refresh_displaced() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.select_active_session("session-2");
-    let mut refreshed = dashboard.state.clone();
-    let launching = refreshed
-        .sessions
-        .remove("session-2")
-        .expect("the launching session");
-    dashboard.set_state(refreshed.clone());
-    assert_eq!(dashboard.selected_session_id(), None);
-    refreshed.sessions.insert(launching.id.clone(), launching);
-    dashboard.set_state(refreshed);
-
-    dashboard.finish_new_session("session-2");
-
-    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
-    assert_eq!(dashboard.focus(), Focus::Prompt);
+fn lifecycle_updates_leave_the_users_pane_selection_focus_and_draft_unchanged() {
+    for kind in [
+        SessionOperationKind::Launching,
+        SessionOperationKind::Moving,
+    ] {
+        let mut dashboard = dashboard_with_two_sessions();
+        dashboard.set_current_session(Some("session-1"));
+        let operated = dashboard.focused_pane();
+        let focused = dashboard
+            .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+            .expect("room for two conversations");
+        dashboard.focus_sessions();
+        dashboard.seed_standby_prompt("session-1", "draft for the operated session".into());
+        dashboard.begin_session_operation("session-1".into(), kind, None);
+        // The runtime may temporarily omit the operated session before its
+        // completed record arrives. Its operation owns the placeholder.
+        let mut refreshed = dashboard.state.clone();
+        let session = refreshed.sessions.remove("session-1").unwrap();
+        dashboard.set_state(refreshed.clone());
+        refreshed.sessions.insert(session.id.clone(), session);
+        dashboard.set_state(refreshed);
+        dashboard.finish_session_operation("session-1");
+        assert_eq!(dashboard.focused_pane(), focused, "{kind:?}");
+        assert_eq!(
+            dashboard.selected_session_id(),
+            Some("session-2"),
+            "{kind:?}"
+        );
+        assert_eq!(
+            dashboard.pane_session(operated),
+            Some("session-1"),
+            "{kind:?}"
+        );
+        assert_eq!(dashboard.focus(), Focus::Sessions, "{kind:?}");
+        assert_eq!(
+            dashboard.take_standby_prompt_draft("session-1").as_deref(),
+            Some("draft for the operated session"),
+            "{kind:?}"
+        );
+    }
 }
 
 /// R4-11: after a suspend, the dashboard reported "Could not open Session
@@ -3818,12 +3716,17 @@ fn a_subagent_the_worker_reports_as_running_counts_as_working_for_its_parent() {
 }
 
 #[tokio::test]
-async fn launch_clipboard_shortcuts_and_empty_terminal_paste_use_the_composer_pipeline() {
+async fn starting_session_clipboard_shortcuts_and_empty_paste_use_the_composer_pipeline() {
     // With no await on this current-thread runtime, the spawned native reader never runs.
     // This tests event routing and its immediate in-flight UI, not a particular clipboard provider.
     for terminal_paste in [false, true] {
-        let mut dashboard = dashboard_with_session(stopped_session());
-        dashboard.begin_launch_standby(mj_chat::chat::SessionHeaderIdentity::default());
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Launching,
+            None,
+        );
+        dashboard.focus_prompt();
         if terminal_paste {
             dashboard.handle_event_result(Event::Paste(String::new()));
         } else {
@@ -3835,22 +3738,24 @@ async fn launch_clipboard_shortcuts_and_empty_terminal_paste_use_the_composer_pi
                 "the dashboard text-only reader must not own this paste"
             );
         }
-        let standby = dashboard.launch_standby.as_ref().unwrap();
+        let standby = dashboard.standby_prompts.get("session-1").unwrap();
         assert_eq!(standby.notice().as_deref(), Some("Reading clipboard…"));
         assert!(standby.draft().is_empty());
     }
 }
 
 #[test]
-fn a_dashboard_clipboard_reply_cannot_follow_focus_into_a_new_launch() {
-    let mut dashboard = dashboard_with_session(stopped_session());
+fn a_dashboard_clipboard_reply_cannot_follow_focus_into_a_starting_session() {
+    let mut dashboard = dashboard_with_session(running_session());
     let target = dashboard.paste_target();
-    dashboard.begin_launch_standby(mj_chat::chat::SessionHeaderIdentity::default());
+    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Launching, None);
+    dashboard.focus_prompt();
+    dashboard.standby_prompt_mut("session-1");
     assert!(!dashboard.apply_clipboard_text(&target, "belongs to the old field"));
     assert!(
         dashboard
-            .launch_standby
-            .as_ref()
+            .standby_prompts
+            .get("session-1")
             .unwrap()
             .draft()
             .is_empty()
@@ -3859,20 +3764,25 @@ fn a_dashboard_clipboard_reply_cannot_follow_focus_into_a_new_launch() {
     let target = dashboard.paste_target();
     dashboard.handle_key(key(KeyCode::Char('e')));
     assert!(!dashboard.apply_clipboard_text(&target, "stale read"));
-    assert_eq!(dashboard.launch_standby.as_ref().unwrap().draft(), "ne");
+    assert_eq!(
+        dashboard.standby_prompts.get("session-1").unwrap().draft(),
+        "ne"
+    );
 }
 
-#[test]
-fn pasted_image_paths_stage_in_a_launch_without_a_session_attachment_store() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_launch_standby(mj_chat::chat::SessionHeaderIdentity::default());
+#[tokio::test]
+async fn pasted_image_paths_stage_in_a_starting_session_without_an_attachment_store() {
+    // No await: attachment installation remains queued on this runtime.
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Launching, None);
+    dashboard.focus_prompt();
     let path = if cfg!(windows) {
         r"C:\shots\before-start.png"
     } else {
         "/shots/before-start.png"
     };
     dashboard.handle_event_result(Event::Paste(path.to_owned()));
-    let draft = dashboard.launch_standby.as_ref().unwrap().draft();
+    let draft = dashboard.standby_prompts.get("session-1").unwrap().draft();
     let payload = mj_chat::chat::PromptPayload::decode_draft(&draft).unwrap();
     assert_eq!(payload.text, "[image 1]");
     assert!(payload.images[0].image.data_base64.is_empty());
@@ -3882,14 +3792,14 @@ fn pasted_image_paths_stage_in_a_launch_without_a_session_attachment_store() {
         DashboardAction::None
     );
     assert_eq!(
-        dashboard.launch_standby.as_ref().unwrap().draft(),
+        dashboard.standby_prompts.get("session-1").unwrap().draft(),
         draft,
-        "Enter must wait for registration and installation before durable enqueue"
+        "Enter must wait for image installation before durable enqueue"
     );
     assert!(
         dashboard
-            .launch_standby
-            .as_ref()
+            .standby_prompts
+            .get("session-1")
             .unwrap()
             .notice()
             .unwrap()

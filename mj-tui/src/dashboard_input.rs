@@ -171,10 +171,6 @@ impl DashboardState {
             let session_id = session_id.to_owned();
             self.standby_prompt_mut(&session_id)
                 .handle_composer_paste(&normalized);
-        } else if self.launch_standby_capturing()
-            && let Some(standby) = self.launch_standby.as_mut()
-        {
-            standby.handle_composer_paste(&normalized);
         }
     }
 
@@ -630,6 +626,12 @@ impl DashboardState {
                 error: issue,
                 previous: Box::new(self.mode.clone()),
             }));
+            return DashboardAction::None;
+        }
+        // Explicit Open can enter the selected session's standby composer
+        // while its worker is starting, resuming, moving, or attaching.
+        if self.standby_prompt_session().is_some() {
+            self.focus_prompt();
             return DashboardAction::None;
         }
         if let Some(operation) = self.session_operations.get(&session.id) {

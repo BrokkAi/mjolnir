@@ -1695,10 +1695,6 @@ impl DashboardContext {
                 if let Some((host, size)) = registered.remembered_container_size {
                     self.controller.state.remember_container_size(&host, size);
                 }
-                let activate = self.dashboard.launch_standby_capturing();
-                if activate {
-                    self.dashboard.select_active_session(&session_id);
-                }
                 self.resolve_project_sources();
                 let still_launching = self
                     .controller
@@ -1712,26 +1708,6 @@ impl DashboardContext {
                         SessionOperationKind::Launching,
                         None,
                     );
-                }
-                // Anything typed while the launch was being prepared belongs to
-                // this session now: its composer becomes the session's standby,
-                // and each prompt already entered there goes to the daemon to
-                // be delivered when the harness is ready.
-                self.dashboard.adopt_launch_standby(&session_id);
-                for prompt in self.dashboard.standby_startup_prompts(&session_id) {
-                    self.startup_prompts.enqueue(
-                        session_id.clone(),
-                        prompt,
-                        None,
-                        self.dashboard_io_tx.clone(),
-                        self.critical_operations.clone(),
-                    );
-                }
-                // The next thing the person does with a launching session is
-                // write its first message, so the keyboard starts where the
-                // type-ahead composer is.
-                if activate {
-                    self.dashboard.focus_prompt();
                 }
                 let notice_name = self.session_notice_name(&session_id);
                 self.dashboard
@@ -1810,15 +1786,11 @@ impl DashboardContext {
         self.apply_controller_metadata(loaded);
         self.dashboard.set_state(self.controller.state.clone());
         self.resolve_project_sources();
-        // A lifecycle may finish after the user changed tabs. Its durable
-        // record still belongs in the global controller, but completion must
-        // not move the visible selection or replace another workspace's chat.
-        let focus_session = self.session_in_active_workspace(&session_id);
+        // Navigation owns pane assignments. Completion retires the old
+        // attachment; reconciliation reconnects only panes still showing it.
         let retirement = operation
             .as_ref()
             .and_then(|operation| operation.retirement.as_ref());
-        let owns_chat = retirement
-            .is_some_and(|retirement| retirement.is_current(&self.chats, &self.attachments));
         if update.result.is_ok()
             && let Some(retirement) = retirement
         {
@@ -1826,9 +1798,6 @@ impl DashboardContext {
         }
         match update.result {
             Ok(LifecycleSuccess::Created) => {
-                if focus_session {
-                    self.dashboard.finish_new_session(&session_id);
-                }
                 self.dashboard
                     .set_notice(format!("Session {} is ready", name));
                 // No quota probe here. Creating, resuming or moving a session
@@ -1844,17 +1813,15 @@ impl DashboardContext {
                 // keeps `TAIL_SEED_ITEMS` and discards everything before it,
                 // so reading the whole projection was work proportional to
                 // history for a result that was thrown away.
-                if focus_session && owns_chat {
+                if self.dashboard.pane_for_session(&session_id).is_some() {
                     self.request_transcript_tail_seed(&session_id);
-                    self.open_chat_session(&session_id);
                 }
                 self.dashboard
                     .set_notice(format!("Resumed {} with {profile_id} on {target_id}", name));
             }
             Ok(LifecycleSuccess::Moved(outcome)) => {
-                if focus_session && owns_chat {
+                if self.dashboard.pane_for_session(&session_id).is_some() {
                     self.request_transcript_tail_seed(&session_id);
-                    self.open_chat_session(&session_id);
                 }
                 let destination = format!("{}/{}", outcome.profile_id, outcome.target_template_id);
                 self.dashboard

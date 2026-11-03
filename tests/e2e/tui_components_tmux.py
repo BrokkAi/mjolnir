@@ -157,6 +157,9 @@ class TmuxController:
     def start(self, session: str, columns: int, rows: int) -> None:
         if self.session is not None:
             raise ScenarioFailure(f"tmux session {self.session!r} is still owned")
+        command = [str(self.binary)]
+        if instance := self.environment.get("MJ_INSTANCE"):
+            command.extend(["--instance", instance])
         self.run(
             "new-session",
             "-d",
@@ -167,7 +170,7 @@ class TmuxController:
             "-y",
             str(rows),
             "--",
-            str(self.binary),
+            *command,
         )
         self.session = session
 
@@ -204,7 +207,7 @@ class TmuxController:
     def send_text(self, text: str) -> None:
         if self.session is None:
             raise ScenarioFailure("no tmux session for text input")
-        self.run("send-keys", "-t", self.session, "-l", text)
+        self.run("send-keys", "-t", self.session, "-l", "--", text)
 
     def send_raw(self, data: str) -> None:
         # tmux sends literal UTF-8 bytes to the pane PTY with -l. This is
@@ -748,6 +751,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", required=True, type=int)
     parser.add_argument("--subagents-only", action="store_true", help="Run only global sub-agent Settings and Create delegation checks")
     parser.add_argument("--dialogs-only", action="store_true", help="Skip unrelated chat and sidebar interaction probes")
+    parser.add_argument("--navigation-only", action="store_true", help="Check that background Create preserves the conversation and keyboard focus")
     parser.add_argument(
         "--hel",
         type=pathlib.Path,
@@ -798,7 +802,7 @@ def main() -> int:
         {
             "HOME": str(fake_home),
             "CODEX_HOME": str(lab.profile),
-            "MJ_WORKER_BINARY": str((REPO_ROOT / "target/debug/mj-worker").resolve()),
+            "MJ_WORKER_BINARY": os.environ.get("MJ_WORKER_BINARY") or str((REPO_ROOT / "target/debug/mj-worker").resolve()),
             "TMPDIR": str(fake_tmp),
             "TERM": "xterm-256color",
             "LC_ALL": "C.UTF-8",
@@ -825,9 +829,28 @@ def main() -> int:
         reviewer_home = lab.runtime_root / "reviewer"
         reviewer_home.mkdir()
         profile = profile.replace(json.dumps(str(lab.profile)), json.dumps(str(reviewer_home)))
-        config_path.write_text(config_text + "\n[profiles.reviewer]" + profile + '\n[review]\nenabled = false\nprofile = "reviewer"\n')
+        config_path.write_text(config_text + "\n[profiles.reviewer]" + profile + '\n[review]\nenabled = false\nprofile = "reviewer"\n\n[quota]\nruntime = "host"\n')
         (lab.runtime_root / "fake_acp.py").write_text((REPO_ROOT / "tests/e2e/tui_components_acp.py").read_text())
-        if args.subagents_only:
+        if args.navigation_only:
+            from tui_components_actions import create_through_dialog, record
+            tmux.start("session-navigation", 140, 40)
+            tmux.wait_for("Sessions")
+            code, _ = lab.wait_daemon_status(port)
+            status, _ = lab.request("POST", "/auth/session", {"code": code})
+            if status != 204:
+                raise ScenarioFailure(f"fixture viewer login returned {status}")
+            first = create_through_dialog(lab, tmux, evidence)
+            lab.wait_snapshot(lambda value: any(row["id"] == first and row.get("state") == "running" for row in value.get("sessions", [])), "first conversation ready")
+            marker = f"draft-keeps-focus-{args.seed}"
+            tmux.send_text(marker)
+            tmux.wait_for(marker)
+            second = create_through_dialog(lab, tmux, evidence)
+            lab.wait_snapshot(lambda value: any(row["id"] == second and row.get("state") == "running" for row in value.get("sessions", [])), "background conversation ready")
+            tmux.wait_for(marker)
+            tmux.send_text("-still-here")
+            tmux.wait_for(marker + "-still-here")
+            record(tmux, evidence, "create-keeps-conversation-and-keyboard", "Create a second session while editing the first", "the original draft remains visible and still receives typing")
+        elif args.subagents_only:
             from tui_components_actions import create_through_dialog
             tmux.start("subagent-config", 140, 40)
             tmux.wait_for("Sessions")

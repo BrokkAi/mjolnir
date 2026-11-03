@@ -1797,41 +1797,6 @@ pub(crate) fn start_preflighted_session_launch(
     start_session_launch_with_repository_preflight(context, action, Some(repository_preflight));
 }
 
-/// Opens the composer that catches typing while a creation runs. Registration
-/// is several seconds of work away — loading the controller, probing Git
-/// remotes, registering with the daemon — and until it lands there is no
-/// session id to key a standby composer by, so the launch standby holds the
-/// text and the new session's standby adopts it.
-fn begin_launch_standby(context: &mut DashboardContext, action: &DashboardAction) {
-    let DashboardAction::CreateSession {
-        profile_id,
-        bundle_id,
-        project_directory,
-        ..
-    } = action
-    else {
-        return;
-    };
-    let target = project_directory
-        .as_ref()
-        .map(|directory| directory.display().to_string())
-        .unwrap_or_else(|| bundle_id.clone());
-    context
-        .dashboard
-        .begin_launch_standby(mj_chat::chat::SessionHeaderIdentity {
-            target,
-            profile: profile_id.clone(),
-            title: String::new(),
-            harness_kind: context
-                .controller
-                .config
-                .profiles
-                .get(profile_id)
-                .map(|profile| profile.kind),
-            subagent_count: 0,
-        });
-}
-
 fn start_session_launch_with_repository_preflight(
     context: &mut DashboardContext,
     action: DashboardAction,
@@ -1852,7 +1817,6 @@ fn start_session_launch_with_repository_preflight(
         action @ DashboardAction::CreateSession { .. } => {
             debug_assert!(repository_preflight.is_none());
             context.dashboard.set_notice("Preparing session launch…");
-            begin_launch_standby(context, &action);
             let go_save = context.dashboard.remember_go_launch(&action);
             spawn_dashboard_create_session(
                 action,
@@ -1938,17 +1902,14 @@ impl DashboardContext {
         self.cancel_chat_open_for(session_id);
         self.dashboard
             .begin_session_operation(session_id.to_owned(), kind, None);
-        // A restart or resume parks the conversation behind the standby
-        // composer. Select the session coming back so that composer is the
-        // one on screen, seed it with the warm chat's text so nothing typed
-        // is lost, and put the keyboard where the typing happens.
+        // Park this session's composer without changing navigation. A Move
+        // can belong to an unfocused pane; its draft must stay with it.
         if matches!(
             kind,
             SessionOperationKind::Launching
                 | SessionOperationKind::Resuming
                 | SessionOperationKind::Moving
         ) {
-            self.dashboard.select_active_session(session_id);
             if !self.dashboard.has_standby_composer(session_id)
                 && let Some(chat) = self.chats.get_mut(session_id)
                 && let Some(composer) = chat.take_live_composer()
@@ -1958,7 +1919,11 @@ impl DashboardContext {
             if kind != SessionOperationKind::Moving {
                 self.dashboard.set_standby_move_origin(session_id, None);
             }
-            self.dashboard.focus_prompt();
+            // Resume is an explicit request to open a suspended conversation.
+            if kind == SessionOperationKind::Resuming {
+                self.dashboard.select_active_session(session_id);
+                self.dashboard.focus_prompt();
+            }
         }
         let cancelled = Arc::new(AtomicBool::new(false));
         let notice_name = self.session_notice_name(session_id);
