@@ -455,3 +455,81 @@ pub(crate) fn add_quota_image(
         plan.push(refresh);
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A `PATH` holding stand-in executables named after `engines`.
+    fn path_with(engines: &[&str]) -> (tempfile::TempDir, std::ffi::OsString) {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        for engine in engines {
+            let program = directory.path().join(engine);
+            std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = directory.path().as_os_str().to_owned();
+        (directory, path)
+    }
+
+    /// Where `auto` runs a check for a config file with `targets` and these
+    /// engines installed, as the daemon loads it: the loader adds the
+    /// standard `podman` and `docker` runtimes the file does not name.
+    fn auto_decision(targets: &str, engines: &[&str]) -> Option<(Engine, String)> {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("config.toml");
+        std::fs::write(
+            &file,
+            format!("version = {}\n{targets}", mj_core::config::CONFIG_VERSION),
+        )
+        .unwrap();
+        let config = mj_core::config::Config::load_from(&file)
+            .unwrap()
+            .with_local_targets();
+        assert_eq!(config.quota.runtime, QuotaRuntimeChoice::Auto);
+        let (_bin, path) = path_with(engines);
+        match QuotaRuntime::resolve(&QuotaRuntimeConfig::of(&config), Some(&path)).unwrap() {
+            QuotaRuntime::Host => None,
+            QuotaRuntime::Container(runtime) => {
+                assert_eq!(
+                    runtime.program.file_name().unwrap(),
+                    runtime.engine.program()
+                );
+                Some((runtime.engine, runtime.image))
+            }
+        }
+    }
+
+    #[test]
+    fn auto_runs_quota_checks_in_an_enabled_local_runtime_and_otherwise_on_the_host() {
+        let standard = mj_core::config::DEFAULT_CONTAINER_IMAGE.to_owned();
+        // The standard candidates exist in every loaded config, so an engine
+        // that is not installed is what keeps the check on this machine.
+        assert_eq!(auto_decision("", &[]), None);
+        assert_eq!(
+            auto_decision("", &["podman", "docker"]),
+            Some((Engine::Podman, standard.clone()))
+        );
+        assert_eq!(
+            auto_decision("", &["docker"]),
+            Some((Engine::Docker, standard.clone()))
+        );
+        // A runtime switched off does not count, even with its engine there.
+        let podman_off = "[targets.podman]\nkind = \"podman\"\nenabled = false\n";
+        assert_eq!(
+            auto_decision(podman_off, &["podman", "docker"]),
+            Some((Engine::Docker, standard))
+        );
+        let both_off = "[targets.podman]\nkind = \"podman\"\nenabled = false\n\
+             [targets.docker]\nkind = \"docker\"\nenabled = false\n";
+        assert_eq!(auto_decision(both_off, &["podman", "docker"]), None);
+        // A runtime the person configured wins over the standard candidate,
+        // and the check runs its image.
+        let mine = "[targets.zz-mine]\nkind = \"podman\"\nimage = \"example.invalid/mine:1\"\n";
+        assert_eq!(
+            auto_decision(mine, &["podman"]),
+            Some((Engine::Podman, "example.invalid/mine:1".to_owned()))
+        );
+    }
+}

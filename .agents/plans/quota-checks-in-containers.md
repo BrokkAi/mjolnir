@@ -16,7 +16,7 @@ Kimi, Muse and Z.ai quota checks are plain HTTPS requests from the daemon and ar
 - [x] (2026-11-02) Milestone 1: `[quota] runtime` in `mj-core/src/config.rs` (`QuotaConfig`, `QuotaRuntimeChoice`), the Settings schema entries in `mj-client/src/settings/schema.rs`, and the row under Sessions in `mj-client/src/settings/page.rs`.
 - [x] (2026-11-02) Milestone 2: `mj-controller/src/quota_runtime.rs` with `QuotaRuntime::resolve`, `ContainerRuntime::{ensure_image, launch}`, `ContainerCheck`, `QuotaContainer` (removal on shutdown and on drop), `sweep_quota_containers`, and `add_quota_image`.
 - [x] (2026-11-02) Milestone 3: `QuotaRefreshRequest.runtime`; Codex (`CodexLauncher`), Grok (`GrokUsageSession::spawn_in_container`) and Claude (`run_claude_refresh`) use the container when resolved; the daemon adds the image to its background downloads (`daemon/process.rs`) and sweeps leftovers when its quota poller starts (`pollers/quota.rs`).
-- [x] (2026-11-02) Milestone 4: tests `a_container_check_passes_secrets_by_name_and_removes_its_container_on_shutdown` and `a_container_check_without_its_image_reports_the_download_and_runs_nothing` (`codex_usage.rs`); settings goldens regenerated; touched suites, clippy and fmt pass (see Outcomes).
+- [x] (2026-11-02) Milestone 4: tests `a_container_check_passes_secrets_by_name_and_removes_its_container_on_shutdown` and `a_container_check_without_its_image_reports_the_download_and_runs_nothing` (`codex_usage.rs`); `auto_runs_quota_checks_in_an_enabled_local_runtime_and_otherwise_on_the_host` (`quota_runtime.rs`, loads a real config file so the loader's standard runtimes take part); settings goldens regenerated; touched suites, clippy and fmt pass (see Outcomes).
 
 ## Surprises & Discoveries
 
