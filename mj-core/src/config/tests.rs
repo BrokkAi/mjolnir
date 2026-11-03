@@ -833,6 +833,7 @@ fn sample_config() -> Config {
         spinner: SpinnerStyle::default(),
         theme: Default::default(),
         phone: PhoneConfig::default(),
+        daemon: Default::default(),
         github: GithubConfig::default(),
         continuation: Default::default(),
         review: ReviewConfig::default(),
@@ -1478,6 +1479,9 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
     // the editor opened. The review save must start from this newer file.
     let mut latest = Config::load_from(&path).unwrap();
     latest.phone.enabled = false;
+    latest.daemon.runtime = DaemonRuntime::Podman;
+    latest.daemon.image = Some("example.test/daemon:fixture".into());
+    latest.daemon.mounts = vec![PathBuf::from("/srv/review-projects")];
     latest
         .profiles
         .get_mut("codex-1")
@@ -1485,16 +1489,28 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
         .environment
         .insert("LATEST_SETTING".into(), "kept".into());
     latest.save_to(&path).unwrap();
+    let current = fs::read_to_string(&path).unwrap();
+    let previous_version = format!("version = {CONFIG_VERSION}");
+    assert!(current.contains(&previous_version));
+    fs::write(
+        &path,
+        current.replacen(&previous_version, "version = 20", 1),
+    )
+    .unwrap();
 
     let review = ReviewConfig {
         trigger: ReviewTrigger::Turn,
+        count: std::num::NonZeroUsize::new(3).unwrap(),
         tier: None,
         profile: Some("codex-1".into()),
         model: Some("review-model".into()),
         effort: Some("high".into()),
     };
     let saved = Config::save_review_to(&path, review.clone()).unwrap();
+    assert_eq!(saved.version, CONFIG_VERSION);
     assert_eq!(saved.review, review);
+    assert_eq!(saved.review.count.get(), 3);
+    assert_eq!(saved.daemon, latest.daemon);
     assert!(!saved.phone.enabled);
     assert_eq!(
         saved.profiles["codex-1"].environment.get("LATEST_SETTING"),
@@ -2284,6 +2300,7 @@ fn a_disabled_profile_loads_instead_of_failing() {
 fn a_session_review_choice_is_stored_in_a_stable_shape() {
     // Stored in `sessions.review_json`; older and newer releases read it.
     let on = SessionReview::Turn {
+        count: None,
         model: Some("gpt-6-astra".into()),
         effort: None,
         tier: None,
@@ -2299,6 +2316,7 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
     assert_eq!(
         serde_json::from_str::<SessionReview>(r#"{"mode":"on"}"#).unwrap(),
         SessionReview::Turn {
+            count: None,
             model: None,
             effort: None,
             tier: None,
@@ -2311,12 +2329,14 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
         )
         .unwrap(),
         SessionReview::Turn {
+            count: None,
             model: Some("gpt-6-luna".into()),
             effort: Some("max".into()),
             tier: None,
         }
     );
     let extended = SessionReview::Turn {
+        count: None,
         model: None,
         effort: None,
         tier: Some("extended".into()),
@@ -2337,6 +2357,16 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
             ReviewConfig::default().for_session(Some(&choice)).trigger,
             choice.trigger()
         );
+        let global = ReviewConfig {
+            count: std::num::NonZeroUsize::new(4).unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(global.for_session(Some(&choice)).count, global.count);
+        let explicit =
+            format!(r#"{{"mode":"{trigger}","count":3,"model":"astra","effort":"high"}}"#);
+        let counted: SessionReview = serde_json::from_str(&explicit).unwrap();
+        assert_eq!(serde_json::to_string(&counted).unwrap(), explicit);
+        assert_eq!(global.for_session(Some(&counted)).count.get(), 3);
     }
     assert_eq!(
         serde_json::from_str::<SessionReview>(r#"{"mode":"off"}"#).unwrap(),

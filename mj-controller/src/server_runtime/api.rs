@@ -51,6 +51,14 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { bail!("push review is unavailable") })
     }
 
+    fn override_review(
+        &self,
+        _session_id: String,
+        _reason: String,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        Box::pin(async { bail!("push review is unavailable") })
+    }
+
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         Default::default()
     }
@@ -209,6 +217,19 @@ impl ExportRuntime for RuntimeState {
                 .begin_push(&session_id)
                 .await
                 .map_err(|error| anyhow!("request_review refused: {}", error.0))
+        })
+    }
+
+    fn override_review(
+        &self,
+        session_id: String,
+        reason: String,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        Box::pin(async move {
+            self.review_host()
+                .override_push(&session_id, reason)
+                .await
+                .map_err(|error| anyhow!("override_review refused: {}", error.0))
         })
     }
 
@@ -848,6 +869,11 @@ impl ApiBackend {
             SubagentToolAction::RequestReview {} => {
                 self.exports
                     .request_review(parent_session_id.to_owned())
+                    .await
+            }
+            SubagentToolAction::OverrideReview { reason } => {
+                self.exports
+                    .override_review(parent_session_id.to_owned(), reason.to_owned())
                     .await
             }
             SubagentToolAction::ListProfiles => {

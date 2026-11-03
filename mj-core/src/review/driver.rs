@@ -2,22 +2,27 @@
 
 use super::lanes::{PriorReviewContext, UserMessage};
 use super::verdict::{ReviewPassEvidence, ReviewVerdict};
+use crate::relay::RepoDelta;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// What the driver needs the caller to do next.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ReviewRequest {
     /// Ask the worker what changed since these baselines.
     CaptureDelta {
         baselines: BTreeMap<PathBuf, String>,
     },
     /// Register a fresh reviewer child with this initial prompt.
-    StartReviewer { command_id: String, prompt: String },
+    StartReviewer {
+        role: String,
+        command_id: String,
+        prompt: String,
+    },
     /// Send `prompt` to the primary session under `command_id`.
     PromptPrimary { command_id: String, prompt: String },
     /// Close the reviewer child.
-    CloseReviewer,
+    CloseReviewer { role: String },
     /// Record these trees, and this transcript ordinal, as reviewed.
     AdvanceBaseline {
         trees: BTreeMap<PathBuf, String>,
@@ -28,6 +33,9 @@ pub enum ReviewRequest {
     RecordPriorReview { prior: PriorReviewContext },
     /// Forget any prior review: this pass consumed it.
     ClearPriorReview,
+    /// An incomplete findings handoff was accepted, but coverage must stay put.
+    /// Clear its durable retry record when closing without advancing a baseline.
+    ClearPendingForward,
     /// The review is over; close the pane and release the prompt lock.
     Close,
 }
@@ -64,6 +72,9 @@ pub struct RoleStatus {
     pub role: String,
     pub label: String,
     pub state: RoleState,
+    /// The host projects its authoritative registration onto this row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<String>,
 }
 
 /// How a review ended.
@@ -112,7 +123,7 @@ pub enum TurnReviewPhase {
     Resolved(Resolution),
 }
 
-/// The turn review's sole reviewer.
+/// The legacy sole-reviewer role, retained for old review records.
 pub const REVIEWER_ROLE: &str = "reviewer";
 
 /// How every command a turn review sends a reviewing role begins, so a
@@ -120,7 +131,7 @@ pub const REVIEWER_ROLE: &str = "reviewer";
 pub const COMMAND_ID_PREFIX: &str = "turn-review-";
 
 /// Everything about the reviewed turn that is known before the capture lands.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TurnReviewSeed {
     /// The latest real user prompt; earlier requirements remain in the history.
     pub task: String,
@@ -132,6 +143,29 @@ pub struct TurnReviewSeed {
     pub through_ordinal: u64,
     /// A previous forwarded verdict, when this review follows a correction.
     pub prior_review: Option<PriorReviewContext>,
+}
+
+/// One frozen reviewer slot. Its verdict is the only terminal-state fact.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReviewerOutcomeSlot {
+    pub role: String,
+    pub command_id: String,
+    pub outcome: Option<ReviewVerdict>,
+}
+
+/// Durable pure-driver state. Child registration and live identity remain host-owned.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ReviewDriverSnapshot {
+    pub review_id: String,
+    pub seed: TurnReviewSeed,
+    pub phase: TurnReviewPhase,
+    pub last_verdict: Option<ReviewVerdict>,
+    pub deltas: Vec<RepoDelta>,
+    pub roles: Vec<ReviewerOutcomeSlot>,
+    pub provenance: FindingsProvenance,
+    pub sequence: u64,
+    /// Exact requests emitted by the current stage, before any side effect.
+    pub replay_requests: Vec<ReviewRequest>,
 }
 
 /// Durable information needed to reconcile a corrective prompt after the
@@ -166,6 +200,8 @@ pub enum FindingsProvenance {
     /// The sole current reviewer. Nothing checks its findings before they
     /// reach the primary agent.
     SingleReviewer,
+    /// Separate reviewer sessions independently inspected the same target.
+    IndependentReviewers,
 }
 
 impl FindingsProvenance {

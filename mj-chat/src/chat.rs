@@ -148,6 +148,11 @@ pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) ->
         Some(model) => format!("{armed}, model {model:?}"),
         None => armed,
     };
+    let count = review.count.get();
+    let armed = format!(
+        "{armed}; {count} reviewer{}",
+        if count == 1 { "" } else { "s" }
+    );
     if open {
         format!("{armed}. A review is open now.")
     } else {

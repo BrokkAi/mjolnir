@@ -400,6 +400,9 @@ pub enum SubagentToolAction {
     },
     ListProfiles,
     RequestReview {},
+    OverrideReview {
+        reason: String,
+    },
     Spawn {
         task_name: String,
         instructions: String,
@@ -465,6 +468,9 @@ enum SubagentToolActionWire {
     },
     ListProfiles,
     RequestReview {},
+    OverrideReview {
+        reason: String,
+    },
     Spawn {
         task_name: String,
         instructions: String,
@@ -520,6 +526,7 @@ impl SubagentToolAction {
             self,
             Self::Spawn { .. }
                 | Self::RequestReview {}
+                | Self::OverrideReview { .. }
                 | Self::SendInput { .. }
                 | Self::SendMessage { .. }
                 | Self::LegacyInterruptAgent { .. }
@@ -571,6 +578,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
             },
             SubagentToolActionWire::ListProfiles => Self::ListProfiles,
             SubagentToolActionWire::RequestReview {} => Self::RequestReview {},
+            SubagentToolActionWire::OverrideReview { reason } => Self::OverrideReview { reason },
             SubagentToolActionWire::Spawn {
                 task_name,
                 instructions,
@@ -1526,6 +1534,9 @@ mod tests {
             },
             SubagentToolAction::CloseAgent {
                 child_session_id: "child".into(),
+            },
+            SubagentToolAction::OverrideReview {
+                reason: "reason".into(),
             },
         ];
         assert!(

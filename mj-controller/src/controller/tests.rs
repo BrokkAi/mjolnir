@@ -2082,6 +2082,7 @@ fn a_session_named_review_model_takes_a_baseline_for_the_reviewer_auto_will_choo
             .unwrap()
     };
     let named = register(Some(mj_core::config::SessionReview::Turn {
+        count: None,
         model: Some("deepseek-flash".into()),
         effort: None,
         tier: None,

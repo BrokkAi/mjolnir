@@ -8,10 +8,7 @@ impl HostState {
         reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
         prepared: Result<Prepared, StartRefusal>,
     ) {
-        let cancelled = self
-            .preparation_cancellation
-            .get(&session_id)
-            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire));
+        let cancelled = matches!(self.preparing.get(&session_id), Some(PreparingOperation::Review { cancelled }) if cancelled.load(std::sync::atomic::Ordering::Acquire));
         let prepared = if cancelled {
             Err(StartRefusal("review preparation cancelled".into()))
         } else {
@@ -20,7 +17,6 @@ impl HostState {
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(refusal) => {
-                self.preparation_cancellation.remove(&session_id);
                 self.preparing.remove(&session_id);
                 release_prompts(&session_id);
                 if manual || refusal.0 != SUBAGENT_REFUSAL {
@@ -44,15 +40,76 @@ impl HostState {
         if prepared.resume_forward.is_none() {
             prepared.state.child_session_id = None;
         }
-        prepared.state.active = Some(format!("review-{epoch}"));
+        let review_id = match new_command_id("review-group") {
+            Ok(id) => id,
+            Err(error) => {
+                self.preparing.remove(&session_id);
+                release_prompts(&session_id);
+                answer(
+                    reply,
+                    Err(StartRefusal(format!(
+                        "could not allocate review id: {error:#}"
+                    ))),
+                );
+                return;
+            }
+        };
+        let seed = seed_from_session(
+            &prepared.materialized,
+            &prepared.state,
+            if manual { "manual" } else { "automatic" },
+        );
+        let (mut driver, mut requests) = if let Some(pending) = prepared.resume_forward.clone() {
+            let command_id = pending.command_id.clone();
+            let (mut driver, _) = TurnReviewDriver::resume_forward(seed, pending);
+            let requests = driver.forward(command_id);
+            (driver, requests)
+        } else {
+            TurnReviewDriver::start(seed, review_id.clone(), prepared.count)
+        };
+        if let Some(deltas) = prepared.captured.clone() {
+            requests = driver.delta_captured(deltas);
+        }
+        if prepared.resume_forward.is_none() {
+            let mut registrations = Vec::new();
+            for role in &driver.snapshot().roles {
+                let request_key = match new_command_id("reviewer-child") {
+                    Ok(key) => key,
+                    Err(error) => {
+                        self.preparing.remove(&session_id);
+                        release_prompts(&session_id);
+                        answer(
+                            reply,
+                            Err(StartRefusal(format!(
+                                "could not allocate reviewer request: {error:#}"
+                            ))),
+                        );
+                        return;
+                    }
+                };
+                registrations.push(mj_core::storage::ReviewerRegistration {
+                    role: role.role.clone(),
+                    request_key,
+                    child_session_id: None,
+                });
+            }
+            prepared.state.active_group = Some(mj_core::storage::ActiveReviewGroup {
+                driver: driver.snapshot(),
+                reviewer: prepared.reviewer.clone(),
+                scope: prepared.scope,
+                registrations,
+            });
+        }
+        prepared.state.active = Some(review_id);
         let state = prepared.state.clone();
         self.pending_open.insert(
             session_id.clone(),
             PendingOpen {
                 epoch,
-                manual,
                 reply,
                 prepared,
+                driver,
+                requests,
             },
         );
         if let Err(error) =
@@ -64,7 +121,6 @@ impl HostState {
                 .expect("pending review was just inserted");
             let retry_recovery = pending.prepared.resume_forward.is_some();
             self.preparing.remove(&session_id);
-            self.preparation_cancellation.remove(&session_id);
             self.publish(&session_id);
             if retry_recovery {
                 self.recovery_candidates.insert(session_id.clone());
@@ -86,10 +142,21 @@ impl HostState {
         result: Result<(), String>,
     ) {
         match completion {
-            PersistenceCompletion::LaunchChild => {
+            PersistenceCompletion::Captured => {
+                let Some(requests) = self.awaiting_capture_persistence.remove(&session_id) else {
+                    return;
+                };
                 if let Err(error) = result {
                     self.fail(&session_id, error);
-                    self.close_reviewer_child(&session_id);
+                } else {
+                    self.run(&session_id, requests);
+                }
+            }
+            PersistenceCompletion::LaunchChild { role } => {
+                if let Err(error) = result {
+                    if let Some(slot) = self.reviews.get(&session_id) {
+                        self.role_failed(&session_id, slot.epoch, &role, None, error);
+                    }
                     return;
                 }
                 // Registration is durable. Provisioning and harness readiness
@@ -97,20 +164,17 @@ impl HostState {
                 if let Some(slot) = self.reviews.get_mut(&session_id) {
                     answer(slot.start_reply.take(), Ok(()));
                 }
-                self.launch_reviewer_child(&session_id);
+                self.launch_reviewer_child(&session_id, &role, true);
             }
             PersistenceCompletion::Open => {
                 let Some(pending) = self.pending_open.remove(&session_id) else {
                     return;
                 };
-                self.preparing.remove(&session_id);
-                let cancelled = self
-                    .preparation_cancellation
-                    .remove(&session_id)
-                    .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire));
+                let cancelled = matches!(self.preparing.remove(&session_id), Some(PreparingOperation::Review { cancelled }) if cancelled.load(std::sync::atomic::Ordering::Acquire));
                 if cancelled && result.is_ok() {
                     let mut state = pending.prepared.state;
                     state.active = None;
+                    state.active_group = None;
                     if let Err(error) = self.persist(session_id.clone(), state, None) {
                         tracing::warn!(%session_id, %error, "could not clear cancelled review preparation");
                     }
@@ -141,49 +205,23 @@ impl HostState {
                     .then(|| PushReview {
                         deltas: pending.prepared.captured.clone().unwrap_or_default(),
                         finishing: false,
+                        retry_delay: std::time::Duration::from_secs(1),
                     });
-                let seed = seed_from_session(
-                    &pending.prepared.materialized,
-                    &pending.prepared.state,
-                    if pending.manual {
-                        "manual"
-                    } else {
-                        "automatic"
-                    },
-                );
-                let (driver, requests) =
-                    if let Some(pending) = pending.prepared.resume_forward.clone() {
-                        let command_id = pending.command_id.clone();
-                        let (mut driver, _) = TurnReviewDriver::resume_forward(seed, pending);
-                        let requests = driver.forward(command_id);
-                        (driver, requests)
-                    } else {
-                        let (mut driver, requests) = TurnReviewDriver::start(seed);
-                        // Preparation already captured the change, so the
-                        // review starts from that capture instead of asking
-                        // the worker for the same one again.
-                        match pending.prepared.captured {
-                            Some(deltas) => {
-                                let requests = driver.delta_captured(deltas);
-                                (driver, requests)
-                            }
-                            None => (driver, requests),
-                        }
-                    };
                 self.reviews.insert(
                     session_id.clone(),
                     ReviewSlot {
                         epoch: pending.epoch,
-                        driver,
+                        driver: pending.driver,
                         reviewer: pending.prepared.reviewer,
                         state: pending.prepared.state,
                         _background: pending.prepared.background,
-                        command_id: None,
                         push,
                         start_reply: pending.reply,
+                        pending_outcome: None,
+                        queued_outcomes: Vec::new(),
                     },
                 );
-                self.run(&session_id, requests);
+                self.run(&session_id, pending.requests);
             }
             PersistenceCompletion::Forward => {
                 let Some(requests) = self.awaiting_forward_persistence.remove(&session_id) else {

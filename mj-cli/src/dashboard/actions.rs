@@ -2003,6 +2003,31 @@ fn spawn_daemon_restart(context: &mut DashboardContext) {
     });
 }
 
+/// Move the daemon where a saved `[daemon]` setting says, off the event loop.
+///
+/// Startup owns that decision: it compares where the daemon runs with the
+/// configuration and hands off to a daemon launched in the right place, so
+/// workers keep running. This only asks it now rather than at the next start.
+pub(super) fn spawn_daemon_placement(context: &mut DashboardContext) {
+    let updates = context.dashboard_io_tx.clone();
+    let guard = context
+        .critical_operations
+        .begin("moving the Mjolnir daemon");
+    context
+        .dashboard
+        .set_notice("Moving the Mjolnir daemon where Settings say...");
+    tokio::spawn(async move {
+        let result = daemon::connect_or_start().await.map_or_else(
+            |error| Err(format!("Could not move the Mjolnir daemon: {error:#}")),
+            |_| Ok("The Mjolnir daemon runs where Settings say.".to_owned()),
+        );
+        if let Err(error) = updates.send(DashboardIoUpdate::DaemonRestarted(result)) {
+            tracing::warn!(%error, "daemon move outcome dropped because the surface closed");
+        }
+        drop(guard);
+    });
+}
+
 fn spawn_web_request(context: &mut DashboardContext, action: DashboardAction) {
     context.web_request_cancel = None;
     context.web_request_generation = context.web_request_generation.wrapping_add(1);

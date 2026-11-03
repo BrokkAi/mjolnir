@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 102;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 106;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1908,6 +1908,47 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older daemons do not maintain SQL-backed pending push
+    // findings when resolving reviews. Refuse their reads and writes.
+    if version < 104 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE turn_review_state ADD COLUMN push_findings TEXT;
+             UPDATE schema_compatibility SET minimum_compatible_version = 104 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (104, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 104;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: older daemons cannot decode durable OverrideReview actions.
+    // Refuse their reads and writes before the new action can be queued.
+    if version < 105 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 105 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (105, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 105;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: older daemons discard active reviewer groups, per-session
+    // reviewer count, and aggregate failure metadata in stored JSON updates.
+    if version < 106 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE turn_review_state ADD COLUMN active_group TEXT;
+             UPDATE schema_compatibility SET minimum_compatible_version = 106 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (106, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 106;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2379,6 +2420,26 @@ pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
         .unwrap();
 }
 
+/// Historical fixtures must remove review columns introduced afterward.
+#[cfg(test)]
+pub(super) fn restore_review_state_schema(connection: &Connection, version: i64) {
+    if version < 106
+        && legacy_schema::table_has_column(connection, "turn_review_state", "active_group").unwrap()
+    {
+        connection
+            .execute_batch("ALTER TABLE turn_review_state DROP COLUMN active_group;")
+            .unwrap();
+    }
+    if version < 104
+        && legacy_schema::table_has_column(connection, "turn_review_state", "push_findings")
+            .unwrap()
+    {
+        connection
+            .execute_batch("ALTER TABLE turn_review_state DROP COLUMN push_findings;")
+            .unwrap();
+    }
+}
+
 #[cfg(test)]
 mod reader_tests {
     use super::*;
@@ -2671,6 +2732,7 @@ mod reader_tests {
         let connection = open_writer(&path).unwrap();
         restore_github_v84_schema(&connection);
         restore_pre101_subagent_preference(&connection);
+        restore_review_state_schema(&connection, 63);
         connection.execute_batch("DROP TABLE retained_move_sources; DELETE FROM schema_migrations WHERE version>=64; UPDATE schema_compatibility SET minimum_compatible_version=63 WHERE singleton=1; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE session_restart_intents DROP COLUMN container_upgrade_json; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version=63;").unwrap();
         drop(connection);
         forget_verified_schema(&path);
@@ -3056,6 +3118,7 @@ mod reader_tests {
             .unwrap();
         restore_github_v84_schema(&connection);
         restore_pre101_subagent_preference(&connection);
+        restore_review_state_schema(&connection, 76);
         // Restore the previous table definition and migration ledger, retaining
         // a real row so the forward migration proves it copies existing data.
         connection
@@ -3221,6 +3284,7 @@ mod reader_tests {
                 .execute_batch("DROP TABLE IF EXISTS quota_history;")
                 .unwrap();
         }
+        restore_review_state_schema(&connection, version);
         // Historical fixtures must remove columns introduced by later revisions.
         if version < 94
             && legacy_schema::table_has_column(
@@ -3325,6 +3389,7 @@ mod reader_tests {
         let connection = Connection::open(&path).unwrap();
         restore_github_v84_schema(&connection);
         restore_pre101_subagent_preference(&connection);
+        restore_review_state_schema(&connection, 55);
         connection
             .execute_batch(
                 "UPDATE sessions SET mjolnir_subagents = 1 WHERE session_id = 'all';
@@ -3394,8 +3459,10 @@ mod reader_tests {
         migrate_schema(&connection).unwrap();
         let schema = read_schema_state(&connection).unwrap();
         assert_eq!(schema.revision, SCHEMA_VERSION);
-        assert_eq!(schema.minimum_compatible, Some(102));
-        schema.ensure_supported_by(102).unwrap();
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        schema
+            .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+            .unwrap();
         assert_eq!(
             connection
                 .query_row(
@@ -3545,6 +3612,7 @@ mod reader_tests {
         let connection = Connection::open(&path).unwrap();
         restore_github_v84_schema(&connection);
         restore_pre101_subagent_preference(&connection);
+        restore_review_state_schema(&connection, 47);
         connection
             .execute_batch(
                 "DELETE FROM schema_migrations WHERE version >= 48;
@@ -3578,6 +3646,7 @@ mod reader_tests {
         let connection = Connection::open(&path).unwrap();
         restore_github_v84_schema(&connection);
         restore_pre101_subagent_preference(&connection);
+        restore_review_state_schema(&connection, 45);
         connection
             .execute_batch(
                 "ALTER TABLE sessions DROP COLUMN target_runtime_json;
@@ -3610,6 +3679,7 @@ mod reader_tests {
         let connection = open_writer(&path).unwrap();
         restore_github_v84_schema(&connection);
         restore_pre101_subagent_preference(&connection);
+        restore_review_state_schema(&connection, 38);
         connection
             .execute_batch(
                 "BEGIN IMMEDIATE;

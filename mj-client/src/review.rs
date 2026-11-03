@@ -59,6 +59,19 @@ pub fn parse_reviewer_question_id(id: &str) -> Option<(&str, &str)> {
 }
 
 impl RuntimeReviewView {
+    /// Child sessions in the host's stable reviewer order. A role without an
+    /// assigned child is status only and has no transcript to attach to.
+    pub fn reviewer_children(&self) -> impl Iterator<Item = &str> {
+        self.roles
+            .iter()
+            .filter_map(|role| role.child_session_id.as_deref())
+    }
+
+    #[must_use]
+    pub fn owns_reviewer(&self, child: &str) -> bool {
+        self.reviewer_children().any(|id| id == child)
+    }
+
     /// Whether progress indicators should move. A verdict and a failed
     /// handoff wait for the user even though they retain an activity label.
     #[must_use]

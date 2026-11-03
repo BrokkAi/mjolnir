@@ -1,22 +1,25 @@
-//! Cumulative review of a completed coding turn by a second harness.
+//! Cumulative review of a completed coding turn by independent harness sessions.
 //!
 //! A *turn review* runs after the primary agent finishes a prompt: Hel captures
 //! what the workspace's repositories changed since the last completed review,
-//! then asks a reviewer harness -- usually a different one from the primary's --
-//! to look for defects in exactly that change. The user watches it happen in the
-//! split pane and either forwards the findings to the primary, dismisses them,
-//! or cancels.
+//! then asks independently running reviewer sessions to inspect that same captured
+//! change. The configured reviewer profile is resolved once for the group. The
+//! user can inspect each session and either forward the combined findings to the
+//! primary, dismiss them, or cancel the review.
 //!
-//! The reviewer follows Codex's `/review` rubric and JSON output contract,
-//! while the driver owns capture, forwarding, cancellation and restart recovery.
+//! Each reviewer follows Codex's `/review` rubric and returns plain-text findings
+//! or exactly `No findings.` when there are none. The driver keeps reports in
+//! launch order, labels their source sessions, and declares the group clean only
+//! when every reviewer completed cleanly. It owns forwarding, cancellation and
+//! the durable state restored after a daemon restart.
 //!
 //! Terms used throughout:
 //!
 //! * A *reviewer* reads the user messages, changed-file counts and captured
 //!   tree ids, then gets the diff through its own harness tools.
 //! * A *baseline* is the Git tree id of a repository's working tree as of the
-//!   last completed review. It advances only when a review resolves, so
-//!   cancelling one review folds its changes into the next.
+//!   last completed review. It advances only after complete review coverage;
+//!   cancellation or an incomplete group leaves the changes for the next review.
 
 pub mod delta;
 pub mod driver;
@@ -29,7 +32,7 @@ pub const USER_MESSAGES_LIMIT: usize = 128 * 1024;
 /// bytes a row that is several hundred files; each repository's totals come
 /// first in its section, so a cut table still says how large the change is.
 pub const CHANGED_FILES_LIMIT: usize = 32 * 1024;
-/// How much of a synthesis is retained as the review's verdict text.
+/// How much of each reviewer's findings is retained before aggregation.
 pub const SYNTHESIS_LIMIT: usize = 32 * 1024;
 /// Bound the diff retained in a capture for existing review status consumers.
 pub const REVIEW_CAPTURE_DIFF_LIMIT: usize = 96 * 1024;

@@ -6148,6 +6148,7 @@ async fn review_status_reports_the_open_review_or_none() {
             roles: vec![crate::server::ViewerReviewRole {
                 label: "reviewer".into(),
                 state: "findings".into(),
+                child_session_id: Some("reviewer-child".into()),
             }],
             verdict: Some(crate::server::ViewerReviewVerdict {
                 kind: "findings".into(),

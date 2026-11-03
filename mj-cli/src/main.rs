@@ -2172,7 +2172,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             // Two builds can report the same version, so the version line
             // cannot answer "is my rebuilt code running?". The executable file
             // can, and it is the question a development restart turns on.
-            match daemon::process_runs_this_executable(status.pid)? {
+            match daemon::daemon_runs_this_build(status.pid, &status.build_version)? {
                 Some(true) => println!("This daemon runs this build."),
                 Some(false) => println!(
                     "This daemon runs a different executable ({}) than this client ({}); \

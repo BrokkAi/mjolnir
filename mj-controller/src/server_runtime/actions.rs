@@ -379,11 +379,20 @@ pub(super) async fn apply_phone_action(
             elicitation_id,
             response,
         } => {
-            let (session_id, elicitation_id) = services
+            let target = services
                 .daemon_runtime
                 .review_host()
                 .question_target(&session_id, &elicitation_id)
-                .unwrap_or((session_id, elicitation_id));
+                .await;
+            let (session_id, elicitation_id) = match target {
+                Some(target) => target,
+                None if mj_client::review::parse_reviewer_question_id(&elicitation_id)
+                    .is_some() =>
+                {
+                    anyhow::bail!("that reviewer question is no longer active")
+                }
+                None => (session_id, elicitation_id),
+            };
             services
                 .sessions
                 .session(&session_id)

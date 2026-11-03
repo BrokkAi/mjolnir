@@ -134,9 +134,19 @@ fn models_probe(offers: &[(&str, &[&str])]) -> Arc<crate::server_runtime::profil
 struct RecordingExports {
     parent: SessionRecord,
     registered: std::sync::Mutex<Option<crate::controller::RegisterSubagentRequest>>,
+    override_call: std::sync::Mutex<Option<(String, String)>>,
 }
 
 impl ExportRuntime for RecordingExports {
+    fn override_review(
+        &self,
+        session_id: String,
+        reason: String,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        *self.override_call.lock().unwrap() = Some((session_id, reason));
+        Box::pin(async { Ok(serde_json::json!({"accepted": true})) })
+    }
+
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         mj_core::config::SubagentConfig {
             straightforward: Some(mj_core::config::SubagentChoice {
@@ -178,6 +188,10 @@ impl RecordingExports {
             .unwrap()
             .clone()
             .expect("the spawn reached registration")
+    }
+
+    fn override_call(&self) -> Option<(String, String)> {
+        self.override_call.lock().unwrap().clone()
     }
 }
 
@@ -222,6 +236,7 @@ async fn selection_backend_refusing(
     let exports = Arc::new(RecordingExports {
         parent: parent_record("parent-1", "parent"),
         registered: std::sync::Mutex::new(None),
+        override_call: std::sync::Mutex::new(None),
     });
     let backend = Arc::new(
         ApiBackend::new(
@@ -306,6 +321,29 @@ async fn legacy_list_profiles_is_refused() {
         )
         .await;
     assert!(result.is_error && result.message.contains("no longer available"));
+}
+
+#[tokio::test]
+async fn override_review_dispatch_forwards_parent_and_reason_to_export() {
+    let (backend, exports) = selection_backend(SAME_MODELS, None).await;
+    let result = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "override-review".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::OverrideReview {
+                    reason: "finding is unreasonable".into(),
+                },
+            },
+        )
+        .await;
+    assert!(!result.is_error, "{}", result.message);
+    assert_eq!(
+        exports.override_call(),
+        Some(("parent-1".into(), "finding is unreasonable".into()))
+    );
 }
 
 /// One login that cannot be discovered drops out on its own; it neither fails
@@ -1490,7 +1528,7 @@ async fn a_child_that_owes_its_report_is_reminded_once() {
 /// A child hands back one report per turn. The report is recorded against the
 /// turn that is running, a repeat in the same turn is refused without being an
 /// error, and a session that is not such a child cannot hand anything back.
-// Hard-won: cba38b09c: ordinary report limits rejected complete reviewer JSON.
+// Hard-won: cba38b09c: ordinary report limits rejected a complete reviewer report.
 #[tokio::test]
 async fn a_child_hands_back_one_report_per_turn() {
     if std::env::var_os(HANDBACK_TEST_CHILD).is_none() {
@@ -1634,10 +1672,8 @@ async fn a_child_hands_back_one_report_per_turn() {
         running_states(),
         Arc::new(NoExports),
     ));
-    let mut output = serde_json::json!({"findings": [{"title": "[P1] Preserve the complete finding", "body": ""}]});
-    let padding = 20_000 - output.to_string().chars().count();
-    output["findings"][0]["body"] = "é".repeat(padding).into();
-    let message = output.to_string();
+    let title = "- [P1] Preserve the complete finding — src/lib.rs:1\n";
+    let message = format!("{title}{}", "é".repeat(20_000 - title.chars().count()));
     assert_eq!(message.chars().count(), 20_000);
     let accepted = backend
         .execute_subagent_tool(

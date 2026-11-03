@@ -227,6 +227,7 @@ pub(super) fn session_request_meta(
             socket.review_gate && socket.role == mj_core::subagent::SubagentMcpRole::Parent
         }) {
             allowed.push("mcp__mj-agents__request_review".into());
+            allowed.push("mcp__mj-agents__override_review".into());
         }
         options.insert("allowedTools".to_owned(), serde_json::json!(allowed));
     }

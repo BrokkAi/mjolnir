@@ -214,6 +214,7 @@ pub(super) async fn prepare_scoped(
             state,
             // No reviewer process starts for a turn with nothing to review.
             reviewer: ReviewerIdentity::default(),
+            count: config.count,
             materialized: Box::new(snapshot.materialized),
             resume_forward: None,
             captured,
@@ -239,6 +240,7 @@ pub(super) async fn prepare_scoped(
         scope,
         state,
         reviewer: reviewer.clone(),
+        count: config.count,
         materialized: Box::new(snapshot.materialized),
         resume_forward: None,
         captured,
@@ -290,6 +292,7 @@ pub(super) async fn prepare_recovery(
         state,
         // No reviewer process is started for a handoff-only recovery.
         reviewer: ReviewerIdentity::default(),
+        count: mj_core::config::default_review_count(),
         materialized: Box::new(snapshot.materialized),
         resume_forward: Some(pending),
         captured: None,

@@ -716,6 +716,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
     let connection = rusqlite::Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
+    schema::restore_review_state_schema(&connection, 65);
     connection
         .execute_batch(
             "ALTER TABLE sessions ADD COLUMN expected_runtime_identity TEXT;
@@ -787,6 +788,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
     let connection = rusqlite::Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
+    schema::restore_review_state_schema(&connection, 53);
     connection
         .execute_batch(
         "ALTER TABLE sessions DROP COLUMN checkout_json;
@@ -885,6 +887,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
     let connection = rusqlite::Connection::open(&database).unwrap();
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
+    schema::restore_review_state_schema(&connection, 46);
     connection
         .execute_batch(
             "ALTER TABLE sessions DROP COLUMN publication_json;
@@ -1279,6 +1282,7 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
     record.review = Some(mj_core::config::SessionReview::Turn {
+        count: None,
         model: Some("gpt-6-astra".into()),
         effort: Some("high".into()),
         tier: Some("extended".into()),
@@ -1291,6 +1295,7 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     assert_eq!(
         loaded.sessions["session-1"].review,
         Some(mj_core::config::SessionReview::Turn {
+            count: None,
             model: Some("gpt-6-astra".into()),
             effort: Some("high".into()),
             tier: None,
@@ -4326,6 +4331,8 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
             // the same "unverified" note after a restart.
             provenance: mj_core::review::driver::FindingsProvenance::SingleReviewer,
         }),
+        push_findings: None,
+        active_group: None,
     };
     save_turn_review_state_in(&database, "session-1", &state).unwrap();
     assert_eq!(turn_review_state_in(&database, "session-1").unwrap(), state);
@@ -4342,6 +4349,38 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
     assert_eq!(restored.baselines, state.baselines);
     assert_eq!(restored.reviewed_through_ordinal, 42);
     assert_eq!(restored.pending_forward, state.pending_forward);
+}
+
+#[test]
+fn old_review_rows_load_without_findings_and_recovery_keeps_new_findings() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    open(&database).unwrap().execute(
+        "INSERT INTO turn_review_state(session_id, baselines, reviewed_through_ordinal) VALUES (?1, ?2, 0)",
+        rusqlite::params!["session-1", "{}"],
+    ).unwrap();
+    let mut state = turn_review_state_in(&database, "session-1").unwrap();
+    assert!(state.push_findings.is_none());
+    assert!(state.active_group.is_none());
+    state.push_findings = Some(mj_core::storage::PushFindingsRecord {
+        review_id: "review-1".into(),
+        trees: [(
+            std::path::PathBuf::from("/workspace/app"),
+            ("tree-1".into(), "head-1".into()),
+        )]
+        .into(),
+        synthesis: "fix the regression".into(),
+    });
+    state.active = Some("interrupted".into());
+    save_turn_review_state_in(&database, "session-1", &state).unwrap();
+    assert_eq!(
+        clear_interrupted_turn_reviews_in(&database).unwrap(),
+        vec!["session-1"]
+    );
+    let restored = turn_review_state_in(&database, "session-1").unwrap();
+    assert_eq!(restored.push_findings, state.push_findings);
+    assert!(restored.active.is_none());
 }
 
 /// A review interrupted by a daemon restart is cancelled, not resumed, and the
@@ -4375,6 +4414,8 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
                 reviewed_through_ordinal: 42,
                 provenance: Default::default(),
             }),
+            push_findings: None,
+            active_group: None,
         },
     )
     .unwrap();
@@ -4388,6 +4429,8 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
             prior_review: None,
             active: None,
             pending_forward: None,
+            push_findings: None,
+            active_group: None,
         },
     )
     .unwrap();
@@ -4407,6 +4450,61 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
         clear_interrupted_turn_reviews_in(&database).unwrap(),
         vec!["session-1".to_string()],
         "a pending handoff remains recoverable until its command is accepted"
+    );
+}
+
+#[test]
+fn active_review_group_survives_interrupted_sweep_with_registered_children() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-group", "project-1")).unwrap();
+    let seed = mj_core::review::driver::TurnReviewSeed {
+        task: "inspect the parser".into(),
+        user_messages: Vec::new(),
+        baselines: Default::default(),
+        through_ordinal: 17,
+        prior_review: None,
+    };
+    let (driver, _) = mj_review::driver::TurnReviewDriver::start(
+        seed,
+        "group-1".into(),
+        std::num::NonZeroUsize::new(2).unwrap(),
+    );
+    let group = mj_core::storage::ActiveReviewGroup {
+        driver: driver.snapshot(),
+        reviewer: Default::default(),
+        scope: mj_core::relay::CaptureScope::TurnDelta,
+        registrations: vec![
+            mj_core::storage::ReviewerRegistration {
+                role: "reviewer-1".into(),
+                request_key: "key-1".into(),
+                child_session_id: Some("child-1".into()),
+            },
+            mj_core::storage::ReviewerRegistration {
+                role: "reviewer-2".into(),
+                request_key: "key-2".into(),
+                child_session_id: None,
+            },
+        ],
+    };
+    let state = TurnReviewState {
+        active: Some("group-1".into()),
+        active_group: Some(group),
+        ..Default::default()
+    };
+    save_turn_review_state_in(&database, "session-group", &state).unwrap();
+    assert_eq!(
+        active_review_groups_in(&database).unwrap(),
+        vec![("session-group".into(), state.clone())]
+    );
+    assert!(
+        clear_interrupted_turn_reviews_in(&database)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        turn_review_state_in(&database, "session-group").unwrap(),
+        state
     );
 }
 
@@ -5568,6 +5666,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
     let raw = Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&raw);
     schema::restore_pre101_subagent_preference(&raw);
+    schema::restore_review_state_schema(&raw, 43);
     raw.execute_batch(
         "DROP TABLE quota_reset_cache;
         DELETE FROM schema_migrations WHERE version >= 44;
@@ -6247,6 +6346,7 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     let raw = Connection::open(&database).unwrap();
     schema::restore_github_v84_schema(&raw);
     schema::restore_pre101_subagent_preference(&raw);
+    schema::restore_review_state_schema(&raw, 52);
     raw.execute_batch(
         "PRAGMA writable_schema = ON;
          UPDATE sqlite_schema

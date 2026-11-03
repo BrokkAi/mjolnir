@@ -6662,21 +6662,23 @@ function renderTurnReview(session) {
   }
   const card = el('section', 'card turn-review');
   card.append(el('strong', '', 'Reviewing this turn'));
-  if (review.child_session_id) {
-    const transcript = el('a', '', 'Reviewer conversation');
-    transcript.href = routeHash({
-      name: 'conversation',
-      sessionId: review.child_session_id,
-      subagentParentId: session.id,
-    });
-    card.append(transcript);
-  }
   const roles = review.roles || [];
   if (roles.length) {
-    const strip = el('p', 'dim turn-review-roles');
-    strip.textContent = roles
-      .map(role => `${role.label}: ${role.state}`)
-      .join('  ·  ');
+    const strip = el('div', 'dim turn-review-roles');
+    for (const role of roles) {
+      const label = `${role.label}: ${role.state}`;
+      if (role.child_session_id) {
+        const transcript = el('a', '', label);
+        transcript.href = routeHash({
+          name: 'conversation',
+          sessionId: role.child_session_id,
+          subagentParentId: session.id,
+        });
+        strip.append(transcript);
+      } else {
+        strip.append(el('span', '', label));
+      }
+    }
     card.append(strip);
   }
   const verdict = review.verdict || null;
@@ -7449,6 +7451,15 @@ function showHelp() {
   scrollToTail();
 }
 
+/// This session's review choice takes precedence over the global settings.
+function sessionReviewStatusConfig(snapshot, session) {
+  return {
+    ...snapshot?.review_config,
+    trigger: session?.review_trigger ?? snapshot?.review_config?.trigger,
+    count: session?.review_count ?? snapshot?.review_config?.count,
+  };
+}
+
 /// The shared `/review status` sentence, from the bounded config projection.
 ///
 /// Keep this byte-for-byte aligned with `hel_chat::review_status_line`: the
@@ -7468,6 +7479,8 @@ function reviewStatusLine(review, open) {
   } else {
     armed = 'Automatic review is off; /review uses Auto';
   }
+  const count = review?.count;
+  if (count) armed += `; ${count} reviewer${count === 1 ? '' : 's'}`;
   return open ? `${armed}. A review is open now.` : armed;
 }
 
@@ -7575,7 +7588,7 @@ async function runLocalCommand(text) {
       const scope = argument.trim().toLowerCase();
       if (scope === 'status') {
         error.textContent = session?.review_unavailable || reviewStatusLine(
-          { ...snapshot?.review_config, trigger: session?.review_trigger ?? snapshot?.review_config?.trigger },
+          sessionReviewStatusConfig(snapshot, session),
           Boolean(session?.turn_review),
         );
         setComposerText('');

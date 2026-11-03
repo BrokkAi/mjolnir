@@ -11,11 +11,13 @@ impl ActiveChat {
         let control = self.session_manager.clone();
         let child = match role.as_ref() {
             Some(child) => {
-                let owner = self
-                    .state
-                    .turn_review()
-                    .and_then(|review| review.view.child_session_id.as_ref());
-                if owner != Some(child) {
+                let owns_question = self.state.turn_review().is_some_and(|review| {
+                    review.view.owns_reviewer(child)
+                        && review.view.questions.iter().any(|question| {
+                            question.role == *child && question.request.id == elicitation_id
+                        })
+                });
+                if !owns_question {
                     self.report_review_refusal(
                         "The reviewer's question is no longer active".to_owned(),
                     );
@@ -87,18 +89,16 @@ impl ActiveChat {
 
     /// The same, after `delay`.
     ///
-    /// An attach answers at once even when the journal has not moved, so a
-    /// loop that re-attaches on every empty page is a spin. A review runs
-    /// review uses one role, so an idle journal waits a beat before asking
-    /// again; a page that did carry events is followed up immediately, which
-    /// keeps a streaming answer smooth.
-    pub(crate) fn poll_turn_review_role_after(&self, _role: &str, delay: Duration) {
+    /// An attach answers at once even when the journal has not moved, so idle
+    /// journals wait a beat before asking again.
+    pub(crate) fn poll_turn_review_role_after(&self, role: &str, delay: Duration) {
         let Some(review) = self.state.turn_review() else {
             return;
         };
-        let Some(child) = review.view.child_session_id.clone() else {
+        if !review.view.owns_reviewer(role) {
             return;
-        };
+        }
+        let child = role.to_owned();
         let control = self.session_manager.clone();
         let updates = self.chat_io_tx.clone();
         let role = child.clone();
@@ -123,27 +123,73 @@ impl ActiveChat {
         result: std::result::Result<Box<mj_core::state::MaterializedSession>, String>,
     ) {
         let Some(review) = self.state.turn_review_mut() else {
-            self.reviewed_role = None;
+            self.reviewed_roles.clear();
             return;
         };
-        if review.view.child_session_id.as_deref() != Some(&child) {
+        if !review.view.owns_reviewer(&child) {
+            self.reviewed_roles.remove(&child);
             return;
         }
+        let role_state = review
+            .view
+            .roles
+            .iter()
+            .find(|role| role.child_session_id.as_deref() == Some(&child))
+            .map(|role| role.state);
+        let mut active =
+            role_state.is_some_and(|state| reviewer_transcript_needs_poll(state, &child, None));
         match result {
             Ok(snapshot) => {
-                review.pane().replace_snapshot(*snapshot);
+                if snapshot.session_id == child {
+                    active = role_state.is_some_and(|state| {
+                        reviewer_transcript_needs_poll(state, &child, Some(&snapshot))
+                    });
+                    if let Some(pane) = review.pane_for(&child) {
+                        pane.replace_snapshot(*snapshot);
+                    }
+                } else {
+                    tracing::warn!(%child, actual = %snapshot.session_id, "reviewer snapshot had the wrong session id");
+                }
             }
             Err(error) => {
                 tracing::debug!(%child, %error, "reviewer transcript is not available yet");
             }
         }
-        let active = review.view.is_working() || !review.view.questions.is_empty();
         self.surface_reviewer_elicitations();
         if active {
             self.poll_turn_review_role_after(&child, REVIEW_POLL_IDLE_INTERVAL);
-        } else {
-            self.reviewed_role = None;
         }
+    }
+}
+
+/// A reviewer handback can precede its harness turn completion. The child is
+/// fresh for this review, so its started prompt's terminal outcome is the
+/// journal's own barrier after the review transcript. Suspension can interrupt
+/// that prompt after handback. Failed launches may have no turn.
+fn reviewer_transcript_needs_poll(
+    state: mj_core::review::driver::RoleState,
+    child: &str,
+    snapshot: Option<&mj_core::state::MaterializedSession>,
+) -> bool {
+    use mj_core::review::driver::RoleState;
+    use mj_core::state::TurnOutcomeKind;
+
+    let own = snapshot.filter(|snapshot| snapshot.session_id == child);
+    match state {
+        RoleState::Pending | RoleState::Running => true,
+        RoleState::Clean | RoleState::Findings => !own.is_some_and(|snapshot| {
+            snapshot.last_turn_outcome.as_ref().is_some_and(|outcome| {
+                outcome.turn_start_position.is_some()
+                    && matches!(
+                        &outcome.outcome,
+                        TurnOutcomeKind::Completed { .. } | TurnOutcomeKind::Interrupted { .. }
+                    )
+                    && outcome.completed_ordinal <= snapshot.applied_event_ordinal
+            })
+        }),
+        RoleState::Failed => own.is_some_and(|snapshot| {
+            snapshot.active_turn.is_some() || !snapshot.queued_prompts.is_empty()
+        }),
     }
 }
 
@@ -173,6 +219,57 @@ fn reviewer_answer_update(
 #[cfg(test)]
 mod answer_tests {
     use super::*;
+
+    #[test]
+    fn a_terminal_reviewer_waits_for_its_own_completed_prompt_snapshot() {
+        use mj_core::review::driver::RoleState;
+        use mj_core::state::{MaterializedSession, MaterializedTurnOutcome, TurnOutcomeKind};
+
+        let mut child = MaterializedSession::empty("review-child");
+        assert!(reviewer_transcript_needs_poll(
+            RoleState::Findings,
+            "review-child",
+            Some(&child),
+        ));
+        child.applied_event_ordinal = 8;
+        child.last_turn_outcome = Some(MaterializedTurnOutcome {
+            diagnostic: None,
+            usage: None,
+            command_id: "review-prompt".into(),
+            accepted_ordinal: Some(2),
+            turn_start_position: Some(3),
+            completed_ordinal: 8,
+            completed_at_ms: 0,
+            outcome: TurnOutcomeKind::Completed {
+                stop_reason: "end_turn".into(),
+            },
+        });
+        assert!(!reviewer_transcript_needs_poll(
+            RoleState::Findings,
+            "review-child",
+            Some(&child),
+        ));
+        child.last_turn_outcome.as_mut().unwrap().outcome = TurnOutcomeKind::Interrupted {
+            message: "suspended after handback".into(),
+            reason: None,
+        };
+        assert!(!reviewer_transcript_needs_poll(
+            RoleState::Findings,
+            "review-child",
+            Some(&child),
+        ));
+        child.applied_event_ordinal = 7;
+        assert!(reviewer_transcript_needs_poll(
+            RoleState::Findings,
+            "review-child",
+            Some(&child),
+        ));
+        assert!(reviewer_transcript_needs_poll(
+            RoleState::Clean,
+            "another-child",
+            Some(&child),
+        ));
+    }
 
     // Hard-won: 7c4a57a: late reviewer answers were silently dropped and misreported as review failures
     #[test]

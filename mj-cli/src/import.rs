@@ -88,6 +88,9 @@ pub(crate) struct NativeImportArgs {
     /// Review every turn of the imported session at this reasoning effort.
     #[arg(long)]
     review_effort: Option<String>,
+    /// Independent reviewers per review. 1–3 is reasonable; more has diminishing returns.
+    #[arg(long)]
+    review_count: Option<std::num::NonZeroUsize>,
     /// Deprecated compatibility option; the value is ignored.
     #[arg(long, hide = true, value_parser = ["quick", "extended"])]
     review_tier: Option<String>,
@@ -222,6 +225,7 @@ pub(crate) fn import_named_native_session(
             allow_omitted_non_git: false,
             review_model: None,
             review_effort: None,
+            review_count: None,
             review_tier: None,
             review: None,
             workspace: crate::WorkspaceName::default(),
@@ -319,6 +323,7 @@ fn import_native(
         args.review_model.as_deref(),
         args.review_effort.as_deref(),
         args.review_tier.as_deref(),
+        args.review_count,
     );
     persist_imported_session(session)?;
     println!("{}", import_success_message(&imported));
@@ -1104,6 +1109,8 @@ mod tests {
             "gpt-6-luna",
             "--review-effort",
             "max",
+            "--review-count",
+            "4",
             "--review-tier",
             "extended",
         ]);
@@ -1113,8 +1120,10 @@ mod tests {
                 args.review_model.as_deref(),
                 args.review_effort.as_deref(),
                 args.review_tier.as_deref(),
+                args.review_count,
             ),
             Some(mj_core::config::SessionReview::Turn {
+                count: std::num::NonZeroUsize::new(4),
                 model: Some("gpt-6-luna".into()),
                 effort: Some("max".into()),
                 tier: None,
@@ -1130,9 +1139,14 @@ mod tests {
                 "--review",
                 trigger,
             ]);
-            let choice =
-                crate::api_commands::session_review(args.review.as_deref(), None, None, None)
-                    .unwrap();
+            let choice = crate::api_commands::session_review(
+                args.review.as_deref(),
+                None,
+                None,
+                None,
+                args.review_count,
+            )
+            .unwrap();
             assert_eq!(choice.trigger().to_string(), trigger);
         }
         let (_, plain) = parse_import(&["mj", "import", "codex", "--session", "native-1"]);
@@ -1142,6 +1156,7 @@ mod tests {
                 plain.review_model.as_deref(),
                 plain.review_effort.as_deref(),
                 plain.review_tier.as_deref(),
+                plain.review_count,
             ),
             None,
             "an import that names nothing follows [review]"
@@ -1161,8 +1176,10 @@ mod tests {
                 tier_only.review_model.as_deref(),
                 tier_only.review_effort.as_deref(),
                 tier_only.review_tier.as_deref(),
+                tier_only.review_count,
             ),
             Some(mj_core::config::SessionReview::Turn {
+                count: None,
                 model: None,
                 effort: None,
                 tier: None,

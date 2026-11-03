@@ -67,6 +67,11 @@ pub trait ReviewEnvironment: Send + Sync {
     /// same change and nothing is lost.
     fn clear_interrupted(&self) -> Result<Vec<String>, String>;
 
+    /// Durable groups are resumed rather than swept as interrupted reviews.
+    fn active_groups(&self) -> Result<Vec<(String, TurnReviewState)>, String> {
+        Ok(Vec::new())
+    }
+
     fn enqueue_verdict(
         &self,
         _session_id: &str,
@@ -75,7 +80,7 @@ pub trait ReviewEnvironment: Send + Sync {
         Err("review verdict mailbox is unavailable".into())
     }
 
-    fn orphaned_children(&self) -> Result<Vec<String>, String> {
+    fn reviewer_children(&self) -> Result<Vec<ReviewerChildRelation>, String> {
         Ok(Vec::new())
     }
 
@@ -98,6 +103,14 @@ pub trait ReviewEnvironment: Send + Sync {
     ) -> mj_client::session::BoxFuture<'a, Option<BackgroundHold>> {
         Box::pin(async { None })
     }
+}
+
+/// The durable sub-agent index owns a child before its ID reaches review state.
+#[derive(Clone)]
+pub struct ReviewerChildRelation {
+    pub parent_session_id: String,
+    pub request_key: String,
+    pub child_session_id: String,
 }
 
 /// Keeps background work off a session while a review needs its worker.
@@ -193,7 +206,7 @@ impl ReviewEnvironment for ControllerEnvironment {
             .map_err(|error| format!("{error:#}"))
     }
 
-    fn orphaned_children(&self) -> Result<Vec<String>, String> {
+    fn reviewer_children(&self) -> Result<Vec<ReviewerChildRelation>, String> {
         let controller =
             crate::controller::Controller::load().map_err(|error| format!("{error:#}"))?;
         Ok(controller
@@ -208,7 +221,11 @@ impl ReviewEnvironment for ControllerEnvironment {
                     .get(&child.child_session_id)
                     .is_some_and(|session| session.state.is_active())
             })
-            .map(|child| child.child_session_id.clone())
+            .map(|child| ReviewerChildRelation {
+                parent_session_id: child.parent_session_id.clone(),
+                request_key: child.kind.request_key(&child.request_key),
+                child_session_id: child.child_session_id.clone(),
+            })
             .collect())
     }
     fn register_child(
@@ -326,6 +343,10 @@ impl ReviewEnvironment for ControllerEnvironment {
 
     fn clear_interrupted(&self) -> Result<Vec<String>, String> {
         crate::database::clear_interrupted_turn_reviews().map_err(|error| format!("{error:#}"))
+    }
+
+    fn active_groups(&self) -> Result<Vec<(String, TurnReviewState)>, String> {
+        crate::database::active_review_groups().map_err(|error| format!("{error:#}"))
     }
 
     fn hold_background_work<'a>(

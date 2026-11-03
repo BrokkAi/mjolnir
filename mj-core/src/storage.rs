@@ -221,6 +221,35 @@ pub struct TurnReviewState {
     /// be retried and reconciled without losing the findings.
     #[serde(default)]
     pub pending_forward: Option<crate::review::driver::PendingForward>,
+    /// The exact trees covered by the last before-push findings verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_findings: Option<PushFindingsRecord>,
+    /// A reviewer group survives daemon handoff with its exact commands and children.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_group: Option<ActiveReviewGroup>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ActiveReviewGroup {
+    pub driver: crate::review::driver::ReviewDriverSnapshot,
+    pub reviewer: crate::review::settings::ResolvedReviewSettings,
+    pub scope: crate::relay::CaptureScope,
+    pub registrations: Vec<ReviewerRegistration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReviewerRegistration {
+    pub role: String,
+    pub request_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PushFindingsRecord {
+    pub review_id: String,
+    pub trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
+    pub synthesis: String,
 }
 
 /// What a bounded prompt search found, and whether it stopped early.

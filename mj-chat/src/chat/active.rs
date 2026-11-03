@@ -444,8 +444,8 @@ pub struct ActiveChat {
     /// Preserve the stronger reconnect result when the initial sync, which
     /// independently reacquires the same actor, finishes just afterwards.
     reconnect_notice_pending_sync: bool,
-    /// The single reviewer journal this chat is already reading.
-    reviewed_role: Option<String>,
+    /// Reviewer journals this chat is already reading.
+    reviewed_roles: std::collections::BTreeSet<String>,
     persistence: Option<tokio::sync::mpsc::UnboundedSender<ChatDaemonRequest>>,
     /// A cached question may arrive in the newly attached review stream a few
     /// ticks after the chat itself opens. Keep it here until that exact source
@@ -722,7 +722,7 @@ impl ActiveChat {
             session_feed_expected: false,
             session_retiring: false,
             reconnect_notice_pending_sync: false,
-            reviewed_role: None,
+            reviewed_roles: std::collections::BTreeSet::new(),
             persistence,
             deferred_elicitation_draft: None,
             earlier_task: None,

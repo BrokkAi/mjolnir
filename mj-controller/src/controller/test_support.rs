@@ -599,6 +599,7 @@ impl IsolatedTest {
     }
 
     /// Include an ignored integration case in the isolated child process.
+    #[cfg(unix)]
     pub(crate) fn include_ignored(mut self) -> Self {
         self.command.arg("--ignored");
         self
