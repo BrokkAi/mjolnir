@@ -348,23 +348,6 @@ impl DashboardState {
         self.focus_pane(pane);
     }
 
-    /// Open the newly created session in the ordinary composer.
-    ///
-    /// The launch selected its session when it started. If the user has
-    /// since selected another row, that choice stands: finishing a launch
-    /// must not move the selection or the keyboard, or the next session
-    /// command would act on a session the user did not choose.
-    pub fn finish_new_session(&mut self, session_id: &str) {
-        if self
-            .selected_session_id()
-            .is_some_and(|selected| selected != session_id)
-        {
-            return;
-        }
-        self.select_active_session(session_id);
-        self.focus_prompt();
-    }
-
     /// Global visibility must not change which workspace opens automatically.
     pub fn startup_sessions(&self) -> impl Iterator<Item = &SessionRecord> {
         self.state.sessions.values().filter(|session| {

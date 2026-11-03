@@ -206,11 +206,7 @@ impl DashboardContext {
         chats
             .get_mut(dashboard.current_session_id()?)
             .filter(|chat| {
-                // A launch standby stands in front of the conversation that was
-                // selected when the creation started, so typing meant for the new
-                // session cannot land in the old one.
                 chat.has_live_composer()
-                    && !dashboard.launch_standby_capturing()
                     && chat_is_visible(opening, chat.session_id())
                     && dashboard.transition_kind(chat.session_id()).is_none()
                     && dashboard

@@ -950,11 +950,6 @@ pub struct DashboardState {
     /// session so each draft stays with its row; the controller hands the
     /// draft to the real composer when the chat opens.
     pub(crate) standby_prompts: BTreeMap<String, ChatState>,
-    /// The composer that catches typing between the new-session wizard
-    /// closing and the daemon registering the session, when there is no
-    /// session id to key a standby by yet. It is adopted by the new session's
-    /// standby as soon as the launch registers.
-    pub(crate) launch_standby: Option<ChatState>,
     /// Durable move intents retained by the daemon, including failed and
     /// cancelled operations that still have an explicit recovery action.
     pub(crate) move_operations: mj_core::snapshot_map::SnapshotMap<String, MoveOperation>,
@@ -1271,7 +1266,6 @@ impl DashboardState {
             unreachable_notices: BTreeMap::new(),
             session_operations: Default::default(),
             standby_prompts: BTreeMap::new(),
-            launch_standby: None,
             move_operations: Default::default(),
             capacity_details: BTreeMap::new(),
             container_capacities: BTreeMap::new(),

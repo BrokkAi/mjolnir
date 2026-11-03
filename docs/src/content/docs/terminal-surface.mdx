@@ -369,8 +369,12 @@ creation wizard. It asks for the profile, then the target, then the project,
 and ends on a review step with the launch options. The target step is skipped
 when only one target is available and it has no size to set. The wizard then
 provisions the session in the selected workspace. The new row appears
-immediately with background launch progress; when it is ready, the normal Prompt
-receives focus. No separate fast path or task-entry dialog remains.
+immediately with background launch progress. Create leaves the current
+conversation and keyboard focus where they were; select the new row to open
+its conversation and queue a first prompt while it launches. Completing Create
+or Move also leaves your selection and focus alone. A moved conversation already
+open in a pane reconnects in that pane. No separate fast path or task-entry
+dialog remains.
 
 Press `prefix+s` to edit all configuration in Settings: accounts, targets and remote
 machines, projects, Interface settings (prefix key, sidebar position, activity
