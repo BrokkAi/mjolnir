@@ -1056,6 +1056,37 @@ pub fn read_head_reflog(
     Ok(entries)
 }
 
+/// `tree` with `paths` removed, written as a new tree object through a scratch
+/// index. Paths `tree` does not hold are ignored.
+pub fn tree_without_paths(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    tree: &str,
+    paths: &[String],
+) -> Result<String> {
+    let scratch = ScratchIndex::create(runner, repository)?;
+    scratch.run(
+        runner,
+        repository,
+        ["read-tree", tree],
+        Vec::new(),
+        "read the tree into a scratch index",
+    )?;
+    let mut stdin = Vec::new();
+    for path in paths {
+        stdin.extend_from_slice(path.as_bytes());
+        stdin.push(0);
+    }
+    scratch.run(
+        runner,
+        repository,
+        ["update-index", "--force-remove", "-z", "--stdin"],
+        stdin,
+        "remove paths from the scratch index",
+    )?;
+    scratch.write_tree(runner, repository)
+}
+
 /// What [`merge_trees`] records where both sides changed the same lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeConflicts {

@@ -95,7 +95,7 @@ pub fn review_prompt(job: &ReviewJob) -> String {
                 String::new()
             } else {
                 format!(
-                    "\nThe base already includes the changes of other history merged, pulled or switched to ({}), so the diff shows only the reviewed work's own commits, merge resolutions and edits. Where a merge conflict was resolved, the base holds the conflict markers and the diff shows the resolution.",
+                    "\nThe base already includes the changes of other history merged, pulled or switched to ({}), so the diff shows only the reviewed work's own commits, merge resolutions and edits. Where a merge conflict was resolved, the base holds the conflict markers and the diff shows the resolution; a conflicted file that the merge could not mark and that was resolved to the base's version is left out of the base, so the diff shows it in full.",
                     repository.merged_in.join(", ")
                 )
             };

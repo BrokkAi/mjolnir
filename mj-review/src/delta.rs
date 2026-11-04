@@ -101,13 +101,15 @@ pub fn has_changes(deltas: &[RepoDelta]) -> bool {
     })
 }
 
-/// Whether every repository's tree matches its base. A push capture like this
-/// adds nothing unreviewed, so it is recorded clean without a reviewer.
+/// Whether every repository's tree is its base tree. A push capture like this
+/// adds nothing unreviewed, so it is recorded clean without a reviewer. Tree
+/// ids, not the diff, decide: diff settings such as `diff.ignoreSubmodules`
+/// can hide a change.
 #[must_use]
 pub fn trees_unchanged(deltas: &[RepoDelta]) -> bool {
     deltas
         .iter()
-        .all(|delta| delta.files.is_empty() && delta.patch.trim().is_empty())
+        .all(|delta| delta.baseline_tree.as_deref() == Some(delta.current_tree.as_str()))
 }
 
 /// Every changed file with its added and removed line counts, one section per
@@ -174,6 +176,23 @@ pub fn captured_trees(deltas: &[RepoDelta]) -> BTreeMap<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trees_unchanged_compares_tree_ids_not_the_diff() {
+        let delta = |baseline: &str, current: &str| RepoDelta {
+            baseline_tree: Some(baseline.into()),
+            current_tree: current.into(),
+            ..RepoDelta::default()
+        };
+        assert!(trees_unchanged(&[delta("tree1", "tree1")]));
+        // An empty diff with different trees, as `diff.ignoreSubmodules=all`
+        // gives for a submodule-only change, still needs a reviewer.
+        assert!(!trees_unchanged(&[delta("tree1", "tree2")]));
+        assert!(!trees_unchanged(&[RepoDelta {
+            current_tree: "tree1".into(),
+            ..RepoDelta::default()
+        }]));
+    }
 
     #[test]
     fn commits_without_a_base_are_changes_even_with_an_empty_patch() {

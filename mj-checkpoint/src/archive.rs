@@ -2065,7 +2065,7 @@ pub use git::{
     numstat_between_trees, pin_review_tree, push_branch, read_head_reflog, read_review_point,
     record_review_point, record_reviewed_tree, remote_workspace_base,
     remove_departed_worktree_pins, restore_git_snapshot, review_baseline_ref, session_diff,
-    session_diff_details, validate_symlink_target,
+    session_diff_details, tree_without_paths, validate_symlink_target,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};

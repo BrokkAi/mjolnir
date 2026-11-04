@@ -318,7 +318,7 @@ pub fn capture_pushable_commits(
                 let found = mj_core::local_git::parse_git_version(&version);
                 let floor = mj_core::local_git::MINIMUM_GIT_VERSION;
                 if found.is_some_and(|found| found >= floor) {
-                    merged = Some(merged_review_tree(runner, root, reviewed, mb)?);
+                    merged = Some(merged_review_tree(runner, root, reviewed, mb, &head)?);
                 } else {
                     push_review_warning = Some(format!(
                         "Pushed without review: Git {} in {} is older than {}.{}.{} or its version could not be read, so Mjolnir could not separate this merge's new changes from reviewed work. Upgrade Git to review merged work.",
@@ -381,12 +381,20 @@ pub fn capture_pushable_commits(
     })
 }
 
-/// The tree Git makes by merging the reviewed point with default-branch work.
+/// The tree Git makes by merging the reviewed point with default-branch work,
+/// as the base for reviewing `head`.
+///
+/// A text conflict leaves markers in that tree, so the diff to `head` shows its
+/// resolution. A binary, modify/delete or submodule conflict leaves one side's
+/// version instead; when `head` resolved it to that same version, the diff
+/// would show nothing. Such paths are removed from the base, so the reviewer
+/// sees each in full.
 fn merged_review_tree(
     runner: &dyn GitCommandRunner,
     root: &Path,
     reviewed: &str,
     merge_base_commit: &str,
+    head: &str,
 ) -> Result<String> {
     let output = run(
         runner,
@@ -395,11 +403,14 @@ fn merged_review_tree(
             "merge-tree",
             "--write-tree",
             "--allow-unrelated-histories",
+            "--no-messages",
+            "--name-only",
+            "-z",
             reviewed,
             merge_base_commit,
         ],
     )?;
-    // Status 1 means conflicts; the tree is still written, holding markers.
+    // Status 1 means conflicts; the tree is still written.
     if !matches!(output.status, 0 | 1) {
         anyhow::bail!(
             "git merge-tree failed with status {}: {}",
@@ -407,12 +418,45 @@ fn merged_review_tree(
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let tree = String::from_utf8(output.stdout)?
-        .lines()
+    let stdout = String::from_utf8(output.stdout)?;
+    let mut fields = stdout.split('\0').filter(|field| !field.is_empty());
+    let tree = fields
         .next()
         .context("git merge-tree printed no tree id")?
         .to_owned();
-    Ok(tree)
+    let conflicted: BTreeSet<String> = fields.map(str::to_owned).collect();
+    if conflicted.is_empty() {
+        return Ok(tree);
+    }
+    let merged = tree_entries(runner, root, &tree, &conflicted)?;
+    let resolved = tree_entries(runner, root, head, &conflicted)?;
+    let hidden: Vec<String> = conflicted
+        .into_iter()
+        .filter(|path| merged.get(path) == resolved.get(path))
+        .collect();
+    if hidden.is_empty() {
+        return Ok(tree);
+    }
+    mj_checkpoint::archive::tree_without_paths(runner, root, &tree, &hidden)
+}
+
+/// The mode and object of each of `paths` that `tree_ish` holds.
+fn tree_entries(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    tree_ish: &str,
+    paths: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut arguments = vec!["--literal-pathspecs", "ls-tree", "-r", "-z", tree_ish, "--"];
+    arguments.extend(paths.iter().map(String::as_str));
+    let output = String::from_utf8(checked_git(runner, root, &arguments)?)?;
+    Ok(output
+        .split('\0')
+        .filter_map(|record| {
+            let (entry, path) = record.split_once('\t')?;
+            Some((path.to_owned(), entry.to_owned()))
+        })
+        .collect())
 }
 
 fn default_branch(runner: &dyn GitCommandRunner, root: &Path) -> Result<Option<String>> {
@@ -2806,6 +2850,59 @@ pub(super) mod push_tests {
             "{}",
             captured.delta.patch
         );
+    }
+
+    #[test]
+    fn push_capture_shows_non_text_conflicts_resolved_to_the_merge_tree_side() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        std::fs::write(root.join("image.bin"), b"\0base").unwrap();
+        std::fs::write(root.join("kept.txt"), "base\n").unwrap();
+        git(&root, &["add", "image.bin", "kept.txt"]);
+        git(&root, &["commit", "-qm", "shared files"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        std::fs::write(root.join("image.bin"), b"\0branch").unwrap();
+        std::fs::write(root.join("kept.txt"), "branch edit\n").unwrap();
+        git(&root, &["add", "image.bin", "kept.txt"]);
+        git(&root, &["commit", "-qm", "reviewed branch change"]);
+        let reviewed = git(&root, &["rev-parse", "HEAD"]);
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &reviewed).unwrap();
+
+        git(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("image.bin"), b"\0upstream").unwrap();
+        std::fs::write(root.join("upstream-only"), "upstream\n").unwrap();
+        git(&root, &["add", "image.bin", "upstream-only"]);
+        git(&root, &["rm", "-q", "kept.txt"]);
+        git(&root, &["commit", "-qm", "upstream conflicting change"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["checkout", "-q", "feature"]);
+        assert_ne!(
+            SystemGit
+                .run(
+                    &root,
+                    &GitCommand {
+                        arguments: ["merge", "main"].map(Into::into).to_vec(),
+                        stdin: Vec::new(),
+                        env: Vec::new(),
+                    }
+                )
+                .unwrap()
+                .status,
+            0
+        );
+        // Keep the branch's side of both conflicts: the version merge-tree
+        // itself writes for a binary and a modify/delete conflict.
+        git(&root, &["checkout", "--ours", "--", "image.bin"]);
+        git(&root, &["add", "image.bin", "kept.txt"]);
+        git(&root, &["commit", "-qm", "resolve merge"]);
+
+        let captured = capture(&root, &start);
+        assert_eq!(captured.base.commit(), Some(reviewed.as_str()));
+        let files: Vec<_> = captured.delta.files.iter().map(|file| &file.path).collect();
+        assert_eq!(files, ["image.bin", "kept.txt"], "{}", captured.delta.patch);
     }
 
     #[test]
