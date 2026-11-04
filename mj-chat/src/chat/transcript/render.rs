@@ -286,21 +286,6 @@ pub(crate) fn empty_transcript_row(loading: bool) -> Line<'static> {
     ))
 }
 
-/// One entry's rows, header included, at `width`, and how copying each row
-/// gives back its text.
-///
-/// The reviewer pane draws with this so its conversation looks exactly like
-/// the primary's rather than growing a second renderer.
-pub(crate) fn render_entry_rows(
-    entry: &ChatEntry,
-    width: usize,
-    mode: TranscriptRenderMode,
-) -> (Vec<Line<'static>>, Vec<RowCopy>) {
-    let mut track = RowTrack::default();
-    let rows = render_entry_tracking(entry, width, mode, ToolView::Summary, Some(&mut track));
-    (rows, track.copies)
-}
-
 pub(crate) fn render_transcript_entry(
     entry: &ChatEntry,
     width: usize,

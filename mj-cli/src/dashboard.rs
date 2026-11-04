@@ -2195,10 +2195,7 @@ fn draw_selection(
     let range = selection.range()?;
     let surface = *surfaces.surface(id)?;
     mj_chat::selection::highlight(frame.buffer_mut(), &surface, &range);
-    if matches!(
-        id,
-        SurfaceId::Transcript | SurfaceId::ElicitationMessage | SurfaceId::ReviewerTranscript
-    ) {
+    if matches!(id, SurfaceId::Transcript | SurfaceId::ElicitationMessage) {
         return None;
     }
     Some(mj_chat::selection::extract_rows(

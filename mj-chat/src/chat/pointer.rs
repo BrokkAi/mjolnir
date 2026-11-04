@@ -219,8 +219,8 @@ impl ChatState {
             self.notices.dismiss(std::time::Instant::now());
         }
         // The topmost form receives the gesture before selection, scrollbars,
-        // or a review pane. This also lets reviewer elicitations stay above
-        // the review while a stale scrollbar is being redrawn.
+        // or review controls. Reviewer elicitations keep priority while a
+        // stale scrollbar is being redrawn.
         if let Some(dialog) = self.elicitation.as_mut() {
             let over_form = dialog.component_handles_mouse_at(mouse.column, mouse.row);
             let over_message = dialog
@@ -345,30 +345,6 @@ impl ChatState {
             let (handled, action) = self.handle_turn_review_mouse(mouse);
             if handled {
                 return action;
-            }
-            if self
-                .reviewer_area
-                .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
-            {
-                let rows = isize::try_from(MOUSE_SCROLL_ROWS).unwrap_or(1);
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => {
-                        self.scroll_turn_review(-rows);
-                    }
-                    MouseEventKind::ScrollDown => {
-                        self.scroll_turn_review(rows);
-                    }
-                    _ => {}
-                }
-                return ChatAction::None;
-            }
-            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-                && self
-                    .turn_review_action_areas
-                    .iter()
-                    .any(|(_, area)| area.contains(Position::new(mouse.column, mouse.row)))
-            {
-                return self.click_turn_review_action(mouse.column, mouse.row);
             }
         }
         if self.handle_transcript_scrollbar_mouse(mouse) {

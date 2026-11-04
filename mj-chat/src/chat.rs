@@ -21,11 +21,9 @@ mod input;
 mod pasted_paths;
 mod remote;
 mod rendering;
-mod reviewer_pane;
 mod submissions;
 mod transcript;
 mod turn_review;
-mod viewport;
 
 #[cfg(test)]
 mod test_support;
@@ -557,12 +555,8 @@ pub struct ChatState {
     /// the display so the primary can surface immediately when that review
     /// request is answered or withdrawn.
     pending_elicitations: Vec<ElicitationRequest>,
-    /// Where the reviewer pane sat on the last frame, for pointer routing.
-    reviewer_area: Option<Rect>,
-    /// The turn-review view owns the pane while findings await a decision.
+    /// The daemon-owned review projected into prompt status and actions.
     turn_review: Option<Box<TurnReview>>,
-    /// Where the turn review's action buttons sat on the last frame.
-    turn_review_action_areas: Vec<(turn_review::ReviewAction, Rect)>,
     /// What `[review]` says, mirrored from the config the TUI already drains,
     /// so `/review status` and the composer title can report it.
     review_config: mj_core::config::ReviewConfig,
@@ -758,9 +752,7 @@ impl ChatState {
             claimed_agent_terminals: BTreeMap::new(),
             elicitation: None,
             pending_elicitations: Vec::new(),
-            reviewer_area: None,
             turn_review: None,
-            turn_review_action_areas: Vec::new(),
             review_config: mj_core::config::ReviewConfig::default(),
             session_review: None,
             review_unavailable: None,

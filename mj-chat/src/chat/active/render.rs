@@ -113,8 +113,6 @@ pub(crate) fn render_in(
         chat.subagent_control_area = None;
         chat.reviewer_control_area = None;
         chat.task_dialog_area = None;
-        chat.reviewer_area = None;
-        chat.turn_review_action_areas.clear();
         chat.voice_form.cancel_pointer();
         chat.voice_form
             .end_frame(crate::chat::VoiceControl::Microphone);
@@ -151,33 +149,15 @@ pub(crate) fn render_in(
     chat.subagent_control_area = None;
     chat.reviewer_control_area = None;
     chat.task_dialog_area = None;
-    chat.reviewer_area = None;
-    let has_verdict = chat
-        .turn_review()
-        .is_some_and(|review| review.view.verdict.is_some());
-    if has_verdict {
-        if let Some(review) = chat.turn_review_mut() {
-            let (inner, top, total) =
-                crate::chat::turn_review::render_turn_review_pane(frame, transcript_area, review);
-            chat.reviewer_area = Some(transcript_area);
-            chat.frame_surfaces.push(SurfaceFrame::scrollable(
-                SurfaceId::ReviewerTranscript,
-                inner,
-                top,
-                total,
-            ));
-        }
-    } else {
-        render_transcript(
-            frame,
-            transcript_area,
-            chat,
-            transcript_selected,
-            regions.title_controls,
-            regions.title_lead,
-            regions.pane_focused,
-        );
-    }
+    render_transcript(
+        frame,
+        transcript_area,
+        chat,
+        transcript_selected,
+        regions.title_controls,
+        regions.title_lead,
+        regions.pane_focused,
+    );
     if chat.turn_review_active() {
         let status = chat
             .turn_review()
@@ -189,22 +169,10 @@ pub(crate) fn render_in(
         }
         let actions_area = block.inner(prompt_area);
         frame.render_widget(block, prompt_area);
-        chat.turn_review_action_areas = match chat.turn_review_mut() {
-            Some(review) => {
-                if !has_verdict {
-                    review.begin_actions_frame();
-                }
-                crate::chat::turn_review::render_turn_review_actions(
-                    frame,
-                    actions_area,
-                    review,
-                    "",
-                )
-            }
-            None => Vec::new(),
-        };
+        if let Some(review) = chat.turn_review_mut() {
+            crate::chat::turn_review::render_turn_review_actions(frame, actions_area, review);
+        }
     } else {
-        chat.turn_review_action_areas.clear();
         render_composer_band(frame, prompt_area, chat, prompt_focused, None);
     }
     if let Some(footer) = regions.footer {

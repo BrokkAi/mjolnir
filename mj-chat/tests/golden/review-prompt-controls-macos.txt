@@ -1,0 +1,112 @@
+=== running review opens virtual workspace (80x16) ===
+╭ Conversation · Reviewing ────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                   ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ the reviewer is reading the change… ─────────────────────────────────────────╮
+│  Forward findings     Dismiss     Cancel                                     │
+│                                                                              │
+│                                                                              │
+╰ Reviewers · 1 › ─────────────────────────────────────────────────────────────╯
+Down review controls · Enter act │ ctrl+b then q detach · : / ? palette
+primary width: Some(76)
+captures pointer: true
+click: OpenReviewers
+keyboard: OpenReviewers
+
+=== running review PageUp scrolls the parent (80x16) ===
+╭ Conversation · Reviewing · message 25 of 30 · End to follow ─────────────────╮
+│                                                                             ││
+│ ● Agent                                                                     ││
+│ │ parent transcript message 25                                              ││
+│                                                                             ││
+│ ● Agent                                                                     ││
+│ │ parent transcript message 26                                              ││
+│                                                                             ▐│
+│ ● Agent                                                                     ││
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ the reviewer is reading the change… ─────────────────────────────────────────╮
+│  Forward findings     Dismiss     Cancel                                     │
+│                                                                              │
+│                                                                              │
+╰ Reviewers · 1 › ─────────────────────────────────────────────────────────────╯
+Down review controls · Enter act │ ctrl+b then q detach · : / ? palette
+
+=== running review PageDown returns to the parent tail (80x16) ===
+╭ Conversation · Reviewing ────────────────────────────────────────────────────╮
+│ │ parent transcript message 27                                              ││
+│                                                                             ││
+│ ● Agent                                                                     ││
+│ │ parent transcript message 28                                              ││
+│                                                                             ││
+│ ● Agent                                                                     ││
+│ │ parent transcript message 29                                              ││
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ the reviewer is reading the change… ─────────────────────────────────────────╮
+│  Forward findings     Dismiss     Cancel                                     │
+│                                                                              │
+│                                                                              │
+╰ Reviewers · 1 › ─────────────────────────────────────────────────────────────╯
+Down review controls · Enter act │ ctrl+b then q detach · : / ? palette
+
+=== findings keep the parent transcript visible (80x16) ===
+╭ Conversation · Reviewing · message 25 of 30 · End to follow ─────────────────╮
+│                                                                             ││
+│ ● Agent                                                                     ││
+│ │ parent transcript message 25                                              ││
+│                                                                             ││
+│ ● Agent                                                                     ││
+│ │ parent transcript message 26                                              ││
+│                                                                             ▐│
+│ ● Agent                                                                     ││
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Review findings ─────────────────────────────────────────────────────────────╮
+│  Forward findings     Dismiss     Cancel                                     │
+│ [P1] src/lib.rs:1 -- unbounded retry                                         │
+│                                                                              │
+╰ Reviewers · 1 › ─────────────────────────────────────────────────────────────╯
+Down review controls · Enter act │ ctrl+b then q detach · : / ? palette
+
+=== findings default action (64x14) ===
+╭ Conversation · Reviewing ────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                   ▐│
+│                                                             ▐│
+│                                                             ▐│
+│                                                             ▐│
+│                                                             ▐│
+│                                                             ▐│
+╰──────────────────────────────────────────────────────────────╯
+╭ Review findings ─────────────────────────────────────────────╮
+│  Forward findings     Dismiss     Cancel                     │
+│ [P1] src/lib.rs:1 -- unbounded retry                         │
+│                                                              │
+╰ Reviewers · 1 › ─────────────────────────────────────────────╯
+Down review controls │ ctrl+b then q detach · : / ? palette
+selected action: Some(Some(Forward))
+action: TurnReview(Resolve(Forwarded))
+
+=== failed verdict allowed actions (64x14) ===
+╭ Conversation · Reviewing ────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                   ▐│
+│                                                             ▐│
+│                                                             ▐│
+│                                                             ▐│
+│                                                             ▐│
+│                                                             ▐│
+╰──────────────────────────────────────────────────────────────╯
+╭ Review failed ───────────────────────────────────────────────╮
+│  Forward findings     Dismiss     Cancel                     │
+│ reviewer exited with 1                                       │
+│                                                              │
+╰ Reviewers · 1 › ─────────────────────────────────────────────╯
+Down review controls │ ctrl+b then q detach · : / ? palette
+selected action: Some(Some(Dismiss))
+allowed actions: Some([(Forward, false), (Dismiss, true), (Cancel, true)])
+action: TurnReview(Resolve(Dismissed))

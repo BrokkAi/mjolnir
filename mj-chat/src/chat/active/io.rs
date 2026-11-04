@@ -89,32 +89,11 @@ impl ActiveChat {
 
     /// Shows the review the daemon is running for this session.
     ///
-    /// The terminal hosts no part of a review: it renders this view, reads the
-    /// reviewer's journal to show its transcript, and sends resolutions back.
+    /// The terminal hosts no part of a review: it projects the daemon's status
+    /// and actions into the prompt area and sends resolutions back.
     /// A review therefore survives this view closing.
     pub fn apply_review_view(&mut self, view: Option<mj_client::review::RuntimeReviewView>) {
         self.state.set_turn_review(view);
-        if self.state.turn_review().is_none() {
-            self.reviewed_roles.clear();
-            // The daemon's review projection is also the authority for
-            // reviewer elicitations. Reconcile here so a form disappears as
-            // soon as an external answer closes the review, even when no
-            // reviewer journal event arrives afterward.
-            self.surface_reviewer_elicitations();
-            return;
-        }
-        let children: std::collections::BTreeSet<String> = self
-            .state
-            .turn_review()
-            .into_iter()
-            .flat_map(|review| review.view.reviewer_children().map(str::to_owned))
-            .collect();
-        self.reviewed_roles.retain(|child| children.contains(child));
-        for child in children {
-            if self.reviewed_roles.insert(child.clone()) {
-                self.poll_turn_review_role(&child);
-            }
-        }
         self.surface_reviewer_elicitations();
     }
 
@@ -143,7 +122,7 @@ impl ActiveChat {
 
     /// Hands one request to the daemon bridge, or reports that this chat has
     /// none: a chat without a bridge cannot reach the daemon at all, and
-    /// silently dropping a review action would leave the pane sitting there.
+    /// silently dropping a review action would leave the prompt held.
     pub(crate) fn send_daemon_request(&mut self, request: ChatDaemonRequest) {
         let Some(persistence) = &self.persistence else {
             self.state
@@ -168,7 +147,7 @@ impl ActiveChat {
         }
     }
 
-    /// Reports a daemon refusal in the review pane, or as a notice when no
+    /// Reports a daemon refusal in the prompt status, or as a notice when no
     /// review is open -- a refused `/review` has nowhere else to appear.
     pub fn report_review_refusal(&mut self, message: String) {
         match self.state.turn_review_mut() {
@@ -205,10 +184,6 @@ impl ActiveChat {
                 if let Err(error) = result {
                     self.report_review_refusal(error);
                 }
-                return;
-            }
-            ChatIoUpdate::TurnReviewEvents { role, result } => {
-                self.apply_turn_review_role_events(role, result);
                 return;
             }
             update => update,
