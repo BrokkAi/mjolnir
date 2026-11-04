@@ -77,6 +77,24 @@ pub(super) async fn handle_action(
             .await?;
             Ok(DaemonReply::DoctorErrors(errors))
         }
+        DaemonAction::NewSessionRemoteRepairs {
+            bundle_id,
+            target_id,
+        } => {
+            let controller = state
+                .with_config(|config| crate::controller::config_only_controller(config.clone()));
+            let repairs = blocking(move || {
+                let executor = crate::targets::CancellableProcessExecutor::new(
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                )
+                .with_deadline(Duration::from_secs(30));
+                let result =
+                    controller.preflight_new_session(&bundle_id, &target_id, None, &executor)?;
+                Ok(result.remote_repairs)
+            })
+            .await?;
+            Ok(DaemonReply::RemoteRepairs(repairs))
+        }
         DaemonAction::Status => {
             state.prune_dead_clients();
             Ok(DaemonReply::Status(DaemonStatus {

@@ -1360,7 +1360,6 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
 /// launch is the daemon's.
 pub(crate) fn spawn_dashboard_create_session(
     action: DashboardAction,
-    config: Config,
     go_save: Option<(std::path::PathBuf, mj_core::go::GoRecipe, bool)>,
     updates: UnboundedSender<DashboardIoUpdate>,
     lifecycle_updates: UnboundedSender<DashboardLifecycleUpdate>,
@@ -1396,25 +1395,22 @@ pub(crate) fn spawn_dashboard_create_session(
                 )
                 .context("save fast-start setup; session has not been started")?;
             }
-            // The new-session preflight reads configuration and runs git; it
-            // never needs the store, which only the daemon opens. The config
-            // is the daemon's published one, not a file this client reads.
-            let controller = mj_controller::controller::config_only_controller(config);
-            let executor = CancellableProcessExecutor::new(cancelled.clone())
-                .with_deadline(Duration::from_secs(30));
+            // The new-session preflight reads configuration and runs git in
+            // the environment that owns the project paths. A client in another
+            // placement cannot do that itself.
             if project_directory.is_none() {
-                let result = controller.preflight_new_session(
-                    &bundle_id,
-                    &target_template_id,
-                    None,
-                    &executor,
-                )?;
-                if !result.remote_repairs.is_empty() {
+                let repairs = mj_core::runtime::block_on(async {
+                    daemon::connect_or_start()
+                        .await?
+                        .new_session_remote_repairs(bundle_id.clone(), target_template_id.clone())
+                        .await
+                })??;
+                if !repairs.is_empty() {
                     updates
                         .send(DashboardIoUpdate::CreateSession(Box::new(
                             DashboardCreateSessionUpdate::RemoteRepair {
                                 bundle_id: bundle_id.clone(),
-                                repairs: result.remote_repairs,
+                                repairs,
                                 retry: Box::new(action.clone()),
                             },
                         )))

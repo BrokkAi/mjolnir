@@ -633,6 +633,12 @@ pub enum DaemonAction {
     /// Run the doctor in the daemon's own environment and return the
     /// actionable errors, which a client shows after first-run setup.
     RunDoctor,
+    /// Check a project's Git remotes before a new session starts, in the
+    /// environment that owns the project paths.
+    NewSessionRemoteRepairs {
+        bundle_id: String,
+        target_id: String,
+    },
     Status,
     WebViewerAccess,
     /// The daemon host's Git commit author, which its sessions inherit.
@@ -1070,6 +1076,7 @@ pub enum DaemonReply {
     Configuration(Box<Config>),
     FirstRunSetup(Option<FirstRunSetupReport>),
     DoctorErrors(Vec<String>),
+    RemoteRepairs(Vec<mj_core::local_git::LocalRemoteRepair>),
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
     GitIdentity(GitIdentity),
@@ -1685,6 +1692,23 @@ impl DaemonClient {
         match self.request(DaemonAction::RunDoctor).await? {
             DaemonReply::DoctorErrors(errors) => Ok(errors),
             reply => bail!("unexpected doctor reply {reply:?}"),
+        }
+    }
+
+    pub async fn new_session_remote_repairs(
+        &mut self,
+        bundle_id: String,
+        target_id: String,
+    ) -> Result<Vec<mj_core::local_git::LocalRemoteRepair>> {
+        match self
+            .request(DaemonAction::NewSessionRemoteRepairs {
+                bundle_id,
+                target_id,
+            })
+            .await?
+        {
+            DaemonReply::RemoteRepairs(repairs) => Ok(repairs),
+            reply => bail!("unexpected new-session preflight reply {reply:?}"),
         }
     }
 
@@ -2931,7 +2955,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // The daemon reports its per-start identity, build and placement instead of
 // clients reading its PID and `/proc`, and it serves the configuration that
 // owns the store instead of clients opening `config.toml`.
-pub const PROTOCOL_VERSION: u32 = 78;
+pub const PROTOCOL_VERSION: u32 = 79;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

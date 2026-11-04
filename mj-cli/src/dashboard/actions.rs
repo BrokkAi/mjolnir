@@ -1900,7 +1900,6 @@ fn start_session_launch_with_repository_preflight(
             let go_save = context.dashboard.remember_go_launch(&action);
             spawn_dashboard_create_session(
                 action,
-                context.controller.config.clone(),
                 go_save,
                 context.dashboard_io_tx.clone(),
                 context.lifecycle_updates_tx.clone(),
