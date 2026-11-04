@@ -383,6 +383,16 @@ pub(crate) fn write_launcher_metadata(metadata: &DaemonMetadata) -> Result<()> {
         .with_context(|| format!("create {}", temporary.display()))?;
     file.write_all(&body)?;
     file.sync_all()?;
+    #[cfg(windows)]
+    {
+        // Windows does not replace an existing destination with rename.
+        if let Err(error) = fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error)
+                .with_context(|| format!("replace daemon metadata {}", path.display()));
+        }
+    }
     fs::rename(&temporary, &path)
         .with_context(|| format!("publish daemon metadata {}", path.display()))?;
     Ok(())
