@@ -373,9 +373,9 @@ RUN printf '%s\n' \
         > /etc/profile.d/20-mjolnir-tools.sh
 
 RUN useradd --create-home --shell /bin/bash hel \
-    && mkdir -p /workspace /var/lib/hel \
-    && chown -R hel:hel /workspace /var/lib/hel \
-    && chmod 0755 /workspace /var/lib/hel
+    && mkdir -p /workspace /var/lib/hel /var/lib/mjolnir/home /var/lib/mjolnir/data /var/lib/mjolnir/config \
+    && chown -R hel:hel /workspace /var/lib/hel /var/lib/mjolnir \
+    && chmod 0755 /workspace /var/lib/hel /var/lib/mjolnir
 
 USER hel
 ENV HOME=/home/hel \

@@ -27,11 +27,13 @@ pub async fn run_daemon_process() -> Result<()> {
     // no daemon state behind.
     let owner_pid = owner_pid_to_watch()?;
     let cancellation = crate::termination::Coordinator::install().token();
-    // Everything this process runs on the user's computer goes to its node.
-    // Daemons that tests run inside their own process keep running commands
-    // locally, because they never reach this line.
-    crate::node_registry::install_command_host(cancellation.clone())?;
-    crate::node_registry::install_host_fs(cancellation.clone())?;
+    // A container-native daemon runs every command beside itself, inside its
+    // own container. A host daemon routes host work to the node. Tests that
+    // run a daemon in-process never reach this line.
+    if mj_core::config::env_override("DAEMON_CONTAINER").is_none() {
+        crate::node_registry::install_command_host(cancellation.clone())?;
+        crate::node_registry::install_host_fs(cancellation.clone())?;
+    }
     let opening = Instant::now();
     let guard = ControllerStoreGuard::acquire()?;
     let database_writer = guard.start_database_writer()?;

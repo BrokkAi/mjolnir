@@ -2793,6 +2793,11 @@ impl ManagementClient {
         self.inner.metadata.protocol_version
     }
 
+    /// The endpoint this management client dialed.
+    pub fn metadata(&self) -> &DaemonMetadata {
+        &self.inner.metadata
+    }
+
     pub async fn identity(&mut self) -> Result<DaemonIdentity> {
         self.inner.identity().await
     }

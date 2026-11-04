@@ -13,7 +13,6 @@ pub(crate) use mj_client::daemon::*;
 pub(crate) use mj_client::executable::process_executable_path;
 pub(crate) use mj_controller::daemon::run_daemon_process;
 
-#[cfg(target_os = "linux")]
 mod container;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -239,53 +238,65 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
     }
 
     // Metadata disappears before shutdown releases the sole-writer lock.
-    // Do not launch a child that can only fail to acquire that lock.
-    let released = Instant::now();
-    let handoff_deadline = released + STOP_TIMEOUT;
-    loop {
-        if let Some(guard) = tokio::task::spawn_blocking(ControllerStoreGuard::try_acquire)
-            .await
-            .context("probe controller ownership task failed")??
-        {
-            drop(guard);
-            let waited = released.elapsed();
-            if waited >= LOGGED_PHASE {
-                tracing::info!(
-                    waited_ms = waited.as_millis(),
-                    "waited for the previous daemon to release the store"
-                );
+    // Do not launch a child that can only fail to acquire that lock. A
+    // container daemon owns a store in its volume, so the host guard is not
+    // about it at all.
+    let configured_container = load_daemon_config()
+        .await
+        .map(|daemon| daemon.runtime.engine().is_some())
+        .unwrap_or(false);
+    if !configured_container {
+        let released = Instant::now();
+        let handoff_deadline = released + STOP_TIMEOUT;
+        loop {
+            if let Some(guard) = tokio::task::spawn_blocking(ControllerStoreGuard::try_acquire)
+                .await
+                .context("probe controller ownership task failed")??
+            {
+                drop(guard);
+                let waited = released.elapsed();
+                if waited >= LOGGED_PHASE {
+                    tracing::info!(
+                        waited_ms = waited.as_millis(),
+                        "waited for the previous daemon to release the store"
+                    );
+                }
+                break;
             }
-            break;
+            // A daemon started outside this client's startup lock may be becoming ready.
+            if let Some(client) = prepare_existing_daemon(startup).await? {
+                return Ok(client);
+            }
+            ensure!(
+                Instant::now() < handoff_deadline,
+                "controller store is still owned by another process after {}s; daemon startup was not attempted",
+                STOP_TIMEOUT.as_secs()
+            );
+            tokio::time::sleep(RETRY_DELAY).await;
         }
-        // A daemon started outside this client's startup lock may be becoming ready.
-        if let Some(client) = prepare_existing_daemon(startup).await? {
-            return Ok(client);
-        }
-        ensure!(
-            Instant::now() < handoff_deadline,
-            "controller store is still owned by another process after {}s; daemon startup was not attempted",
-            STOP_TIMEOUT.as_secs()
-        );
-        tokio::time::sleep(RETRY_DELAY).await;
     }
 
     let log_path = data_dir().join("daemon.log");
     let launched = launch_daemon(&log_path).await?;
     let launched_at = Instant::now();
-    tracing::info!(pid = launched.pid, "launched the daemon");
+    let label = launched.label();
+    tracing::info!(daemon = %label, "launched the daemon");
 
     let outcome = wait_for_ready_daemon(
-        || process_is_alive(launched.pid),
+        || launched.is_alive(),
         || async {
             let mut client = connect_existing().await?;
             ping_daemon(&mut client).await?;
-            check_store_readiness().await?;
+            // The host store guard describes the host placement only. A
+            // container daemon's store is in its volume.
+            if launched.container.is_none() {
+                check_store_readiness().await?;
+            }
             Ok(client)
         },
         |waited| {
             startup_notice(format!(
-                "Mjolnir daemon {} has been starting for {}s; still waiting.",
-                launched.pid,
+                "Mjolnir daemon {label} has been starting for {}s; still waiting.",
                 waited.as_secs()
             ));
         },
@@ -294,7 +305,7 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
     let reason = match outcome {
         StartupOutcome::Ready(client) => {
             tracing::info!(
-                pid = launched.pid,
+                daemon = %label,
                 ready_ms = launched_at.elapsed().as_millis(),
                 "the launched daemon is ready"
             );
@@ -304,11 +315,10 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
         // exits without ever publishing an endpoint. That explanation is the
         // answer; the client's own failure to reach the absent endpoint is not.
         StartupOutcome::Exited => {
-            format!("Mjolnir daemon {} exited before it was ready", launched.pid)
+            format!("Mjolnir daemon {label} exited before it was ready")
         }
         StartupOutcome::StillStarting { last_error } => format!(
-            "Mjolnir daemon {} is still starting after {}s and has not accepted a request (last attempt: {last_error:#})",
-            launched.pid,
+            "Mjolnir daemon {label} is still starting after {}s and has not accepted a request (last attempt: {last_error:#})",
             START_TIMEOUT.as_secs()
         ),
     };
@@ -349,6 +359,35 @@ fn legacy_placement(pid: u32) -> DaemonPlacement {
     }
 }
 
+/// Publish the host's `daemon.json` for a daemon whose own filesystem is a
+/// container volume. The body is owner-only and replaced atomically, like the
+/// daemon's own publication.
+pub(crate) fn write_launcher_metadata(metadata: &DaemonMetadata) -> Result<()> {
+    use std::io::Write as _;
+    let path = metadata_path();
+    let parent = path
+        .parent()
+        .context("container daemon metadata path has no parent")?;
+    mj_core::config::create_owner_only_directory(parent)?;
+    let temporary = parent.join(format!(".daemon.{}.tmp", std::process::id()));
+    let body = serde_json::to_vec_pretty(metadata)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .with_context(|| format!("create {}", temporary.display()))?;
+    file.write_all(&body)?;
+    file.sync_all()?;
+    fs::rename(&temporary, &path)
+        .with_context(|| format!("publish daemon metadata {}", path.display()))?;
+    Ok(())
+}
+
 /// What a daemon reports about itself, or the legacy answer when an older
 /// daemon cannot report at all.
 async fn daemon_identity_or_legacy(metadata: &DaemonMetadata) -> DaemonIdentity {
@@ -369,8 +408,9 @@ async fn daemon_identity_or_legacy(metadata: &DaemonMetadata) -> DaemonIdentity 
 /// Where the configuration puts the daemon on this computer.
 enum ConfiguredPlacement {
     /// On the host; `reason` says why when a container was asked for.
-    Host { reason: Option<String> },
-    #[cfg(target_os = "linux")]
+    Host {
+        reason: Option<String>,
+    },
     Container(Box<container::ContainerSpec>),
 }
 
@@ -379,7 +419,6 @@ impl ConfiguredPlacement {
     fn container(&self) -> Option<&str> {
         match self {
             Self::Host { .. } => None,
-            #[cfg(target_os = "linux")]
             Self::Container(spec) => Some(&spec.name),
         }
     }
@@ -392,22 +431,11 @@ async fn resolve_placement(daemon: &mj_core::config::DaemonConfig) -> Result<Con
     if daemon.runtime.engine().is_none() {
         return Ok(ConfiguredPlacement::Host { reason: None });
     }
-    #[cfg(target_os = "linux")]
-    {
-        Ok(match container::placement(daemon).await? {
-            container::Placement::Container(spec) => ConfiguredPlacement::Container(spec),
-            container::Placement::Host { reason } => ConfiguredPlacement::Host {
-                reason: Some(reason),
-            },
-        })
-    }
-    #[cfg(not(target_os = "linux"))]
-    Ok(ConfiguredPlacement::Host {
-        reason: Some(
-            "a daemon container shares the host's network and process namespaces, which only \
-             Linux provides"
-                .to_owned(),
-        ),
+    Ok(match container::placement(daemon).await? {
+        container::Placement::Container(spec) => ConfiguredPlacement::Container(spec),
+        container::Placement::Host { reason } => ConfiguredPlacement::Host {
+            reason: Some(reason),
+        },
     })
 }
 
@@ -454,20 +482,20 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
              instead.",
             daemon.runtime.engine().unwrap_or("a container")
         )),
-        #[cfg(target_os = "linux")]
         ConfiguredPlacement::Container(spec) => {
-            let log_offset = fs::metadata(log_path)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
-            let launched = container::launch(&spec, log_path).await?;
+            let launched = container::launch(&spec).await?;
             tracing::info!(
-                pid = launched.pid,
                 container = %launched.container,
+                port = launched.port,
                 "launched the daemon in its container"
             );
             return Ok(LaunchedDaemon {
-                pid: launched.pid,
-                log_offset,
+                pid: 0,
+                log_offset: 0,
+                container: Some(ContainerProcess {
+                    name: launched.container,
+                    runtime: spec.runtime(),
+                }),
             });
         }
     }
@@ -507,7 +535,11 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
             std::os::unix::process::CommandExt::arg0(&mut command, "mj");
             let pid = mj_core::subprocess::spawn_detached(&mut command, &log_path)?;
             crate::node::spawn_node()?;
-            Ok(LaunchedDaemon { pid, log_offset })
+            Ok(LaunchedDaemon {
+                pid,
+                log_offset,
+                container: None,
+            })
         }
     })
     .await
@@ -761,7 +793,11 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
         }
     };
     let build = daemon_build(&metadata, &identity.placement)?;
-    if let Err(error) = check_store_readiness().await {
+    // A container daemon's store is in its volume; the host store says
+    // nothing about it. The daemon reports its own migration failure.
+    if identity.placement.container().is_none()
+        && let Err(error) = check_store_readiness().await
+    {
         let needs_migration = error.chain().any(|cause| {
             cause
                 .downcast_ref::<mj_core::storage::StoreSchemaMismatch>()
@@ -980,12 +1016,13 @@ enum StartupOutcome<T> {
 /// it publishes its endpoint, so a slow start is not a failure and the wait
 /// continues. Only the process leaving, or the hard [`START_TIMEOUT`] bound,
 /// ends the wait without a client. The clock is Tokio's, so tests can drive it.
-async fn wait_for_ready_daemon<T, Probe, Waiting, Notice>(
-    is_alive: impl Fn() -> bool,
+async fn wait_for_ready_daemon<T, Alive, Probe, Waiting, Notice>(
+    is_alive: impl Fn() -> Alive,
     mut probe: Probe,
     notice: Notice,
 ) -> StartupOutcome<T>
 where
+    Alive: Future<Output = bool>,
     Probe: FnMut() -> Waiting,
     Waiting: Future<Output = Result<T>>,
     Notice: FnOnce(Duration),
@@ -998,7 +1035,7 @@ where
             Ok(ready) => return StartupOutcome::Ready(ready),
             Err(error) => error,
         };
-        if !is_alive() {
+        if !is_alive().await {
             return StartupOutcome::Exited;
         }
         let now = tokio::time::Instant::now();
@@ -1014,17 +1051,52 @@ where
     }
 }
 
+/// A daemon container this launch started or reused.
+#[derive(Debug, Clone)]
+struct ContainerProcess {
+    name: String,
+    runtime: mj_core::config::DaemonRuntime,
+}
+
 /// The daemon this client launched and where its log stood at launch.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct LaunchedDaemon {
     pid: u32,
     log_offset: u64,
+    container: Option<ContainerProcess>,
 }
 
 impl LaunchedDaemon {
+    fn label(&self) -> String {
+        match &self.container {
+            Some(container) => format!("container {}", container.name),
+            None => format!("{}", self.pid),
+        }
+    }
+
+    async fn is_alive(&self) -> bool {
+        match &self.container {
+            Some(container) => container::is_running(container.runtime, &container.name)
+                .await
+                .unwrap_or(false),
+            None => process_is_alive(self.pid),
+        }
+    }
+
     /// Include process diagnostics and detached stderr. Failures before logger
     /// initialization have only stderr; later failures also have a process log.
     async fn output_since_launch(&self, log_path: &Path) -> (PathBuf, String) {
+        if let Some(container) = &self.container {
+            let log = container::log_tail(
+                container
+                    .runtime
+                    .engine()
+                    .expect("a daemon container has an engine"),
+                &container.name,
+            )
+            .await;
+            return (PathBuf::from(format!("container {}", container.name)), log);
+        }
         let log_path = log_path.to_path_buf();
         let fallback_path = log_path.clone();
         let offset = self.log_offset;
@@ -1225,6 +1297,11 @@ async fn hand_off_daemon(metadata: &DaemonMetadata) -> Result<()> {
     let mut attempts = 0_u32;
     // The latest reason the daemon has not accepted, reported with each notice.
     let mut not_yet = String::new();
+    let container = daemon_identity_or_legacy(metadata)
+        .await
+        .placement
+        .container()
+        .is_some();
     tracing::info!(
         pid = metadata.pid,
         build = %metadata.build_version,
@@ -1267,16 +1344,29 @@ async fn hand_off_daemon(metadata: &DaemonMetadata) -> Result<()> {
                     "the daemon accepted the handoff"
                 );
                 // An acknowledged handoff is not permission to impose a kill
-                // deadline. Keep following the store it owned until it is
-                // released; the daemon may exit on any platform without a PID.
-                let exited = wait_for_store_release(STOP_TIMEOUT).await;
+                // deadline. A host daemon owns the host store; a container
+                // daemon owns the volume store and is followed by its
+                // endpoint.
+                let exited = if container {
+                    wait_for_endpoint_down(metadata, STOP_TIMEOUT).await
+                } else {
+                    wait_for_store_release(STOP_TIMEOUT).await
+                };
                 tracing::info!(
                     pid = metadata.pid,
+                    container,
                     exited = exited.is_ok(),
                     exit_ms = accepted.elapsed().as_millis(),
                     "waited for the handed-off daemon to exit"
                 );
                 if exited.is_ok() {
+                    if container
+                        && read_metadata_any().is_ok_and(|current| {
+                            current.address == metadata.address && current.token == metadata.token
+                        })
+                    {
+                        container::remove_metadata()?;
+                    }
                     return Ok(());
                 }
             }
@@ -1335,10 +1425,11 @@ async fn upgrade_blockers(metadata: &DaemonMetadata) -> Option<Vec<String>> {
 }
 
 async fn stop_daemon(metadata: &DaemonMetadata) -> Result<()> {
-    if let Ok(inner) = DaemonClient::connect(metadata.clone()).await
-        && ManagementClient::new(inner).stop().await.is_ok()
-    {
-        return wait_for_stopped_daemon().await;
+    if let Ok(mut inner) = DaemonClient::connect(metadata.clone()).await {
+        let identity = inner.identity().await.ok();
+        if ManagementClient::new(inner).stop().await.is_ok() {
+            return wait_after_accepted_stop(metadata, identity.as_ref()).await;
+        }
     }
     // Another client may have completed the replacement while this client was
     // waiting on the old endpoint. Never signal the process named by stale
@@ -1351,11 +1442,65 @@ async fn stop_daemon(metadata: &DaemonMetadata) -> Result<()> {
     signal_daemon(metadata).await
 }
 
-/// Wait for a daemon that accepted a stop to release the store.
-pub(crate) async fn wait_for_stopped_daemon() -> Result<()> {
-    wait_for_store_release(STOP_DRAIN_TIMEOUT)
+/// Stop a management client's daemon and wait for it to actually go away.
+pub(crate) async fn stop_and_wait(daemon: &mut ManagementClient) -> Result<()> {
+    let metadata = daemon.metadata().clone();
+    let identity = daemon.identity().await.ok();
+    daemon.stop().await?;
+    wait_after_accepted_stop(&metadata, identity.as_ref()).await
+}
+
+async fn wait_after_accepted_stop(
+    metadata: &DaemonMetadata,
+    identity: Option<&DaemonIdentity>,
+) -> Result<()> {
+    let placement = identity
+        .map(|identity| identity.placement.clone())
+        .unwrap_or_else(|| legacy_placement(metadata.pid));
+    if placement.container().is_some() {
+        // A container daemon's store is in its volume, so the host's store
+        // guard says nothing about it. Its endpoint disappearing is the
+        // durable fact that this daemon process stopped.
+        wait_for_endpoint_down(metadata, STOP_DRAIN_TIMEOUT).await?;
+        // Another client may already have published the replacement.
+        if read_metadata_any().is_ok_and(|current| {
+            current.address == metadata.address && current.token == metadata.token
+        }) {
+            container::remove_metadata()?;
+        }
+        Ok(())
+    } else {
+        wait_for_store_release(STOP_DRAIN_TIMEOUT)
+            .await
+            .context("the daemon accepted the stop but still owns the store")
+    }
+}
+
+/// Wait until no daemon answers at `metadata`'s endpoint.
+async fn wait_for_endpoint_down(metadata: &DaemonMetadata, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let answers = tokio::time::timeout(Duration::from_secs(1), async {
+            let Ok(mut client) = DaemonClient::connect(metadata.clone()).await else {
+                return false;
+            };
+            matches!(
+                client.request(DaemonAction::Ping).await,
+                Ok(DaemonReply::Pong)
+            )
+        })
         .await
-        .context("the daemon accepted the stop but still owns the store")
+        .unwrap_or(false);
+        if !answers {
+            return Ok(());
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "the Mjolnir daemon still answers after {}s",
+            timeout.as_secs()
+        );
+        tokio::time::sleep(RETRY_DELAY).await;
+    }
 }
 
 /// Stop the daemon `metadata` names after it did not answer a protocol
@@ -1366,7 +1511,6 @@ pub(crate) async fn wait_for_stopped_daemon() -> Result<()> {
 async fn signal_daemon(metadata: &DaemonMetadata) -> Result<()> {
     // A daemon that reports a container and its engine is stopped through the
     // engine, so this works even when the container has no host PID.
-    #[cfg(target_os = "linux")]
     {
         let identity = daemon_identity_or_legacy(metadata).await;
         if let DaemonPlacement::Container {
@@ -1374,13 +1518,11 @@ async fn signal_daemon(metadata: &DaemonMetadata) -> Result<()> {
             runtime: Some(runtime),
         } = &identity.placement
         {
+            // The forced path stops the workers in the container too. That is
+            // why it is used only after the protocol stop failed.
             container::stop(*runtime, name).await?;
-            return wait_for_store_release(STOP_TIMEOUT).await.with_context(|| {
-                format!(
-                    "superseded Mjolnir daemon container {name} was stopped but still owns the store after {}s",
-                    STOP_TIMEOUT.as_secs()
-                )
-            });
+            container::remove_metadata()?;
+            return Ok(());
         }
     }
     #[cfg(unix)]
@@ -2028,7 +2170,7 @@ mod tests {
         let announced = Cell::new(None);
         let started = tokio::time::Instant::now();
         let outcome = wait_for_ready_daemon(
-            || true,
+            || async { true },
             || {
                 attempts.set(attempts.get() + 1);
                 let ready =
@@ -2082,6 +2224,7 @@ mod tests {
         let launched = LaunchedDaemon {
             pid: 7,
             log_offset: old.len() as u64,
+            container: None,
         };
         let (path, output) = launched.output_since_launch(&stderr).await;
         assert_eq!(path, diagnostics);
@@ -2105,6 +2248,7 @@ mod tests {
         let launched = LaunchedDaemon {
             pid: 7,
             log_offset: 0,
+            container: None,
         };
         let (path, output) = launched.output_since_launch(&stderr).await;
         assert_eq!(path, stderr);
@@ -2118,7 +2262,7 @@ mod tests {
         let attempts = Cell::new(0usize);
         let started = tokio::time::Instant::now();
         let outcome: StartupOutcome<()> = wait_for_ready_daemon(
-            || attempts.get() < 3,
+            || async { attempts.get() < 3 },
             || {
                 attempts.set(attempts.get() + 1);
                 async { Err(anyhow!("connection refused")) }
@@ -2137,7 +2281,7 @@ mod tests {
     async fn an_alive_daemon_that_never_answers_stops_at_the_bound() {
         let started = tokio::time::Instant::now();
         let outcome: StartupOutcome<()> = wait_for_ready_daemon(
-            || true,
+            || async { true },
             || async { Err(anyhow!("connection refused")) },
             |_| {},
         )
