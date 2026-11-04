@@ -23,10 +23,10 @@ After this change, reviewer options without `--review` inherit the configured tr
 - [x] (2026-11-04) Commit the validated review-inheritance checkpoint as `71850aa7d`.
 - [x] (2026-11-04) Commit subagent-list defaults as `6eb3146b8` and request the required before-push review.
 - [x] (2026-11-04) Address all first-review findings and pass focused native navigation, suspend restoration, and web review-visibility regressions; commit as `2f0d27ea1`.
-- [ ] Validate review corrections, commit them, obtain a clean before-push review, and push to `origin/master`.
+- [x] (2026-11-04) Validate and commit review corrections, obtain a clean before-push review, and push to `origin/master`.
 - [x] (2026-11-04) Resolve integration with upstream `5238411cd`, preserve migration history, use client protocol 82, and make child filters kind-aware. All-target TUI/client check and Worker/Reviewer isolation regression passed.
 - [x] (2026-11-04) Validate merged browser behavior: 58 Node checks and all 19 dashboard Playwright cases passed.
-- [ ] Complete merged-tree Rust suites and Clippy, commit the merge, obtain a clean before-push review, and push.
+- [x] (2026-11-04) Complete merged-tree Rust suites and Clippy, commit the merge, obtain a clean before-push review, and push.
 - [x] (2026-11-04) Pass merged core/client/controller/CLI-library suites, workspace formatting and Clippy; resolve both TUI compact/history failures and pass six focused TUI regressions plus crate Clippy.
 - [x] (2026-11-04) Resolve merged CLI integration failures without weakening assertions: strict incompatible-store exit and all nine PTY failure reruns pass.
 - [x] (2026-11-04) Move the mandatory compatibility check to an independently supervised task and cancel optional target refresh on shutdown. All three store-divergence integration cases passed; strict breaking-revision exit passed in under one second.
@@ -35,7 +35,7 @@ After this change, reviewer options without `--review` inherit the configured tr
 - [x] (2026-11-04) Commit the integration as `491e7a15f` and request renewed review against upstream `5238411cd`.
 - [x] (2026-11-04) Address the second review's lifecycle finding in canonical attention and extend the existing child-scope workflow for all four lifecycle states; the focused regression passed.
 - [x] (2026-11-04) Pass final terminal suite (570 passed, two ignored), workspace Clippy, and formatting for the lifecycle correction.
-- [ ] Commit the lifecycle correction, obtain a clean before-push review, and push.
+- [x] (2026-11-04) Commit the lifecycle correction as `25d1e6db0`, obtain clean review for tree `4526b87`, and push successfully to `origin/master`.
 
 ## Surprises & Discoveries
 
@@ -74,7 +74,9 @@ The worker and daemon already distinguish the triggers: turn completion only arm
 
 ## Outcomes & Retrospective
 
-The integrated implementation is validated. Merged browser checks passed 58 Node checks and all 19 Playwright dashboard cases. Merged core (561 passed, four ignored), client (44 passed), controller (2,267 passed, 19 ignored), and CLI-library (236 passed) suites passed. Both initially failing TUI compact/history workflows and four directly affected guards passed after preserving unknown relationships and explicitly selecting All for history. The live store-divergence cases passed (three total), including strict incompatible-revision exit in under one second after making its guard independent of optional preparation. All nine previously failing PTY cases and all four Welcome cases passed after completing the no-setup state transition and correcting isolated fixture prerequisites. Final workspace Clippy and formatting passed. Evidence for the final startup checks is `.mj/agents/45af5a7af38c6f18cf3f14cfce887b54/summary.txt`; implementation acceptance is complete pending committed-tree review and Git delivery.
+Both requested changes are delivered to `origin/master` at `25d1e6db0`. Automatic review still defaults to off; reviewer-only options inherit the configured trigger. Ordinary terminal and web subagent views default to hiding idle children, while reviewer history, active lifecycle work, failures, and review activity remain visible. Final review was clean for tree `4526b87`, and Git confirmed the push from `5238411cd` to `25d1e6db0`. The final terminal suite passed 570 tests with two existing ignores; workspace Clippy and formatting passed.
+
+The integrated implementation is validated. Merged browser checks passed 58 Node checks and all 19 Playwright dashboard cases. Merged core (561 passed, four ignored), client (44 passed), controller (2,267 passed, 19 ignored), and CLI-library (236 passed) suites passed. Both initially failing TUI compact/history workflows and four directly affected guards passed after preserving unknown relationships and explicitly selecting All for history. The live store-divergence cases passed (three total), including strict incompatible-revision exit in under one second after making its guard independent of optional preparation. All nine previously failing PTY cases and all four Welcome cases passed after completing the no-setup state transition and correcting isolated fixture prerequisites. Final workspace Clippy and formatting passed. Evidence for the final startup checks is `.mj/agents/45af5a7af38c6f18cf3f14cfce887b54/summary.txt`; implementation acceptance, committed-tree review, and Git delivery are complete.
 
 Review inheritance implementation and validation passed: core 553 passed/4 ignored, client 43 passed, controller 2,255 passed/19 ignored, and CLI library 231 plus its integration targets. The focused inherited-review HTTP test also passed. Logs are in `.mj/agents/96db413dbd2386a48ffbb29510d32ce0`.
 
@@ -159,3 +161,5 @@ Revision note (2026-11-04): Integration was committed as 491e7a15f. Renewed revi
 Revision note (2026-11-04): Provisioning, checkpointing, closing, and destroying now carry Working attention from their lifecycle state; stopped stays Inactive. The existing child-scope workflow covers all four without local overlays and passed. Full terminal validation and lint are running before the correction commit and renewed review.
 
 Revision note (2026-11-04): All 570 terminal tests passed (two ignored), as did final workspace Clippy and formatting. Parent reviewed the final diff; the only edit during lint was moving the hard-won comment immediately above its test attribute, with no behavioral change. The correction is ready to commit and review.
+
+Revision note (2026-11-04): The final review is clean and the functional changes were pushed successfully as 25d1e6db0. Recorded completed progress and delivery evidence.
