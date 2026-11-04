@@ -17,7 +17,7 @@ impl Controller {
         manager: Option<&SessionManagerControl>,
         before_close: Option<BeforeClose>,
     ) -> Result<bool> {
-        crate::worker_lifecycle::run(session_id, "close sub-agent", executor, async {
+        let close = crate::worker_lifecycle::run(session_id, "close sub-agent", executor, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
             ensure!(
                 self.state.subagents.contains_key(session_id),
@@ -45,6 +45,10 @@ impl Controller {
                     &previous,
                     "persist child close intent before synchronizing its conversation",
                 )?;
+                // Closing retains the target and journal, and startup resumes
+                // it. None of the worker waits below should hold up replacing
+                // the daemon, even when the relay never answers.
+                executor.begin_resumable_work()?;
                 let backend =
                     backend_locator(previous.target.as_ref().unwrap(), &previous, &self.config)?;
                 let reconnect = targets::reconnect_plan(&backend, session_id)?
@@ -52,7 +56,8 @@ impl Controller {
                     .into_iter()
                     .next()
                     .context("reconnect plan is empty")?;
-                let connected = connect_checkpoint_relay(session_id, manager, &reconnect, None).await;
+                let connected =
+                    connect_checkpoint_relay(session_id, manager, &reconnect, None).await;
                 Some(match connected {
                     Ok(relay) => relay,
                     Err(error) if crate::session_manager::worker_connect_needs_restart(&error) => {
@@ -197,7 +202,18 @@ impl Controller {
                 relay.release();
             }
             outcome
-        })
-        .await
+        });
+        tokio::pin!(close);
+        loop {
+            tokio::select! {
+                result = &mut close => return result,
+                () = tokio::time::sleep(super::super::readiness::CANCELLATION_POLL_INTERVAL) => {
+                    ensure!(
+                        !executor.shutdown_interrupted(),
+                        "sub-agent close interrupted for daemon handoff; its journal and close intent are retained"
+                    );
+                }
+            }
+        }
     }
 }

@@ -745,7 +745,6 @@ async fn run_child(
     };
     let out = pump(Box::new(stdout), FRAME_STDOUT);
     let err = pump(Box::new(stderr), FRAME_STDERR);
-    drop(frames_tx);
     // Forward output, and notice a reset even while the child prints nothing:
     // a quiet child must still die when the daemon gives up on it.
     let forward = async {
@@ -784,29 +783,41 @@ async fn run_child(
         }
     };
 
+    // The child owns the lifetime of its input. A relay keeps stdin open
+    // between requests, including when the proxy has already failed to start.
+    // Waiting for request EOF first would hide that exit until the caller's
+    // handshake deadline. Keep draining output after the process ends.
+    let exited = async {
+        let status = tokio::select! {
+            status = child.wait() => status.context("wait for node child")?,
+            fed = feed => {
+                fed.context("feed node child stdin")?;
+                child.wait().await.context("wait for node child")?
+            }
+        };
+        if let Some(group) = &group {
+            group.kill();
+        }
+        // Keep the output channel open until the child exits, even if both
+        // pipes close first. Its receiver owns reset detection throughout.
+        drop(frames_tx);
+        anyhow::Ok(status)
+    };
     let streamed = tokio::try_join!(
-        async { feed.await.context("feed node child stdin") },
+        exited,
         async { out.await.context("read node child stdout") },
         async { err.await.context("read node child stderr") },
         forward,
     );
-    if let Err(error) = streamed {
-        // The daemon reset the stream or a pipe failed: nobody will read this
-        // child's output, so it must not keep running.
-        if let Some(group) = &group {
-            group.kill();
-        }
-        child.kill().await.ok();
-        return Err(error);
-    }
-    let status = tokio::select! {
-        status = child.wait() => status.context("wait for node child")?,
-        reset = poll_fn(|cx| send.poll_reset(cx)) => {
+    let status = match streamed {
+        Ok((status, (), (), ())) => status,
+        Err(error) => {
+            // A reset or pipe failure must stop the whole process group.
             if let Some(group) = &group {
                 group.kill();
             }
             child.kill().await.ok();
-            bail!("the daemon reset the exec while its child ran: {reset:?}");
+            return Err(error);
         }
     };
     // A session the transport turned away usually means its shared master
@@ -1328,6 +1339,31 @@ mod tests {
         crate::targets::CommandSpec::new("sh", ["-c", script]).to_node_run(true)
     }
 
+    // Hard-won: 413864386: an exited relay proxy waited for stdin EOF before reporting its failure.
+    #[tokio::test]
+    async fn failed_exec_reports_all_output_and_exit_while_stdin_remains_open() {
+        let client = connected().await;
+        let mut exec = client
+            .exec(&sh("head -c 300000 /dev/zero >&2; exit 23"))
+            .await
+            .unwrap();
+        let mut stderr = Vec::new();
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match exec.next().await.unwrap().expect("exit frame") {
+                    NodeFrame::Stderr(bytes) => stderr.extend_from_slice(&bytes),
+                    NodeFrame::Stdout(_) => panic!("the failing proxy only writes stderr"),
+                    NodeFrame::Exit(exit) => break exit,
+                }
+            }
+        })
+        .await
+        .expect("an exited proxy must not wait for its caller to close stdin");
+        assert_eq!(exit.status, Some(23));
+        assert_eq!(exit.error, None);
+        assert_eq!(stderr, vec![0; 300000]);
+    }
+
     /// Host files cross the node as streams, not as one oversized frame, and
     /// metadata and listings use the same path conversion.
     #[tokio::test]
@@ -1415,17 +1451,26 @@ mod tests {
     async fn dropping_an_exec_kills_its_process_group() {
         let client = connected().await;
         let directory = tempfile::tempdir().unwrap();
-        let marker = directory.path().join("grandchild");
-        let script = format!("(sleep 3; touch {}) & echo started; wait", marker.display());
-        let mut exec = client.exec(&sh(&script)).await.unwrap();
-        exec.close_stdin().unwrap();
-        assert_eq!(
-            exec.next().await.unwrap(),
-            Some(NodeFrame::Stdout(Bytes::from_static(b"started\n")))
-        );
-        drop(exec);
-        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-        assert!(!marker.exists(), "the grandchild was killed with its group");
+        for closed_pipes in [false, true] {
+            let marker = directory.path().join(format!("grandchild-{closed_pipes}"));
+            let close = if closed_pipes { "exec 1>&- 2>&-;" } else { "" };
+            let script = format!(
+                "(sleep 3; touch {}) >/dev/null 2>&1 & echo started; {close} wait",
+                marker.display()
+            );
+            let mut exec = client.exec(&sh(&script)).await.unwrap();
+            exec.close_stdin().unwrap();
+            assert_eq!(
+                exec.next().await.unwrap(),
+                Some(NodeFrame::Stdout(Bytes::from_static(b"started\n")))
+            );
+            // Allow both output pumps to reach EOF before resetting a child
+            // that is still running with closed pipes.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            drop(exec);
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            assert!(!marker.exists(), "the grandchild was killed with its group");
+        }
     }
 
     // The daemon's executors reach the node through `NodeCommandHost`, which

@@ -438,7 +438,11 @@ pub(super) async fn run_daemon_runtime(
         let recovery_state = state.clone();
         let recovery_shutdown = cancellation.clone();
         let updates = interrupted_close_tx.clone();
-        let upgrade_work = startup_work.clone();
+        // A child's durable close is resumed by every daemon. Its worker
+        // connection may be unavailable for minutes and must not hold startup
+        // admission after the daemon begins serving.
+        let upgrade_work =
+            (!controller.state.subagents.contains_key(&session_id)).then(|| startup_work.clone());
         let interrupted_close_task = tokio::spawn(async move {
             let _upgrade_work = upgrade_work;
             let result = tokio::select! {
