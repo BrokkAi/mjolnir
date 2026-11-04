@@ -102,6 +102,39 @@ pub struct DaemonIdentity {
     pub placement: DaemonPlacement,
 }
 
+/// What automatic first-run setup found and configured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirstRunSetupReport {
+    pub agents: Vec<mj_core::config::HarnessKind>,
+    pub repository: Option<String>,
+}
+
+impl FirstRunSetupReport {
+    pub fn summary(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self.agents.is_empty() {
+            lines.push(
+                "No installed coding agent was found. Mjolnir can install and sign in to one for you."
+                    .to_owned(),
+            );
+        } else {
+            lines.push(format!(
+                "Agents: {}.",
+                self.agents
+                    .iter()
+                    .map(|kind| kind.display_name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some(repository) = &self.repository {
+            lines.push(format!("Project: {repository}."));
+        }
+        lines
+    }
+}
+
 /// A project synthesized while importing a native session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -593,6 +626,10 @@ pub enum DaemonAction {
     /// The configuration the daemon serves. Clients read it here instead of
     /// opening `config.toml`, which belongs to the daemon.
     Configuration,
+    /// Discover and persist the first-run configuration in the daemon's own
+    /// environment. A client in another placement asks its daemon instead of
+    /// writing the client's `config.toml`.
+    RunFirstRunSetup,
     Status,
     WebViewerAccess,
     /// The daemon host's Git commit author, which its sessions inherit.
@@ -1028,6 +1065,7 @@ pub enum DaemonReply {
     UpgradeBlockers(Vec<String>),
     Identity(DaemonIdentity),
     Configuration(Box<Config>),
+    FirstRunSetup(Option<FirstRunSetupReport>),
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
     GitIdentity(GitIdentity),
@@ -1629,6 +1667,13 @@ impl DaemonClient {
         match self.request(DaemonAction::Configuration).await? {
             DaemonReply::Configuration(config) => Ok(*config),
             reply => bail!("unexpected daemon configuration reply {reply:?}"),
+        }
+    }
+
+    pub async fn run_first_run_setup(&mut self) -> Result<Option<FirstRunSetupReport>> {
+        match self.request(DaemonAction::RunFirstRunSetup).await? {
+            DaemonReply::FirstRunSetup(report) => Ok(report),
+            reply => bail!("unexpected first-run setup reply {reply:?}"),
         }
     }
 
@@ -2875,7 +2920,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // The daemon reports its per-start identity, build and placement instead of
 // clients reading its PID and `/proc`, and it serves the configuration that
 // owns the store instead of clients opening `config.toml`.
-pub const PROTOCOL_VERSION: u32 = 76;
+pub const PROTOCOL_VERSION: u32 = 77;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

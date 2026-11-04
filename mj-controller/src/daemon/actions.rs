@@ -41,6 +41,28 @@ pub(super) async fn handle_action(
         DaemonAction::Configuration => Ok(DaemonReply::Configuration(Box::new(
             state.with_config(Clone::clone),
         ))),
+        DaemonAction::RunFirstRunSetup => {
+            let report = blocking(|| {
+                let executor = crate::targets::ProcessExecutor;
+                let report = crate::setup::run_setup(
+                    &mj_core::config::config_path(),
+                    &mj_core::config::data_dir(),
+                    false,
+                    &executor,
+                    &|| false,
+                    || {},
+                )?;
+                Ok(report.map(|report| FirstRunSetupReport {
+                    agents: report.agents,
+                    repository: report.repository,
+                }))
+            })
+            .await?;
+            if report.is_some() {
+                refresh_runtime_controller(state).await;
+            }
+            Ok(DaemonReply::FirstRunSetup(report))
+        }
         DaemonAction::Status => {
             state.prune_dead_clients();
             Ok(DaemonReply::Status(DaemonStatus {

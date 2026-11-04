@@ -481,28 +481,24 @@ pub(crate) fn spawn_first_run_setup(
         tracker,
         "first-run setup",
         updates,
-        move |cancelled| {
-            use mj_controller::{doctor, setup};
-            let executor = CancellableProcessExecutor::new(cancelled.clone())
-                .with_deadline(Duration::from_secs(30));
-            let config_path = mj_core::config::config_path();
-            let result = setup::run_setup(
-                &config_path,
-                &mj_core::config::data_dir(),
-                false,
-                &executor,
-                &|| executor.is_cancelled(),
-                || {
-                    report(
-                        "first-run setup",
-                        &progress,
-                        DashboardIoUpdate::FirstRunStarted,
-                    );
-                },
-            )?;
+        move |_cancelled| {
+            report(
+                "first-run setup",
+                &progress,
+                DashboardIoUpdate::FirstRunStarted,
+            );
+            // The daemon owns its configuration and its environment. In
+            // container placement this discovery runs inside the container,
+            // not against the client's host home.
+            let summary = mj_core::runtime::block_on(async {
+                crate::daemon::connect_or_start()
+                    .await?
+                    .run_first_run_setup()
+                    .await
+            })??;
             // An existing installation picks up agents installed since its
             // last launch through the startup availability check.
-            let Some(summary) = result else {
+            let Some(summary) = summary else {
                 return Ok(None);
             };
             report(
@@ -510,15 +506,7 @@ pub(crate) fn spawn_first_run_setup(
                 &progress,
                 DashboardIoUpdate::FirstRunConfigured(summary),
             );
-            let checks =
-                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
-            let result = doctor::run_with_config_path(
-                &config_path,
-                &checks,
-                doctor::current_apple_platform(&checks),
-                doctor::DoctorOptions { smoke: false },
-            );
-            Ok(Some(setup::actionable_errors(&result)))
+            Ok(None)
         },
         DashboardIoUpdate::FirstRunChecked,
     )
