@@ -1018,7 +1018,12 @@ async fn run_command(
                 .await
                 .map(|()| DashboardExit::Normal)
         }
-        Some(Command::Doctor(args)) => doctor(args).map(|()| DashboardExit::Normal),
+        Some(Command::Doctor(args)) => {
+            if daemon::container::exec_in_container(&container_forwarded_args()).await? {
+                return Ok(DashboardExit::Normal);
+            }
+            doctor(args).map(|()| DashboardExit::Normal)
+        }
         Some(Command::Setup(args)) => {
             if args.command.is_none()
                 && daemon::container::exec_in_container(&["setup".to_owned()]).await?
@@ -1028,6 +1033,9 @@ async fn run_command(
             setup(args).map(|()| DashboardExit::Normal)
         }
         Some(Command::Import(args)) => {
+            if daemon::container::exec_in_container(&container_forwarded_args()).await? {
+                return Ok(DashboardExit::Normal);
+            }
             let workspace_id =
                 resolve_store_workspace(args.workspace().or(requested_workspace).as_deref())
                     .await?;
@@ -2293,6 +2301,26 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The command line to replay inside a daemon container. The container is one
+/// instance already, so the host's `--instance` selector is removed; every
+/// other argument keeps its meaning.
+fn container_forwarded_args() -> Vec<String> {
+    let mut args = std::env::args().skip(1);
+    let mut forwarded = Vec::new();
+    while let Some(argument) = args.next() {
+        if argument == "-i" || argument == "--instance" {
+            let _ = args.next();
+            continue;
+        }
+        if argument.starts_with("--instance=") || (argument.starts_with("-i") && argument.len() > 2)
+        {
+            continue;
+        }
+        forwarded.push(argument);
+    }
+    forwarded
 }
 
 /// Run the harness's own interactive login against a profile's canonical home.
