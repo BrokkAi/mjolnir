@@ -43,14 +43,10 @@ impl WorkspaceSettingPersistence<PaneSize> {
             BTreeMap::from([("global".to_owned(), initial)]),
             notices,
             |_, size| async move {
-                tokio::task::spawn_blocking(move || {
-                    mj_core::config::Config::update(|config| {
-                        config.sidebar_size = size;
-                        Ok(())
-                    })
-                    .map(|_| ())
-                })
-                .await?
+                crate::daemon::connect_existing()
+                    .await?
+                    .save_sidebar_size(size)
+                    .await
             },
         )
     }

@@ -15,7 +15,9 @@ The Sessions sidebar should retain its chosen width across workspaces and applic
 - [x] (2026-11-04) Extended rendered goldens, Unicode hit testing, workspace restoration, config round-trip, and pointer-drag routing coverage.
 - [x] (2026-11-04) Isolated tmux instance confirmed dropdown selection, unchanged tiny size across workspace switches, saved configuration, and tiny size on reopening another workspace.
 - [x] (2026-11-04) Final full core, controller, TUI, and CLI suites passed, including CLI integration, PTY upgrade/termination tests, and doctests. Workspace clippy passed with warnings denied; formatting and diff checks passed.
-- [ ] Commit, request review, address findings, and push to origin/master.
+- [x] (2026-11-04) Committed implementation as `1b13e4a69` and requested review.
+- [x] (2026-11-04) Addressed both review findings; immediate-startup regression and short-terminal golden pass after reproducing both defects.
+- [ ] Validate the review fixes, commit, request review again, and push to origin/master.
 
 ## Surprises & Discoveries
 
@@ -24,6 +26,10 @@ The tool catalog exposes sub-agent spawning, but the session rejects it with `th
 Existing workspace snapshots persist all three support pane sizes in `PaneSizes`. Its Sessions value must no longer override the shared sidebar preference; the stored database representation remains readable without a migration.
 
 Dragging outside the workspace pane also needs ownership in `component_handles_mouse`, before the CLI routes the pointer to conversation text selection. The scrollbar now retains that ownership until release or cancellation. The rendered regression exercises this boundary.
+
+Review found that a configuration-file save can precede the daemon's periodic publication by 500 ms. A new dashboard can therefore hold an older sidebar size even after a successful file write. Sidebar saves now use a dedicated daemon configuration mutation, with the mutation coordinator holding ownership through persistence and publication before acknowledging success.
+
+Review also found that measuring workspace height against the whole frame did not reserve the other panes' actual allocation. A stacked sidebar must reserve only one workspace content row as its minimum, then grow its workspace rows with surplus. A side-by-side sidebar must clamp its workspace height against its final allocated band while preserving a Sessions pane.
 
 ## Decision Log
 
@@ -36,10 +42,16 @@ Dragging outside the workspace pane also needs ownership in `component_handles_m
 - Decision: Reuse the anchored pane menu for the tiny dropdown and the ordered background setting writer for persistence.
   Rationale: Keeps keyboard, pointer, cancellation, and bounded shutdown behavior shared with existing controls.
   Date/Author: 2026-11-04 / Codex.
+- Decision: Route sidebar writes through a dedicated daemon configuration mutation and publish the resulting configuration before its acknowledgement, under the same coordinator used by periodic reloads.
+  Rationale: Makes immediate dashboard reopen correct by ownership and ordering, without timing sleeps, an optimistic snapshot round trip, or loading session state for a size change.
+  Date/Author: 2026-11-04 / Codex.
+- Decision: Keep a single allocator for stacked rows, with flexible workspace growth above compact Sessions, and measure wide-sidebar workspace height only after its band is allocated.
+  Rationale: Allows overflow to scroll on short terminals and prevents workspace geometry from crossing into Targets or Profiles.
+  Date/Author: 2026-11-04 / Codex.
 
 ## Outcomes & Retrospective
 
-All requested behaviors are implemented and validated. The existing workspace-manager golden now shows medium/large overflow, wheel and track navigation, selected-workspace visibility, and the tiny chooser. Four existing dashboard goldens received only the new tiny dropdown marker. The reviewed push remains.
+All requested behaviors are implemented. The initial full validation passed, and both subsequent review findings now have passing focused regressions. The existing workspace-manager golden shows medium/large overflow, wheel and track navigation, selected-workspace visibility, and the tiny chooser. The combined-dashboard golden additionally shows overflow on short stacked and wide terminals. Full validation of the review fixes and the reviewed push remain.
 
 ## Context and Orientation
 
@@ -57,7 +69,7 @@ Finally add a workspace operation to the existing anchored menu for tiny mode. O
 
 ## Concrete Steps
 
-Work from the repository root. Use `cargo fmt --all` for formatting. Run Cargo tests outside the restricted sandbox, leaving mbx build storage untouched. Run focused tests during implementation, then `cargo test -p brokk-mj-core -p brokk-mj-tui -p brokk-mjolnir` and `cargo clippy --all-targets -- -D warnings` after the final implementation round. Golden updates use `MJ_UPDATE_GOLDEN=1` and require inspection of the resulting diff.
+Work from the repository root. Use `cargo fmt --all` for formatting. Run Cargo tests outside the restricted sandbox, leaving mbx build storage untouched. Run focused tests during implementation, then `cargo test -p brokk-mj-core -p brokk-mj-client -p brokk-mj-controller -p brokk-mj-tui -p brokk-mjolnir` and `cargo clippy --all-targets -- -D warnings` after the final implementation round. Golden updates use `MJ_UPDATE_GOLDEN=1` and require inspection of the resulting diff.
 
 ## Validation and Acceptance
 
@@ -75,12 +87,18 @@ Focused workspace tests passed (15 tests), followed by all five affected golden 
 
 Final validation exited successfully: controller 2,272 tests, core 562 tests plus subprocess checks, TUI 570 tests, CLI 236 unit tests plus all integration/PTY suites and doctests. `cargo clippy --all-targets -- -D warnings` finished successfully in the dev profile. The copied live-test binary was removed after stopping the isolated daemon; captures remain.
 
+Review regressions reproduced both defects before the fix (`/mnt/optane/tmp/mj-sidebar-review-startup-before.log` and `mj-sidebar-review-layout-before.log`). The startup case observed Standard after saving Minimized, without a periodic refresher. Focused checks now pass (`mj-sidebar-review-startup-after.log` and `mj-sidebar-review-layout-after.log`). The layout golden covers 70x22, 80x13, and 160x13 terminals and verifies pane boundaries and scrollbar presence.
+
 ## Interfaces and Dependencies
 
-Use the existing `PaneSize`, `PaneSizes`, `WorkspaceSettingPersistence`, `PaneMenu`, Ratatui, and theme glyph/scrollbar helpers. Add no crate or external dependency. Keep shared workspace row interpretation in `mj-tui/src/workspaces.rs` and use it from the combined layout.
+Use the existing `PaneSize`, `PaneSizes`, `WorkspaceSettingPersistence`, `PaneMenu`, Ratatui, and theme glyph/scrollbar helpers. `DaemonClient::save_sidebar_size` sends the additive `DaemonAction::SaveSidebarSize` operation; the controller coordinates its file transaction and publication under `config_mutation`, with the admission label `sidebar size setting`. Add no crate or external dependency. Keep shared workspace row interpretation in `mj-tui/src/workspaces.rs` and use it from the combined layout.
 
 Revision 2026-11-04: Initial plan records the design and disabled-delegation constraint before implementation.
 
 Revision 2026-11-04: Recorded implementation, pointer-ownership correction, focused validation, and isolated live evidence before final validation.
 
 Revision 2026-11-04: Recorded successful full validation before committing and requesting review.
+
+Revision 2026-11-04: Recorded both accepted review findings and their ownership/allocation corrections before implementing the fixes.
+
+Revision 2026-11-04: Recorded deterministic before/after evidence and the dedicated daemon operation, which avoids optimistic snapshot updates and session-store reads for sidebar saves.

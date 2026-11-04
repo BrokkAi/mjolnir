@@ -713,6 +713,10 @@ pub enum DaemonAction {
         bundle_id: String,
         text: String,
     },
+    /// Persist the shared sidebar preference and publish it before replying.
+    SaveSidebarSize {
+        size: mj_core::workspace::PaneSize,
+    },
     SaveWorkspacePaneSizes {
         workspace_id: String,
         sizes: mj_core::workspace::PaneSizes,
@@ -2000,6 +2004,13 @@ impl DaemonClient {
         {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected abandoned-prompt reply {reply:?}"),
+        }
+    }
+
+    pub async fn save_sidebar_size(&mut self, size: mj_core::workspace::PaneSize) -> Result<()> {
+        match self.request(DaemonAction::SaveSidebarSize { size }).await? {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected sidebar-size save reply {reply:?}"),
         }
     }
 
