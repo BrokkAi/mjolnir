@@ -228,7 +228,6 @@ pub(super) fn session_request_meta(
             .as_ref()
             .is_some_and(|socket| socket.review_gate && socket.role.supports_review())
         {
-            allowed.push("mcp__mj-agents__request_review".into());
             allowed.push("mcp__mj-agents__override_review".into());
         }
         options.insert("allowedTools".to_owned(), serde_json::json!(allowed));

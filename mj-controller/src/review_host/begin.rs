@@ -125,9 +125,7 @@ impl HostState {
         path: Option<String>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     ) {
-        let refusal = if !(self.config)(&session_id).is_push() {
-            Some("this session's review trigger is not push")
-        } else if crate::controller::move_session::move_owns_session(&session_id) {
+        let refusal = if crate::controller::move_session::move_owns_session(&session_id) {
             Some("session is moving")
         } else if self.reviews.contains_key(&session_id)
             || self.preparing.contains_key(&session_id)

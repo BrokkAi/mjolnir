@@ -906,7 +906,7 @@ pub enum SubagentMcpRole {
 }
 
 impl SubagentMcpRole {
-    /// Push reviews are independent of a top-level session's delegation policy.
+    /// Top-level sessions can request reviews independently of delegation policy.
     #[must_use]
     pub fn supports_review(self) -> bool {
         matches!(self, Self::Parent | Self::MessageOnly)
@@ -927,8 +927,15 @@ impl SubagentMcpRole {
     #[must_use]
     pub fn tool_names(self) -> &'static [&'static str] {
         match self {
-            Self::Parent => &["spawn", "list_agents", "send_message", "close", "fetch"],
-            Self::MessageOnly => &["send_message", "fetch"],
+            Self::Parent => &[
+                "spawn",
+                "list_agents",
+                "send_message",
+                "close",
+                "fetch",
+                "request_review",
+            ],
+            Self::MessageOnly => &["send_message", "fetch", "request_review"],
             Self::FetchOnly => &["fetch"],
             Self::Child => &["handback", "fetch"],
         }

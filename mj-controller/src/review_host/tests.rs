@@ -3192,6 +3192,7 @@ async fn old_git_push_delta_records_warning_and_clean_tree_without_reviewer() {
     host.shutdown().await.unwrap();
 }
 
+// Hard-won: c5e89cf12: explicit review requests were refused unless automatic review ran on push.
 #[tokio::test]
 async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_primary() {
     for (name, report, expected) in [
@@ -3206,8 +3207,19 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
             "Review of commits",
         ),
         ("pushfailed", None, "Review of commits"),
+        (
+            "manualoff",
+            Some("No findings."),
+            "Review clean for commits",
+        ),
+        (
+            "manualturn",
+            Some("No findings."),
+            "Review clean for commits",
+        ),
     ] {
         let session = session_id(name);
+        let clean = report == Some("No findings.");
         let mut manager = FakeManager::new(&session).await;
         let environment = FakeEnvironment::new();
         if name == "pushclean" {
@@ -3219,8 +3231,18 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
                 .baselines
                 .insert(PathBuf::from("/workspace/lib"), "libtree".into());
         }
-        let host =
-            TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+        let trigger = match name {
+            "manualoff" => mj_core::config::ReviewTrigger::Off,
+            "manualturn" => mj_core::config::ReviewTrigger::Turn,
+            _ => mj_core::config::ReviewTrigger::Push,
+        };
+        let config: ReviewConfigSource = Arc::new(move |_| ReviewConfig {
+            trigger,
+            profile: Some("reviewer".into()),
+            count: std::num::NonZeroUsize::new(1).unwrap(),
+            ..Default::default()
+        });
+        let host = TurnReviewHost::spawn_in(manager.control.clone(), config, environment.clone());
         let child = open_push(&mut manager, &host, &environment).await;
         assert_eq!(
             host.begin_push(&session, None).await.unwrap_err().0,
@@ -3243,7 +3265,7 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
                     request = manager.requests.recv() => match request.unwrap() {
                         RemoteSessionRequest::Reviewer { action, reply, .. } => {
                             match &action {
-                                ReviewerAction::RecordReviewed { trees } => { assert_eq!(name, "pushclean"); assert_eq!(trees[&PathBuf::from("/workspace/app")], ("newtree".into(), "bbbbbbb456".into())); recorded = true; },
+                                ReviewerAction::RecordReviewed { trees } => { assert!(clean); assert_eq!(trees[&PathBuf::from("/workspace/app")], ("newtree".into(), "bbbbbbb456".into())); recorded = true; },
                                 ReviewerAction::AdvanceBaseline { .. } => { assert!(recorded); advanced = true; },
                                 _ => panic!("unexpected review operation {action:?}"),
                             }
@@ -3259,7 +3281,7 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
             }
         }).await.unwrap();
         finished.await.unwrap().unwrap();
-        assert_eq!(recorded, name == "pushclean");
+        assert_eq!(recorded, clean);
         assert_eq!(advanced, recorded);
         let mailbox = environment.mailbox.lock().unwrap().clone();
         assert_eq!(mailbox.len(), 1);
@@ -3272,7 +3294,7 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
                 .contains_key(&PathBuf::from("/workspace/app")),
             recorded
         );
-        if recorded {
+        if name == "pushclean" {
             // The review covered one repository; the other keeps its baseline.
             assert_eq!(state.baselines[&PathBuf::from("/workspace/lib")], "libtree");
         }
@@ -3784,23 +3806,10 @@ async fn shutdown_cancels_unadmitted_push_override_without_marking_a_review_inte
 }
 
 #[tokio::test]
-async fn push_review_refuses_unsupported_workers_and_non_push_sessions() {
+async fn explicit_commit_review_refuses_unsupported_workers() {
     let session = session_id("pushrefusals");
     let manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-    assert!(
-        host.begin_push(&session, None)
-            .await
-            .unwrap_err()
-            .0
-            .contains("trigger is not push")
-    );
-    host.shutdown().await.unwrap();
     let host = TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment);
     let mut published = view(&session, MaterializedExecutionState::Idle);
     published

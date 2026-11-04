@@ -162,7 +162,7 @@ pub(super) fn configure_claude_subagent_mcp(
             })?;
         let mut tools = role.tool_names().to_vec();
         if review_gate && role.supports_review() {
-            tools.extend(["request_review", "override_review"]);
+            tools.push("override_review");
         }
         for tool in tools {
             let rule = serde_json::Value::from(format!("mcp__{SUBAGENT_MCP_SERVER}__{tool}"));
@@ -1122,7 +1122,11 @@ mod tests {
                     .unwrap();
             assert_eq!(
                 settings["permissions"]["allow"],
-                serde_json::json!(["mcp__mj-agents__send_message", "mcp__mj-agents__fetch"])
+                serde_json::json!([
+                    "mcp__mj-agents__send_message",
+                    "mcp__mj-agents__fetch",
+                    "mcp__mj-agents__request_review"
+                ])
             );
             let command = settings["hooks"]["PostToolBatch"][0]["hooks"][0]["command"]
                 .as_str()
@@ -1578,7 +1582,11 @@ print(sys.argv[sys.argv.index('--role') + 1])
             serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap()).unwrap();
         assert_eq!(
             settings["permissions"]["allow"],
-            serde_json::json!(["mcp__mj-agents__send_message", "mcp__mj-agents__fetch"])
+            serde_json::json!([
+                "mcp__mj-agents__send_message",
+                "mcp__mj-agents__fetch",
+                "mcp__mj-agents__request_review"
+            ])
         );
 
         // Losing the role removes the server; the person's servers stay.
@@ -2781,7 +2789,7 @@ mod review_gate_tests {
                         .unwrap()
                         .iter()
                         .any(|value| value == "mcp__mj-agents__request_review"),
-                    expected
+                    matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly)
                 );
                 assert_eq!(
                     settings["permissions"]["allow"]
