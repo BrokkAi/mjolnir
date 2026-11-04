@@ -2927,6 +2927,8 @@ pub(super) mod push_tests {
         assert_eq!(files, ["image.bin", "kept.txt"], "{}", captured.delta.patch);
     }
 
+    // Windows file names are always Unicode, so only Unix can make this case.
+    #[cfg(unix)]
     #[test]
     fn push_capture_shows_conflicted_paths_that_are_not_utf8() {
         use std::os::unix::ffi::OsStrExt;
