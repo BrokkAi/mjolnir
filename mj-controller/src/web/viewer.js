@@ -1217,6 +1217,7 @@ function isIdleSubagentSession(session) {
     || session.quota_recovery
     || session.capacity_retry
     || session.retry_assessment_pending
+    || session.turn_review
     || ['starting', 'suspending', 'failed'].includes(session.lifecycle)
     || attentionParts(session).length) return false;
   return session.state === 'parked' || session.is_idle === true;

@@ -21,7 +21,10 @@ After this change, reviewer options without `--review` inherit the configured tr
 - [x] (2026-11-04) Implement the user's additional terminal/web subagent-list default. Terminal scopes move their active filter to/from inactive saved scope slots and default to Not idle; uppercase I selects it without colliding with Create session on n. Web has a persisted Show/Hide idle control and hidden counts.
 - [x] (2026-11-04) Validate subagent filter transitions and rendering, preserve top-level filters, and complete final Clippy on the combined tree.
 - [x] (2026-11-04) Commit the validated review-inheritance checkpoint as `71850aa7d`.
-- [ ] Commit the subagent-list defaults and final validation evidence, obtain the required before-push review, and push both commits to `origin/master`.
+- [x] (2026-11-04) Commit subagent-list defaults as `6eb3146b8` and request the required before-push review.
+- [ ] Address review findings: route every automatic/native scope exit through the shared filter transition, preserve native navigation under nonediting filters, and keep children with open reviews visible in the web view.
+- [ ] Validate review corrections, commit them, obtain a clean before-push review, and push to `origin/master`.
+- [ ] Integrate fetched upstream `5238411cd` on the current branch, preserve any newer migration/protocol history and reviewer-workspace behavior, and validate affected merged code before final review.
 
 ## Surprises & Discoveries
 
@@ -42,6 +45,12 @@ The worker and daemon already distinguish the triggers: turn completion only arm
 - Decision: Deprecated `--review-tier` remains accepted and ignored; used alone it inherits the trigger like other reviewer-only flags.
   Rationale: A deprecated, ignored value should not silently change review timing.
   Date/Author: 2026-11-04, parent agent.
+- Decision: All subagent scope transitions, including suspend exits and native-parent shortcuts, must use the same filter owner; only an editing filter claims native navigation keys.
+  Rationale: The first committed-tree review found overlooked direct transitions and an old no-filter keyboard gate. Centralizing all transitions prevents saved top-level filters from being replaced by child state.
+  Date/Author: 2026-11-04, parent agent after independent review.
+- Decision: A web child with an open `turn_review` remains visible regardless of harness idleness.
+  Rationale: Running review or a pending review decision is work or attention, and existing UI already treats review presence as authoritative.
+  Date/Author: 2026-11-04, parent agent after independent review.
 
 ## Outcomes & Retrospective
 
@@ -108,3 +117,7 @@ Revision note (2026-11-04): Recorded passing review suites, browser validation a
 Revision note (2026-11-04): The review-inheritance checkpoint is committed as 71850aa7d. Final TUI reruns passed 34 of 37 formerly failing cases; the remaining historical menu/escape workflows now explicitly reveal idle rows and await their focused reruns. Browser regression and final workspace Clippy passed.
 
 Revision note (2026-11-04): Recorded successful final three history/menu reruns, the retained-native-child check, all browser/Node results, and final workspace Clippy. Source acceptance is complete; remaining work is the required committed-tree review and push.
+
+Revision note (2026-11-04): The first before-push review found three unique valid gaps (one reported twice): native navigation under filters, automatic scope exits bypassing filter restoration, and web review activity being hidden. Acceptance is reopened for these corrections and their regressions.
+
+Revision note (2026-11-04): Upstream advanced to 5238411cd with significant concurrent changes. Integration is required before final delivery; a focused investigation is mapping compatibility counters and shared reviewer-workspace changes while review corrections receive focused validation.

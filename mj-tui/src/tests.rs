@@ -3242,6 +3242,106 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
     assert_eq!(dashboard.selected_session_id(), Some(parent.id.as_str()));
 }
 
+// Hard-won: 6eb3146b8: active child filters hid native navigation and parent return.
+#[test]
+fn native_nested_scope_keys_preserve_filters_and_filter_editing() {
+    use mj_core::native_agent::*;
+    let parent = running_session();
+    let mut dashboard = dashboard_with_session(parent.clone());
+    let child = NativeAgent {
+        availability: Default::default(),
+        availability_reason: None,
+        stable_id: None,
+        owner_session_id: parent.id.clone(),
+        session_id: "child".into(),
+        parent_session_id: None,
+        name: "Child".into(),
+        task: String::new(),
+        capabilities: NativeAgentCapabilities::default(),
+        state: NativeAgentState::Running,
+    };
+    let grandchild = NativeAgent {
+        session_id: "grandchild".into(),
+        parent_session_id: Some("child".into()),
+        name: "Grandchild".into(),
+        ..child.clone()
+    };
+    let child_id = child.view_id();
+    let grandchild_id = grandchild.view_id();
+    dashboard.set_native_agents(
+        [child, grandchild]
+            .into_iter()
+            .map(|agent| NativeAgentView {
+                generation_ordinal: 1,
+                projection: mj_core::state::MaterializedSession::empty(agent.view_id()),
+                agent,
+            })
+            .collect(),
+    );
+
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Char('I')));
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for letter in "session".chars() {
+        dashboard.handle_key(key(KeyCode::Char(letter)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    let top_filter = dashboard.sessions_filter_label();
+
+    dashboard.open_subagent_workspace(parent.id.clone());
+    assert_eq!(dashboard.selected_session_id(), Some(child_id.as_str()));
+    assert_eq!(
+        dashboard.sessions_filter.as_ref().unwrap().state,
+        Some(SessionStateFilter::NotIdle)
+    );
+    dashboard.handle_key(key(KeyCode::Right));
+    assert_eq!(dashboard.subagent_parent_id(), Some(child_id.as_str()));
+    assert_eq!(
+        dashboard.selected_session_id(),
+        Some(grandchild_id.as_str())
+    );
+    assert!(
+        matches!(dashboard.handle_key(key(KeyCode::PageUp)), DashboardAction::LoadNativeAgentHistory { owner, child, .. } if owner == parent.id && child == "grandchild")
+    );
+
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for letter in "grandchild".chars() {
+        dashboard.handle_key(key(KeyCode::Char(letter)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        dashboard.subagent_parent_id(),
+        Some(child_id.as_str()),
+        "editing Enter belongs to the filter"
+    );
+    assert!(dashboard.sessions_filter_label().contains("/grandchild"));
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    assert!(dashboard.sessions_filter_label().contains("/grandchild"));
+    assert_eq!(dashboard.sessions_filter.as_ref().unwrap().state, None);
+    assert!(
+        matches!(dashboard.handle_key(key(KeyCode::Char('p'))), DashboardAction::Open { session_id } if session_id == child_id)
+    );
+    assert_eq!(dashboard.subagent_parent_id(), Some(parent.id.as_str()));
+    assert_eq!(
+        dashboard.sessions_filter.as_ref().unwrap().state,
+        Some(SessionStateFilter::NotIdle)
+    );
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(dashboard.subagent_parent_id(), Some(child_id.as_str()));
+    assert!(
+        matches!(dashboard.handle_key(key(KeyCode::Char('p'))), DashboardAction::Open { session_id } if session_id == child_id)
+    );
+    assert!(
+        matches!(dashboard.handle_key(key(KeyCode::Char('p'))), DashboardAction::Open { session_id } if session_id == parent.id)
+    );
+    assert_eq!(dashboard.subagent_parent_id(), None);
+    assert_eq!(dashboard.sessions_filter_label(), top_filter);
+    dashboard.open_subagent_workspace(parent.id.clone());
+    dashboard.open_subagent_workspace(child_id);
+    assert!(dashboard.sessions_filter_label().contains("/grandchild"));
+    assert_eq!(dashboard.sessions_filter.as_ref().unwrap().state, None);
+}
+
 #[test]
 fn resize_mode_routes_repeated_motions_consumes_text_and_exits() {
     let mut dashboard = dashboard_with_two_sessions();
@@ -3550,7 +3650,17 @@ fn stopped_by_the_parents_suspend(
 #[test]
 fn a_suspend_that_stops_the_open_sub_agent_goes_back_to_its_parent() {
     let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Char('I')));
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for letter in "session".chars() {
+        dashboard.handle_key(key(KeyCode::Char(letter)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    let top_filter = dashboard.sessions_filter_label();
     dashboard.open_subagent_workspace(parent.clone());
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    assert!(dashboard.sessions_filter.is_none());
     dashboard.set_current_session(Some("child-session"));
     assert_eq!(dashboard.selected_session_id(), Some("child-session"));
     let title = dashboard.state.sessions["child-session"]
@@ -3560,6 +3670,7 @@ fn a_suspend_that_stops_the_open_sub_agent_goes_back_to_its_parent() {
     dashboard.set_state(stopped_by_the_parents_suspend(&dashboard, &parent));
 
     assert_eq!(dashboard.subagent_parent_id(), None);
+    assert_eq!(dashboard.sessions_filter_label(), top_filter);
     assert_eq!(dashboard.selected_session_id(), Some(parent.as_str()));
     assert_eq!(
         dashboard.notice(),
@@ -3574,6 +3685,11 @@ fn a_suspend_that_stops_the_open_sub_agent_goes_back_to_its_parent() {
         .unwrap();
     let rows = terminal.backend().to_string();
     assert!(!rows.contains("No sessions yet"), "{rows}");
+    dashboard.open_subagent_workspace(parent);
+    assert!(
+        dashboard.sessions_filter.is_none(),
+        "child All survives automatic exit"
+    );
 }
 
 /// The host lets the stopped sub-agent's conversation go without saving a

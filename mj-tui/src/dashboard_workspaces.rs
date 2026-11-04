@@ -56,7 +56,7 @@ impl DashboardState {
         self.clamp_selections();
     }
 
-    fn switch_subagent_scope(&mut self, parent_id: Option<String>) {
+    pub(crate) fn switch_subagent_scope(&mut self, parent_id: Option<String>) {
         let previous_parent = std::mem::replace(&mut *self.subagent_parent_id, parent_id.clone());
         self.sessions_filters_by_scope
             .insert(previous_parent, self.sessions_filter.take());
@@ -162,7 +162,7 @@ impl DashboardState {
             if !in_view {
                 continue;
             }
-            *self.subagent_parent_id = self.subagent_parent_for(&parent_id);
+            self.switch_subagent_scope(self.subagent_parent_for(&parent_id));
             self.select_active_session(&parent_id);
             self.clamp_selections();
             let titles = children

@@ -510,10 +510,11 @@ test('golden_viewer_dashboard', async ({ context }) => {
   assertGolden('viewer_dashboard', output.join('\n'));
 });
 
+// Hard-won: 6eb3146b8: an idle child with review work was hidden from its parent workspace.
 test('child workspace hides idle history while preserving active work and an opened conversation', async ({ page }) => {
   const parent = session('parent', 'project', 'Project', {
     title: 'Parent session',
-    subagentSessionIds: ['idle', 'working', 'blocked', 'failed', 'unknown'],
+    subagentSessionIds: ['idle', 'working', 'blocked', 'failed', 'unknown', 'reviewing'],
   });
   parent.native_subagents = [
     { session_id: 'native-completed', name: 'Completed helper', state: 'completed', availability: 'available' },
@@ -526,13 +527,16 @@ test('child workspace hides idle history while preserving active work and an ope
   const child = (id, options = {}) => session(id, 'project', 'Project', { subagentParentId: 'parent', ...options });
   const unknown = child('unknown', { activityDetails: { kind: 'unknown' } });
   delete unknown.is_idle;
-  await mount(page, [
+  const reviewing = child('reviewing');
+  reviewing.turn_review = { status: 'Preparing reviewer' };
+  const state = await mount(page, [
     parent,
     child('idle'),
     child('working', { isIdle: false, activityDetails: { kind: 'turn' } }),
     child('blocked', { pendingElicitations: [{ id: 'question', question: 'Need input' }] }),
     child('failed', { hasError: true }),
     unknown,
+    reviewing,
   ]);
   await expect(card(page, 'parent')).toBeVisible();
   await card(page, 'parent').click();
@@ -540,13 +544,25 @@ test('child workspace hides idle history while preserving active work and an ope
   await expect(page).toHaveURL(/#subagents\/parent$/);
   await expect(page.locator('#sessions')).toContainText('3 idle sub-agents hidden');
   await expect(card(page, 'idle')).toHaveCount(0);
-  for (const id of ['working', 'blocked', 'failed', 'unknown']) await expect(card(page, id)).toBeVisible();
+  for (const id of ['working', 'blocked', 'failed', 'unknown', 'reviewing']) await expect(card(page, id)).toBeVisible();
   for (const name of ['Running helper', 'Failed helper', 'Disconnected helper', 'Unknown helper']) {
     await expect(page.locator('#sessions')).toContainText(name);
   }
   for (const name of ['Completed helper', 'Cancelled helper']) {
     await expect(page.locator('#sessions')).not.toContainText(name);
   }
+
+  // This is the same published verdict shape used by the turn-review browser tests.
+  reviewing.turn_review = {
+    status: 'Choose what to do with the findings.',
+    roles: [],
+    verdict: { text: '[P1] a concrete finding', allowed: ['forward', 'dismiss', 'cancel'] },
+  };
+  await refresh(page, state);
+  await expect(card(page, 'reviewing')).toBeVisible();
+  reviewing.turn_review = null;
+  await refresh(page, state);
+  await expect(card(page, 'reviewing')).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Show idle' }).click();
   await expect(card(page, 'idle')).toBeVisible();
