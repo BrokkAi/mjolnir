@@ -1,7 +1,7 @@
-//! Ordered background saves of one per-workspace dashboard setting.
+//! Ordered background saves of dashboard settings.
 //!
-//! The dashboard persists two of these: the support panes' sizes and the
-//! conversation area's pane layout. Both need the same behaviour, so the
+//! The dashboard persists workspace support-pane sizes, conversation layouts,
+//! and the shared sidebar size. They need the same behaviour, so the
 //! coordinator is generic over the stored value and carries a short setting
 //! name for its notices.
 
@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use mj_chat::chat::Notices;
-use mj_core::workspace::{ConversationLayout, PaneSizes};
+use mj_core::workspace::{ConversationLayout, PaneSize, PaneSizes};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -34,6 +34,26 @@ pub(super) struct WorkspaceSettingPersistence<T> {
     task: Option<JoinHandle<Result<()>>>,
     failure: Option<String>,
     notices: Notices,
+}
+
+impl WorkspaceSettingPersistence<PaneSize> {
+    pub(super) fn start_sidebar_size(initial: PaneSize, notices: Notices) -> Self {
+        Self::with_save(
+            "sidebar size",
+            BTreeMap::from([("global".to_owned(), initial)]),
+            notices,
+            |_, size| async move {
+                tokio::task::spawn_blocking(move || {
+                    mj_core::config::Config::update(|config| {
+                        config.sidebar_size = size;
+                        Ok(())
+                    })
+                    .map(|_| ())
+                })
+                .await?
+            },
+        )
+    }
 }
 
 impl WorkspaceSettingPersistence<PaneSizes> {

@@ -607,7 +607,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · : / ? palette
 === minimized rows at 80 columns (80x40) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default        ≡ ││                                                          │
+│ default ▾      ≡ ││                                                          │
 ╰──────────────────╯│                                                          │
 ╭ Sessions ─ ▁   ▄ ╮│                                                          │
 │ Create   Open    ││                                                          │
@@ -693,7 +693,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === minimized session summaries (120x44) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default        ≡ ││                                                                                                  │
+│ default ▾      ≡ ││                                                                                                  │
 ╰──────────────────╯│                                                                                                  │
 ╭Sessi…─ ▁   ▄   □ ╮│                                                                                                  │
 │ Create   Open    ││                                                                                                  │
@@ -738,7 +738,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === minimized CPU and weekly quota (120x44) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default        ≡ ││                                                                                                  │
+│ default ▾      ≡ ││                                                                                                  │
 ╰──────────────────╯│                                                                                                  │
 ╭Sessi…─ ▁   ▄   □ ╮│                                                                                                  │
 │ Create   Open    ││                                                                                                  │
@@ -783,7 +783,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === paired weekly and five-hour quota (160x44) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default        ≡ ││                                                                                                                                          │
+│ default ▾      ≡ ││                                                                                                                                          │
 ╰──────────────────╯│                                                                                                                                          │
 ╭Sessi…─ ▁   ▄   □ ╮│                                                                                                                                          │
 │ Create   Open    ││                                                                                                                                          │

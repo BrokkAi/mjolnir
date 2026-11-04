@@ -27,14 +27,11 @@ use crate::render::{
 use crate::resume::resume_sessions_pane;
 use crate::tile_layout::PaneId;
 use crate::widgets::bordered_content;
-use crate::workspaces::render_workspace_tabs;
+use crate::workspaces::{render_workspace_tabs, workspace_pane_height};
 use crate::{DashboardState, Focus, Mode, PaneSize, SupportPane};
 
 /// Rows the footer always keeps.
 const FOOTER_HEIGHT: u16 = 1;
-/// The bordered workspace list above Sessions. Its inner row is intentionally
-/// short; the border gives it a stable click and focus target.
-const WORKSPACE_PANE_HEIGHT: u16 = 3;
 /// The fewest rows the transcript is worth drawing in.
 const TRANSCRIPT_MINIMUM: u16 = 3;
 /// A bordered composer with one row of text.
@@ -452,6 +449,7 @@ fn render_combined_themed(
         area.height = area.height.saturating_sub(height);
     }
     if area.width < NARROW_TERMINAL_WIDTH {
+        dashboard.workspace_scrollbar.clear();
         render_terminal_too_small(
             frame,
             area,
@@ -508,7 +506,8 @@ fn render_combined_themed(
         sidebar_area.x,
         sidebar_area.y,
         sidebar_area.width,
-        WORKSPACE_PANE_HEIGHT.min(sidebar_area.height),
+        workspace_pane_height(dashboard, sidebar_area.width)
+            .min(sidebar_area.height.saturating_sub(PANE_MINIMUM)),
     );
     let sidebar_top = workspace_area.height;
     let sessions_area = Rect::new(
@@ -675,7 +674,7 @@ fn render_combined_themed(
         let band = dimensions[0]
             .1
             .minimized
-            .saturating_add(WORKSPACE_PANE_HEIGHT);
+            .saturating_add(workspace_area.height);
         PaneBand {
             minimum: band,
             full: band,
@@ -706,6 +705,7 @@ fn render_combined_themed(
         CombinedAllocation::TooSmall {
             required_frame_height,
         } => {
+            dashboard.workspace_scrollbar.clear();
             render_terminal_too_small(
                 frame,
                 area,

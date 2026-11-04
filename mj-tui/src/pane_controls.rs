@@ -27,6 +27,7 @@ enum PaneOperation {
     Command(CommandId),
     /// An informational row in the read-only capacity dropdown.
     Information,
+    Workspace(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +81,40 @@ impl DashboardState {
             display_rows: None,
             capacity_target: None,
         });
+    }
+
+    pub(crate) fn begin_workspace_dropdown(&mut self) {
+        let Some(anchor) = self.workspace_dropdown_area else {
+            return;
+        };
+        let ids = self.workspace_ids();
+        let selected = ids
+            .iter()
+            .position(|id| Some(id.as_str()) == self.active_workspace_id())
+            .unwrap_or(0);
+        let entries = ids
+            .into_iter()
+            .map(|id| {
+                let name = self.workspace_display_name(&id);
+                let label = if Some(id.as_str()) == self.active_workspace_id() {
+                    format!("{name} (current)")
+                } else {
+                    name.to_owned()
+                };
+                (label, PaneOperation::Workspace(id))
+            })
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            return;
+        }
+        self.show_pane_menu("Workspaces", entries, false);
+        if let Some(menu) = self.pane_menu.as_mut() {
+            menu.anchor = Some(anchor);
+            menu.form.get_mut().set_selected(0, selected);
+        }
+        self.focus = Focus::Workspaces;
+        self.workspace_control_focus = crate::workspaces::WorkspaceControlFocus::Tabs;
+        self.set_session_action_focus(None);
     }
 
     /// Opens the selected capacity row's filesystem details beneath its
@@ -368,6 +403,13 @@ impl DashboardState {
             PaneOperation::Close(pane) => DashboardAction::ClosePane { pane },
             PaneOperation::Command(id) => self.run_available_command(id),
             PaneOperation::Information => DashboardAction::None,
+            PaneOperation::Workspace(workspace_id) => {
+                if self.workspace_ids().contains(&workspace_id) {
+                    DashboardAction::SelectWorkspace { workspace_id }
+                } else {
+                    DashboardAction::None
+                }
+            }
         }
     }
 }

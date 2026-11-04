@@ -75,6 +75,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
+        sidebar_size: Default::default(),
         advanced: Default::default(),
         notify: Default::default(),
         spinner: Default::default(),

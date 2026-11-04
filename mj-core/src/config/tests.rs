@@ -828,6 +828,7 @@ fn sample_config() -> Config {
         version: CONFIG_VERSION,
         keys: Default::default(),
         sessions_side: Default::default(),
+        sidebar_size: Default::default(),
         advanced: Default::default(),
         notify: Default::default(),
         spinner: SpinnerStyle::default(),
@@ -1334,7 +1335,8 @@ fn bundle_requires_exactly_one_repository_source() {
 fn config_toml_round_trip_is_atomic() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("nested/config.toml");
-    let config = sample_config();
+    let mut config = sample_config();
+    config.sidebar_size = crate::workspace::PaneSize::Minimized;
     config.save_to(&path).unwrap();
     assert_eq!(Config::load_from(&path).unwrap(), config);
     assert!(!fs::read_to_string(&path).unwrap().contains("pull_policy"));

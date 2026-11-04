@@ -22,6 +22,20 @@ impl DashboardState {
         Ok(())
     }
 
+    /// Workspace layouts own Targets and Profiles; Sessions belongs to the
+    /// dashboard. Its global maximum takes precedence over a saved maximum.
+    pub(crate) fn restore_workspace_pane_sizes(&mut self, sizes: PaneSizes) {
+        let sessions = self.pane_sizes.sessions;
+        self.pane_sizes = PaneSizes { sessions, ..sizes };
+        if sessions == PaneSize::Maximized {
+            for pane in [SupportPane::Targets, SupportPane::Quota] {
+                if self.pane_size(pane) == PaneSize::Maximized {
+                    *pane_size_for_mut(&mut self.pane_sizes, pane) = PaneSize::Standard;
+                }
+            }
+        }
+    }
+
     pub(crate) fn pane_maximize_enabled(&self, pane: SupportPane) -> bool {
         match pane {
             SupportPane::Sessions => self.pane_maximize_enabled[0],
