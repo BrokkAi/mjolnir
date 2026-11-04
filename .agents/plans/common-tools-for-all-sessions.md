@@ -13,6 +13,7 @@ Every session, including managed children, must receive `send_message`, `fetch`,
 - [x] (2026-11-04) Extend common tools and managed-child request handling while preserving container ownership.
 - [x] (2026-11-04) Extend existing wire, database registration, message delivery, and review-host regressions.
 - [x] (2026-11-04) Validate implementation and prepare the current branch for required review and publication.
+- [x] (2026-11-04) Correct and validate reciprocal messaging for managed children, including parked recipients and nested reviewer parents.
 
 ## Surprises & Discoveries
 
@@ -20,11 +21,15 @@ The original push gate promoted sessions to the full parent role. Separating it 
 
 The first complete test run exposed the persisted-state validator's prohibition on nested relationships. Older builds reject nested reviewers on read, so migration 108 raises the compatibility floor before this new relationship can be saved. Worker capture also required a turn baseline even for explicit commit reviews; only turn captures now require that baseline. The first run had one unrelated continuation-timer timeout alongside the registration failure; rerun only those failures after correction.
 
+Review of 2f18a1e20 found that child senders could contact peers but those peers could not reply. Recipient filtering still applied delegation ownership to common messaging. Common messages must resolve and reach any session, including managed children, while lifecycle operations retain ownership filtering. Parked-child wake admission belongs to the child's durable parent, not the message sender.
+
 ## Decision Log
 
 Allow reviewer-kind registration below managed children while retaining the prohibition on ordinary nested workers. Use the existing review host and durable reviewer ownership tree rather than routing child requests through another session. Preserve existing borrowed container ownership. Keep the existing restriction on automatic turn reviews for children, because those changes already belong to their parent's turn review.
 
 Migration 108 is breaking because older state validators cannot read the newly permitted nested reviewer relationship. Advance the revision and compatibility floor atomically without rewriting previous migrations. Exercise only isolated databases; this task does not install or migrate the live daemon's store. Reuse checkout ownership traversal to reject relationship cycles.
+
+Separate message recipient scope from child lifecycle scope in the existing target resolver. Reuse child wake handling for replies, with capacity checked against the child's durable owner and the mailbox outbox retaining responsibility for late parks. Session-message envelopes preserve the actual sender so nested reviewers can message their managed parent.
 
 ## Context and Orientation
 
@@ -32,7 +37,7 @@ Migration 108 is breaking because older state validators cannot read the newly p
 
 ## Plan of Work
 
-Add common tools to Child and FetchOnly roles and match their schemas to those names. Keep handback first for child report-budget handling. Allow explicit commit-review preparation for children, but continue skipping their turn reviews. Permit reviewer registration from managed children, retaining ordinary nested-worker refusal. Preserve the existing container owner when deriving another borrowed locator. Permit managed-child message senders while preserving recipient ownership restrictions.
+Add common tools to Child and FetchOnly roles and match their schemas to those names. Keep handback first for child report-budget handling. Allow explicit commit-review preparation for children, but continue skipping their turn reviews. Permit reviewer registration from managed children, retaining ordinary nested-worker refusal. Preserve the existing container owner when deriving another borrowed locator. Permit managed-child senders and recipients while retaining lifecycle ownership restrictions.
 
 Extend existing regression cases to exercise all role catalogs, child review calls, managed-child review verdict delivery, persisted nested reviewer registration, original container ownership, and child sender identity. Existing isolated test infrastructure remains authoritative; do not touch host default data.
 
@@ -46,7 +51,7 @@ Run focused checks with `cargo test -p brokk-mj-worker subagent_mcp::tests` and 
 
 ## Validation and Acceptance
 
-MCP tool listings for Child and FetchOnly must contain common tools without spawn, list_agents, or close. A managed child must request a commit review and receive the resulting verdict through its own mailbox. Reviewer registration must persist a reviewer beneath a managed child while worker registration there remains refused. A nested container borrower must pass normal locator validation with the original owner. Child messages must carry the real child sender identity.
+MCP tool listings for Child and FetchOnly must contain common tools without spawn, list_agents, or close. A managed child must request a commit review and receive the resulting verdict through its own mailbox. Reviewer registration must persist a reviewer beneath a managed child while worker registration there remains refused. A nested container borrower must pass normal locator validation with the original owner. Child messages and replies must carry the actual sender identity, reach a parked recipient after its normal wake, and work from a nested reviewer to its managed parent. Message permission must not grant permission to close someone else's child.
 
 ## Idempotence and Recovery
 
@@ -55,6 +60,8 @@ Retain existing request-key deduplication, review persistence, lifecycle cancell
 ## Artifacts and Notes
 
 Final validation logs are `/tmp/mj-common-tools-final-tests.log` and `/tmp/mj-common-tools-final-clippy.log`. Focused correction evidence is in `/tmp/mj-common-tools-registration-rerun.log`, `/tmp/mj-common-tools-continuation-rerun.log`, and `/tmp/mj-common-tools-capture-rerun.log`.
+
+Reciprocal-message follow-up evidence is in `/tmp/mj-common-tools-replies-focused.log`, `/tmp/mj-common-tools-replies-full.log`, and `/tmp/mj-common-tools-replies-clippy.log`. The two worker failures from that full run passed in `/tmp/mj-common-tools-description-rerun.log` and `/tmp/mj-common-tools-adapter-rerun.log`: required parked-child wording was restored, and an ACP adapter timeout passed its isolated rerun.
 
 ## Interfaces and Dependencies
 
@@ -65,3 +72,5 @@ Keep `SubagentMcpRole::tool_names` the authoritative common tool contract. Revie
 Every MCP role now exposes common messaging, fetch, and explicit review tools. Ordinary delegation remains restricted to the Mjolnir parent role. Explicit child commit reviews use the existing durable review machinery, preserve original container ownership, and reject ownership cycles. Automatic turn reviews still cover children through their parent. Migration 108 protects older daemons from a stored relationship they cannot read.
 
 The complete core, worker, and controller suites passed, as did workspace Clippy and formatting. The initial registration failure exposed an older persisted-state restriction and was fixed at that owner. The continuation timeout passed both its isolated rerun and final full validation. No live daemon or store was upgraded. Commit, independent review, and publication proceed through the normal repository gate.
+
+Reciprocal messaging now reaches managed children regardless of who owns them. Child lifecycle controls still enforce ownership. Parked-child wake admission reads the durable parent relation, and mailbox replies retain wake intent if a child parks after acceptance. Seven focused message regressions and the complete controller suite passed. The worker run's description regression and unrelated adapter timeout passed targeted reruns after correction; Clippy and formatting passed.

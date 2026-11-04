@@ -723,9 +723,17 @@ impl ApiBackend {
             return Ok(());
         };
         let parent_session_id = parent_session_id.to_owned();
+        let child_management = matches!(
+            request.action,
+            mj_core::subagent::SubagentToolAction::CloseAgent { .. }
+        );
         let resolved = blocking("resolve durable sub-agent target", move || {
             let state = Controller::load()?.state;
-            subagent_input::resolve_session_target(&state, Some(&parent_session_id), &requested_id)
+            subagent_input::resolve_session_target(
+                &state,
+                child_management.then_some(parent_session_id.as_str()),
+                &requested_id,
+            )
         })
         .await;
         match resolved {
@@ -1077,7 +1085,7 @@ impl ApiBackend {
                 self.require_owned_child(parent_session_id, child_session_id)
                     .await?;
                 let delivery = self
-                    .deliver_subagent_input(parent_session_id, child_session_id, message, request)
+                    .deliver_subagent_input(child_session_id, message, request)
                     .await?;
                 let via = delivery.via();
                 match delivery {
@@ -1265,6 +1273,17 @@ impl ApiBackend {
         if !parked {
             return Ok(false);
         }
+        let child = child_id.to_owned();
+        blocking("admit parked child restart", move || {
+            let controller = Controller::load()?;
+            let relation = controller
+                .state
+                .subagents
+                .get(&child)
+                .context("child relationship no longer exists")?;
+            controller.ensure_subagent_slot_available(&relation.parent_session_id, Some(&child))
+        })
+        .await?;
         Arc::clone(&self.exports)
             .unpark_subagent(child_id.to_owned())
             .await

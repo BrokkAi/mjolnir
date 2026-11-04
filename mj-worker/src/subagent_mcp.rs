@@ -25,7 +25,7 @@ static SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-static MESSAGE_ONLY_INSTRUCTIONS: &str = "Use send_message to contact another top-level Mjolnir session or one of your own Mjolnir sub-agents. The recipient sees your full session ID and can reply with send_message.";
+static MESSAGE_ONLY_INSTRUCTIONS: &str = "Use send_message to contact another Mjolnir session, including managed children. The recipient sees your full session ID and can reply with send_message.";
 
 /// Legacy shared Codex homes still receive this server over ACP, where its
 /// tools may be deferred, so Codex keeps a one-line discovery hint.
@@ -938,11 +938,11 @@ struct OverrideReviewArgs {
 fn send_message_tool() -> Value {
     tool(
         "send_message",
-        "Send a message to another top-level session or one of your own Mjolnir sub-agents by `session_id`, using its full ID or a unique case-insensitive hexadecimal prefix of at least 8 characters. Mjolnir refuses your own session, an unknown or destroyed target, a stopped (suspended) target, and another session's sub-agent. A parked child is restarted before delivery. The parked child starts a turn and can take tens of seconds. Peer mailbox delivery requires a protocol-36 worker; a busy recipient sees it at the next tool boundary without turn cancellation and an idle recipient wakes. Otherwise Mjolnir queues a turn. The response includes the resolved full session ID. The recipient sees your full session ID and a reply instruction; they can use send_message with that ID or its unique prefix. Check pending_messages and message_deliveries in list_agents before retrying; do not resend an acknowledged message.",
+        "Send a message to another Mjolnir session, including managed children, by `session_id`, using its full ID or a unique case-insensitive hexadecimal prefix of at least 8 characters. Mjolnir refuses your own session, an unknown or destroyed target, and a stopped (suspended) target. A parked child is restarted before delivery. The parked child starts a turn and can take tens of seconds. Peer mailbox delivery requires a protocol-36 worker; a busy recipient sees it at the next tool boundary without turn cancellation and an idle recipient wakes. Otherwise Mjolnir queues a turn. The response includes the resolved full session ID. The recipient sees your full session ID and a reply instruction; they can use send_message with that ID or its unique prefix. Do not resend an acknowledged message.",
         json!({
             "type":"object",
             "properties":{
-                "session_id":{"type":"string","description":"Full ID or unique case-insensitive hexadecimal prefix (at least 8 characters) of a top-level session or one of your own Mjolnir sub-agents."},
+                "session_id":{"type":"string","description":"Full ID or unique case-insensitive hexadecimal prefix (at least 8 characters) of a Mjolnir session, including managed children."},
                 "message":{"type":"string"}
             },
             "required":["session_id","message"],
@@ -1492,7 +1492,7 @@ mod tests {
                         assert_eq!(send_message["inputSchema"]["additionalProperties"], false);
                         let description = send_message["description"].as_str().unwrap();
                         for behavior in [
-                            "another top-level session",
+                            "another Mjolnir session",
                             "stopped (suspended)",
                             "full session ID",
                         ] {
@@ -1559,7 +1559,7 @@ mod tests {
                         assert_eq!(send_message["inputSchema"]["additionalProperties"], false);
                         let description = send_message["description"].as_str().unwrap();
                         for behavior in [
-                            "another top-level session",
+                            "another Mjolnir session",
                             "stopped (suspended)",
                             "next tool boundary",
                             "without turn cancellation",
