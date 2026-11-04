@@ -15,7 +15,7 @@ After a reviewer fails to start, its parent must remain able to close or upgrade
 - [x] (2026-11-04) Report concrete blockers from the atomic container replacement decision, and exempt borrowed children from the API publication preflight.
 - [x] (2026-11-04) Confirm the original regression fails, then pass all 53 reviewer-host tests, including retry and partial-group recovery.
 - [x] (2026-11-04) Full controller suite passed: 2,269 passed, 19 ignored, no failures; isolated Error-reviewer journal and API publication regressions passed. Workspace Clippy and formatting checks passed.
-- [ ] Commit, request review and push the validated result to origin/master.
+- [x] (2026-11-04) Commit `a3c2ac0e6` passed pre-push review and was pushed to origin/master.
 
 ## Surprises & Discoveries
 
@@ -31,7 +31,7 @@ Keep implementation here because the child tool refused startup with “this ses
 
 ## Outcomes & Retrospective
 
-Implementation and validation are complete. The failed-start retry, partial-group recovery, push cleanup, Error-child journal and parent upgrade, and API publication regressions passed. The complete controller suite passed (2,269 tests, 19 ignored), as did workspace Clippy with warnings denied and rustfmt checking. Pre-push review and publication remain.
+Implementation and validation are complete. The failed-start retry, partial-group recovery, push cleanup, Error-child journal and parent upgrade, and API publication regressions passed. The complete controller suite passed (2,269 tests, 19 ignored), as did workspace Clippy with warnings denied and rustfmt checking. Commit `a3c2ac0e6` passed pre-push review and was pushed to origin/master. No live installation or default-instance changes were performed.
 
 ## Context and Orientation
 
@@ -77,3 +77,5 @@ Revision 2026-11-04: initial plan after tracing the actual dispatch and snapshot
 Revision 2026-11-04: record completed implementation, the red-to-green reviewer regression, and the API publication preflight correction found in the report.
 
 Revision 2026-11-04: record successful complete validation; logs are `/tmp/mj-1448-controller-tests.log`, `/tmp/mj-1448-clippy.log`, and `/tmp/mj-1448-review-tests.log` in this session's host filesystem.
+
+Revision 2026-11-04: record the clean review and completed implementation push.
