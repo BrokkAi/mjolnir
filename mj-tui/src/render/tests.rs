@@ -2451,6 +2451,19 @@ fn reviewer_workspace_filters_child_kinds_and_returns_through_nested_workspaces(
     assert!(dashboard.reviewers_workspace_open());
     assert_eq!(dashboard.subagent_parent_id(), Some(parent.as_str()));
     assert_eq!(dashboard.selected_session_id(), Some("reviewer-a"));
+
+    // The shared workspace must select a known reviewer relationship before
+    // the scoped daemon feed has loaded that reviewer's full session record.
+    let loaded = dashboard.state.clone();
+    let mut compact = loaded.clone();
+    compact.sessions.remove("reviewer-a");
+    dashboard.set_state(compact.clone());
+    dashboard.open_reviewer_workspace(parent.clone());
+    assert_eq!(dashboard.current_session_id(), Some("reviewer-a"));
+    dashboard.set_state(compact);
+    assert_eq!(dashboard.current_session_id(), Some("reviewer-a"));
+    dashboard.set_state(loaded);
+    assert_eq!(dashboard.selected_session_id(), Some("reviewer-a"));
 }
 
 fn set_cpu(dashboard: &mut DashboardState, entries: &[(&str, u16, u16)]) {

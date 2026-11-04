@@ -181,19 +181,6 @@ pub(crate) fn spawn_workspace_management_load(
     })
 }
 
-/// Stored layouts of these workspaces, read by the daemon, which alone opens
-/// the store. Called from blocking tasks.
-fn stored_workspace_layouts(
-    workspace_ids: Vec<String>,
-) -> Result<mj_client::daemon::WorkspaceLayouts> {
-    mj_core::runtime::block_on(async {
-        daemon::connect_or_start()
-            .await?
-            .workspace_layouts(workspace_ids)
-            .await
-    })?
-}
-
 /// Reads layouts for workspace ids discovered after the dashboard opened.
 /// Loading is deliberately separate from the runtime snapshot so a late
 /// result cannot overwrite a pane size the local client already edited.
@@ -201,11 +188,15 @@ pub(crate) fn spawn_workspace_pane_sizes_load(
     workspace_ids: Vec<String>,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) -> JoinHandle<()> {
-    spawn_io(
+    spawn_background_async(
         "load workspace pane sizes",
         updates,
-        move || {
-            Ok(stored_workspace_layouts(workspace_ids)?
+        SAVE_ACK_TIMEOUT,
+        async move {
+            Ok(daemon::connect_or_start()
+                .await?
+                .workspace_layouts(workspace_ids)
+                .await?
                 .pane_sizes
                 .into_iter()
                 .collect())
@@ -220,11 +211,15 @@ pub(crate) fn spawn_workspace_layouts_load(
     workspace_ids: Vec<String>,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) -> JoinHandle<()> {
-    spawn_io(
+    spawn_background_async(
         "load workspace layouts",
         updates,
-        move || {
-            Ok(stored_workspace_layouts(workspace_ids)?
+        SAVE_ACK_TIMEOUT,
+        async move {
+            Ok(daemon::connect_or_start()
+                .await?
+                .workspace_layouts(workspace_ids)
+                .await?
                 .conversation_layouts
                 .into_iter()
                 .collect())
@@ -486,28 +481,28 @@ pub(crate) fn spawn_first_run_setup(
         tracker,
         "first-run setup",
         updates,
-        move |cancelled| {
-            use mj_controller::{doctor, setup};
-            let executor = CancellableProcessExecutor::new(cancelled.clone())
-                .with_deadline(Duration::from_secs(30));
-            let config_path = mj_core::config::config_path();
-            let result = setup::run_setup(
-                &config_path,
-                &mj_core::config::data_dir(),
-                false,
-                &executor,
-                &|| executor.is_cancelled(),
-                || {
-                    report(
-                        "first-run setup",
-                        &progress,
-                        DashboardIoUpdate::FirstRunStarted,
-                    );
-                },
-            )?;
+        move |_cancelled| {
+            report(
+                "first-run setup",
+                &progress,
+                DashboardIoUpdate::FirstRunStarted,
+            );
+            // The daemon owns its configuration and its environment. In
+            // container placement this discovery runs inside the container,
+            // not against the client's host home.
+            let (summary, errors) = mj_core::runtime::block_on(async {
+                let mut daemon = crate::daemon::connect_or_start().await?;
+                let summary = daemon.run_first_run_setup().await?;
+                let errors = if summary.is_some() {
+                    daemon.run_doctor().await?
+                } else {
+                    Vec::new()
+                };
+                Ok::<_, anyhow::Error>((summary, errors))
+            })??;
             // An existing installation picks up agents installed since its
             // last launch through the startup availability check.
-            let Some(summary) = result else {
+            let Some(summary) = summary else {
                 return Ok(None);
             };
             report(
@@ -515,15 +510,7 @@ pub(crate) fn spawn_first_run_setup(
                 &progress,
                 DashboardIoUpdate::FirstRunConfigured(summary),
             );
-            let checks =
-                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
-            let result = doctor::run_with_config_path(
-                &config_path,
-                &checks,
-                doctor::current_apple_platform(&checks),
-                doctor::DoctorOptions { smoke: false },
-            );
-            Ok(Some(setup::actionable_errors(&result)))
+            Ok(Some(errors))
         },
         DashboardIoUpdate::FirstRunChecked,
     )
@@ -718,19 +705,18 @@ pub(crate) fn spawn_setup_save(
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
-    spawn_critical_io(
+    spawn_critical_async(
         tracker,
         "saving setup",
         updates,
-        move || {
+        SAVE_ACK_TIMEOUT,
+        async move {
             // The daemon checks the edit against the stored sessions it would
             // disturb; only it opens the store.
-            mj_core::runtime::block_on(async {
-                daemon::connect_or_start()
-                    .await?
-                    .save_setup(original, updated)
-                    .await
-            })?
+            daemon::connect_or_start()
+                .await?
+                .save_setup(original, updated)
+                .await
         },
         move |result| DashboardIoUpdate::SetupSaved {
             generation,
@@ -888,16 +874,15 @@ pub(crate) fn spawn_stopped_subagent_transcript(
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
     let reported_session_id = session_id.clone();
-    spawn_io(
+    spawn_background_async(
         "load a stopped sub-agent's transcript",
         updates,
-        move || {
-            mj_core::runtime::block_on(async {
-                daemon::connect_or_start()
-                    .await?
-                    .stored_projection_tail(session_id, mj_chat::chat::TAIL_SEED_ITEMS)
-                    .await
-            })?
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .stored_projection_tail(session_id, mj_chat::chat::TAIL_SEED_ITEMS)
+                .await
         },
         move |result| DashboardIoUpdate::StoppedSubagentTranscript {
             session_id: reported_session_id,
@@ -909,40 +894,58 @@ pub(crate) fn spawn_stopped_subagent_transcript(
 pub(crate) fn spawn_stored_session_summary(
     session_id: String,
     viewed_through_event_ordinal: u64,
+    generation: u64,
+    permits: Arc<tokio::sync::Semaphore>,
     updates: UnboundedSender<DashboardIoUpdate>,
-) {
+) -> JoinHandle<()> {
     let reported_session_id = session_id.clone();
-    spawn_io(
-        "load stored session summary",
-        updates,
-        move || {
-            let summary = mj_core::runtime::block_on(async {
-                daemon::connect_or_start()
+    tokio::spawn(async move {
+        let _permit = permits
+            .acquire_owned()
+            .await
+            .expect("summary read permits remain open");
+        let task = spawn_background_async(
+            "load stored session summary",
+            updates,
+            SAVE_ACK_TIMEOUT,
+            async move {
+                let summary = daemon::connect_or_start()
                     .await?
                     .stored_session_summary(session_id.clone())
-                    .await
-            })??
-            .with_context(|| format!("session {session_id} has no stored projection"))?;
-            Ok(PreparedMaterializedSessionSummary::from_materialized(
-                summary,
-                viewed_through_event_ordinal,
-            ))
-        },
-        move |result| DashboardIoUpdate::StoredSessionSummary {
-            session_id: reported_session_id,
-            result,
-        },
-    );
+                    .await?
+                    .with_context(|| format!("session {session_id} has no stored projection"))?;
+                // Only CPU preparation needs a blocking thread. Acquiring one
+                // while awaiting the connection can starve its metadata read.
+                tokio::task::spawn_blocking(move || {
+                    PreparedMaterializedSessionSummary::from_materialized(
+                        summary,
+                        viewed_through_event_ordinal,
+                    )
+                })
+                .await
+                .context("prepare stored session summary task failed")
+            },
+            move |result| DashboardIoUpdate::StoredSessionSummary {
+                session_id: reported_session_id,
+                generation,
+                result,
+            },
+        );
+        if let Err(error) = tokio_util::task::AbortOnDropHandle::new(task).await {
+            tracing::error!(%error, "stored summary supervisor failed");
+        }
+    })
 }
 
 pub(crate) fn spawn_lifecycle_reload(
     reload: LifecycleReload,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
-    spawn_io(
+    spawn_background_async(
         "reload lifecycle state",
         updates,
-        crate::dashboard::io::stored_session_metadata,
+        SAVE_ACK_TIMEOUT,
+        crate::dashboard::io::stored_session_metadata(),
         move |result| {
             DashboardIoUpdate::LifecycleReloaded(Box::new(LifecycleReloaded { reload, result }))
         },
@@ -1066,11 +1069,12 @@ pub(crate) fn spawn_dashboard_container_settings(
     tracker: CriticalOperationTracker,
 ) {
     let session_id = request.session_id.clone();
-    spawn_critical_io(
+    spawn_critical_async(
         tracker,
         format!("saving container settings for {}", short_id(&session_id)),
         updates,
-        move || {
+        SAVE_ACK_TIMEOUT,
+        async move {
             let ContainerSettingsRequest {
                 session_id,
                 cpus,
@@ -1078,22 +1082,20 @@ pub(crate) fn spawn_dashboard_container_settings(
                 additional_mounts,
                 mount_history,
             } = request;
-            mj_core::runtime::block_on(async {
-                daemon::connect_or_start()
-                    .await?
-                    .set_session_container_settings(
-                        session_id,
-                        cpus,
-                        memory,
-                        additional_mounts,
-                        mount_history,
-                    )
-                    .await
-            })??;
+            daemon::connect_or_start()
+                .await?
+                .set_session_container_settings(
+                    session_id,
+                    cpus,
+                    memory,
+                    additional_mounts,
+                    mount_history,
+                )
+                .await?;
             // Return a fresh durable snapshot so the dashboard can update its
             // state without synchronously reloading the database while it is
             // applying the worker result.
-            crate::dashboard::io::stored_session_metadata()
+            crate::dashboard::io::stored_session_metadata().await
         },
         move |result| DashboardIoUpdate::ContainerSettings { session_id, result },
     );
@@ -1258,21 +1260,13 @@ pub(crate) fn spawn_imported_session_apply(
                 .get(&session.bundle_id)
                 .cloned()
                 .context("import worker did not return its session bundle")?;
-            Config::update(|config| {
-                if let Some(existing) = config.bundles.get(&session.bundle_id) {
-                    anyhow::ensure!(
-                        existing == &bundle,
-                        "bundle {:?} changed during import; retry the import",
-                        session.bundle_id
-                    );
-                } else {
-                    config
-                        .bundles
-                        .insert(session.bundle_id.clone(), bundle.clone());
-                }
-                Ok(())
-            })?;
-            persist_imported_session(&session)?;
+            persist_imported_session(
+                &session,
+                Some(crate::daemon::ImportedBundle {
+                    bundle_id: session.bundle_id.clone(),
+                    bundle: bundle.clone(),
+                }),
+            )?;
             Ok(ImportedDashboardSessionApply {
                 harness: imported.harness,
                 native_session_id: pending.native_session_id,
@@ -1401,24 +1395,22 @@ pub(crate) fn spawn_dashboard_create_session(
                 )
                 .context("save fast-start setup; session has not been started")?;
             }
-            // The new-session preflight reads configuration and runs git; it
-            // never needs the store, which only the daemon opens.
-            let controller = mj_controller::controller::config_only_controller(Config::load()?);
-            let executor = CancellableProcessExecutor::new(cancelled.clone())
-                .with_deadline(Duration::from_secs(30));
+            // The new-session preflight reads configuration and runs git in
+            // the environment that owns the project paths. A client in another
+            // placement cannot do that itself.
             if project_directory.is_none() {
-                let result = controller.preflight_new_session(
-                    &bundle_id,
-                    &target_template_id,
-                    None,
-                    &executor,
-                )?;
-                if !result.remote_repairs.is_empty() {
+                let repairs = mj_core::runtime::block_on(async {
+                    daemon::connect_or_start()
+                        .await?
+                        .new_session_remote_repairs(bundle_id.clone(), target_template_id.clone())
+                        .await
+                })??;
+                if !repairs.is_empty() {
                     updates
                         .send(DashboardIoUpdate::CreateSession(Box::new(
                             DashboardCreateSessionUpdate::RemoteRepair {
                                 bundle_id: bundle_id.clone(),
-                                repairs: result.remote_repairs,
+                                repairs,
                                 retry: Box::new(action.clone()),
                             },
                         )))

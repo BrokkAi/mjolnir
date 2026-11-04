@@ -421,7 +421,13 @@ pub(crate) fn session_belongs_in_layout<V>(
     active_workspace_id: Option<&str>,
     session_id: &str,
 ) -> bool {
-    let Some(record) = state.sessions.get(session_id) else {
+    let record = state.sessions.get(session_id).or_else(|| {
+        state
+            .subagents
+            .get(session_id)
+            .and_then(|child| state.sessions.get(&child.parent_session_id))
+    });
+    let Some(record) = record else {
         return false;
     };
     native_agents.contains_key(session_id)

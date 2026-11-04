@@ -623,7 +623,7 @@ impl DashboardState {
             && (session.state.is_active() || self.transition_kind(&session.id).is_some())
     }
 
-    pub(crate) fn ordered_sessions_unfiltered(&self) -> Vec<&SessionRecord> {
+    fn ordered_sessions_unfiltered(&self) -> Vec<&SessionRecord> {
         if let Some(workspace) = self.child_workspace.as_ref() {
             let parent_id = &workspace.parent_id;
             let mut children = self

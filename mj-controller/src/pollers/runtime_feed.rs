@@ -7,6 +7,7 @@ pub struct RemoteDashboardWorkerPoller {
     pub control: SessionManagerControl,
     pub shutdown: SessionManagerShutdown,
     pub state: tokio::sync::watch::Receiver<RuntimeStateUpdate>,
+    pub subagent_parents: tokio::sync::watch::Sender<std::collections::BTreeSet<String>>,
     /// Reviews the daemon is running for this workspace's sessions.
     pub reviews: tokio::sync::watch::Receiver<Vec<crate::review_host::RuntimeReviewView>>,
     /// Background events the daemon wants reported once, oldest first.
@@ -22,6 +23,7 @@ pub struct RemoteDashboardWorkerPoller {
 /// Records and lifecycle ownership must reach the surface in the same frame.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RuntimeStateUpdate {
+    pub subagent_parents: std::collections::BTreeSet<String>,
     pub operator_presence: mj_core::state::OperatorPresence,
     pub session_cpu: SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>,
     pub last_subagent_policies:
@@ -35,7 +37,7 @@ pub struct RuntimeStateUpdate {
     /// Parent/child relations for the sessions in `records`, so a surface can
     /// keep a daemon-created child out of the real workspace without a full
     /// state reload.
-    pub subagents: SnapshotMap<String, SubagentRecord>,
+    pub subagents: SnapshotMap<String, SubagentMetadata>,
     /// Session creation history for project-list ordering and the legacy fallback; see
     /// [`mj_client::runtime_feed::LaunchRecency`].
     pub launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,

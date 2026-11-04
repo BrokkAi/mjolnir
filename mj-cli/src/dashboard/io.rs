@@ -1,9 +1,8 @@
 //! One-shot background jobs the dashboard starts and the updates they report.
 //!
-//! Each job runs on a blocking task and answers over the dashboard's single
-//! [`DashboardIoUpdate`] channel, so no filesystem, database, or process work
-//! ever happens on the render loop. Failures travel as `Err` payloads rather
-//! than being dropped.
+//! Network jobs run as async tasks; synchronous work uses blocking tasks.
+//! Both answer over the dashboard's single [`DashboardIoUpdate`] channel,
+//! keeping work off the render loop and reporting failures as `Err` payloads.
 
 mod spawn;
 pub(crate) use spawn::*;
@@ -101,6 +100,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     StoredSessionSummary {
         session_id: String,
+        generation: u64,
         result: std::result::Result<PreparedMaterializedSessionSummary, String>,
     },
     /// The stored tail of a stopped sub-agent's conversation, which is read
@@ -160,7 +160,7 @@ pub(crate) enum DashboardIoUpdate {
     GoPrepared {
         workspace_id: String,
         retry: Box<DashboardAction>,
-        result: Box<std::result::Result<(Config, mj_core::go::GoRecipe), String>>,
+        result: Box<std::result::Result<mj_core::go::GoRecipe, String>>,
     },
     RemotePreflight {
         generation: u64,
@@ -233,6 +233,11 @@ pub(crate) enum DashboardIoUpdate {
     /// The daemon's answer to a Refresh: it accepted the request, or it could
     /// not be reached.
     QuotaRefreshRequested(std::result::Result<(), String>),
+    /// The host's global Git author identity, read before the first new
+    /// session of this run.
+    GitIdentityChecked(std::result::Result<mj_client::daemon::GitIdentity, String>),
+    /// The host's global Git author identity after the dialog saved it.
+    GitIdentitySaved(std::result::Result<mj_client::daemon::GitIdentity, String>),
     WebAccess {
         generation: u64,
         access: WebViewerAccess,
@@ -286,7 +291,7 @@ pub(crate) enum DashboardIoUpdate {
         error: String,
     },
     FirstRunStarted,
-    FirstRunConfigured(mj_controller::setup::SetupReport),
+    FirstRunConfigured(mj_client::daemon::FirstRunSetupReport),
     FirstRunChecked(std::result::Result<Option<Vec<String>>, String>),
     SetupSaved {
         generation: u64,
@@ -549,16 +554,13 @@ impl From<mj_client::daemon::StoredSessionMetadata> for DashboardMetadata {
     }
 }
 
-/// The store's session metadata, read by the daemon, which alone opens the
-/// store. Called from blocking tasks.
-pub(crate) fn stored_session_metadata() -> Result<DashboardMetadata> {
-    mj_core::runtime::block_on(async {
-        crate::daemon::connect_or_start()
-            .await?
-            .stored_session_metadata()
-            .await
-    })?
-    .map(DashboardMetadata::from)
+/// The store's session metadata, read by the daemon, which alone opens the store.
+pub(crate) async fn stored_session_metadata() -> Result<DashboardMetadata> {
+    crate::daemon::connect_or_start()
+        .await?
+        .stored_session_metadata()
+        .await
+        .map(DashboardMetadata::from)
 }
 
 impl DashboardMetadata {
@@ -834,7 +836,10 @@ impl DashboardContext {
                 self.dashboard
                     .set_stopped_subagent_transcript(&session_id, result);
             }
-            DashboardIoUpdate::StoredSessionSummary { session_id, result } => {
+            DashboardIoUpdate::StoredSessionSummary { session_id, generation, result } => {
+                if !self.summary_reads.finish(&session_id, generation) {
+                    return;
+                }
                 match result {
                     Ok(summary) => {
                         self.dashboard
@@ -959,7 +964,7 @@ impl DashboardContext {
                 retry,
                 result,
             } => match *result {
-                Ok((_config, recipe)) => {
+                Ok(recipe) => {
                     let action = self.dashboard.go_launch_action(workspace_id, recipe);
                     super::actions::start_session_launch(self, action);
                 }
@@ -1182,6 +1187,12 @@ impl DashboardContext {
                     .dashboard
                     .set_notice(format!("Could not rename {what}: {error}")),
             },
+            DashboardIoUpdate::GitIdentityChecked(result) => {
+                self.dashboard.apply_git_identity_check(result)
+            }
+            DashboardIoUpdate::GitIdentitySaved(result) => {
+                self.dashboard.apply_git_identity_save(result)
+            }
             DashboardIoUpdate::QuotaRefreshRequested(Ok(())) => {}
             DashboardIoUpdate::QuotaRefreshRequested(Err(error)) => {
                 self.manual_quota_refresh_cycles = None;
@@ -2394,6 +2405,70 @@ mod tests {
             .is_err()
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    // Hard-won: 0bd61a289: summary hydration exhausted the blocking pool while awaiting nested metadata reads.
+    #[test]
+    fn stored_summary_bursts_leave_the_blocking_pool_available() {
+        const CHILD: &str = "MJ_TEST_SUMMARY_BLOCKING_POOL";
+        const TEST: &str =
+            "dashboard::io::tests::stored_summary_bursts_leave_the_blocking_pool_available";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        // Refuse before startup can launch anything. Even this refusal needs
+        // connection metadata, just as successful summary reads do.
+        let metadata = daemon::DaemonMetadata {
+            protocol_version: daemon::PROTOCOL_VERSION + 1,
+            pid: std::process::id(),
+            address: "127.0.0.1:1".parse().unwrap(),
+            token: "summary-pool-test".into(),
+            started_at: "2026-11-04T00:00:00Z".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: crate::daemon::DaemonPlacement::Host,
+        };
+        std::fs::write(
+            daemon::metadata_path(),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let completed = runtime.block_on(async {
+            let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
+            let permits = Arc::new(tokio::sync::Semaphore::new(4));
+            for id in 0..64 {
+                spawn_stored_session_summary(
+                    id.to_string(),
+                    0,
+                    id,
+                    Arc::clone(&permits),
+                    updates.clone(),
+                );
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                for _ in 0..64 {
+                    let Some(DashboardIoUpdate::StoredSessionSummary { result, .. }) =
+                        results.recv().await
+                    else {
+                        panic!("expected a summary result")
+                    };
+                    assert!(result.is_err(), "the newer daemon must be refused");
+                }
+                // Attachment renewal and chat preparation need this pool too.
+                tokio::task::spawn_blocking(|| ()).await.unwrap();
+            })
+            .await
+        });
+        // A regression must fail without hanging runtime shutdown on the
+        // deadlocked blocking task.
+        runtime.shutdown_timeout(Duration::from_secs(1));
+        completed.expect("summary network waits must not starve connection metadata reads");
     }
 
     #[test]

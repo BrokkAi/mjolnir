@@ -201,7 +201,7 @@ mod tests {
             state.sessions.insert(id.into(), session);
         }
         let child = super::super::tests::runtime_test_subagent("child", "parent");
-        state.subagents.insert("child".into(), child);
+        state.subagents.insert("child".into(), child.into());
         assert_eq!(close_roots(&state, "a"), ["independent", "parent"]);
         state.sessions.get_mut("parent").unwrap().state = SessionState::Stopped;
         assert_eq!(close_roots(&state, "a"), ["child", "independent"]);

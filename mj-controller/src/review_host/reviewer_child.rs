@@ -24,6 +24,14 @@ impl HostState {
         }
         let request_key = registration.request_key.clone();
         let reviewer = group.reviewer.clone();
+        // A push review covers one repository when it names a worktree, so
+        // its reviewer reads context from that checkout, not the session's.
+        let working_directory = match group.driver.deltas.as_slice() {
+            [delta] if group.scope == mj_core::relay::CaptureScope::PushableCommits => {
+                Some(delta.root.clone())
+            }
+            _ => None,
+        };
         let epoch = slot.epoch;
         let environment = self.environment.clone();
         let events = self.events.clone();
@@ -37,6 +45,7 @@ impl HostState {
                     &reviewer,
                     format!("{prompt}{HANDBACK_INSTRUCTION}"),
                     request_key,
+                    working_directory,
                 )
             })
             .await

@@ -387,10 +387,14 @@ On **Agent Profiles**, each saved profile shows its sign-in status (`signed in`,
 `signed out`, `credential expired`, or the API-key/no-login case), and **Sign
 in** hands the terminal to the profile's login flow for the selected profile.
 **Detect profiles** discovers the agents installed on this machine and usable
-local runtimes. The dashboard runs the same profile
-detection on every plain `mj` launch (not `mj go`, `mj workspaces`, or the
-relaunch after an upgrade), so a removed profile for an installed agent returns;
-disable the profile instead to stop using it. Review settings are part of the same
+local runtimes. The dashboard runs profile detection on every plain `mj` launch
+(not `mj go`, `mj workspaces`, or the relaunch after an upgrade), so a removed
+profile for an installed agent returns; disable the profile instead to stop
+using it. Automatic detection leaves a harness's conventional home alone once
+that harness already has a profile, because the harness or its managed launch
+can create that directory without a second installation. A home named by the
+harness's own environment variable, or an explicit **Detect profiles**, can add
+another installation. Review settings are part of the same
 draft: discovery checks the selected reviewer profile's model and effort
 capabilities and filters incompatible profiles. **Save and Close** or Ctrl+S
 validates and saves the complete draft. Errors keep your edits in place. `Esc`

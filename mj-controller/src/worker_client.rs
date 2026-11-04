@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
@@ -11,7 +10,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, watch};
 
 use crate::targets::{
@@ -99,7 +97,7 @@ type ProxyStderrTail = Arc<std::sync::Mutex<VecDeque<String>>>;
 /// routine MaxSessions refusal is not a warning (R7-1). Once the connection
 /// is up, anything the proxy says is a warning.
 async fn drain_proxy_stderr(
-    errors: tokio::process::ChildStderr,
+    errors: proxy::ProxyReader,
     purpose: String,
     session_id: String,
     tail: ProxyStderrTail,
@@ -134,6 +132,7 @@ mod errors;
 pub use errors::*;
 mod connect;
 mod exchange;
+use crate::streamed_child as proxy;
 mod relay;
 mod reviewer;
 mod transport;
@@ -147,9 +146,9 @@ pub use credential_sync::*;
 /// Callers persist bounded attachment pages, then acknowledge only a frontier
 /// that is already durable locally.
 pub struct RelayClient {
-    child: Option<Child>,
-    input: Option<ChildStdin>,
-    output: BufReader<ChildStdout>,
+    child: Option<proxy::ProxyChild>,
+    input: Option<proxy::ProxyWriter>,
+    output: BufReader<proxy::ProxyReader>,
     request_timeout: Duration,
     /// Why this connection can no longer be used, once a call gave up on a
     /// reply that is still in flight. See [`RelayClient::exchange`].

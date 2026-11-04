@@ -1447,8 +1447,14 @@ pub(super) async fn drive_reviewer(
 ) -> Result<ReviewerOutcome> {
     let role = role.as_deref();
     Ok(match action {
-        ReviewerAction::CaptureDelta { baselines, scope } => ReviewerOutcome::Delta {
-            repositories: client.capture_review_delta(role, baselines, scope).await?,
+        ReviewerAction::CaptureDelta {
+            baselines,
+            scope,
+            repositories,
+        } => ReviewerOutcome::Delta {
+            repositories: client
+                .capture_review_delta(role, baselines, scope, repositories)
+                .await?,
         },
         ReviewerAction::RecordReviewed { trees } => {
             client.record_reviewed(role, trees).await?;
@@ -1589,7 +1595,7 @@ async fn reopen_subagent_admission_after_move(
             let queue_enabled = crate::controller::move_session::worker_subagent_queue_enabled(
                 &session.subagents.clone().unwrap_or_default(),
                 session.harness_kind,
-                subagent.as_ref(),
+                subagent.as_ref().map(|child| child.handback_tool),
                 true,
             );
             let move_active = crate::database::has_active_in_place_move(&id)?;

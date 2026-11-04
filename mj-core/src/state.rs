@@ -14,7 +14,7 @@ use crate::relay::{
     RELAY_EVENT_GENESIS_DIGEST, RelayOperationalState, SequencedEvent, WorkerEvent,
 };
 use crate::snapshot_map::SnapshotMap;
-use crate::subagent::SubagentRecord;
+use crate::subagent::SubagentMetadata;
 use crate::targets::{AdditionalMount, validate_additional_mounts};
 
 pub const STATE_VERSION: u32 = 1;
@@ -2392,7 +2392,7 @@ pub struct State {
     /// Child sessions keyed by their session id. The relationship lives in
     /// controller state so every control surface sees the same session family.
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
-    pub subagents: SnapshotMap<String, SubagentRecord>,
+    pub subagents: SnapshotMap<String, SubagentMetadata>,
     /// Recently used source directories, keyed by `local` or SSH host name.
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
     pub mount_history: SnapshotMap<String, Vec<PathBuf>>,
@@ -2524,7 +2524,7 @@ pub fn session_is_live(record: &SessionRecord, in_operation: bool, parent_live: 
 /// membership settles parent before child.
 pub fn live_session_ids(
     sessions: &SnapshotMap<String, SessionRecord>,
-    subagents: &SnapshotMap<String, SubagentRecord>,
+    subagents: &SnapshotMap<String, SubagentMetadata>,
     operations: &BTreeSet<String>,
 ) -> BTreeSet<String> {
     let mut live = sessions

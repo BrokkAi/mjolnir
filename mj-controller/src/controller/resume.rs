@@ -668,7 +668,10 @@ impl Controller {
                             .clone()
                             .unwrap_or_default(),
                         profile.kind,
-                        self.state.subagents.get(session_id),
+                        self.state
+                            .subagents
+                            .get(session_id)
+                            .map(|child| child.handback_tool),
                         true,
                     );
             resume_notices.extend(mj_core::subagent::stopped_subagents_notice(

@@ -47,7 +47,11 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
-    fn request_review(&self, _session_id: String) -> BoxFuture<'_, Result<serde_json::Value>> {
+    fn request_review(
+        &self,
+        _session_id: String,
+        _path: Option<String>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async { bail!("push review is unavailable") })
     }
 
@@ -211,10 +215,14 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
-    fn request_review(&self, session_id: String) -> BoxFuture<'_, Result<serde_json::Value>> {
+    fn request_review(
+        &self,
+        session_id: String,
+        path: Option<String>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async move {
             self.review_host()
-                .begin_push(&session_id)
+                .begin_push(&session_id, path)
                 .await
                 .map_err(|error| anyhow!("request_review refused: {}", error.0))
         })
@@ -866,9 +874,9 @@ impl ApiBackend {
                     serde_json::from_slice(&output).context("decode the saved fetch")?;
                 Ok(serde_json::to_value(saved)?)
             }
-            SubagentToolAction::RequestReview {} => {
+            SubagentToolAction::RequestReview { path } => {
                 self.exports
-                    .request_review(parent_session_id.to_owned())
+                    .request_review(parent_session_id.to_owned(), path.clone())
                     .await
             }
             SubagentToolAction::OverrideReview { reason } => {

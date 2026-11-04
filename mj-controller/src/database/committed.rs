@@ -501,10 +501,12 @@ pub(super) fn finish_operation(
             .optional()?;
         let relation: Option<SubagentRecord> =
             json.map(|json| serde_json::from_str(&json)).transpose()?;
-        let relation = relation.filter(|relation| {
-            state.sessions.contains_key(key)
-                && state.sessions.contains_key(&relation.parent_session_id)
-        });
+        let relation = relation
+            .filter(|relation| {
+                state.sessions.contains_key(key)
+                    && state.sessions.contains_key(&relation.parent_session_id)
+            })
+            .map(mj_core::subagent::SubagentMetadata::from);
         if state.subagents.get(key) != relation.as_ref() {
             match relation {
                 Some(relation) => {

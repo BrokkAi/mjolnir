@@ -76,9 +76,18 @@ impl DashboardState {
         // scroll position means nothing here.
         self.sessions_scroll.set(0);
         let child = self
-            .ordered_sessions_unfiltered()
-            .first()
-            .map(|session| session.id.clone());
+            .managed_child_ids_of_kind(&parent_id, kind)
+            .into_iter()
+            .next()
+            .or_else(|| {
+                if kind == mj_core::subagent::SubagentKind::Worker {
+                    self.native_by_parent
+                        .get(&parent_id)
+                        .and_then(|ids| ids.first().cloned())
+                } else {
+                    None
+                }
+            });
         self.set_current_session(None);
         if let Some(child) = child {
             self.select_active_session(&child);
@@ -379,7 +388,12 @@ impl DashboardState {
     /// Select a conversation immediately, retaining the current keyboard focus.
     /// Pinned sessions stay in their pane; other sessions replace Browse.
     pub fn select_active_session(&mut self, session_id: &str) {
-        if !self.state.sessions.contains_key(session_id) {
+        // Navigation owns the selection immediately, even while the daemon
+        // is loading the row detail for this family's compact relationship.
+        let unloaded_child = self.state.subagents.get(session_id).is_some_and(|child| {
+            self.subagent_parent_id() == Some(child.parent_session_id.as_str())
+        });
+        if !self.state.sessions.contains_key(session_id) && !unloaded_child {
             return;
         }
         let pane = self

@@ -522,9 +522,8 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
     state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(
         child.id.clone(),
-        crate::subagent::SubagentRecord {
+        crate::subagent::SubagentMetadata {
             kind: crate::subagent::SubagentKind::Worker,
-            reviewer_launch: None,
             child_session_id: child.id.clone(),
             parent_session_id: parent.id.clone(),
             task_name: "Inspect parser".into(),
@@ -532,7 +531,6 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
             model: None,
             effort: None,
             working_directory: PathBuf::new(),
-            initial_prompt: "Inspect the parser".into(),
             request_key: "request-1".into(),
             created_at: child.created_at.clone(),
             noticed_turn: None,
@@ -568,9 +566,8 @@ fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
     state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(
         child.id.clone(),
-        crate::subagent::SubagentRecord {
+        crate::subagent::SubagentMetadata {
             kind: crate::subagent::SubagentKind::Worker,
-            reviewer_launch: None,
             child_session_id: child.id.clone(),
             parent_session_id: parent.id.clone(),
             task_name: "Inspect parser".into(),
@@ -578,7 +575,6 @@ fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
             model: None,
             effort: None,
             working_directory: PathBuf::new(),
-            initial_prompt: "Inspect the parser".into(),
             request_key: "request-1".into(),
             created_at: child.created_at.clone(),
             noticed_turn: None,
@@ -745,9 +741,8 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
         state.sessions.insert(child.id.clone(), child.clone());
         state.subagents.insert(
             child.id.clone(),
-            crate::subagent::SubagentRecord {
+            crate::subagent::SubagentMetadata {
                 kind: crate::subagent::SubagentKind::Worker,
-                reviewer_launch: None,
                 child_session_id: child.id.clone(),
                 parent_session_id: parent.id.clone(),
                 task_name: "Borrow checkout".into(),
@@ -755,7 +750,6 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
                 model: None,
                 effort: None,
                 working_directory: PathBuf::new(),
-                initial_prompt: "Borrow checkout".into(),
                 request_key: format!("request-{id}"),
                 created_at: child.created_at.clone(),
                 noticed_turn: None,
@@ -1367,9 +1361,8 @@ fn a_stored_subagent_may_launch_outside_the_parent_workspace() {
     state.sessions.insert(child_id.clone(), child);
     state.subagents.insert(
         child_id.clone(),
-        SubagentRecord {
+        SubagentMetadata {
             kind: crate::subagent::SubagentKind::Worker,
-            reviewer_launch: None,
             child_session_id: child_id.clone(),
             parent_session_id: parent_id,
             task_name: "lane".into(),
@@ -1377,7 +1370,6 @@ fn a_stored_subagent_may_launch_outside_the_parent_workspace() {
             model: None,
             effort: None,
             working_directory: PathBuf::new(),
-            initial_prompt: "work in the lane".into(),
             request_key: "request-1".into(),
             created_at: "2026-09-16T00:00:00Z".into(),
             noticed_turn: None,

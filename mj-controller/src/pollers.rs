@@ -41,7 +41,7 @@ use crate::targets::{
 use crate::worker_client::CredentialSyncCoordinator;
 
 use crate::daemon;
-use mj_core::subagent::SubagentRecord;
+use mj_core::subagent::SubagentMetadata;
 mod provider_auth;
 pub(crate) use provider_auth::ProviderAuthCache;
 

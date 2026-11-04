@@ -299,7 +299,9 @@ pub(super) async fn finish_push_delivery(
             if let Some(ordinal) = reviewed_through_ordinal {
                 state.reviewed_through_ordinal = ordinal;
             }
-            state.baselines = trees;
+            // A review scoped to one worktree leaves the other repositories'
+            // baselines where they were.
+            state.baselines.extend(trees);
             state.prior_review = None;
             state.push_findings = None;
         }

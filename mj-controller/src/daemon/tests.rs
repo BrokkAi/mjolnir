@@ -12,6 +12,8 @@ fn newer_daemon_protocol_requires_updating_the_client() {
         token: "tok".into(),
         started_at: "2026-09-01T07:48:14Z".into(),
         build_version: "9.9.9".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     assert!(ensure_supported_daemon_protocol(&metadata(PROTOCOL_VERSION)).is_ok());
     assert!(ensure_supported_daemon_protocol(&metadata(PROTOCOL_VERSION - 1)).is_ok());
@@ -1276,6 +1278,8 @@ pub(super) fn test_metadata(address: SocketAddr) -> DaemonMetadata {
         token: "right-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     }
 }
 
@@ -1288,6 +1292,7 @@ async fn in_process_reviewer_forwarding_stops_when_the_caller_goes_away() {
             session_id: "session-1".into(),
             role: None,
             action: crate::session_manager::ReviewerAction::CaptureDelta {
+                repositories: None,
                 scope: Default::default(),
                 baselines: Default::default(),
             },
@@ -1451,7 +1456,7 @@ fn active_child_session_ids_skips_children_that_already_stopped() {
         runtime_test_subagent(&stopped_child.id, &parent.id),
     ]
     .into_iter()
-    .map(|subagent| (subagent.child_session_id.clone(), subagent))
+    .map(|subagent| (subagent.child_session_id.clone(), subagent.into()))
     .collect();
 
     let children = active_child_session_ids(&state, &parent.id);
@@ -1617,6 +1622,8 @@ async fn daemon_stops_serving_data_actions_once_shutdown_begins() {
         token: "right-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     let cancellation = CancellationToken::new();
     cancellation.cancel();
@@ -1692,6 +1699,8 @@ async fn management_stop_is_bounded_when_the_daemon_never_acknowledges() {
         token: "test-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     let mut client = ManagementClient::new(DaemonClient::connect(metadata).await.unwrap());
     let (mut peer, _) = listener.accept().await.unwrap();
@@ -1717,6 +1726,8 @@ async fn daemon_rejects_a_request_with_the_wrong_owner_token() {
         token: "right-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     let server_metadata = metadata.clone();
     let server = tokio::spawn(async move {
@@ -1756,6 +1767,8 @@ async fn the_daemon_rejects_a_client_one_protocol_behind_before_dispatch() {
         token: "right-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     let server_metadata = metadata.clone();
     let server = tokio::spawn(async move {
@@ -1857,6 +1870,8 @@ async fn daemon_serves_management_actions_for_any_protocol_version() {
             token: "right-token".into(),
             started_at: "now".into(),
             build_version: "test".into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         let server_metadata = metadata.clone();
         let server = tokio::spawn(async move {
@@ -2223,6 +2238,8 @@ async fn management_client_talks_to_every_released_protocol_version() {
             token: "tok".into(),
             started_at: "2026-09-01T07:48:14Z".into(),
             build_version: daemon_build.into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         let mut client = ManagementClient::new(DaemonClient::connect(metadata).await.unwrap());
         let status = client.status().await.unwrap();
@@ -6261,6 +6278,89 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
     );
 }
 
+// Hard-won: 0bd61a289: dashboard startup failed when live session state exceeded one frame.
+#[tokio::test]
+async fn dashboard_startup_larger_than_a_frame_arrives_whole() {
+    let mut session = runtime_test_session("large-draft", "workspace", SessionState::Running);
+    session.draft_input = "draft 🙂\n".repeat(MAX_FRAME_BYTES / 8);
+    let startup = DashboardStartup {
+        runtime: mj_client::runtime_feed::RuntimeBootstrap {
+            cursor: mj_client::runtime_feed::RuntimeCursor {
+                incarnation: "startup".into(),
+                sequence: 1,
+                subagent_parents: Default::default(),
+            },
+            projection: mj_client::runtime_feed::RuntimeProjection {
+                records: [(session.id.clone(), session)].into_iter().collect(),
+                ..Default::default()
+            },
+        },
+        metadata: Default::default(),
+        pane_sizes: Default::default(),
+        conversation_layouts: Default::default(),
+        queued_prompts: Default::default(),
+    };
+    let expected = serde_json::to_value(&startup).unwrap();
+    let payload_bytes = serde_json::to_vec(&startup).unwrap().len();
+    assert!(payload_bytes > MAX_FRAME_BYTES);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        for reply in [
+            DaemonReply::DashboardStartup(Box::new(startup)),
+            DaemonReply::Pong,
+        ] {
+            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+            match &reply {
+                DaemonReply::DashboardStartup(_) => assert!(matches!(
+                    request.action,
+                    DaemonAction::DashboardStartup { client_id, workspace_id } if client_id == "large-dashboard" && workspace_id == "workspace"
+                )),
+                _ => assert!(matches!(request.action, DaemonAction::Ping)),
+            }
+            super::serve::write_response(
+                &mut stream,
+                ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(reply),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    });
+    let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let proxy_address = proxy.local_addr().unwrap();
+    let copied = tokio::spawn(async move {
+        let (mut incoming, _) = proxy.accept().await.unwrap();
+        let mut outgoing = TcpStream::connect(address).await.unwrap();
+        tokio::io::copy_bidirectional(&mut incoming, &mut outgoing)
+            .await
+            .unwrap()
+    });
+    let mut client = mj_client::daemon::DaemonClient::connect(test_metadata(proxy_address))
+        .await
+        .unwrap();
+    let received = client
+        .dashboard_startup("large-dashboard".into(), "workspace".into())
+        .await
+        .expect("load the complete dashboard startup state");
+    assert_eq!(serde_json::to_value(received).unwrap(), expected);
+    assert!(matches!(
+        client.request(DaemonAction::Ping).await.unwrap(),
+        DaemonReply::Pong
+    ));
+    drop(client);
+    server.await.unwrap();
+    let (_, response_bytes) = copied.await.unwrap();
+    assert!(
+        response_bytes < (payload_bytes * 3 / 2) as u64,
+        "base64 chunks must stay near 4/3 of JSON size: {response_bytes} wire bytes for {payload_bytes} JSON bytes"
+    );
+}
+
 #[tokio::test]
 async fn oversized_response_reports_its_size_and_keeps_connection_usable() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -8329,6 +8429,7 @@ async fn runtime_publication_crosses_frame_limit_atomically_and_keeps_connection
                         cursor: RuntimeCursor {
                             incarnation: "test".into(),
                             sequence: 1,
+                            subagent_parents: Default::default(),
                         },
                         projection: Box::new(projection),
                     },
@@ -9192,9 +9293,10 @@ async fn resume_candidates_are_inactive_top_level_sessions_with_every_adopted_na
     for record in [live, stopped, lost, child] {
         state.sessions.insert(record.id.clone(), record);
     }
-    state
-        .subagents
-        .insert("child".into(), runtime_test_subagent("child", "live"));
+    state.subagents.insert(
+        "child".into(),
+        runtime_test_subagent("child", "live").into(),
+    );
     let candidates = test_runtime_state_holding(state).resume_candidates();
     let ids = candidates
         .candidates
@@ -9239,9 +9341,10 @@ async fn go_startup_session_falls_back_when_the_remembered_session_is_archived()
             .collect(),
         ..mj_core::state::State::default()
     };
-    state
-        .subagents
-        .insert(child.id.clone(), runtime_test_subagent(&child.id, "parent"));
+    state.subagents.insert(
+        child.id.clone(),
+        runtime_test_subagent(&child.id, "parent").into(),
+    );
     let runtime = test_runtime_state_holding(state);
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();

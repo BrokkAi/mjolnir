@@ -1357,10 +1357,7 @@ async fn follow_handoff(continuation: Vec<String>) -> Result<ApiClient> {
         Ok(client) => return Ok(client),
         Err(error) => error,
     };
-    let target = tokio::task::spawn_blocking(crate::daemon::upgraded_daemon_executable)
-        .await
-        .context("inspect the upgraded daemon task failed")??;
-    let Some(target) = target else {
+    let Some(target) = crate::daemon::upgraded_daemon_executable().await? else {
         return Err(error);
     };
     Err(crate::daemon::continue_under_upgraded_build(

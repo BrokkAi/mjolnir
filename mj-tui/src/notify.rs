@@ -239,7 +239,7 @@ impl DashboardState {
                 .state
                 .sessions
                 .get(session_id)
-                .is_some_and(|session| !session.state.is_active())
+                .is_some_and(|session| !session.state.has_live_worker())
     }
 
     /// Whether a pane holding `session_id` must let it go rather than attach

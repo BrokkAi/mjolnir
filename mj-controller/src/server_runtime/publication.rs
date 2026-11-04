@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Default)]
 pub(super) struct ViewerPublication {
     records: SnapshotMap<String, SessionRecord>,
-    subagents: SnapshotMap<String, mj_core::subagent::SubagentRecord>,
+    subagents: SnapshotMap<String, mj_core::subagent::SubagentMetadata>,
     children: crate::server::ViewerChildren,
     config: Option<Config>,
     rows: crate::server::ViewerSessions,

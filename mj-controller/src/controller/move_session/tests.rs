@@ -1355,7 +1355,7 @@ fn in_place_move_retains_running_and_parked_children_and_roleless_refusal_names_
             relation(&parked.id, "review the tests"),
         ]
         .into_iter()
-        .map(|child| (child.child_session_id.clone(), child))
+        .map(|child| (child.child_session_id.clone(), child.into()))
         .collect(),
         ..Default::default()
     };
@@ -2935,7 +2935,7 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         .controller
         .state
         .subagents
-        .insert(child.id.clone(), relation.clone());
+        .insert(child.id.clone(), relation.clone().into());
     let mut selection =
         in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE).selection;
     selection.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
@@ -3049,7 +3049,7 @@ fn recovery_from_in_place_closing_source_keeps_children_and_skips_stop_hook() {
         controller
             .state
             .subagents
-            .insert(relation.child_session_id.clone(), relation);
+            .insert(relation.child_session_id.clone(), relation.into());
     }
     let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
     operation.phase = MovePhase::ClosingSource;

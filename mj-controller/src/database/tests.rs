@@ -5247,6 +5247,23 @@ fn finished_transcript_cursor_advances_across_non_agent_rows() {
 
 /// A parent, a child, and the relation between them, written the way the
 /// controller writes them.
+pub(super) fn register_test_subagent(
+    path: &Path,
+    session: &SessionRecord,
+    relation: &mj_core::subagent::SubagentRecord,
+) -> Result<()> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction()?;
+    insert_session(&tx, session)?;
+    super::usage::record_child_accounting(&tx, relation)?;
+    tx.execute(
+        "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES (?1,?2,?3,?4)",
+        params![relation.child_session_id, relation.parent_session_id, relation.kind.request_key(&relation.request_key), serde_json::to_string(relation)?],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     let parent = session("11111111111111111111111111111111", "bundle-1");
     let mut child = session("22222222222222222222222222222222", "bundle-1");
@@ -5254,28 +5271,90 @@ fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     let mut state = State::default();
     state.sessions.insert(parent.id.clone(), parent.clone());
     state.sessions.insert(child.id.clone(), child.clone());
-    state.subagents.insert(
-        child.id.clone(),
-        mj_core::subagent::SubagentRecord {
-            kind: mj_core::subagent::SubagentKind::Worker,
-            reviewer_launch: None,
-            child_session_id: child.id.clone(),
-            parent_session_id: parent.id.clone(),
-            task_name: "probe".into(),
-            profile_id: "codex".into(),
-            model: None,
-            effort: None,
-            working_directory: PathBuf::new(),
-            initial_prompt: "say ready".into(),
-            request_key: "probe-1".into(),
-            created_at: "2026-09-18T00:00:00Z".into(),
-            noticed_turn: None,
-            reported_finish: None,
-            handback_tool: false,
-        },
-    );
+    let relation = mj_core::subagent::SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
+        child_session_id: child.id.clone(),
+        parent_session_id: parent.id.clone(),
+        task_name: "probe".into(),
+        profile_id: "codex".into(),
+        model: None,
+        effort: None,
+        working_directory: PathBuf::new(),
+        initial_prompt: "say ready".into(),
+        request_key: "probe-1".into(),
+        created_at: "2026-09-18T00:00:00Z".into(),
+        noticed_turn: None,
+        reported_finish: None,
+        handback_tool: false,
+    };
+    save_state_to(path, &state).unwrap();
+    register_test_subagent(path, &child, &relation).unwrap();
+    state.subagents.insert(child.id.clone(), relation.into());
     save_state_to(path, &state).unwrap();
     (parent, child)
+}
+
+#[test]
+fn metadata_state_saves_preserve_complete_subagent_launch_intent() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("metadata-launch.sqlite3");
+    let (_, child) = subagent_pair(&path);
+    let connection = open(&path).unwrap();
+    let json: String = connection
+        .query_row(
+            "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+            [&child.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut launch: mj_core::subagent::SubagentRecord = serde_json::from_str(&json).unwrap();
+    launch.kind = mj_core::subagent::SubagentKind::Reviewer;
+    launch.initial_prompt = "private durable launch 🙂\n".repeat(10_000);
+    launch.reviewer_launch = Some(mj_core::worker_launch::ReviewerLaunchConfig {
+        profile_id: "reviewer".into(),
+        harness: mj_core::config::HarnessKind::Codex,
+        bridge_command: "review-bridge".into(),
+        bridge_args: vec!["--private-launch".into()],
+        environment: BTreeMap::from([("PRIVATE_LAUNCH".into(), "retain in the daemon".into())]),
+        excluded_environment: vec![],
+        execution_policy: mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+        model: Some("review-model".into()),
+        effort: None,
+        fast_mode: None,
+        generation: 0,
+        mcp_servers: vec![],
+    });
+    connection
+        .execute(
+            "UPDATE subagent_sessions SET record_json=?2 WHERE child_session_id=?1",
+            params![child.id, serde_json::to_string(&launch).unwrap()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut state = load_state_from(&path).unwrap();
+    let published = serde_json::to_value(&state).unwrap();
+    let metadata = &published["subagents"][&child.id];
+    assert!(metadata.get("initial_prompt").is_none());
+    assert!(metadata.get("reviewer_launch").is_none());
+    state.subagents.get_mut(&child.id).unwrap().noticed_turn = Some(42);
+    save_state_to(&path, &state).unwrap();
+
+    let connection = open_reader(&path).unwrap();
+    let json: String = connection
+        .query_row(
+            "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+            [&child.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let reloaded: mj_core::subagent::SubagentRecord = serde_json::from_str(&json).unwrap();
+    launch.noticed_turn = Some(42);
+    assert_eq!(
+        reloaded, launch,
+        "metadata edits must retain every durable launch field"
+    );
 }
 
 thread_local! {
@@ -5295,6 +5374,15 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.sqlite3");
         let (_parent, child) = subagent_pair(&path);
+        let launch_json: String = open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+                [&child.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let launch: mj_core::subagent::SubagentRecord = serde_json::from_str(&launch_json).unwrap();
         let mut with_child = load_state_from(&path).unwrap();
         with_child
             .mount_history
@@ -5317,6 +5405,9 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
             *hook.borrow_mut() = Some(Box::new(move || {
                 // Commit a real creation/deletion between the reader's queries.
                 // WAL permits this while a read transaction remains open.
+                if creating_child {
+                    register_test_subagent(&writer_path, &child, &launch).unwrap();
+                }
                 save_state_to(&writer_path, &committed).unwrap();
                 let writer = open(&writer_path).unwrap();
                 let violations: i64 = writer

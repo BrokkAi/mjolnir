@@ -17,6 +17,7 @@ mod go;
 mod hints;
 mod import;
 mod logging;
+mod node;
 mod pollers;
 mod session_presentation;
 mod simple;
@@ -101,6 +102,9 @@ enum Command {
     /// Internal persistent controller process.
     #[command(hide = true)]
     DaemonRun,
+    /// Internal process that runs the daemon's work on this computer.
+    #[command(hide = true)]
+    Node,
     /// Serve the Agent Client Protocol on standard input and output, running
     /// each session it creates through this daemon.
     Acp(acp::AcpArgs),
@@ -808,7 +812,7 @@ fn install_panic_logging() {
 /// short CLI invocations never push a long-running process's log out of it.
 fn process_kind(command: Option<&Command>) -> logging::ProcessKind {
     match command {
-        Some(Command::DaemonRun) => logging::ProcessKind::Daemon,
+        Some(Command::DaemonRun) | Some(Command::Node) => logging::ProcessKind::Daemon,
         None
         | Some(Command::Go(_))
         | Some(Command::Simple(_))
@@ -828,6 +832,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::DesktopBootstrap) => "desktop-bootstrap",
         Some(Command::Daemon(_)) => "daemon",
         Some(Command::DaemonRun) => "daemon-run",
+        Some(Command::Node) => "node",
         Some(Command::Acp(_)) => "acp",
         Some(Command::Doctor(_)) => "doctor",
         Some(Command::Setup(_)) => "setup",
@@ -999,6 +1004,7 @@ async fn run_command(
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
             .map(|()| DashboardExit::Normal),
+        Some(Command::Node) => node::run_node().await.map(|()| DashboardExit::Normal),
         Some(Command::Acp(args)) => {
             let Some(workspace) = args.workspace.or(requested_workspace) else {
                 return Err(workspace_required("mj acp").await);
@@ -1012,9 +1018,24 @@ async fn run_command(
                 .await
                 .map(|()| DashboardExit::Normal)
         }
-        Some(Command::Doctor(args)) => doctor(args).map(|()| DashboardExit::Normal),
-        Some(Command::Setup(args)) => setup(args).map(|()| DashboardExit::Normal),
+        Some(Command::Doctor(args)) => {
+            if daemon::container::exec_in_container(&container_forwarded_args()).await? {
+                return Ok(DashboardExit::Normal);
+            }
+            doctor(args).map(|()| DashboardExit::Normal)
+        }
+        Some(Command::Setup(args)) => {
+            if args.command.is_none()
+                && daemon::container::exec_in_container(&["setup".to_owned()]).await?
+            {
+                return Ok(DashboardExit::Normal);
+            }
+            setup(args).map(|()| DashboardExit::Normal)
+        }
         Some(Command::Import(args)) => {
+            if daemon::container::exec_in_container(&container_forwarded_args()).await? {
+                return Ok(DashboardExit::Normal);
+            }
             let workspace_id =
                 resolve_store_workspace(args.workspace().or(requested_workspace).as_deref())
                     .await?;
@@ -1085,7 +1106,27 @@ async fn run_command(
             println!("{}", serde_json::to_string_pretty(&sources)?);
             Ok(DashboardExit::Normal)
         }
-        Some(Command::Login(args)) => login(args).await.map(|()| DashboardExit::Normal),
+        Some(Command::Login(args)) => {
+            let mut forwarded = vec!["login".to_owned()];
+            if let Some(profile) = &args.profile {
+                forwarded.push("--profile".to_owned());
+                forwarded.push(profile.clone());
+            }
+            if args.setup_token {
+                forwarded.push("--setup-token".to_owned());
+            }
+            if let Some(method) = &args.method {
+                forwarded.push("--method".to_owned());
+                forwarded.push(method.clone());
+            }
+            if args.cli {
+                forwarded.push("--cli".to_owned());
+            }
+            if daemon::container::exec_in_container(&forwarded).await? {
+                return Ok(DashboardExit::Normal);
+            }
+            login(args).await.map(|()| DashboardExit::Normal)
+        }
         Some(Command::New(args)) => {
             let workspace = args.workspace.or(requested_workspace);
             api_commands::new_session(args, workspace)
@@ -1887,12 +1928,11 @@ async fn start_dashboard(
             .into_iter()
             .map(|listing| listing.workspace)
             .collect();
-        let startup = daemon.dashboard_startup(client_id.clone()).await?;
-        let config = tokio::task::spawn_blocking(mj_core::config::Config::load)
-            .await
-            .context("load configuration task failed")??;
+        let startup = daemon
+            .dashboard_startup(client_id.clone(), selected.clone())
+            .await?;
         Some(dashboard::LoadedDashboard::from_daemon(
-            &selected, &client_id, workspaces, startup, config,
+            &selected, &client_id, workspaces, startup,
         ))
     } else {
         None
@@ -1947,9 +1987,10 @@ pub(crate) async fn workspace_required(command: &str) -> anyhow::Error {
     anyhow::anyhow!(workspace_required_message(command, workspaces.as_deref()))
 }
 
-/// The workspaces as a running daemon lists them. Never starts a daemon, and
-/// never opens the store, which only the daemon may reach. `None` when no
-/// list could be read.
+/// The workspaces as a running daemon lists them or, when none runs and the
+/// daemon's store lives on this computer, as that store holds them. Never
+/// starts a daemon. `None` when no list could be read, which includes a store
+/// in a daemon container's volume.
 async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
     match daemon::connect_existing().await {
         Ok(mut daemon) => daemon
@@ -1965,12 +2006,38 @@ async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::
                 tracing::warn!(%error, "could not list workspaces for the refusal");
             })
             .ok(),
-        Err(error) if daemon::daemon_not_running(&error).is_some() => None,
+        Err(error) if daemon::daemon_not_running(&error).is_some() => {
+            tokio::task::spawn_blocking(stored_workspaces_on_this_computer)
+                .await
+                .ok()
+                .flatten()
+        }
         Err(error) => {
             tracing::warn!(%error, "could not reach the daemon to list workspaces");
             None
         }
     }
+}
+
+/// The workspaces in a host daemon's store, read while no daemon runs. Only
+/// a host placement has its store here; a container's is in its volume. A
+/// store that does not exist yet has none; one that cannot be read answers
+/// `None`.
+fn stored_workspaces_on_this_computer() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
+    let placement = mj_core::config::Config::load_from(&mj_core::config::config_path())
+        .map(|config| config.daemon.runtime)
+        .unwrap_or_default();
+    if placement.engine().is_some() {
+        return None;
+    }
+    if !mj_controller::database::database_path().exists() {
+        return Some(Vec::new());
+    }
+    mj_controller::database::list_workspaces()
+        .map_err(|error| {
+            tracing::warn!(%error, "could not read the workspaces from the store");
+        })
+        .ok()
 }
 
 /// Refuse a `--workspace` name that no workspace carries, before anything
@@ -2134,9 +2201,15 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 }
             };
             let status = daemon.status().await?;
+            let identity = daemon.identity().await?;
+            let location = match &identity.placement {
+                daemon::DaemonPlacement::Host => status.pid.to_string(),
+                daemon::DaemonPlacement::Container { name, .. } => {
+                    format!("in container {name}")
+                }
+            };
             println!(
-                "Mjolnir daemon {} (version {}) started {}; {} attached client{}; web viewer {}",
-                status.pid,
+                "Mjolnir daemon {location} (version {}) started {}; {} attached client{}; web viewer {}",
                 mj_client::build_identity::BuildIdentity::parse(&status.build_version)
                     .map_or_else(|_| status.build_version.clone(), |build| build.describe()),
                 status.started_at,
@@ -2149,19 +2222,25 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 status.phone_status
             );
             // Two builds can report the same version, so the version line
-            // cannot answer "is my rebuilt code running?". The executable file
-            // can, and it is the question a development restart turns on.
-            match daemon::daemon_runs_this_build(status.pid, &status.build_version)? {
+            // cannot answer "is my rebuilt code running?". The build identity
+            // the daemon reports can, and it is the question a development
+            // restart turns on.
+            match daemon::daemon_runs_this_build(&identity)? {
                 Some(true) => println!("This daemon runs this build."),
-                Some(false) => println!(
-                    "This daemon runs a different executable ({}) than this client ({}); \
-                     commands work, but code you rebuilt is not running. \
-                     Run `mj daemon restart` from this build.",
-                    daemon::describe_executable(
-                        daemon::process_executable_path(status.pid).as_deref()
-                    ),
-                    daemon::describe_executable(daemon::running_executable_path().as_deref()),
-                ),
+                Some(false) => {
+                    let daemon_build =
+                        mj_client::build_identity::BuildIdentity::parse(&identity.build_version)
+                            .map_or_else(
+                                |_| identity.build_version.clone(),
+                                |build| build.describe(),
+                            );
+                    println!(
+                        "This daemon runs build {daemon_build}, not this client's build ({}); \
+                         commands work, but code you rebuilt is not running. \
+                         Run `mj daemon restart` from this build.",
+                        mj_client::build_identity::this_build().describe()
+                    );
+                }
                 None => {}
             }
             if daemon.protocol_version() != daemon::PROTOCOL_VERSION {
@@ -2180,8 +2259,9 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             )?;
             if stop.suspend_sessions {
                 let stopped = suspend_all_sessions(stop.acknowledge_unpublished_work).await?;
-                let daemon = daemon::connect_management().await?;
-                daemon.stop_and_wait().await?;
+                let mut daemon = daemon::connect_management().await?;
+                daemon::stop_and_wait(&mut daemon).await?;
+                node::withdraw_endpoint();
                 match stopped {
                     0 => println!("Mjolnir daemon stopped; no sessions were active."),
                     1 => println!("Mjolnir daemon stopped after stopping its active session."),
@@ -2189,7 +2269,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 }
                 return Ok(());
             }
-            let daemon = match daemon::connect_management().await {
+            let mut daemon = match daemon::connect_management().await {
                 Ok(daemon) => daemon,
                 Err(error) if daemon::daemon_not_running(&error).is_some() => {
                     println!("Mjolnir daemon is already stopped.");
@@ -2197,7 +2277,8 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 }
                 Err(error) => return Err(error.context("Mjolnir daemon is not answering")),
             };
-            daemon.stop_and_wait().await?;
+            daemon::stop_and_wait(&mut daemon).await?;
+            node::withdraw_endpoint();
             println!(
                 "Mjolnir daemon stopped; detached workers remain active. \
                  `{}` suspends them too.",
@@ -2220,6 +2301,26 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The command line to replay inside a daemon container. The container is one
+/// instance already, so the host's `--instance` selector is removed; every
+/// other argument keeps its meaning.
+fn container_forwarded_args() -> Vec<String> {
+    let mut args = std::env::args().skip(1);
+    let mut forwarded = Vec::new();
+    while let Some(argument) = args.next() {
+        if argument == "-i" || argument == "--instance" {
+            let _ = args.next();
+            continue;
+        }
+        if argument.starts_with("--instance=") || (argument.starts_with("-i") && argument.len() > 2)
+        {
+            continue;
+        }
+        forwarded.push(argument);
+    }
+    forwarded
 }
 
 /// Run the harness's own interactive login against a profile's canonical home.

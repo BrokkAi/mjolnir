@@ -114,6 +114,14 @@ pub(crate) async fn apply_dashboard_action(
     action: DashboardAction,
 ) -> Result<()> {
     context.cancel_stale_path_input();
+    // A fast-start launch bypasses the new-session key, so it meets the Git
+    // identity check here.
+    let action = match action {
+        launch @ DashboardAction::GoLaunch { .. } => {
+            context.dashboard.gate_launch_on_git_identity(launch)
+        }
+        action => action,
+    };
     match action {
         DashboardAction::SetOperatorAway { away } => {
             let revision = context.dashboard.operator_presence_revision();
@@ -140,6 +148,35 @@ pub(crate) async fn apply_dashboard_action(
             );
         }
         DashboardAction::None => {}
+        DashboardAction::CheckGitIdentity => {
+            // The daemon reads Git in the environment its sessions inherit.
+            let updates = context.dashboard_io_tx.clone();
+            tokio::spawn(async move {
+                let result = async { daemon::connect_or_start().await?.git_identity().await }
+                    .await
+                    .map_err(|e: anyhow::Error| format!("{e:#}"));
+                report(
+                    "reading the Git identity",
+                    &updates,
+                    DashboardIoUpdate::GitIdentityChecked(result),
+                );
+            });
+        }
+        DashboardAction::SaveGitIdentity { name, email } => {
+            super::io::spawn_critical_async(
+                context.critical_operations.clone(),
+                "saving the Git identity",
+                context.dashboard_io_tx.clone(),
+                super::io::SAVE_ACK_TIMEOUT,
+                async move {
+                    daemon::connect_or_start()
+                        .await?
+                        .set_git_identity(name, email)
+                        .await
+                },
+                DashboardIoUpdate::GitIdentitySaved,
+            );
+        }
         DashboardAction::CopyNativeSessionId { native_session_id } => {
             context.copy_text(&native_session_id, "Copied session ID")?;
         }
@@ -175,11 +212,12 @@ pub(crate) async fn apply_dashboard_action(
                     recipe: recipe.clone(),
                 };
                 context.dashboard.set_notice("Preparing session…");
+                let config = context.controller.config.clone();
                 super::io::spawn_critical_io(
                     context.critical_operations.clone(),
                     "preparing fast-start session",
                     context.dashboard_io_tx.clone(),
-                    move || crate::go::resolve_recipe(&go.directory, recipe),
+                    move || crate::go::resolve_recipe(&config, &go.directory, recipe),
                     move |result| DashboardIoUpdate::GoPrepared {
                         workspace_id,
                         retry: Box::new(retry),
@@ -1243,12 +1281,13 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "repairing Git tracking",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let config = mj_core::config::Config::load()?;
-                    let bundle = config.bundles.get(&bundle_id).context("unknown bundle")?;
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(30));
-                    mj_core::local_git::apply_repository_remote_repairs(bundle, &repairs, &executor)
+                move |_cancelled| {
+                    mj_core::runtime::block_on(async {
+                        daemon::connect_or_start()
+                            .await?
+                            .repair_repository_remotes(bundle_id, repairs)
+                            .await
+                    })?
                 },
                 move |result| DashboardIoUpdate::RepositoryRemotesRepaired {
                     generation,
@@ -2307,6 +2346,8 @@ mod tests {
             token: "restart-test".into(),
             started_at: "test".into(),
             build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: crate::daemon::DaemonPlacement::Host,
         };
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();

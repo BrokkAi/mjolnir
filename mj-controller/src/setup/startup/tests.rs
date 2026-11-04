@@ -12,6 +12,7 @@ fn homes(directory: &Path, kinds: &[HarnessKind]) -> Vec<DiscoveredHome> {
         .map(|kind| DiscoveredHome {
             kind: *kind,
             path: directory.join(format!("custom-{}", kind.id())),
+            conventional: false,
             codex_profile: None,
             authenticated: false,
         })
@@ -212,6 +213,53 @@ fn every_launch_adds_newly_installed_agents_and_keeps_disabled_profiles_off() {
             .unwrap()
             .is_empty(),
         "the overlay's profile is not added again on the next launch"
+    );
+}
+
+// Hard-won: 1c14f7b9b: automatic detection added a managed harness's conventional home as a second profile.
+#[test]
+fn automatic_detection_leaves_a_configured_harness_conventional_home_alone() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let managed = homes(directory.path(), &[HarnessKind::Mimo]);
+    run_setup_with_discovery(
+        &path,
+        directory.path(),
+        false,
+        &|| false,
+        || {},
+        || Ok((managed, None)),
+    )
+    .unwrap()
+    .unwrap();
+
+    let conventional = DiscoveredHome {
+        kind: HarnessKind::Mimo,
+        path: directory.path().join(".mimocode"),
+        conventional: true,
+        codex_profile: None,
+        authenticated: true,
+    };
+    assert!(
+        add_profiles_for(&path, &[conventional], &|| false)
+            .unwrap()
+            .is_empty(),
+        "the harness's own conventional home is not a second installation"
+    );
+    assert_eq!(Config::load_from(&path).unwrap().profiles.len(), 1);
+
+    // A home named by the harness's own home variable is a distinct
+    // installation and is still added.
+    let named = DiscoveredHome {
+        kind: HarnessKind::Mimo,
+        path: directory.path().join("work/mimo"),
+        conventional: false,
+        codex_profile: None,
+        authenticated: true,
+    };
+    assert_eq!(
+        add_profiles_for(&path, &[named], &|| false).unwrap(),
+        ["mimo-2"]
     );
 }
 

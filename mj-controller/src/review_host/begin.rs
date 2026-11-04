@@ -122,6 +122,7 @@ impl HostState {
     pub(super) fn begin_push(
         &mut self,
         session_id: String,
+        path: Option<String>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     ) {
         let refusal = if !(self.config)(&session_id).is_push() {
@@ -163,6 +164,7 @@ impl HostState {
                     config,
                     cancelled.clone(),
                     mj_core::relay::CaptureScope::PushableCommits,
+                    path.map(|path| vec![std::path::PathBuf::from(path)]),
                 ),
             )
             .await;

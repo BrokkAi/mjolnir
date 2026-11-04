@@ -51,6 +51,8 @@ pub struct RelayAttachment {
 #[serde(rename_all = "snake_case")]
 pub enum ReviewerAction {
     CaptureDelta {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repositories: Option<Vec<std::path::PathBuf>>,
         #[serde(default)]
         scope: mj_core::relay::CaptureScope,
         baselines: std::collections::BTreeMap<std::path::PathBuf, String>,

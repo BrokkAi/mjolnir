@@ -89,8 +89,16 @@ impl RawDiffSummary {
 /// Whether any repository has something to review.
 #[must_use]
 pub fn has_changes(deltas: &[RepoDelta]) -> bool {
-    deltas.iter().any(|delta| !delta.patch.trim().is_empty()
-        || matches!((&delta.base_commit, &delta.head_commit), (Some(base), Some(head)) if base != head))
+    deltas.iter().any(|delta| {
+        !delta.patch.trim().is_empty()
+            || match (&delta.base_commit, &delta.head_commit) {
+                (Some(base), Some(head)) => base != head,
+                // Commits that share no history with any start point are new
+                // work even when they leave the tree empty.
+                (None, Some(_)) => true,
+                _ => false,
+            }
+    })
 }
 
 /// Every changed file with its added and removed line counts, one section per
@@ -157,6 +165,19 @@ pub fn captured_trees(deltas: &[RepoDelta]) -> BTreeMap<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commits_without_a_base_are_changes_even_with_an_empty_patch() {
+        let delta = |base: Option<&str>, head: Option<&str>| RepoDelta {
+            base_commit: base.map(str::to_owned),
+            head_commit: head.map(str::to_owned),
+            ..Default::default()
+        };
+        assert!(has_changes(&[delta(None, Some("head"))]));
+        assert!(has_changes(&[delta(Some("base"), Some("head"))]));
+        assert!(!has_changes(&[delta(Some("head"), Some("head"))]));
+        assert!(!has_changes(&[delta(None, None)]));
+    }
 
     const PATCH: &str = "diff --git a/one.rs b/one.rs\n\
         --- a/one.rs\n\

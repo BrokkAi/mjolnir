@@ -168,10 +168,10 @@ fn available_workspace_name<'a>(base: &str, names: impl Iterator<Item = &'a str>
 }
 
 pub(crate) fn resolve_recipe(
+    config: &Config,
     directory: &std::path::Path,
     mut recipe: GoRecipe,
-) -> Result<(Config, GoRecipe)> {
-    let mut config = Config::load()?;
+) -> Result<GoRecipe> {
     // The settings key is whatever `[keys]` says it is, so the advice names
     // the binding in force rather than a key that may have been rebound.
     let settings = config
@@ -205,15 +205,21 @@ pub(crate) fn resolve_recipe(
                 let source = directory
                     .to_str()
                     .context("repository path must be valid UTF-8")?;
-                let created =
-                    mj_controller::controller::create_bundle_from_sources(&[source.to_owned()])?;
-                config = created.config;
+                // The daemon owns the configuration, and project creation is a
+                // configuration write plus a catalog write. Ask it, rather
+                // than creating the bundle in this client.
+                let created = mj_core::runtime::block_on(async {
+                    crate::daemon::connect_or_start()
+                        .await?
+                        .create_project(vec![source.to_owned()])
+                        .await
+                })??;
                 recipe.bundle_id = Some(created.bundle_id);
             }
             recipe.create_managed_worktree = Some(false);
         }
     }
-    Ok((config, recipe))
+    Ok(recipe)
 }
 
 #[cfg(test)]

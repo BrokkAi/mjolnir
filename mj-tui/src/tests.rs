@@ -889,9 +889,8 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
     child.id = "child-session".into();
     child.session_title_override = Some("Inspect parser".into());
     child.state = SessionState::Stopped;
-    let relation = mj_core::subagent::SubagentRecord {
+    let relation = mj_core::subagent::SubagentMetadata {
         kind: mj_core::subagent::SubagentKind::Worker,
-        reviewer_launch: None,
         child_session_id: child.id.clone(),
         parent_session_id: parent.id.clone(),
         task_name: "Inspect parser".into(),
@@ -899,7 +898,6 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
         model: None,
         effort: None,
         working_directory: Default::default(),
-        initial_prompt: "Inspect the parser".into(),
         request_key: "request-1".into(),
         created_at: child.created_at.clone(),
         noticed_turn: None,
@@ -924,6 +922,25 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
         },
         BTreeMap::new(),
     );
+    // Opening a compact relationship assigns the conversation before row
+    // detail arrives. An intermediate refresh must retain that user choice.
+    let complete = (*dashboard.state).clone();
+    let mut compact = complete.clone();
+    compact.sessions.remove(&child.id);
+    dashboard.set_state(compact.clone());
+    dashboard.open_subagent_workspace(parent.id.clone());
+    assert_eq!(dashboard.current_session_id(), Some(child.id.as_str()));
+    dashboard.set_state(compact);
+    assert_eq!(dashboard.current_session_id(), Some(child.id.as_str()));
+    let mut parked = complete.clone();
+    parked.sessions.get_mut(&child.id).unwrap().state = SessionState::Parked;
+    dashboard.set_state(parked);
+    assert!(
+        dashboard.is_stopped_subagent(&child.id),
+        "parked children have no worker to attach to"
+    );
+    dashboard.set_state(complete);
+    assert_eq!(dashboard.current_session_id(), Some(child.id.as_str()));
     assert!(dashboard.is_stopped_subagent(&child.id));
     assert!(!dashboard.is_stopped_subagent(&parent.id));
     // The host empties a pane whose session this calls suspended, which
@@ -993,9 +1010,8 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
     let mut first_child = stopped_session();
     first_child.id = "first-child".into();
     first_child.state = SessionState::Running;
-    let first_relation = mj_core::subagent::SubagentRecord {
+    let first_relation = mj_core::subagent::SubagentMetadata {
         kind: mj_core::subagent::SubagentKind::Worker,
-        reviewer_launch: None,
         child_session_id: first_child.id.clone(),
         parent_session_id: parent.id.clone(),
         task_name: "First task".into(),
@@ -1003,7 +1019,6 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         model: None,
         effort: None,
         working_directory: Default::default(),
-        initial_prompt: "Do the first task".into(),
         request_key: "request-1".into(),
         created_at: first_child.created_at.clone(),
         noticed_turn: None,
@@ -1034,9 +1049,8 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
     let mut second_child = stopped_session();
     second_child.id = "second-child".into();
     second_child.state = SessionState::Running;
-    let second_relation = mj_core::subagent::SubagentRecord {
+    let second_relation = mj_core::subagent::SubagentMetadata {
         kind: mj_core::subagent::SubagentKind::Worker,
-        reviewer_launch: None,
         child_session_id: second_child.id.clone(),
         parent_session_id: parent.id.clone(),
         task_name: "Second task".into(),
@@ -1044,7 +1058,6 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         model: None,
         effort: None,
         working_directory: Default::default(),
-        initial_prompt: "Do the second task".into(),
         request_key: "request-2".into(),
         created_at: second_child.created_at.clone(),
         noticed_turn: None,
@@ -3049,9 +3062,8 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
         .insert(ancestor.id.clone(), ancestor.clone());
     dashboard.state.subagents.insert(
         parent.id.clone(),
-        mj_core::subagent::SubagentRecord {
+        mj_core::subagent::SubagentMetadata {
             kind: mj_core::subagent::SubagentKind::Worker,
-            reviewer_launch: None,
             child_session_id: parent.id.clone(),
             parent_session_id: ancestor.id.clone(),
             task_name: "managed owner".into(),
@@ -3059,7 +3071,6 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
             model: None,
             effort: None,
             working_directory: Default::default(),
-            initial_prompt: "inspect".into(),
             request_key: "request".into(),
             created_at: parent.created_at.clone(),
             noticed_turn: None,
