@@ -60,7 +60,7 @@ pub(crate) fn source(
         && let Some(config) = mj_core::codex_provider::ConfigFiles::read_with(
             &profile.home,
             profile.codex_profile.as_deref(),
-            |path| crate::host_fs::read_optional_sync(path),
+            crate::host_fs::read_optional_sync,
         )?
         .layer(&profile.home)?
     {

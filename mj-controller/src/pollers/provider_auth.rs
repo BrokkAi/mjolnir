@@ -34,7 +34,7 @@ impl ProviderAuthCache {
             let files = match mj_core::codex_provider::ConfigFiles::read_with(
                 &home,
                 overlay.as_deref(),
-                |path| crate::host_fs::read_optional_sync(path),
+                crate::host_fs::read_optional_sync,
             ) {
                 Ok(files) => files,
                 Err(error) => {
