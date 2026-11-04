@@ -7809,6 +7809,241 @@ async fn child_close_cancel_before_commit_leaves_it_running_and_allows_a_fresh_c
     exercise_child_close_with_a_nested_workspace(true).await;
 }
 
+// Hard-won: 413864386: a child close held daemon handoff for a nonanswering worker's five-minute hello.
+#[cfg(unix)]
+#[tokio::test]
+async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_final_journal() {
+    use crate::controller::checkpoint::tests::{
+        LATCH_RELAY_HOLD_COMMAND, LATCH_RELAY_HOLD_PATH, LATCH_RELAY_JOURNALS_BEFORE_CLOSE,
+        LATCH_RELAY_SESSION, LATE_HARNESS_NOTIFICATION,
+    };
+    use mj_core::subagent::{SubagentToolAction, SubagentToolRequest};
+    const NAME: &str =
+        "child_close_yields_handoff_and_replays_its_durable_request_with_the_final_journal";
+    const PHASE: &str = "MJ_TEST_CHILD_CLOSE_HANDOFF_PHASE";
+    const ROOT: &str = "MJ_TEST_CHILD_CLOSE_HANDOFF_ROOT";
+    let Ok(phase) = std::env::var(PHASE) else {
+        let directory = tempfile::tempdir().unwrap();
+        for phase in ["blocked", "recovery"] {
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(module_path!(), NAME),
+            )
+            .env(PHASE, phase)
+            .env(ROOT, directory.path())
+            .env(LATCH_RELAY_HOLD_COMMAND, "begin_checkpoint")
+            .env(
+                LATCH_RELAY_HOLD_PATH,
+                directory.path().join("recovery-hold"),
+            )
+            .env(LATCH_RELAY_JOURNALS_BEFORE_CLOSE, LATE_HARNESS_NOTIFICATION)
+            .env("MJ_INSTANCE", "child-close-handoff")
+            .isolated_store(directory.path())
+            .run();
+        }
+        return;
+    };
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
+    let worker_root = root.join(LATCH_RELAY_SESSION);
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let final_output = "journal output retained across daemon handoff ".repeat(4096);
+    let request = SubagentToolRequest {
+        request_id: "same-child-close-across-handoff".into(),
+        originating_command_id: None,
+        created_at_ms: 1234,
+        action: SubagentToolAction::CloseAgent {
+            child_session_id: LATCH_RELAY_SESSION.into(),
+        },
+    };
+    if phase == "blocked" {
+        seed_live_session(&root, &worker_root);
+        let mut journal =
+            mj_worker::relay::DurableRelay::open(&worker_root, LATCH_RELAY_SESSION, "1.0.0")
+                .unwrap();
+        journal
+            .record_observation(mj_core::relay::RelayObservation::Warning {
+                message: final_output,
+            })
+            .unwrap();
+        drop(journal);
+        let workspace = crate::database::create_workspace("Child close handoff").unwrap();
+        let parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+        crate::database::save_session(&parent).unwrap();
+        let mut child =
+            runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Running);
+        child.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        });
+        crate::database::save_subagent_session(
+            &child,
+            &runtime_test_subagent(LATCH_RELAY_SESSION, parent_id),
+        )
+        .unwrap();
+        let channels = crate::session_manager::spawn_session_manager().unwrap();
+        channels
+            .targets
+            .send(vec![crate::session_manager::RelaySessionTarget {
+                session_id: LATCH_RELAY_SESSION.into(),
+                spec: CommandSpec::new("sleep", ["600"]),
+                worker_recovery: None,
+                project_memory: None,
+            }])
+            .unwrap();
+        let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
+        let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+            channels.control.clone(),
+            &recovery.observer(),
+        );
+        let state = Arc::new(RuntimeState::new_with_controller_loader(
+            channels.control.clone(),
+            Controller::load().unwrap(),
+            recovery.observer(),
+            upgrades.observer(),
+            Vec::new(),
+            Controller::load,
+        ));
+        let backend = Arc::new(crate::server_runtime::api::ApiBackend::new(
+            channels.control.client(),
+            Arc::new({
+                let state = state.clone();
+                move |id| state.session_state(id)
+            }),
+            state.clone(),
+        ));
+        let pending = tokio::spawn(async move {
+            backend
+                .execute_subagent_tool_durable(parent_id.into(), request)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let yielded = state
+                    .owner()
+                    .lifecycle
+                    .get(LATCH_RELAY_SESSION)
+                    .is_some_and(|active| {
+                        active.is_running() && active.upgrade_work.lock().unwrap().is_none()
+                    });
+                if yielded {
+                    break;
+                }
+                assert!(
+                    !pending.is_finished(),
+                    "the unavailable worker must still be waiting"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the durable child close must release upgrade admission");
+        assert!(
+            crate::upgrade::gate().try_close(),
+            "{:?}",
+            crate::upgrade::active_labels()
+        );
+        // The daemon stops delegation delivery before interrupting lifecycles.
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(2), state.cancel_and_wait_lifecycles())
+            .await
+            .expect("shutdown must interrupt the pending relay lease")
+            .unwrap();
+        channels.shutdown.shutdown().await.unwrap();
+        let stored = crate::database::load_state().unwrap();
+        let child = &stored.sessions[LATCH_RELAY_SESSION];
+        assert_eq!(child.state, SessionState::Closing);
+        assert_eq!(
+            child.target,
+            Some(mj_core::state::TargetLocator::LocalBare {
+                worker_root: worker_root.clone(),
+            })
+        );
+        assert!(
+            child.public_error().is_none(),
+            "handoff is not a failed close"
+        );
+        assert!(
+            worker_root.exists(),
+            "the final journal must survive handoff"
+        );
+        assert!(
+            crate::database::load_delegation(parent_id, "same-child-close-across-handoff")
+                .unwrap()
+                .unwrap()
+                .1
+                .is_none()
+        );
+    } else {
+        let controller = Controller::load().unwrap();
+        assert!(interrupted_suspend_session_ids(&controller).contains(&LATCH_RELAY_SESSION.into()));
+        let (channels, state) = serve_live_session(&worker_root, false).await;
+        // Startup recovery and replay can arrive in either order. The
+        // lifecycle owner must coalesce the unkeyed recovery and keyed replay.
+        let recovering = tokio::spawn({
+            let state = state.clone();
+            async move { state.suspend_session(LATCH_RELAY_SESSION.into()).await }
+        });
+        let hold = root.join("recovery-hold");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !hold.with_extension("reached").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("recovery must reach the worker barrier");
+        let backend = Arc::new(crate::server_runtime::api::ApiBackend::new(
+            channels.control.client(),
+            Arc::new({
+                let state = state.clone();
+                move |id| state.session_state(id)
+            }),
+            state,
+        ));
+        let replaying = tokio::spawn({
+            let backend = backend.clone();
+            let request = request.clone();
+            async move {
+                backend
+                    .execute_subagent_tool_durable(parent_id.into(), request)
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !replaying.is_finished(),
+            "replay must join recovery rather than refuse it"
+        );
+        std::fs::write(hold.with_extension("release"), b"go").unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(30), replaying)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        recovering.await.unwrap().unwrap();
+        assert!(!closed.result.is_error, "{}", closed.result.message);
+        let repeated = backend
+            .execute_subagent_tool_durable(parent_id.into(), request)
+            .await
+            .unwrap();
+        assert_eq!(closed.result, repeated.result);
+        channels.shutdown.shutdown().await.unwrap();
+        let stored = crate::database::load_state().unwrap();
+        assert_eq!(
+            stored.sessions[LATCH_RELAY_SESSION].state,
+            SessionState::Stopped
+        );
+        assert!(!worker_root.exists());
+        let history = crate::database::load_materialized_session(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        assert!(
+            serde_json::to_string(&history)
+                .unwrap()
+                .contains(&final_output)
+        );
+    }
+}
+
 #[cfg(unix)]
 async fn exercise_child_close_with_a_nested_workspace(cancel_before_commit: bool) {
     use crate::controller::checkpoint::tests::{LATCH_RELAY_HOLD_PATH, LATCH_RELAY_SESSION};
