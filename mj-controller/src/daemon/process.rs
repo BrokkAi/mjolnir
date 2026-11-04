@@ -26,16 +26,18 @@ pub async fn run_daemon_process() -> Result<()> {
     // Checked before the store is locked so a bad value fails fast and leaves
     // no daemon state behind.
     let owner_pid = owner_pid_to_watch()?;
+    let cancellation = crate::termination::Coordinator::install().token();
     // Everything this process runs on the user's computer goes to its node.
     // Daemons that tests run inside their own process keep running commands
     // locally, because they never reach this line.
-    crate::node_registry::install_command_host()?;
+    crate::node_registry::install_command_host(cancellation.clone())?;
     let opening = Instant::now();
     let guard = ControllerStoreGuard::acquire()?;
     let database_writer = guard.start_database_writer()?;
     log_startup_phase("open the store", opening);
     let epilogue_started = AtomicBool::new(false);
-    let mut outcome = run_daemon_runtime(&epilogue_started, owner_pid).await;
+    let mut outcome = run_daemon_runtime(&epilogue_started, owner_pid, cancellation.clone()).await;
+    cancellation.cancel();
     crate::node_registry::registry().finish().await;
     if !epilogue_started.load(Ordering::Acquire) {
         // Initialization failed before the runtime-owned epilogue existed.
@@ -64,6 +66,7 @@ pub async fn run_daemon_process() -> Result<()> {
 pub(super) async fn run_daemon_runtime(
     epilogue_started: &AtomicBool,
     owner_pid: Option<u32>,
+    cancellation: CancellationToken,
 ) -> Result<()> {
     let progress = super::diagnostics::DaemonProgressMonitor::start()?;
     // Before this daemon can start a checkpoint, so every checkpoint file older
@@ -188,7 +191,6 @@ pub(super) async fn run_daemon_runtime(
             .map(|target| target.session_id.clone())
             .collect(),
     );
-    let cancellation = crate::termination::Coordinator::install().token();
     let apple_container_startup = spawn_apple_container_startup(
         state.clone(),
         cancellation.clone(),

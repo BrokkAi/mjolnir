@@ -895,6 +895,7 @@ pub struct NodeOutput {
 pub struct NodeCommandHost {
     slot: tokio::sync::watch::Receiver<Option<NodeClient>>,
     runtime: tokio::runtime::Handle,
+    shutdown: tokio_util::sync::CancellationToken,
 }
 
 /// The connected node, or `None` between connections. The daemon's registry
@@ -909,16 +910,38 @@ impl NodeCommandHost {
     pub fn new(
         slot: tokio::sync::watch::Receiver<Option<NodeClient>>,
         runtime: tokio::runtime::Handle,
+        shutdown: tokio_util::sync::CancellationToken,
     ) -> Self {
-        Self { slot, runtime }
+        Self {
+            slot,
+            runtime,
+            shutdown,
+        }
     }
 
     async fn connected(&self) -> Result<NodeClient> {
         let mut slot = self.slot.clone();
-        let waited = tokio::time::timeout(NODE_CONNECT_WAIT, slot.wait_for(Option::is_some)).await;
+        let connected = async {
+            loop {
+                // Cleanup may still use a connected node during shutdown,
+                // but must never wait for an absent node to arrive.
+                if let Some(client) = slot.borrow_and_update().clone() {
+                    return Ok(client);
+                }
+                tokio::select! {
+                    biased;
+                    () = self.shutdown.cancelled() => {
+                        bail!("daemon shutdown cancelled the wait for a node connection");
+                    }
+                    changed = slot.changed() => {
+                        changed.context("the daemon's node registry has stopped")?;
+                    }
+                }
+            }
+        };
+        let waited = tokio::time::timeout(NODE_CONNECT_WAIT, connected).await;
         match waited {
-            Ok(Ok(client)) => Ok(client.clone().expect("waited for a node")),
-            Ok(Err(_)) => bail!("the daemon's node registry has stopped"),
+            Ok(result) => result,
             Err(_) => bail!(
                 "no node from this computer is connected, so nothing can run here; \
                  `mj` starts one beside the daemon"
@@ -1095,7 +1118,11 @@ mod tests {
 
         let client = connected().await;
         let (slot, receiver) = tokio::sync::watch::channel(Some(client));
-        let host = NodeCommandHost::new(receiver, tokio::runtime::Handle::current());
+        let host = NodeCommandHost::new(
+            receiver,
+            tokio::runtime::Handle::current(),
+            tokio_util::sync::CancellationToken::new(),
+        );
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("grandchild");
         let script = format!(
@@ -1140,10 +1167,18 @@ mod tests {
 
         let client = connected().await;
         let (_slot, receiver) = tokio::sync::watch::channel(Some(client));
-        let host = NodeCommandHost::new(receiver, tokio::runtime::Handle::current());
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let host = NodeCommandHost::new(
+            receiver,
+            tokio::runtime::Handle::current(),
+            shutdown.clone(),
+        );
         let errors = tokio::task::spawn_blocking(move || {
             let command = CommandSpec::new("/nonexistent/podman", ["ps"]);
             let closed = host.run(&command, None, &|| false);
+            // Shutdown stops waiting for an absent node, while cleanup on
+            // the already connected node still reports its own result.
+            shutdown.cancel();
             let mut input = std::io::Cursor::new(vec![0u8; 1_000_000]);
             let streamed = host.run(&command, Some(&mut input), &|| false);
             [closed, streamed]

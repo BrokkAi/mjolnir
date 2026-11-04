@@ -42,10 +42,11 @@ pub fn registry() -> &'static Arc<NodeRegistry> {
 /// Route every command this daemon process runs to its node. Called once by
 /// the `mj daemon-run` process before it runs any command; daemons that tests
 /// run inside their own process keep running commands locally.
-pub fn install_command_host() -> Result<()> {
+pub fn install_command_host(shutdown: tokio_util::sync::CancellationToken) -> Result<()> {
     let host = NodeCommandHost::new(
         registry().slot.subscribe(),
         tokio::runtime::Handle::current(),
+        shutdown,
     );
     mj_core::targets::install_command_host(Arc::new(host))
 }
