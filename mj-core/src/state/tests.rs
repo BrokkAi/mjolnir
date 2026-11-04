@@ -405,6 +405,7 @@ fn sample_config() -> Config {
         notify: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
+        sidebar_size: Default::default(),
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),

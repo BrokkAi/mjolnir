@@ -788,6 +788,8 @@ fn discard_legacy_startup<'de, D: serde::Deserializer<'de>>(
 #[serde(into = "StoredConfig", try_from = "StoredConfig")]
 pub struct Config {
     pub sessions_side: SessionsSide,
+    /// Shared Sessions sidebar size, independent of the selected workspace.
+    pub sidebar_size: crate::workspace::PaneSize,
     pub advanced: AdvancedConfig,
     pub notify: NotifyConfig,
     pub version: u32,
@@ -834,6 +836,11 @@ struct StoredConfig {
     show_stopped_sessions: bool,
     #[serde(default, skip_serializing_if = "SessionsSide::is_default")]
     sessions_side: SessionsSide,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::workspace::PaneSize::is_default"
+    )]
+    sidebar_size: crate::workspace::PaneSize,
     #[serde(default, skip_serializing_if = "AdvancedConfig::is_default")]
     advanced: AdvancedConfig,
     #[serde(default, skip_serializing_if = "NotifyConfig::is_default")]
@@ -1033,6 +1040,7 @@ impl TryFrom<StoredConfig> for Config {
         let StoredConfig {
             show_stopped_sessions: _,
             sessions_side,
+            sidebar_size,
             advanced,
             notify,
             version,
@@ -1118,6 +1126,7 @@ impl TryFrom<StoredConfig> for Config {
         }
         Ok(Self {
             sessions_side,
+            sidebar_size,
             advanced,
             notify,
             // Versions 1 through 19 acquire this build's defaults in memory
@@ -1181,6 +1190,7 @@ impl From<Config> for StoredConfig {
         Self {
             show_stopped_sessions: false,
             sessions_side: config.sessions_side,
+            sidebar_size: config.sidebar_size,
             advanced: config.advanced,
             notify: config.notify,
             version: config.version,
@@ -1211,6 +1221,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             sessions_side: SessionsSide::default(),
+            sidebar_size: crate::workspace::PaneSize::default(),
             advanced: AdvancedConfig::default(),
             notify: NotifyConfig::default(),
             version: CONFIG_VERSION,

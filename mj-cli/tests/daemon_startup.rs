@@ -1207,6 +1207,7 @@ fn acp_with_an_unknown_workspace_refuses_at_start_when_a_daemon_is_running() {
 /// every daemon runs one at startup, so the handoff must go ahead while one is
 /// parked mid-pass, and the old daemon must exit without finishing it.
 // Hard-won: c87e5e887f: A live handoff took over 23 seconds because SessionWiki sync held admission; this checks the deferrable sync no longer delays handoff.
+// Hard-won: 3b15d8840: store release can precede the old process's final shutdown.
 #[test]
 fn a_handoff_does_not_wait_for_a_sessionwiki_sync_in_flight() {
     use std::time::{Duration, Instant, SystemTime};
@@ -1260,6 +1261,17 @@ fn a_handoff_does_not_wait_for_a_sessionwiki_sync_in_flight() {
     let mut new_client = upgrade_command(&storage);
     new_client.env("HOME", &home);
     let (status, log) = run_client_with_deadline(&mut new_client, &storage.path().join("new.log"));
+    // Store release admits the new daemon before the old runtime finishes
+    // shutting down. Keep the sync parked until that process has exited.
+    let old_exited = loop {
+        if !common::process_exists(old.pid) {
+            break true;
+        }
+        if started.elapsed() >= Duration::from_secs(30) {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
     let took = started.elapsed();
     // Release the parked pass whatever happened, so nothing waits on it.
     fs::write(hooks.join("sessionwiki_sync_pass.continue"), "").unwrap();
@@ -1276,7 +1288,7 @@ fn a_handoff_does_not_wait_for_a_sessionwiki_sync_in_flight() {
         serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
     assert_ne!(new.pid, old.pid);
     assert!(
-        !common::process_exists(old.pid),
+        old_exited,
         "the old daemon exited without finishing its sync"
     );
 }

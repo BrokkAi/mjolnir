@@ -296,7 +296,7 @@ impl DashboardState {
                 self.quota_scroll.set(view.quota_scroll);
                 self.capacity_index = view.capacity_index;
                 self.quota_index = view.quota_index;
-                self.pane_sizes = view.pane_sizes;
+                self.restore_workspace_pane_sizes(view.pane_sizes);
                 self.restore_conversation_layout(&view.conversation_layout);
                 *self.collapsed_project_keys = view.collapsed_project_keys;
                 self.focus = view.focus;
@@ -306,7 +306,7 @@ impl DashboardState {
                 self.quota_scroll.set(0);
                 self.capacity_index = 0;
                 self.quota_index = 0;
-                self.pane_sizes = PaneSizes::default();
+                self.restore_workspace_pane_sizes(PaneSizes::default());
                 self.reset_conversation_layout();
                 if let Some(session) = self
                     .go
@@ -324,7 +324,7 @@ impl DashboardState {
             self.quota_scroll.set(0);
             self.capacity_index = 0;
             self.quota_index = 0;
-            self.pane_sizes = PaneSizes::default();
+            self.restore_workspace_pane_sizes(PaneSizes::default());
             self.reset_conversation_layout();
             self.collapsed_project_keys.clear();
             self.focus = Focus::Sessions;
@@ -372,7 +372,7 @@ impl DashboardState {
             return;
         }
         if self.active_workspace_id.as_deref() == Some(workspace_id) {
-            self.pane_sizes = sizes;
+            self.restore_workspace_pane_sizes(sizes);
             self.clamp_selections();
         }
         self.workspace_views
@@ -402,6 +402,8 @@ impl DashboardState {
 
     pub(crate) fn clear_workspace_tab_areas(&mut self) {
         self.workspace_tab_areas.clear();
+        self.workspace_dropdown_area = None;
+        self.workspace_scroll_geometry = None;
         self.workspace_hamburger_area = None;
         self.subagent_workspace_close_area = None;
     }

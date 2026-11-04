@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use mj_chat::components::{
     ChoiceList, ColumnAlign, ColumnSplit, ControlKind, Dialog, Interaction, TextField,
+    render_scrollbar, scrollbar_geometry,
 };
 use mj_chat::selection::FrameSurfaces;
 use mj_chat::text_input::TextInput;
@@ -416,6 +417,14 @@ impl DashboardState {
             self.record_event_handled();
             return Some(DashboardAction::ExitSubagentWorkspace);
         }
+        if self.workspace_dropdown_area.is_some()
+            && self.workspace_control_focus == WorkspaceControlFocus::Tabs
+            && matches!(key.code, KeyCode::Enter | KeyCode::Char(' '))
+        {
+            self.begin_workspace_dropdown();
+            self.record_event_handled();
+            return Some(DashboardAction::None);
+        }
         // The tab row is horizontal, so Up/Down carry the same meaning as
         // Left/Right everywhere in this pane.
         let key = match key.code {
@@ -487,6 +496,17 @@ impl DashboardState {
                 Some(self.select_adjacent_workspace(-1))
             }
             _ => None,
+        }
+    }
+
+    pub(crate) fn scroll_workspaces(&mut self, delta: isize) {
+        if let Some((rows, visible)) = self.workspace_scroll_geometry {
+            self.workspace_scroll.set(
+                self.workspace_scroll
+                    .get()
+                    .saturating_add_signed(delta)
+                    .min(rows.saturating_sub(visible)),
+            );
         }
     }
 
@@ -963,6 +983,14 @@ pub(crate) fn workspace_tab_click(
     row: u16,
 ) -> Option<DashboardAction> {
     if dashboard
+        .workspace_dropdown_area
+        .is_some_and(|area| area.contains((column, row).into()))
+    {
+        dashboard.begin_workspace_dropdown();
+        dashboard.record_event_handled();
+        return Some(DashboardAction::None);
+    }
+    if dashboard
         .subagent_workspace_close_area
         .is_some_and(|area| area.contains(ratatui::layout::Position::new(column, row)))
     {
@@ -1000,14 +1028,87 @@ const WORKSPACES_TITLE: &str = " Workspaces ";
 /// The two rounded corners a bordered title row cannot draw into.
 const BORDER_CORNER_CELLS: usize = 2;
 
-/// Draws the bordered workspace list and records its hitboxes for the next
-/// mouse event. The selected tab is kept visible when the list is wider than
-/// the pane, and every visible label retains one cell of padding on either
-/// side.
+const WORKSPACE_MAX_ROWS: usize = 5;
+const WORKSPACE_MENU_WIDTH: u16 = 3;
+
+struct WorkspaceTabs {
+    ids: Vec<String>,
+    labels: Vec<String>,
+    badges: Vec<Option<Span<'static>>>,
+    /// (workspace index, content row, column, cell width).
+    cells: Vec<(usize, usize, u16, u16)>,
+    rows: usize,
+}
+
+impl WorkspaceTabs {
+    fn new(dashboard: &DashboardState, width: u16) -> Self {
+        let ids = dashboard.workspace_ids();
+        let labels = ids
+            .iter()
+            .map(|id| dashboard.workspace_display_name(id).to_owned())
+            .collect::<Vec<_>>();
+        let badges = ids
+            .iter()
+            .map(|id| {
+                crate::render::sessions::attention_badge(dashboard.workspace_attention_summary(id))
+            })
+            .collect::<Vec<_>>();
+        let mut cells = Vec::new();
+        let mut row = 0;
+        let mut x = 0;
+        if width > 0 {
+            for (index, (label, badge)) in labels.iter().zip(&badges).enumerate() {
+                let desired = Line::raw(format!(" {label} ")).width()
+                    + badge.as_ref().map_or(0, |badge| badge.width());
+                let cell_width = u16::try_from(desired).unwrap_or(u16::MAX).min(width);
+                if x > 0 && cell_width > width.saturating_sub(x) {
+                    row += 1;
+                    x = 0;
+                }
+                cells.push((index, row, x, cell_width));
+                x += cell_width;
+            }
+        }
+        let rows = if cells.is_empty() { 1 } else { row + 1 };
+        Self {
+            ids,
+            labels,
+            badges,
+            cells,
+            rows,
+        }
+    }
+
+    fn fitting(dashboard: &DashboardState, width: u16, visible: usize) -> Self {
+        let tabs = Self::new(dashboard, width);
+        if tabs.rows > visible {
+            Self::new(dashboard, width.saturating_sub(1))
+        } else {
+            tabs
+        }
+    }
+}
+
+pub(crate) fn workspace_pane_height(dashboard: &DashboardState, width: u16) -> u16 {
+    if dashboard.pane_size(crate::SupportPane::Sessions) == crate::PaneSize::Minimized
+        || dashboard.subagent_parent_id().is_some()
+    {
+        return 3;
+    }
+    let tabs = WorkspaceTabs::fitting(
+        dashboard,
+        width.saturating_sub(2 + WORKSPACE_MENU_WIDTH),
+        WORKSPACE_MAX_ROWS,
+    );
+    tabs.rows.min(WORKSPACE_MAX_ROWS) as u16 + 2
+}
+
+/// Draw the workspace rows using the same cell layout used to measure them.
 pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &mut DashboardState) {
     dashboard.clear_workspace_tab_areas();
     dashboard.workspace_pane_area = (area.height > 0 && area.width > 0).then_some(area);
     if area.height == 0 || area.width == 0 {
+        dashboard.workspace_scrollbar.clear();
         return;
     }
     let focused = dashboard.focus() == crate::Focus::Workspaces;
@@ -1038,9 +1139,11 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
+        dashboard.workspace_scrollbar.clear();
         return;
     }
     if let Some(parent_id) = dashboard.subagent_parent_id().map(str::to_owned) {
+        dashboard.workspace_scrollbar.clear();
         let title = dashboard
             .state
             .sessions
@@ -1086,52 +1189,101 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         crate::surface_controls::render_workspace_menu(frame, menu_area, dashboard);
     }
     let tabs_width = inner.width.saturating_sub(menu_width);
-    let tabs_area = Rect::new(inner.x, inner.y, tabs_width, 1);
-    let ids = dashboard.workspace_ids();
-    let labels = ids
-        .iter()
-        .map(|id| dashboard.workspace_display_name(id).to_owned())
-        .collect::<Vec<_>>();
-    let badges = ids
-        .iter()
-        .map(|id| {
-            crate::render::sessions::attention_badge(dashboard.workspace_attention_summary(id))
-        })
-        .collect::<Vec<_>>();
-    let widths = labels
-        .iter()
-        .zip(&badges)
-        .map(|(label, badge)| {
-            Line::raw(format!(" {label} ")).width()
-                + badge.as_ref().map_or(0, |badge| badge.width())
-        })
-        .collect::<Vec<_>>();
-    let selected = ids
+    if dashboard.pane_size(crate::SupportPane::Sessions) == crate::PaneSize::Minimized {
+        let ids = dashboard.workspace_ids();
+        if let Some(id) = ids
+            .iter()
+            .find(|id| Some(id.as_str()) == dashboard.active_workspace_id())
+            .or_else(|| ids.first())
+        {
+            let tabs_area = Rect::new(inner.x, inner.y, tabs_width, 1);
+            dashboard.workspace_dropdown_area = Some(tabs_area);
+            let label_width = tabs_width.saturating_sub(2);
+            let mut line = workspace_tab_line(
+                dashboard.workspace_display_name(id),
+                crate::render::sessions::attention_badge(dashboard.workspace_attention_summary(id)),
+                label_width,
+                theme::active_control(),
+            );
+            line.spans.push(Span::styled(
+                format!("{} ", theme::glyphs().dropdown),
+                theme::actionable(),
+            ));
+            frame.render_widget(Paragraph::new(line), tabs_area);
+        }
+        dashboard.workspace_scrollbar.clear();
+        return;
+    }
+    let visible = usize::from(inner.height);
+    let tabs = WorkspaceTabs::fitting(dashboard, tabs_width, visible);
+    let selected = tabs
+        .ids
         .iter()
         .position(|id| Some(id.as_str()) == dashboard.active_workspace_id())
         .unwrap_or(0);
-    let mut first = 0;
-    let mut selected_width = widths.iter().take(selected + 1).sum::<usize>();
-    while first < selected && selected_width > usize::from(tabs_area.width) {
-        selected_width = selected_width.saturating_sub(widths[first]);
-        first += 1;
-    }
-    let mut x = tabs_area.x;
-    for (index, id) in ids.iter().enumerate().skip(first) {
-        let width = widths[index].min(usize::from(tabs_area.right().saturating_sub(x))) as u16;
-        if width == 0 {
-            break;
+    let selected_row = tabs
+        .cells
+        .iter()
+        .find(|(index, _, _, _)| *index == selected)
+        .map_or(0, |(_, row, _, _)| *row);
+    let selection_layout = tabs
+        .ids
+        .get(selected)
+        .map(|id| (id.clone(), selected_row, tabs_width, inner.height));
+    let mut first = dashboard
+        .workspace_scroll
+        .get()
+        .min(tabs.rows.saturating_sub(visible));
+    // Scrolling may intentionally hide the active workspace. Reveal it only
+    // when selection or layout changes, not on every redraw after the wheel.
+    if dashboard.workspace_scroll_selected != selection_layout {
+        if selected_row < first {
+            first = selected_row;
         }
-        let tab_area = Rect::new(x, inner.y, width, 1);
-        dashboard.register_workspace_tab_area(id.clone(), tab_area);
-        let style = if index == selected {
+        if selected_row >= first + visible {
+            first = selected_row + 1 - visible;
+        }
+    }
+    dashboard.workspace_scroll_selected = selection_layout;
+    dashboard.workspace_scroll.set(first);
+    dashboard.workspace_scroll_geometry = Some((tabs.rows, visible));
+    for (index, row, x, width) in &tabs.cells {
+        if *row < first || *row >= first + visible {
+            continue;
+        }
+        let tab_area = Rect::new(inner.x + x, inner.y + (row - first) as u16, *width, 1);
+        dashboard.register_workspace_tab_area(tabs.ids[*index].clone(), tab_area);
+        let style = if *index == selected {
             theme::active_control()
         } else {
             theme::actionable()
         };
-        let line = workspace_tab_line(&labels[index], badges[index].clone(), width, style);
+        let line = workspace_tab_line(
+            &tabs.labels[*index],
+            tabs.badges[*index].clone(),
+            *width,
+            style,
+        );
         frame.render_widget(Paragraph::new(line), tab_area);
-        x = x.saturating_add(width);
+    }
+    let geometry = (tabs.rows > visible)
+        .then(|| {
+            scrollbar_geometry(
+                Rect::new(
+                    inner.x + tabs_width.saturating_sub(1),
+                    inner.y,
+                    1,
+                    inner.height,
+                ),
+                tabs.rows,
+                first,
+                visible,
+            )
+        })
+        .flatten();
+    dashboard.workspace_scrollbar.set_geometry(geometry);
+    if let Some(geometry) = geometry {
+        render_scrollbar(frame, geometry);
     }
 }
 

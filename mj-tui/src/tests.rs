@@ -1371,16 +1371,20 @@ fn workspace_switch_restores_selection_and_pane_layout_without_losing_local_edit
     dashboard.cache_workspace_pane_sizes(
         "remote-workspace",
         PaneSizes {
-            sessions: PaneSize::Maximized,
-            targets: PaneSize::Standard,
+            sessions: PaneSize::Standard,
+            targets: PaneSize::Maximized,
             quota: PaneSize::Standard,
         },
     );
     dashboard.set_active_workspace(Some("remote-workspace".into()));
     dashboard.select_active_session("remote");
     assert_eq!(
-        dashboard.pane_size(SupportPane::Sessions),
+        dashboard.pane_size(SupportPane::Targets),
         PaneSize::Maximized
+    );
+    assert_eq!(
+        dashboard.pane_size(SupportPane::Sessions),
+        PaneSize::Minimized
     );
     dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Standard);
     dashboard.cache_workspace_pane_sizes(
@@ -1400,7 +1404,28 @@ fn workspace_switch_restores_selection_and_pane_layout_without_losing_local_edit
     assert_eq!(dashboard.selected_session_id(), Some("local"));
     assert_eq!(
         dashboard.pane_size(SupportPane::Sessions),
-        PaneSize::Minimized
+        PaneSize::Standard
+    );
+    dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
+    dashboard.set_active_workspace(Some("remote-workspace".into()));
+    assert_eq!(
+        dashboard.pane_size(SupportPane::Sessions),
+        PaneSize::Maximized
+    );
+    assert_eq!(
+        dashboard.pane_size(SupportPane::Targets),
+        PaneSize::Standard
+    );
+    dashboard.pane_sizes().validate().unwrap();
+    dashboard.set_active_workspace(Some("new-workspace".into()));
+    assert_eq!(
+        dashboard.pane_size(SupportPane::Sessions),
+        PaneSize::Maximized
+    );
+    dashboard.set_active_workspace(None);
+    assert_eq!(
+        dashboard.pane_size(SupportPane::Sessions),
+        PaneSize::Maximized
     );
 }
 
@@ -2621,6 +2646,45 @@ fn golden_attention_navigation() {
         .find(|line| line.contains("done ✓1"))
         .expect("unread badge on folded heading");
     writeln!(output, "folded heading: {heading}").expect("write folded heading");
+
+    let mut dropdown = dashboard_with_attention_mix();
+    dropdown.set_active_workspace(Some("default".into()));
+    dropdown.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
+    drawn(&mut dropdown, 120, 40);
+    chord(&mut dropdown, CommandId::FocusWorkspaces);
+    dropdown.handle_key(key(KeyCode::Enter));
+    // Hard-won: f82d5aa4b: the tiny workspace dropdown hid attention in inactive workspaces.
+    let lines = append_attention_state(
+        &mut output,
+        "tiny workspace dropdown shows current and inactive attention",
+        &mut dropdown,
+        120,
+        40,
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("!1 Default (current)"))
+    );
+    assert!(lines.iter().any(|line| line.contains("!1 Other")));
+    dropdown.state.sessions.get_mut("remote").unwrap().state = SessionState::Error;
+    let lines = append_attention_state(
+        &mut output,
+        "open workspace dropdown updates an inactive failure badge",
+        &mut dropdown,
+        120,
+        40,
+    );
+    assert!(lines.iter().any(|line| line.contains("×1 Other")));
+    dropdown.handle_key(key(KeyCode::Down));
+    let action = dropdown.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        action,
+        DashboardAction::SelectWorkspace {
+            workspace_id: "other".into()
+        }
+    );
+    writeln!(output, "attention dropdown action: {action:?}").unwrap();
 
     let mut priority = dashboard_with_attention_mix();
     priority.set_active_workspace(Some("default".into()));

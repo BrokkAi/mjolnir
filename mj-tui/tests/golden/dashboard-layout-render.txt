@@ -67,7 +67,7 @@ standard transcript area at height 32: Rect { x: 40, y: 0, width: 80, height: 18
 compact pane preset action: None
 === compact panes at height 32 (120x32) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default        ≡ ││                                                                                                  │
+│ default ▾      ≡ ││                                                                                                  │
 ╰──────────────────╯│                                                                                                  │
 ╭Sessi…─ ▁   ▄   □ ╮│                                                                                                  │
 │ Create   Open    ││                                                                                                  │
@@ -183,7 +183,7 @@ standard transcript area at height 44: Rect { x: 40, y: 0, width: 80, height: 30
 compact pane preset action: None
 === compact panes at height 44 (120x44) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default        ≡ ││                                                                                                  │
+│ default ▾      ≡ ││                                                                                                  │
 ╰──────────────────╯│                                                                                                  │
 ╭Sessi…─ ▁   ▄   □ ╮│                                                                                                  │
 │ Create   Open    ││                                                                                                  │

@@ -428,7 +428,7 @@ Sessions action row: "│ Create   Open   Filter: _____________│"; filter acti
 
 === minimized pane applies the filter while hiding the input (140x40) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default        ≡ ││                                                                                                                      │
+│ default ▾      ≡ ││                                                                                                                      │
 ╰──────────────────╯│                                                                                                                      │
 ╭ S ·  × ▁   ▄   □ ╮│                                                                                                                      │
 │ Create   Open    ││                                                                                                                      │

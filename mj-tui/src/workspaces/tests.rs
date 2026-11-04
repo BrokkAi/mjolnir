@@ -161,6 +161,134 @@ fn golden_workspace_manager_drafts() {
         &drawn(&mut dashboard, 110, 32),
     );
 
+    dashboard.mode = Mode::Dashboard;
+    let names = (0..24)
+        .map(|index| {
+            (
+                format!("workspace-{index}"),
+                format!("Project {index:02} 界"),
+            )
+        })
+        .collect();
+    dashboard.set_workspace_names(names);
+    dashboard.order_workspaces(
+        &(0..24)
+            .map(|index| format!("workspace-{index}"))
+            .collect::<Vec<_>>(),
+    );
+    dashboard.set_active_workspace(Some("workspace-0".into()));
+    for size in [crate::PaneSize::Standard, crate::PaneSize::Maximized] {
+        dashboard.set_pane_size(crate::SupportPane::Sessions, size);
+        let lines = drawn(&mut dashboard, 110, 32);
+        assert_eq!(dashboard.workspace_pane_area.unwrap().height, 7);
+        assert!(dashboard.workspace_scrollbar.geometry().is_some());
+        append_workspace_state(
+            &mut output,
+            &format!("five workspace rows in {size:?} sidebar"),
+            &lines,
+        );
+    }
+    let area = dashboard.workspace_pane_area.unwrap();
+    assert_eq!(
+        dashboard.handle_mouse(mouse_at(
+            MouseEventKind::ScrollDown,
+            (area.x + 1, area.y + 1)
+        )),
+        DashboardAction::None
+    );
+    let lines = drawn(&mut dashboard, 110, 32);
+    assert_eq!(dashboard.active_workspace_id(), Some("workspace-0"));
+    assert_eq!(dashboard.workspace_scroll.get(), 1);
+    append_workspace_state(
+        &mut output,
+        "wheel scrolls without switching workspaces",
+        &lines,
+    );
+    let scrollbar = dashboard.workspace_scrollbar.geometry().unwrap();
+    dashboard.handle_mouse(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        (scrollbar.track.x, scrollbar.track.bottom() - 1),
+    ));
+    dashboard.handle_mouse(mouse_at(
+        MouseEventKind::Up(MouseButton::Left),
+        (scrollbar.track.x, scrollbar.track.bottom() - 1),
+    ));
+    let lines = drawn(&mut dashboard, 110, 32);
+    assert_eq!(dashboard.workspace_scroll.get(), scrollbar.max_scroll);
+    append_workspace_state(
+        &mut output,
+        "scrollbar seeks to the final workspace rows",
+        &lines,
+    );
+    let scrollbar = dashboard.workspace_scrollbar.geometry().unwrap();
+    dashboard.handle_mouse(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        (scrollbar.thumb.x, scrollbar.thumb.y),
+    ));
+    let outside = (109, scrollbar.track.y);
+    let drag = mouse_at(MouseEventKind::Drag(MouseButton::Left), outside);
+    assert!(dashboard.component_handles_mouse(drag));
+    dashboard.handle_mouse(drag);
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), outside));
+    assert_eq!(dashboard.workspace_scroll.get(), 0);
+    dashboard.set_active_workspace(Some("workspace-23".into()));
+    let lines = drawn(&mut dashboard, 110, 32);
+    assert!(
+        dashboard
+            .workspace_tab_areas
+            .iter()
+            .any(|(id, _)| id == "workspace-23")
+    );
+    append_workspace_state(
+        &mut output,
+        "selecting the final workspace reveals it",
+        &lines,
+    );
+
+    dashboard.set_pane_size(crate::SupportPane::Sessions, crate::PaneSize::Minimized);
+    let lines = drawn(&mut dashboard, 110, 32);
+    assert_eq!(dashboard.workspace_pane_area.unwrap().height, 3);
+    assert!(dashboard.workspace_tab_areas.is_empty());
+    append_workspace_state(&mut output, "tiny workspace selector", &lines);
+    let area = dashboard.workspace_dropdown_area.unwrap();
+    dashboard.handle_mouse(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        (area.x + 1, area.y),
+    ));
+    let lines = drawn(&mut dashboard, 110, 32);
+    assert!(dashboard.pane_menu.is_some());
+    append_workspace_state(
+        &mut output,
+        "tiny selector opens the workspace dropdown",
+        &lines,
+    );
+    dashboard.handle_key(key(KeyCode::Home));
+    let action = dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        action,
+        DashboardAction::SelectWorkspace {
+            workspace_id: "workspace-0".into()
+        }
+    );
+    writeln!(output, "dropdown action: {action:?}").unwrap();
+    dashboard.set_active_workspace(Some("workspace-0".into()));
+    let lines = drawn(&mut dashboard, 110, 32);
+    append_workspace_state(
+        &mut output,
+        "tiny selector after choosing a workspace",
+        &lines,
+    );
+    dashboard.handle_key(key(KeyCode::Enter));
+    drawn(&mut dashboard, 110, 32);
+    assert!(dashboard.pane_menu.is_some());
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(dashboard.pane_menu.is_none());
+    writeln!(
+        output,
+        "Escape dismisses the dropdown without switching workspace"
+    )
+    .unwrap();
+
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),
         "workspace-manager-drafts",
@@ -207,27 +335,27 @@ fn tabs_scroll_to_the_selected_workspace_and_mouse_hits_unicode_labels() {
         ("c".into(), "Last workspace".into()),
     ]));
     dashboard.set_active_workspace(Some("b".into()));
-    let mut terminal = Terminal::new(TestBackend::new(24, 3)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(24, 5)).unwrap();
     terminal
-        .draw(|frame| render_workspace_tabs(frame, Rect::new(0, 0, 24, 3), &mut dashboard))
+        .draw(|frame| render_workspace_tabs(frame, Rect::new(0, 0, 24, 5), &mut dashboard))
         .unwrap();
     assert_eq!(
-        dashboard.workspace_tab_areas[0],
-        ("b".into(), Rect::new(1, 1, 6, 1))
+        dashboard.workspace_tab_areas[1],
+        ("b".into(), Rect::new(1, 2, 6, 1))
     );
     let buffer = terminal.backend().buffer();
-    assert_eq!(buffer[(1, 1)].symbol(), " ");
-    assert_eq!(buffer[(2, 1)].symbol(), "界");
-    assert_eq!(buffer[(4, 1)].symbol(), "界");
-    assert_eq!(buffer[(6, 1)].symbol(), " ");
-    assert_eq!(buffer[(1, 1)].bg, buffer[(6, 1)].bg);
+    assert_eq!(buffer[(1, 2)].symbol(), " ");
+    assert_eq!(buffer[(2, 2)].symbol(), "界");
+    assert_eq!(buffer[(4, 2)].symbol(), "界");
+    assert_eq!(buffer[(6, 2)].symbol(), " ");
+    assert_eq!(buffer[(1, 2)].bg, buffer[(6, 2)].bg);
     assert!(
-        matches!(workspace_tab_click(&mut dashboard, 8, 1), Some(DashboardAction::SelectWorkspace { workspace_id }) if workspace_id == "c")
+        matches!(workspace_tab_click(&mut dashboard, 2, 3), Some(DashboardAction::SelectWorkspace { workspace_id }) if workspace_id == "c")
     );
     assert_eq!(dashboard.focus(), crate::Focus::Workspaces);
     dashboard.set_active_workspace(Some("c".into()));
     terminal
-        .draw(|frame| render_workspace_tabs(frame, Rect::new(0, 0, 24, 3), &mut dashboard))
+        .draw(|frame| render_workspace_tabs(frame, Rect::new(0, 0, 24, 5), &mut dashboard))
         .unwrap();
     assert!(
         dashboard
@@ -236,7 +364,7 @@ fn tabs_scroll_to_the_selected_workspace_and_mouse_hits_unicode_labels() {
             .any(|(id, _)| id == "c")
     );
     let text = (0..24)
-        .map(|x| terminal.backend().buffer()[(x, 1)].symbol())
+        .map(|x| terminal.backend().buffer()[(x, 3)].symbol())
         .collect::<String>();
     assert!(text.contains("Last workspace"), "{text}");
 }
