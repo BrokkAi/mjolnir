@@ -259,6 +259,38 @@ impl SetupDialog {
         Ok(())
     }
 
+    /// Whether edits made on the person's behalf can join this dialog now:
+    /// not while they type a value, search, edit review settings, or save.
+    pub(crate) fn accepts_staged_edits(&self) -> bool {
+        !self.saving
+            && self.editor.is_none()
+            && self.search.is_none()
+            && self.review_editor.is_none()
+            && self
+                .fields
+                .values()
+                .all(|field| field.input.value() == field.applied)
+    }
+
+    /// Stage edits made on the person's behalf (`mj ui settings`) through the
+    /// shared settings model, all or none, and return their page paths.
+    pub(super) fn stage_edits(
+        &mut self,
+        edits: &[mj_client::ui_request::SettingEdit],
+    ) -> Result<Vec<Vec<String>>, String> {
+        let paths = mj_client::settings::edit::stage_all(&mut self.draft, edits)?;
+        for path in &paths {
+            // A field's typing buffer would otherwise show its old text.
+            self.fields.remove(path);
+            if path.first().is_some_and(|section| section == "profiles") {
+                self.invalidate_review_validation_for(path.get(1).map(String::as_str));
+            }
+        }
+        self.fields
+            .retain(|field_path, _| self.draft.pointer(&pointer(field_path)).is_some());
+        Ok(paths)
+    }
+
     pub(super) fn save(
         &mut self,
         _capabilities: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,

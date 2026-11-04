@@ -364,6 +364,13 @@ pub(crate) struct DashboardContext {
     /// late does not replay a backlog.
     runtime_notices: Feed<watch::Receiver<Vec<crate::daemon::RuntimeNotice>>>,
     reported_notice_id: Option<u64>,
+    /// Dashboard requests made on the person's behalf (`mj ui`). Only ones
+    /// newer than those present at attach are applied.
+    runtime_ui_requests: Feed<watch::Receiver<Vec<mj_client::ui_request::UiRequest>>>,
+    ui_request_cursor: mj_client::ui_request::UiRequestCursor,
+    /// What the applied requests asked of the host, run after the frame's
+    /// own action.
+    ui_request_actions: Vec<DashboardAction>,
     /// Last complete review projection, retained even while the session list
     /// is on screen so a subsequently opened chat starts in the right state.
     runtime_review_views: BTreeMap<String, mj_controller::review_host::RuntimeReviewView>,
@@ -905,6 +912,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             update = paced(feed_gate, context.runtime_notices.wait()), if context.runtime_notices.is_open() => {
                 context.runtime_notices.accept(update);
             }
+            update = paced(feed_gate, context.runtime_ui_requests.wait()), if context.runtime_ui_requests.is_open() => {
+                context.runtime_ui_requests.accept(update);
+            }
             update = paced(feed_gate, context.runtime_config.wait()), if context.runtime_config.is_open() => {
                 context.runtime_config.accept(update);
             }
@@ -962,6 +972,15 @@ pub(crate) async fn run_dashboard_for_workspace(
             // continue as though the user had just asked for it.
             if let Some(followup) = context.dashboard.take_git_identity_followup() {
                 actions::apply_dashboard_action(&mut context, followup).await?;
+            }
+            // Requests an agent made for the person run as their keys would,
+            // after the person's own input; one held behind a dialog runs
+            // once the dialog has closed.
+            for requested in std::mem::take(&mut context.ui_request_actions) {
+                actions::apply_dashboard_action(&mut context, requested).await?;
+            }
+            while let Some(requested) = context.dashboard.take_ui_followup() {
+                actions::apply_dashboard_action(&mut context, requested).await?;
             }
             // Input or a background result can open an isolated creation
             // review; either way its prerequisite check starts here.
@@ -1705,6 +1724,11 @@ impl DashboardContext {
             .iter()
             .map(|notice| notice.id)
             .max();
+        let ui_requests_rx = remote_worker.ui_requests;
+        // Like notices, requests already published when this surface
+        // attaches were meant for whatever was on screen before it.
+        let ui_request_cursor =
+            mj_client::ui_request::UiRequestCursor::after(&ui_requests_rx.borrow());
         let quota_rx = remote_worker.quotas;
         let capabilities_rx = remote_worker.profile_capabilities;
         dashboard.set_profile_capabilities(capabilities_rx.borrow().clone());
@@ -1792,6 +1816,9 @@ impl DashboardContext {
             runtime_reviews: Feed::new(runtime_reviews_rx),
             runtime_notices: Feed::new(runtime_notices_rx),
             reported_notice_id,
+            runtime_ui_requests: Feed::new(ui_requests_rx),
+            ui_request_cursor,
+            ui_request_actions: Vec::new(),
             runtime_review_views,
             runtime_config: Feed::new(runtime_config_rx),
             review_capabilities: capabilities_rx.clone(),

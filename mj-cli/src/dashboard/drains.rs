@@ -86,6 +86,7 @@ impl DashboardContext {
         self.drain_worker_updates();
         self.drain_runtime_reviews();
         self.drain_runtime_notices();
+        self.drain_ui_requests();
         self.drain_runtime_config();
         while let Some(capabilities) = self.profile_capabilities.next_ready() {
             self.dashboard.set_profile_capabilities(capabilities);
@@ -116,6 +117,7 @@ impl DashboardContext {
             self.runtime_health.take_delivered(),
             self.runtime_reviews.take_delivered(),
             self.runtime_notices.take_delivered(),
+            self.runtime_ui_requests.take_delivered(),
             self.runtime_config.take_delivered(),
             self.lifecycle.take_delivered(),
             self.capacity.take_delivered(),
@@ -273,6 +275,23 @@ impl DashboardContext {
                 .dashboard
                 .notice_naming_workspace(&notice.session_id, notice.text);
             self.dashboard.set_notice(text);
+        }
+    }
+
+    /// Apply each dashboard request published since the last one applied.
+    pub(crate) fn drain_ui_requests(&mut self) {
+        let mut latest = None;
+        while let Some(requests) = self.runtime_ui_requests.next_ready() {
+            latest = Some(requests);
+        }
+        let Some(requests) = latest else {
+            return;
+        };
+        for request in self.ui_request_cursor.take_new(&requests) {
+            let action = self.dashboard.apply_ui_request(request.clone());
+            if !matches!(action, DashboardAction::None) {
+                self.ui_request_actions.push(action);
+            }
         }
     }
 

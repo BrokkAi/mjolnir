@@ -24,6 +24,40 @@ impl DashboardState {
         self.mode = Mode::Setup(dialog);
     }
 
+    /// Open Settings on the page of the first edit with every edit staged in
+    /// the draft, unsaved. An open Settings keeps its other unsaved edits and
+    /// takes these as well. Nothing changes when any edit does not apply.
+    pub(crate) fn begin_staged_settings(
+        &mut self,
+        edits: &[mj_client::ui_request::SettingEdit],
+        notice: String,
+    ) -> Result<(), String> {
+        let (mut dialog, was_open) = match std::mem::replace(&mut self.mode, Mode::Dashboard) {
+            Mode::Setup(dialog) => (dialog, true),
+            other => {
+                self.mode = other;
+                self.profile_login_refresh = true;
+                let mut dialog = SetupDialog::new(&self.config);
+                dialog
+                    .login_statuses
+                    .extend(self.profile_login_statuses.clone());
+                (dialog, false)
+            }
+        };
+        let result = dialog.stage_edits(edits).map(|paths| {
+            let first = &paths[0];
+            dialog.open_page(first[..first.len() - 1].to_vec());
+            dialog.focus_path(first);
+            dialog.notice = Some(notice);
+        });
+        // An open Settings stays open either way; a new one opens only with
+        // the edits in it.
+        if was_open || result.is_ok() {
+            self.mode = Mode::Setup(dialog);
+        }
+        result
+    }
+
     pub fn begin_setup(&mut self) {
         self.profile_login_refresh = true;
         let mut dialog = SetupDialog::new(&self.config);

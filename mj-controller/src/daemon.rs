@@ -239,6 +239,8 @@ pub struct RuntimeState {
     /// Bounded: a surface that never attaches must not make this grow.
     notices: Mutex<VecDeque<RuntimeNotice>>,
     next_notice_id: AtomicU64,
+    /// Dashboard requests made on the person's behalf (`mj ui`).
+    ui_requests: Mutex<ui_requests::UiRequestBoard>,
     /// What the quota poller last published, and how to wake it. The poller
     /// is the only process that asks a provider for quota; everything else
     /// reads this.
@@ -749,6 +751,7 @@ pub(crate) mod startup_followup;
 mod state;
 mod subagent_park;
 mod support;
+pub(crate) mod ui_requests;
 mod views;
 use support::*;
 mod activity_cleanup;

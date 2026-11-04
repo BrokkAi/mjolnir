@@ -1,6 +1,7 @@
 //! How an edit changes a settings draft. Every surface applies edits through
 //! these functions, so a value means the same thing whichever one typed it.
-use super::draft::pointer;
+use super::draft::{config_from_draft, page_path, pointer, storage_path};
+use super::page::hidden_key;
 use super::page::is_collection;
 use super::schema;
 use serde_json::{Value, json};
@@ -137,6 +138,87 @@ pub fn apply_value(
         draft["subagents"][&path[1]]["effort"] = Value::Null;
     }
     Ok(rewritten)
+}
+
+/// Set the setting at page `path` to `value` the way a person would in
+/// Settings: a checkbox is ticked or cleared, a listed value is chosen, and
+/// anything else is typed, so it is checked and rewritten exactly as typing
+/// it would be. `null` clears the field.
+pub fn stage(draft: &mut Value, path: &[String], value: &Value) -> Result<(), String> {
+    let Some(current) = draft.pointer(&pointer(path)) else {
+        return Err("there is no such setting".into());
+    };
+    if current.is_object() || current.is_array() {
+        return Err("this is a page of settings; name one of the settings on it".into());
+    }
+    for depth in 1..path.len() {
+        let parent = &path[..depth];
+        let parent_value = draft
+            .pointer(&pointer(parent))
+            .expect("parent of a setting");
+        if hidden_key(parent, parent_value, &path[depth]) {
+            return Err("Settings does not offer this setting here".into());
+        }
+    }
+    if let Some(wanted) = value.as_bool()
+        && let Some(held) = current.as_bool()
+    {
+        if held != wanted {
+            toggle(draft, path)?;
+        }
+        return Ok(());
+    }
+    let choices = schema::choices(&storage_path(path), draft);
+    if choices.len() > 1 && !value.is_null() {
+        if !choices.contains(value) {
+            let listed = choices
+                .iter()
+                .filter(|choice| !choice.is_null())
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!("{value} is not one of {listed}"));
+        }
+        apply_value(draft, path, SettingInput::Choice(value.clone()))?;
+        return Ok(());
+    }
+    let text = match value {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        Value::Bool(_) | Value::Number(_) => value.to_string(),
+        Value::Array(_) | Value::Object(_) => {
+            return Err("give one value; set a list or table one setting at a time".into());
+        }
+    };
+    apply_value(draft, path, SettingInput::Text(text))?;
+    Ok(())
+}
+
+/// Stage every edit, or none: the draft changes only when each edit applies
+/// and the result is a configuration that could be saved. Paths may use the
+/// stored spelling of an Interface setting (`theme`, `keys.prefix`). Returns
+/// the page path of each edit, in order.
+pub fn stage_all(
+    draft: &mut Value,
+    edits: &[crate::ui_request::SettingEdit],
+) -> Result<Vec<Vec<String>>, String> {
+    if edits.is_empty() {
+        return Err("name at least one setting to change".into());
+    }
+    let mut staged = draft.clone();
+    let mut paths = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let path = page_path(&edit.path);
+        stage(&mut staged, &path, &edit.value)
+            .map_err(|error| format!("{}: {error}", edit.dotted()))?;
+        paths.push(path);
+    }
+    config_from_draft(staged.clone())
+        .map_err(anyhow::Error::from)
+        .and_then(|config| config.validate())
+        .map_err(|error| format!("these settings would not save: {error:#}"))?;
+    *draft = staged;
+    Ok(paths)
 }
 
 /// Flip the checkbox at `path`. Disabling a profile also clears the places

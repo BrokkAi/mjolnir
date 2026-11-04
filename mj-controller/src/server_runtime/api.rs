@@ -212,6 +212,17 @@ pub trait ExportRuntime: Send + Sync {
     ) -> BoxFuture<'static, Result<Option<String>>> {
         Box::pin(async { anyhow::bail!("SessionWiki restore is unavailable") })
     }
+
+    /// Publish a dashboard request (`mj ui`) to the attached dashboards.
+    fn request_ui(
+        &self,
+        _body: mj_client::ui_request::UiRequestBody,
+    ) -> std::result::Result<
+        mj_client::ui_request::UiRequestReceipt,
+        mj_client::ui_request::UiRequestRefusal,
+    > {
+        Err(mj_client::ui_request::UiRequestRefusal::NoDashboard)
+    }
 }
 
 impl ExportRuntime for RuntimeState {
@@ -399,6 +410,16 @@ impl ExportRuntime for RuntimeState {
                 .await?
                 .map(|registered| registered.session.id))
         })
+    }
+
+    fn request_ui(
+        &self,
+        body: mj_client::ui_request::UiRequestBody,
+    ) -> std::result::Result<
+        mj_client::ui_request::UiRequestReceipt,
+        mj_client::ui_request::UiRequestRefusal,
+    > {
+        RuntimeState::request_ui(self, body)
     }
 }
 
@@ -2794,6 +2815,16 @@ impl SubagentBackend for ApiBackend {
     fn wiki_search(&self, query: String, limit: usize) -> BoxFuture<'_, Result<WikiSearchPage>> {
         let runtime = Arc::clone(&self.exports);
         Box::pin(async move { runtime.wiki_search(query, limit).await })
+    }
+
+    fn request_ui(
+        &self,
+        body: mj_client::ui_request::UiRequestBody,
+    ) -> std::result::Result<
+        mj_client::ui_request::UiRequestReceipt,
+        mj_client::ui_request::UiRequestRefusal,
+    > {
+        self.exports.request_ui(body)
     }
 
     fn wiki_brief(

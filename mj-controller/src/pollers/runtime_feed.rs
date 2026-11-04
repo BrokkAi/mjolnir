@@ -12,6 +12,8 @@ pub struct RemoteDashboardWorkerPoller {
     pub reviews: tokio::sync::watch::Receiver<Vec<crate::review_host::RuntimeReviewView>>,
     /// Background events the daemon wants reported once, oldest first.
     pub notices: tokio::sync::watch::Receiver<Vec<daemon::RuntimeNotice>>,
+    /// Dashboard requests made on the person's behalf (`mj ui`), oldest first.
+    pub ui_requests: tokio::sync::watch::Receiver<Vec<mj_client::ui_request::UiRequest>>,
     /// What the daemon knows about quota. The daemon is the only prober.
     pub quotas: tokio::sync::watch::Receiver<mj_client::quota::QuotaSnapshot>,
     pub profile_capabilities:

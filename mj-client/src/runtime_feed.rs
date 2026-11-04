@@ -161,6 +161,10 @@ pub struct RuntimeMetadata {
     pub lifecycles: Vec<RuntimeLifecycleView>,
     pub reviews: Vec<RuntimeReviewView>,
     pub notices: Vec<RuntimeNotice>,
+    /// Requests to change the dashboard made on the person's behalf, newest
+    /// last. Bounded like `notices`; see [`crate::ui_request`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ui_requests: Vec<crate::ui_request::UiRequest>,
     /// The daemon's quota reports. The daemon is the only prober.
     #[serde(default)]
     pub quotas: SharedSnapshot<crate::quota::QuotaSnapshot>,

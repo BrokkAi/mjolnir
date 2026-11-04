@@ -322,6 +322,9 @@ mj elicitations --session <id> [--json]
 mj respond --session <id> --elicitation <id> [<response JSON>|-] [--response-file <path>]
 mj models --profile <id> [--model <name>] [--json]
 mj set-config --session <id> [--key <key> --value <value>] [--json]
+mj ui pane (sessions | targets | profiles) (minimized | standard | maximized) [--json]
+mj ui show <session-id> [--right | --below] [--json]
+mj ui settings <path>=<value>... [--json]
 ```
 
 `mj new --at <sha>` starts the workspace checked out at that full commit ID in
@@ -431,6 +434,19 @@ mj new --workspace eval --bundle product --target builder \
   such as the model, effort, approval mode, or collaboration mode.
   Without `--key` and `--value` it lists the settings the session's agent
   offers, with their choices.
+- `mj ui` changes what an open dashboard shows, as if you had pressed the keys,
+  so an agent you ask to "maximize the Profiles pane" or "turn the bell off" can
+  do it for you. `pane` sets one support pane's size. `show` opens a session in
+  the main conversation, or in a new pane to its right or below. `settings`
+  opens Settings on the page of the first change with every change filled in
+  but not saved: review it and press Save, or press Esc to discard it. Paths
+  are the configuration file's keys joined with dots, such as
+  `notify.bell=false`, `theme=dark` or `advanced.auto_afk_minutes=30`. A value
+  that reads as JSON is used as JSON, anything else as text, and `null` clears
+  a field. The whole request is checked first: an unknown setting or value is
+  refused with the reason, and nothing changes. With no dashboard open the
+  command fails and says so. A request that arrives while a dialog is open
+  waits until the dialog closes.
 
 `mj diff` compares against the recorded launch base by default. Use `--base`
 to compare against an explicit Git commit or revision, for example after

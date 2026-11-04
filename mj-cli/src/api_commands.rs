@@ -279,7 +279,7 @@ pub(crate) struct MessageArgs {
 
 /// The session this process runs inside, which Mjolnir names in
 /// `MJ_SESSION_ID` for every harness session; `None` in the user's own shell.
-fn calling_session() -> Result<Option<String>> {
+pub(crate) fn calling_session() -> Result<Option<String>> {
     std::env::var_os("MJ_SESSION_ID")
         .map(|value| {
             value

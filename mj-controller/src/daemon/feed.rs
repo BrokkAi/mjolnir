@@ -232,6 +232,11 @@ impl RuntimeState {
             .iter()
             .cloned()
             .collect();
+        full.metadata.ui_requests = self
+            .ui_requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .published();
         full.metadata.quotas = self
             .quota
             .lock()

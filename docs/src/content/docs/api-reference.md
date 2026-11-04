@@ -1055,6 +1055,36 @@ Preconditions, all answering `409` with the reason:
 | `diff` | A recorded base commit, or a session branch whose reflog still names where it started. |
 | `bundle` | Commits beyond the session base. A live session is checkpointed first; a suspended one is read from its last checkpoint, so this export also works after the target is gone. |
 
+### Change what the dashboard shows
+
+```text
+POST /api/v1/ui/requests
+{"from_session_id": "3f2a…", "action": {"kind": "stage_settings",
+  "edits": [{"path": ["notify", "bell"], "value": false}]}}
+```
+
+```json
+{"id": 4, "dashboards": 1}
+```
+
+Every attached terminal dashboard applies the request as if the person had
+pressed the keys. `action.kind` is one of the following:
+
+- `pane_size`, with `pane` (`sessions`, `targets` or `profiles`) and `size`
+  (`minimized`, `standard` or `maximized`).
+- `show_session`, with `session_id` and `placement` (`main`, `right` or
+  `below`).
+- `stage_settings`, with `edits`, a list of Settings paths and values.
+
+Staged settings open Settings with the changes filled in but not saved; only
+the person's Save writes them, so this route never changes the configuration.
+`from_session_id` is optional and names the session whose agent asked, for the
+dashboard's notice. The daemon checks the whole request before publishing it:
+an unknown session, setting or value returns **400** with the reason, and
+nothing is shown. With no dashboard attached it returns **409**. `dashboards`
+counts the dashboards that were attached to receive the request. The web
+viewer does not act on these requests.
+
 ## CLI equivalents
 
 | Command | Route |
@@ -1080,6 +1110,7 @@ Preconditions, all answering `409` with the reason:
 | `mj review status --session <id>` | `GET /sessions/{id}/review` |
 | `mj review forward\|dismiss\|cancel --session <id>` | `POST /sessions/{id}/review/{resolution}` |
 | `mj stop-task --session <id> <task-id>` | `POST /sessions/{id}/background-tasks/stop` |
+| `mj ui pane\|show\|settings …` | `POST /ui/requests` |
 
 These commands accept `--json`. `mj stop-task` prints its aggregate report of
 accepted, skipped, and failed task IDs; the other commands print the route's

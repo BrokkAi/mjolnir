@@ -120,6 +120,7 @@ impl RuntimeState {
             worker_upgrade_observer,
             notices: Mutex::new(VecDeque::new()),
             next_notice_id: AtomicU64::new(1),
+            ui_requests: Mutex::new(ui_requests::UiRequestBoard::default()),
             quota: Mutex::new(QuotaBoard::default()),
             capacity: std::sync::OnceLock::new(),
             container_admission: tokio::sync::Mutex::new(()),
