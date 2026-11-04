@@ -63,6 +63,20 @@ pub(super) async fn handle_action(
             }
             Ok(DaemonReply::FirstRunSetup(report))
         }
+        DaemonAction::RunDoctor => {
+            let errors = blocking(|| {
+                let executor = crate::targets::ProcessExecutor;
+                let checks = crate::doctor::run_with_config_path(
+                    &mj_core::config::config_path(),
+                    &executor,
+                    crate::doctor::current_apple_platform(&executor),
+                    crate::doctor::DoctorOptions { smoke: false },
+                );
+                Ok(crate::setup::actionable_errors(&checks))
+            })
+            .await?;
+            Ok(DaemonReply::DoctorErrors(errors))
+        }
         DaemonAction::Status => {
             state.prune_dead_clients();
             Ok(DaemonReply::Status(DaemonStatus {

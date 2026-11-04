@@ -490,11 +490,15 @@ pub(crate) fn spawn_first_run_setup(
             // The daemon owns its configuration and its environment. In
             // container placement this discovery runs inside the container,
             // not against the client's host home.
-            let summary = mj_core::runtime::block_on(async {
-                crate::daemon::connect_or_start()
-                    .await?
-                    .run_first_run_setup()
-                    .await
+            let (summary, errors) = mj_core::runtime::block_on(async {
+                let mut daemon = crate::daemon::connect_or_start().await?;
+                let summary = daemon.run_first_run_setup().await?;
+                let errors = if summary.is_some() {
+                    daemon.run_doctor().await?
+                } else {
+                    Vec::new()
+                };
+                Ok::<_, anyhow::Error>((summary, errors))
             })??;
             // An existing installation picks up agents installed since its
             // last launch through the startup availability check.
@@ -506,7 +510,7 @@ pub(crate) fn spawn_first_run_setup(
                 &progress,
                 DashboardIoUpdate::FirstRunConfigured(summary),
             );
-            Ok(None)
+            Ok(Some(errors))
         },
         DashboardIoUpdate::FirstRunChecked,
     )
