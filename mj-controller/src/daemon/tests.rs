@@ -3976,7 +3976,11 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
         crate::targets::container_upgrade_test_plan("session-1"),
     )
     .unwrap();
-    assert!(crate::database::try_commit_container_upgrade("session-1", "upgrade-test").unwrap());
+    assert!(
+        crate::database::try_commit_container_upgrade("session-1", "upgrade-test")
+            .unwrap()
+            .is_committed()
+    );
     let state = test_runtime_state();
     let result = state
         .admit_lifecycle(
@@ -4154,6 +4158,7 @@ async fn container_replacement_serializes_with_child_wake_and_registration() {
             assert!(
                 !crate::database::try_commit_container_upgrade("session-1", "upgrade-test")
                     .unwrap()
+                    .is_committed()
             );
             crate::database::finish_worker_restart("child-1", "wake-1").unwrap();
             child.state = SessionState::Parked;
@@ -4170,13 +4175,16 @@ async fn container_replacement_serializes_with_child_wake_and_registration() {
             .unwrap();
             assert!(
                 !crate::database::try_commit_container_upgrade("session-1", "upgrade-test")
-                    .unwrap(),
+                    .unwrap()
+                    .is_committed(),
                 "a registered child owns startup before its target is assigned"
             );
             preparing.state = SessionState::Stopped;
             crate::database::save_session(&preparing).unwrap();
             assert!(
-                crate::database::try_commit_container_upgrade("session-1", "upgrade-test").unwrap()
+                crate::database::try_commit_container_upgrade("session-1", "upgrade-test")
+                    .unwrap()
+                    .is_committed()
             );
             assert!(crate::database::begin_subagent_unpark("child-1", &wake).is_err());
         })
@@ -7795,7 +7803,7 @@ async fn child_close_preserves_history_and_reports_without_exporting_the_workspa
     if !in_held_close_child(NAME, "unused") {
         return;
     }
-    exercise_child_close_with_a_nested_workspace(false).await;
+    exercise_child_close_with_a_nested_workspace(false, false).await;
 }
 
 #[cfg(unix)]
@@ -7806,7 +7814,18 @@ async fn child_close_cancel_before_commit_leaves_it_running_and_allows_a_fresh_c
     if !in_held_close_child(NAME, "begin_checkpoint") {
         return;
     }
-    exercise_child_close_with_a_nested_workspace(true).await;
+    exercise_child_close_with_a_nested_workspace(true, false).await;
+}
+
+// Hard-won: #1448: failed reviewer starts left borrowed targets blocking parent replacement.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_reviewer_recovery_releases_parent_upgrade_after_saving_its_journal() {
+    const NAME: &str = "failed_reviewer_recovery_releases_parent_upgrade_after_saving_its_journal";
+    if !in_held_close_child(NAME, "unused") {
+        return;
+    }
+    exercise_child_close_with_a_nested_workspace(false, true).await;
 }
 
 // Hard-won: 413864386: a child close held daemon handoff for a nonanswering worker's five-minute hello.
@@ -8045,7 +8064,10 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
 }
 
 #[cfg(unix)]
-async fn exercise_child_close_with_a_nested_workspace(cancel_before_commit: bool) {
+async fn exercise_child_close_with_a_nested_workspace(
+    cancel_before_commit: bool,
+    failed_reviewer: bool,
+) {
     use crate::controller::checkpoint::tests::{LATCH_RELAY_HOLD_PATH, LATCH_RELAY_SESSION};
     use crate::controller::test_support::{committed_repository, test_git};
     let _writer = crate::database::install_isolated_test_writer();
@@ -8086,15 +8108,16 @@ async fn exercise_child_close_with_a_nested_workspace(cancel_before_commit: bool
     std::fs::create_dir_all(&worker_root).unwrap();
     std::fs::write(worker_root.join("private"), "child worker").unwrap();
     let mut child = runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Running);
+    let mut relation = runtime_test_subagent(LATCH_RELAY_SESSION, parent_id);
+    if failed_reviewer {
+        child.state = SessionState::Error;
+        relation.kind = mj_core::subagent::SubagentKind::Reviewer;
+    }
     child.project_directory = parent.project_directory.clone();
     child.target = Some(mj_core::state::TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
     });
-    crate::database::save_subagent_session(
-        &child,
-        &runtime_test_subagent(LATCH_RELAY_SESSION, parent_id),
-    )
-    .unwrap();
+    crate::database::save_subagent_session(&child, &relation).unwrap();
     let reports = repository
         .path()
         .join(".mj/agents")
@@ -8103,7 +8126,65 @@ async fn exercise_child_close_with_a_nested_workspace(cancel_before_commit: bool
     std::fs::write(reports.join("result.txt"), "child report").unwrap();
     crate::database::record_subagent_report_dir(LATCH_RELAY_SESSION, reports.to_str().unwrap())
         .unwrap();
+    if failed_reviewer {
+        use mj_core::review::driver::TurnReviewSeed;
+        use mj_review::driver::TurnReviewDriver;
+        let (mut driver, _) = TurnReviewDriver::start(
+            TurnReviewSeed {
+                task: "review the changes".into(),
+                user_messages: Vec::new(),
+                baselines: Default::default(),
+                through_ordinal: 1,
+                prior_review: None,
+            },
+            "failed-start".into(),
+            std::num::NonZeroUsize::new(1).unwrap(),
+        );
+        driver.delta_captured(vec![mj_core::relay::RepoDelta {
+            root: repository.path().into(),
+            current_tree: "unreviewed".into(),
+            patch: "+unfinished".into(),
+            changed_lines: 1,
+            ..Default::default()
+        }]);
+        driver.role_failed("reviewer-1", Some(LATCH_RELAY_SESSION), "startup failed");
+        crate::database::save_turn_review_state(
+            parent_id,
+            &crate::database::TurnReviewState {
+                active_group: Some(mj_core::storage::ActiveReviewGroup {
+                    driver: driver.snapshot(),
+                    reviewer: Default::default(),
+                    scope: Default::default(),
+                    registrations: vec![mj_core::storage::ReviewerRegistration {
+                        role: "reviewer-1".into(),
+                        request_key: relation.request_key.clone(),
+                        child_session_id: Some(LATCH_RELAY_SESSION.into()),
+                    }],
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        crate::database::begin_container_upgrade(
+            parent_id,
+            "upgrade-after-failed-review",
+            Arc::new(AtomicBool::new(false)),
+            crate::targets::container_upgrade_test_plan(parent_id),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::database::try_commit_container_upgrade(parent_id, "upgrade-after-failed-review")
+                .unwrap(),
+            crate::database::ContainerUpgradeCommit::Waiting(vec![format!(
+                "reviewer session {LATCH_RELAY_SESSION} (Error)"
+            )]),
+            "an Error reviewer with a retained target still blocks replacement"
+        );
+    }
     let (channels, state) = serve_live_session(&relay_root, !cancel_before_commit).await;
+    if failed_reviewer {
+        state.reviewer_runtime.set(Arc::downgrade(&state)).unwrap();
+    }
     if cancel_before_commit {
         let closing = tokio::spawn({
             let state = state.clone();
@@ -8135,17 +8216,45 @@ async fn exercise_child_close_with_a_nested_workspace(cancel_before_commit: bool
         );
         assert!(worker_root.join("private").exists());
     }
-    tokio::time::timeout(
-        Duration::from_secs(60),
-        state.close_subagent_request(
-            LATCH_RELAY_SESSION.into(),
-            parent_id.into(),
-            "close-child".into(),
-        ),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    if failed_reviewer {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if crate::database::load_session_record(LATCH_RELAY_SESSION)
+                    .unwrap()
+                    .is_some_and(|child| child.state == SessionState::Stopped)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("startup closes a failed reviewer without any manual suspension");
+        assert!(
+            crate::database::try_commit_container_upgrade(parent_id, "upgrade-after-failed-review")
+                .unwrap()
+                .is_committed()
+        );
+        assert!(
+            crate::database::turn_review_state(parent_id)
+                .unwrap()
+                .baselines
+                .is_empty()
+        );
+        state.review_host.shutdown().await.unwrap();
+    } else {
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            state.close_subagent_request(
+                LATCH_RELAY_SESSION.into(),
+                parent_id.into(),
+                "close-child".into(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
     channels.shutdown.shutdown().await.unwrap();
     let stored = crate::database::load_state().unwrap();
     let closed = &stored.sessions[LATCH_RELAY_SESSION];

@@ -2941,8 +2941,9 @@ async fn a_session_with_no_projection_row_has_no_transcript() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+// Hard-won: #1448: publication preflight refused child close although it preserves the shared checkout.
 #[tokio::test]
-async fn suspend_refuses_an_unverified_clone_from_the_published_snapshot_until_acknowledged() {
+async fn suspend_requires_publication_ack_only_for_owned_clones() {
     let (app, mut actions, _snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |snapshot| {
             snapshot.sessions[0].publication_state =
@@ -2983,6 +2984,36 @@ async fn suspend_refuses_an_unverified_clone_from_the_published_snapshot_until_a
         .unwrap();
     let response = response.await.unwrap().unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let (app, mut actions, _snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.sessions[0].publication_state =
+                Some(mj_core::state::PublicationState::Unknown);
+            snapshot.sessions[0].is_subagent_session = true;
+        });
+    let response = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/suspend"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    let request = actions.recv().await.unwrap();
+    assert_eq!(
+        request.action,
+        ControllerAction::Suspend {
+            session_id: "session-1".into(),
+            acknowledge_unpublished_work: false,
+        }
+    );
+    request
+        .reply
+        .send(super::super::ActionOutcome::accepted())
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
 }
 
 /// A snapshot whose session-1 has one running sub-agent, child-1, and nothing

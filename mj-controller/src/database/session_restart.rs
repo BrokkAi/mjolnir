@@ -462,7 +462,24 @@ pub(super) fn ensure_container_parent_available(
     Ok(())
 }
 
-pub(crate) fn try_commit_container_upgrade(session_id: &str, operation_id: &str) -> Result<bool> {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ContainerUpgradeCommit {
+    Committed,
+    /// Descriptions captured by the same transaction that refused replacement.
+    Waiting(Vec<String>),
+}
+
+#[cfg(test)]
+impl ContainerUpgradeCommit {
+    pub(crate) fn is_committed(&self) -> bool {
+        matches!(self, Self::Committed)
+    }
+}
+
+pub(crate) fn try_commit_container_upgrade(
+    session_id: &str,
+    operation_id: &str,
+) -> Result<ContainerUpgradeCommit> {
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
     submit_database_write("commit container upgrade", move |connection| {
@@ -478,19 +495,32 @@ pub(crate) fn try_commit_container_upgrade(session_id: &str, operation_id: &str)
                 ),
             "container upgrade ownership changed or cancellation was accepted"
         );
-        let children = tx.prepare("SELECT s.state,t.session_id IS NOT NULL FROM subagent_sessions c JOIN sessions s ON s.session_id=c.child_session_id LEFT JOIN session_targets t ON t.session_id=s.session_id WHERE c.parent_session_id=?1")?
-            .query_map([&session_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)))?
+        let children = tx.prepare("SELECT s.session_id,s.state,t.session_id IS NOT NULL,json_extract(c.record_json,'$.kind') FROM subagent_sessions c JOIN sessions s ON s.session_id=c.child_session_id LEFT JOIN session_targets t ON t.session_id=s.session_id WHERE c.parent_session_id=?1 ORDER BY s.session_id")?
+            .query_map([&session_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, Option<String>>(3)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let occupied = children.into_iter().any(|(state, has_target)| {
-            let state = stored_session_state(&state);
-            state != SessionState::Parked && (state.has_live_worker() || has_target)
-        });
-        if occupied || super::delegation::has_pending_mutating_delegations_with(&tx, &session_id)? {
-            return Ok(false);
+        let mut blockers: Vec<_> = children
+            .into_iter()
+            .filter_map(|(id, state, has_target, kind)| {
+                let state = stored_session_state(&state);
+                (state != SessionState::Parked && (state.has_live_worker() || has_target)).then(
+                    || {
+                        format!(
+                            "{} session {id} ({state:?})",
+                            kind.as_deref().unwrap_or("child")
+                        )
+                    },
+                )
+            })
+            .collect();
+        if super::delegation::has_pending_mutating_delegations_with(&tx, &session_id)? {
+            blockers.push("accepted delegation requests".into());
+        }
+        if !blockers.is_empty() {
+            return Ok(ContainerUpgradeCommit::Waiting(blockers));
         }
         tx.execute("UPDATE session_restart_intents SET phase='recreating_container', updated_at=?3 WHERE session_id=?1 AND operation_id=?2", params![session_id, operation_id, Utc::now().to_rfc3339()])?;
         tx.commit()?;
-        Ok(true)
+        Ok(ContainerUpgradeCommit::Committed)
     })
 }
 

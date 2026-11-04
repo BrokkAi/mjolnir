@@ -142,6 +142,10 @@ impl HostState {
     }
 
     pub(super) async fn shutdown(&mut self) -> Result<(), String> {
+        // The child index and its durable close intent survive this host.
+        // Never hold daemon handoff for a retry or an unavailable worker.
+        self.child_closures.shutdown().await;
+        self.child_closure_owners.clear();
         // A validated override has accepted daemon-owned work. It must finish
         // while the persistence lane and the worker connection are still live.
         for operation in self.preparing.values_mut() {

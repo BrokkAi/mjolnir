@@ -293,6 +293,7 @@ struct FakeEnvironment {
     mailbox: Mutex<Vec<mj_core::mailbox::MailboxEvent>>,
     started: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
+    close_error: Mutex<Option<String>>,
     start_error: Mutex<Option<String>>,
     register_error: Mutex<Option<String>>,
     register_gate: Mutex<Option<Arc<SaveGate>>>,
@@ -372,6 +373,7 @@ impl FakeEnvironment {
             mailbox: Mutex::new(Vec::new()),
             started: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
+            close_error: Mutex::new(None),
             start_error: Mutex::new(None),
             register_error: Mutex::new(None),
             register_gate: Mutex::new(None),
@@ -542,6 +544,9 @@ impl ReviewEnvironment for FakeEnvironment {
         child: &'a str,
     ) -> mj_client::session::BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
+            if let Some(error) = self.close_error.lock().unwrap().take() {
+                return Err(error);
+            }
             self.closed.lock().unwrap().push(child.to_owned());
             Ok(())
         })
@@ -1780,6 +1785,7 @@ async fn queued_prompts_hold_a_review_back() {
 /// A reviewer launch failure is a durable failed verdict, but it no longer
 /// owns the primary turn: the active marker and admission hold are both
 /// cleared before the user dismisses the visible failure.
+// Hard-won: #1448: failed reviewer starts retained borrowed targets after their review ended.
 #[tokio::test]
 async fn a_failed_review_clears_durable_active_state_and_the_prompt_hold() {
     let session = session_id("failedrole0");
@@ -1792,6 +1798,7 @@ async fn a_failed_review_clears_durable_active_state_and_the_prompt_hold() {
         environment.clone(),
     );
     *environment.start_error.lock().unwrap() = Some("review harness failed to launch".to_owned());
+    *environment.close_error.lock().unwrap() = Some("temporary close admission refusal".into());
     finish_a_turn(&manager, &host).await;
 
     // Preparation captures the change before the review opens (I2-10), so
@@ -1835,6 +1842,16 @@ async fn a_failed_review_clears_durable_active_state_and_the_prompt_hold() {
     })
     .await
     .expect("failure releases and persists the turn");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while environment.closed.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a failed reviewer is closed, retrying a transient cleanup refusal");
+    assert_eq!(environment.closed.lock().unwrap().len(), 1);
+    assert!(environment.state().baselines.is_empty());
 
     host.resolve(session, Resolution::Dismissed)
         .await
@@ -2468,6 +2485,91 @@ async fn startup_restores_group_before_push_or_override_admission() {
     host.shutdown().await.unwrap();
 }
 
+// Hard-won: #1448: startup retained failed reviewer roles as if they still owned review work.
+#[tokio::test]
+async fn startup_reaps_settled_and_orphaned_reviewers_but_preserves_their_busy_peer() {
+    let session = session_id("reap-settled");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let (mut driver, _) = TurnReviewDriver::start(
+        TurnReviewSeed {
+            task: "inspect the changes".into(),
+            user_messages: Vec::new(),
+            baselines: Default::default(),
+            through_ordinal: 1,
+            prior_review: None,
+        },
+        "partly-failed-group".into(),
+        std::num::NonZeroUsize::new(2).unwrap(),
+    );
+    driver.delta_captured(vec![push_delta("/workspace/app", "newtree")]);
+    driver.role_failed("reviewer-1", Some("failed-child"), "startup failed");
+    let registrations: Vec<_> = [("reviewer-1", "failed-child"), ("reviewer-2", "busy-child")]
+        .into_iter()
+        .map(|(role, child)| mj_core::storage::ReviewerRegistration {
+            role: role.into(),
+            request_key: format!("key-{child}"),
+            child_session_id: Some(child.into()),
+        })
+        .collect();
+    for registration in &registrations {
+        environment
+            .child_relations
+            .lock()
+            .unwrap()
+            .push(ReviewerChildRelation {
+                parent_session_id: session.clone(),
+                request_key: mj_core::subagent::SubagentKind::Reviewer
+                    .request_key(&registration.request_key),
+                child_session_id: registration.child_session_id.clone().unwrap(),
+            });
+    }
+    environment
+        .child_relations
+        .lock()
+        .unwrap()
+        .push(ReviewerChildRelation {
+            parent_session_id: session.clone(),
+            request_key: "reviewer:orphan-key".into(),
+            child_session_id: "orphan-child".into(),
+        });
+    *environment.owner.lock().unwrap() = Some(session.clone());
+    *environment.state.lock().unwrap() = TurnReviewState {
+        active: Some("partly-failed-group".into()),
+        active_group: Some(mj_core::storage::ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewer: Default::default(),
+            scope: Default::default(),
+            registrations,
+        }),
+        ..Default::default()
+    };
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let closed = environment.closed.lock().unwrap().clone();
+            let started = environment.started.lock().unwrap().clone();
+            assert!(!closed.iter().any(|id| id == "busy-child"));
+            assert!(!started.iter().any(|id| id == "failed-child"));
+            if closed.iter().any(|id| id == "failed-child")
+                && closed.iter().any(|id| id == "orphan-child")
+                && started.iter().any(|id| id == "busy-child")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("only the role still awaiting an outcome survives startup");
+    host.shutdown().await.unwrap();
+    assert!(environment.state().active.is_some());
+}
+
 /// A review someone asked for delivers its findings: a findings verdict is
 /// forwarded to the primary agent as soon as it is reached, without waiting
 /// for a surface to choose Forward.
@@ -2915,6 +3017,7 @@ async fn review_starts_report_child_registration_refusal_to_their_callers() {
     }
 }
 
+// Hard-won: #1448: push verdict delivery discarded registrations before closing their workers.
 #[tokio::test]
 async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_primary() {
     for (name, report, expected) in [
@@ -3012,6 +3115,13 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
             );
         }
         assert!(state.active.is_none());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !environment.closed.lock().unwrap().contains(&child) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("push completion transfers its child to cleanup before clearing the group");
         host.shutdown().await.unwrap();
     }
 }

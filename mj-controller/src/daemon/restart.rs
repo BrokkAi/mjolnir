@@ -600,7 +600,16 @@ impl RuntimeState {
         );
         // Cancellation uses this same owner; child admission uses this same
         // database writer. Neither can race the irreversible decision.
-        if !crate::database::try_commit_container_upgrade(session_id, operation_id)? {
+        if let crate::database::ContainerUpgradeCommit::Waiting(blockers) =
+            crate::database::try_commit_container_upgrade(session_id, operation_id)?
+        {
+            let notice = format!("Container upgrade waiting for {}", blockers.join(", "));
+            let changed = active.notice.as_ref() != Some(&notice);
+            active.notice = Some(notice);
+            drop(owner);
+            if changed {
+                self.publish_revision();
+            }
             return Ok(false);
         }
         ensure!(
@@ -608,6 +617,7 @@ impl RuntimeState {
             "container upgrade cancellation won before commit"
         );
         active.phase = LifecyclePhase::RetiringContainer;
+        active.notice = None;
         drop(owner);
         self.publish_revision();
         Ok(true)

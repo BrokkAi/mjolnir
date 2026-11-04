@@ -31,14 +31,7 @@ impl HostState {
                 self.prompt_primary(session_id, command_id, prompt);
             }
             ReviewRequest::CloseReviewer { role } => {
-                if self.reviews.get(session_id).is_some_and(|slot| {
-                    matches!(
-                        slot.driver.phase(),
-                        TurnReviewPhase::Resolved(Resolution::Cancelled)
-                    )
-                }) {
-                    self.close_reviewer_role(session_id, &role);
-                }
+                self.close_reviewer_role(session_id, &role);
             }
             ReviewRequest::AdvanceBaseline {
                 trees,

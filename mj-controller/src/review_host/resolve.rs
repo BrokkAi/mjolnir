@@ -93,9 +93,9 @@ impl HostState {
         let message = message.into();
         answer(slot.start_reply.take(), Err(StartRefusal(message.clone())));
         slot.state.active = None;
-        let state = slot.state.clone();
         let requests = slot.driver.request_failed(message);
         slot.sync_group();
+        let state = slot.state.clone();
         // A failed review remains visible so the person can dismiss it, but it
         // no longer owns the turn or has work capable of progressing.
         release_prompts(session_id);
@@ -106,12 +106,21 @@ impl HostState {
     }
 
     pub(super) fn run(&mut self, session_id: &str, requests: Vec<ReviewRequest>) {
+        // Verdict delivery can discard the group. Transfer its child ownership
+        // to supervised cleanup before that asynchronous delivery starts.
+        for request in &requests {
+            if let ReviewRequest::CloseReviewer { role } = request {
+                self.close_reviewer_role(session_id, role);
+            }
+        }
         if self.finish_push(session_id, &requests) {
             self.publish(session_id);
             return;
         }
         for request in requests {
-            self.run_one(session_id, request);
+            if !matches!(request, ReviewRequest::CloseReviewer { .. }) {
+                self.run_one(session_id, request);
+            }
         }
         self.forward_fresh_findings(session_id);
         self.publish(session_id);
