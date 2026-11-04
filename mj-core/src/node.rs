@@ -36,6 +36,51 @@ pub const RUN_PATH: &str = "/run";
 /// left to serve and exits. A daemon that is replaced never sends this, so
 /// its node keeps running and serves the next one.
 pub const SHUTDOWN_PATH: &str = "/shutdown";
+/// Read a host file as a stream of [`FRAME_STDOUT`] bytes.
+pub const FS_READ_PATH: &str = "/fs/read";
+/// Write the request body to a host file.
+pub const FS_WRITE_PATH: &str = "/fs/write";
+/// List a host directory as JSON.
+pub const FS_LIST_PATH: &str = "/fs/list";
+/// Read host path metadata as JSON.
+pub const FS_METADATA_PATH: &str = "/fs/metadata";
+
+/// A host path the node should act on. Paths cross as UTF-8 text; only the
+/// node turns one into a `PathBuf`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FsRequest {
+    pub path: String,
+}
+
+/// One entry in a host directory listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FsEntryKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FsEntry {
+    pub name: String,
+    pub kind: FsEntryKind,
+}
+
+/// Host path metadata, as the daemon records it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FsMetadata {
+    pub len: u64,
+    pub modified_ms: Option<i64>,
+    pub is_file: bool,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub readonly: bool,
+}
 
 /// Why [`serve`] returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,8 +266,192 @@ async fn serve_exec(
     match path.as_str() {
         EXEC_PATH => serve_stream(description, stdin_prefix, body, respond).await,
         RUN_PATH => serve_run(description, stdin_prefix, body, respond).await,
+        FS_READ_PATH => serve_fs_read(description, respond).await,
+        FS_WRITE_PATH => serve_fs_write(description, stdin_prefix, body, respond).await,
+        FS_LIST_PATH => serve_fs_list(description, respond).await,
+        FS_METADATA_PATH => serve_fs_metadata(description, respond).await,
         other => bail!("unknown node path {other}"),
     }
+}
+
+fn fs_request(description: &Bytes) -> Result<std::path::PathBuf> {
+    let request: FsRequest =
+        serde_json::from_slice(description).context("decode node fs request")?;
+    Ok(std::path::PathBuf::from(request.path))
+}
+
+async fn fs_response(
+    mut respond: h2::server::SendResponse<Bytes>,
+) -> Result<h2::SendStream<Bytes>> {
+    let response = http::Response::builder()
+        .status(200)
+        .body(())
+        .expect("static response");
+    Ok(respond.send_response(response, false)?)
+}
+
+async fn finish_fs(send: &mut h2::SendStream<Bytes>, exit: NodeExit) -> Result<()> {
+    send_all(send, frame(FRAME_EXIT, &serde_json::to_vec(&exit)?)).await?;
+    send.send_data(Bytes::new(), true)?;
+    Ok(())
+}
+
+async fn fail_fs(send: &mut h2::SendStream<Bytes>, error: &std::io::Error) -> Result<()> {
+    fail_fs_text(send, &error.to_string()).await
+}
+
+async fn fail_fs_text(send: &mut h2::SendStream<Bytes>, message: &str) -> Result<()> {
+    send_all(send, frame(FRAME_STDERR, message.as_bytes())).await?;
+    finish_fs(
+        send,
+        NodeExit {
+            status: None,
+            error: Some(message.to_owned()),
+        },
+    )
+    .await
+}
+
+async fn serve_fs_read(description: Bytes, respond: h2::server::SendResponse<Bytes>) -> Result<()> {
+    let path = fs_request(&description)?;
+    let mut send = fs_response(respond).await?;
+    let mut file = match tokio::fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(error) => return fail_fs(&mut send, &error).await,
+    };
+    let mut buffer = vec![0; READ_CHUNK];
+    loop {
+        let read = match file.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) => return fail_fs(&mut send, &error).await,
+        };
+        send_all(&mut send, frame(FRAME_STDOUT, &buffer[..read])).await?;
+    }
+    finish_fs(
+        &mut send,
+        NodeExit {
+            status: Some(0),
+            error: None,
+        },
+    )
+    .await
+}
+
+async fn serve_fs_write(
+    description: Bytes,
+    stdin_prefix: Bytes,
+    mut body: h2::RecvStream,
+    respond: h2::server::SendResponse<Bytes>,
+) -> Result<()> {
+    let path = fs_request(&description)?;
+    let mut send = fs_response(respond).await?;
+    let mut file = match tokio::fs::File::create(&path).await {
+        Ok(file) => file,
+        Err(error) => return fail_fs(&mut send, &error).await,
+    };
+    let write: Result<()> = async {
+        if !stdin_prefix.is_empty() {
+            file.write_all(&stdin_prefix).await?;
+        }
+        while let Some(chunk) = next_chunk(&mut body).await? {
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        Ok(())
+    }
+    .await;
+    match write {
+        Ok(()) => {
+            finish_fs(
+                &mut send,
+                NodeExit {
+                    status: Some(0),
+                    error: None,
+                },
+            )
+            .await
+        }
+        Err(error) => fail_fs_text(&mut send, &format!("{error:#}")).await,
+    }
+}
+
+async fn serve_fs_list(description: Bytes, respond: h2::server::SendResponse<Bytes>) -> Result<()> {
+    let path = fs_request(&description)?;
+    let mut send = fs_response(respond).await?;
+    let mut directory = match tokio::fs::read_dir(&path).await {
+        Ok(directory) => directory,
+        Err(error) => return fail_fs(&mut send, &error).await,
+    };
+    let mut entries = Vec::new();
+    loop {
+        let entry = match directory.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) => return fail_fs(&mut send, &error).await,
+        };
+        let kind = match entry.file_type().await {
+            Ok(file_type) if file_type.is_dir() => FsEntryKind::Directory,
+            Ok(file_type) if file_type.is_file() => FsEntryKind::File,
+            Ok(file_type) if file_type.is_symlink() => FsEntryKind::Symlink,
+            Ok(_) => FsEntryKind::Other,
+            Err(error) => return fail_fs(&mut send, &error).await,
+        };
+        entries.push(FsEntry {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            kind,
+        });
+    }
+    send_all(
+        &mut send,
+        frame(FRAME_STDOUT, &serde_json::to_vec(&entries)?),
+    )
+    .await?;
+    finish_fs(
+        &mut send,
+        NodeExit {
+            status: Some(0),
+            error: None,
+        },
+    )
+    .await
+}
+
+async fn serve_fs_metadata(
+    description: Bytes,
+    respond: h2::server::SendResponse<Bytes>,
+) -> Result<()> {
+    let path = fs_request(&description)?;
+    let mut send = fs_response(respond).await?;
+    let metadata = match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(error) => return fail_fs(&mut send, &error).await,
+    };
+    let metadata = FsMetadata {
+        len: metadata.len(),
+        modified_ms: metadata.modified().ok().and_then(|time| {
+            time.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        }),
+        is_file: metadata.is_file(),
+        is_dir: metadata.is_dir(),
+        is_symlink: metadata.file_type().is_symlink(),
+        readonly: metadata.permissions().readonly(),
+    };
+    send_all(
+        &mut send,
+        frame(FRAME_STDOUT, &serde_json::to_vec(&metadata)?),
+    )
+    .await?;
+    finish_fs(
+        &mut send,
+        NodeExit {
+            status: Some(0),
+            error: None,
+        },
+    )
+    .await
 }
 
 /// The length-prefixed JSON description at the start of a request body, and
@@ -653,6 +882,48 @@ impl NodeClient {
             .await
     }
 
+    /// Read a host file through the node.
+    pub async fn fs_read(&self, path: &std::path::Path) -> Result<Vec<u8>> {
+        let request = serde_json::to_vec(&FsRequest {
+            path: crate::target_path::text(path),
+        })?;
+        let exec = self.open(FS_READ_PATH, &request, true).await?;
+        let output = exec.collect(Bytes::new()).await?;
+        fs_stdout(output)
+    }
+
+    /// Replace a host file with `data`, streaming through the node.
+    pub async fn fs_write(&self, path: &std::path::Path, data: Bytes) -> Result<()> {
+        let request = serde_json::to_vec(&FsRequest {
+            path: crate::target_path::text(path),
+        })?;
+        let mut exec = self.open(FS_WRITE_PATH, &request, false).await?;
+        exec.write_stdin(data).await?;
+        exec.close_stdin()?;
+        let output = exec.collect(Bytes::new()).await?;
+        fs_stdout(output).map(|_| ())
+    }
+
+    /// List a host directory through the node.
+    pub async fn fs_list(&self, path: &std::path::Path) -> Result<Vec<FsEntry>> {
+        let request = serde_json::to_vec(&FsRequest {
+            path: crate::target_path::text(path),
+        })?;
+        let exec = self.open(FS_LIST_PATH, &request, true).await?;
+        let output = exec.collect(Bytes::new()).await?;
+        serde_json::from_slice(&fs_stdout(output)?).context("decode node fs listing")
+    }
+
+    /// Read host path metadata through the node.
+    pub async fn fs_metadata(&self, path: &std::path::Path) -> Result<FsMetadata> {
+        let request = serde_json::to_vec(&FsRequest {
+            path: crate::target_path::text(path),
+        })?;
+        let exec = self.open(FS_METADATA_PATH, &request, true).await?;
+        let output = exec.collect(Bytes::new()).await?;
+        serde_json::from_slice(&fs_stdout(output)?).context("decode node fs metadata")
+    }
+
     /// Tell the node the daemon is stopping for good, and wait for it to
     /// acknowledge.
     pub async fn dismiss(&self) -> Result<()> {
@@ -892,6 +1163,22 @@ pub struct NodeOutput {
     pub exit: Option<NodeExit>,
 }
 
+fn fs_stdout(output: NodeOutput) -> Result<Vec<u8>> {
+    let exit = output
+        .exit
+        .context("node fs stream ended without an exit")?;
+    if let Some(error) = exit.error {
+        bail!("{error}");
+    }
+    ensure!(
+        exit.status == Some(0),
+        "node fs operation failed with status {:?}: {}",
+        exit.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(output.stdout)
+}
+
 /// The daemon's [`crate::targets::CommandHost`]: every command goes to the
 /// node that serves this computer's work. Which node that is has one owner,
 /// the [`NodeSlot`] the daemon's node registry publishes into.
@@ -1039,6 +1326,37 @@ mod tests {
 
     fn sh(script: &str) -> crate::targets::NodeRun {
         crate::targets::CommandSpec::new("sh", ["-c", script]).to_node_run(true)
+    }
+
+    /// Host files cross the node as streams, not as one oversized frame, and
+    /// metadata and listings use the same path conversion.
+    #[tokio::test]
+    async fn host_files_stream_through_the_node_in_both_directions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("payload.bin");
+        let payload = (0..300_000_u32)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        tokio::fs::write(&path, &payload).await.unwrap();
+
+        let client = connected().await;
+        assert_eq!(client.fs_read(&path).await.unwrap(), payload);
+
+        let written = directory.path().join("written.bin");
+        client
+            .fs_write(&written, Bytes::from(payload.clone()))
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(&written).await.unwrap(), payload);
+
+        let entries = client.fs_list(directory.path()).await.unwrap();
+        assert!(entries.iter().any(|entry| entry.name == "payload.bin"));
+        assert!(entries.iter().all(|entry| entry.name != ".."));
+
+        let metadata = client.fs_metadata(&path).await.unwrap();
+        assert_eq!(metadata.len, payload.len() as u64);
+        assert!(metadata.is_file);
+        assert!(!metadata.is_dir);
     }
 
     // A stream protocol over bounded windows: drive far more than 64KB both
