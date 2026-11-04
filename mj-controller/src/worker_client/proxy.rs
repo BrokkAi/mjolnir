@@ -52,7 +52,9 @@ impl std::fmt::Display for ProxyExit {
 }
 
 pub(super) enum ProxyChild {
-    Local(tokio::process::Child),
+    // Boxed: `tokio::process::Child` is over 200 bytes larger on Windows than
+    // the node variant, which trips `large_enum_variant` there.
+    Local(Box<tokio::process::Child>),
     Node(NodeProxy),
 }
 
@@ -144,7 +146,7 @@ pub(super) async fn spawn_proxy(spec: &CommandSpec) -> Result<ProxyStdio> {
         .take()
         .context("relay proxy stderr unavailable")?;
     Ok(ProxyStdio {
-        child: ProxyChild::Local(child),
+        child: ProxyChild::Local(Box::new(child)),
         stdin: Box::new(stdin),
         stdout: Box::new(stdout),
         stderr: Box::new(stderr),
