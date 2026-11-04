@@ -55,10 +55,6 @@ impl ActiveChat {
             SurfaceId::ElicitationMessage => self
                 .state
                 .scroll_elicitation_message(if direction < 0 { -rows } else { rows }),
-            SurfaceId::ReviewerTranscript => {
-                self.state
-                    .scroll_turn_review(if direction < 0 { -rows } else { rows });
-            }
             _ => {}
         }
     }

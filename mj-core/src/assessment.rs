@@ -258,6 +258,13 @@ pub enum Status {
     Failed,
 }
 
+/// Identity of the completed turn whose inferred question a person can dismiss.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferredQuestion {
+    pub turn_id: String,
+    pub completed_ordinal: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnAssessment {
     pub turn_id: String,
@@ -292,6 +299,22 @@ impl TurnAssessment {
     }
     pub fn current(&self) -> bool {
         !matches!(self.status, Status::Consumed | Status::Superseded)
+    }
+    pub fn inferred_question(&self) -> Option<InferredQuestion> {
+        (self.current() && self.action == Some(Action::AwaitInput)).then(|| InferredQuestion {
+            turn_id: self.turn_id.clone(),
+            completed_ordinal: self.completed_ordinal,
+        })
+    }
+    pub fn question_dismissed(&self) -> bool {
+        self.status == Status::Superseded && self.reason == "question_dismissed"
+    }
+    pub fn matches_completion(&self, outcome: &crate::state::MaterializedTurnOutcome) -> bool {
+        self.turn_id == outcome.command_id && self.completed_ordinal == outcome.completed_ordinal
+    }
+    /// Only the assessment of this exact completion may interpret its reply.
+    pub fn applies_to(&self, outcome: &crate::state::MaterializedTurnOutcome) -> bool {
+        self.matches_completion(outcome) && self.current()
     }
     pub fn needs_classification(&self, now: i64) -> bool {
         matches!(self.status, Status::Pending | Status::Failed)

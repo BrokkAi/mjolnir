@@ -34,6 +34,11 @@ impl DashboardState {
             .managed_active_child_ids(parent)
             .into_iter()
             .filter(|id| {
+                self.state.subagents.get(id).is_some_and(|relation| {
+                    relation.kind == mj_core::subagent::SubagentKind::Worker
+                })
+            })
+            .filter(|id| {
                 #[cfg(test)]
                 self.reconciliation_visits
                     .set(self.reconciliation_visits.get() + 1);
@@ -57,7 +62,8 @@ impl DashboardState {
     }
 
     pub fn subagent_count_for(&self, parent: &str) -> usize {
-        self.managed_child_count(parent)
+        self.managed_child_ids_of_kind(parent, mj_core::subagent::SubagentKind::Worker)
+            .len()
             + self.native_by_parent.get(parent).map_or(0, BTreeSet::len)
     }
 
@@ -283,7 +289,8 @@ impl DashboardState {
             KeyCode::End => pane.scroll = 0,
             KeyCode::Char('p') if key.modifiers.is_empty() => {
                 let parent = pane.agent.parent_view_id();
-                self.switch_subagent_scope(self.subagent_parent_for(&parent));
+                let next = self.child_workspace_for(&parent);
+                self.switch_child_scope(next);
                 self.select_active_session(&parent);
                 return Some(DashboardAction::Open { session_id: parent });
             }

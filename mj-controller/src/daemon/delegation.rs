@@ -82,8 +82,11 @@ async fn run(
                                 SubagentToolAction::SendInput { .. }
                                     | SubagentToolAction::SendMessage { .. }
                                     | SubagentToolAction::Spawn { .. }
-                                    | SubagentToolAction::RequestReview {}
+                                    | SubagentToolAction::RequestReview { .. }
                                     | SubagentToolAction::OverrideReview { .. }
+                                    // Its lifecycle persists Closing before yielding
+                                    // admission; the next daemon finishes the close.
+                                    | SubagentToolAction::CloseAgent { .. }
                                     // A temporary copy is safe to repeat after handoff.
                                     | SubagentToolAction::Fetch { .. }
                             ) {

@@ -128,8 +128,15 @@ impl ImportCommand {
 
 pub(crate) fn import(args: ImportArgs, workspace_id: &str) -> Result<()> {
     let (harness, args) = args.command.split();
-    let source = import_source(&Config::load()?, harness, args.profile.as_deref())?;
-    import_native(harness, args, &source, workspace_id).map(|_| ())
+    let config = daemon_config()?;
+    let source = import_source(&config, harness, args.profile.as_deref())?;
+    import_native(harness, args, &source, workspace_id, &config).map(|_| ())
+}
+
+/// Read the configuration from the daemon that owns it. Import runs on a
+/// blocking task inside the runtime, so this can wait for the daemon.
+fn daemon_config() -> Result<Config> {
+    mj_core::runtime::block_on(async { crate::daemon::connect_or_start().await?.config().await })?
 }
 
 /// Where one import reads its session from.
@@ -212,6 +219,7 @@ pub(crate) fn import_named_native_session(
         profile_id: None,
         home: harness_config_home(harness)?,
     };
+    let config = daemon_config()?;
     import_native(
         harness,
         NativeImportArgs {
@@ -231,6 +239,7 @@ pub(crate) fn import_named_native_session(
         },
         &source,
         workspace_id,
+        &config,
     )
 }
 
@@ -261,7 +270,9 @@ fn import_native(
     args: NativeImportArgs,
     source: &ImportSource,
     workspace_id: &str,
+    config: &Config,
 ) -> Result<Option<String>> {
+    let mut config = config.clone();
     let home = source.home.clone();
     let selection = match args.session {
         Some(session) => ClaudeSessionSelection::NativeSessionId(session),
@@ -283,19 +294,19 @@ fn import_native(
     let transcript = read_native_transcript(harness, &located.source_path)?;
     println!("Original cwd: {}", transcript.cwd.display());
 
-    let mut state = mj_controller::database::load_state()?;
-    state.validate()?;
+    // Import only adds its session; the daemon persists it. The store is the
+    // daemon's alone.
+    let mut state = State::default();
     let targets = session_edit_targets(&transcript, &home)?;
     if !confirm_import_safety(&targets, args.allow_dirty_local, args.allow_omitted_non_git)? {
         println!("{IMPORT_CANCELLED_MESSAGE}");
         return Ok(None);
     }
-    // Resolve and persist a synthesized bundle while holding the config lock;
-    // the archive scan then runs outside that lock so other settings do not
-    // wait behind a large import.
-    let (config, bundle_id) = Config::update(|config| {
-        resolve_import_bundle(config, &transcript, &targets, args.bundle.as_deref())
-    })?;
+    // Resolve the bundle against the daemon's configuration. The daemon
+    // writes a synthesized one with the session, so the client never edits
+    // the configuration file.
+    let (bundle_id, bundle) =
+        resolve_import_bundle(&mut config, &transcript, &targets, args.bundle.as_deref())?;
     let imported = import_native_session(
         &config,
         &mut state,
@@ -324,7 +335,13 @@ fn import_native(
         args.review_tier.as_deref(),
         args.review_count,
     );
-    persist_imported_session(session)?;
+    persist_imported_session(
+        session,
+        bundle.map(|bundle| crate::daemon::ImportedBundle {
+            bundle_id: bundle_id.clone(),
+            bundle,
+        }),
+    )?;
     println!("{}", import_success_message(&imported));
     Ok(Some(imported.session_id))
 }
@@ -341,12 +358,12 @@ fn resolve_import_bundle(
     transcript: &ClaudeTranscript,
     targets: &SessionEditTargets,
     requested_bundle: Option<&str>,
-) -> Result<String> {
+) -> Result<(String, Option<mj_core::config::ProjectBundle>)> {
     match resolve_bundle(config, &transcript.cwd, targets, requested_bundle)? {
-        BundleResolution::Existing(bundle_id) => Ok(bundle_id),
+        BundleResolution::Existing(bundle_id) => Ok((bundle_id, None)),
         BundleResolution::Synthesized { id, bundle } => {
-            config.bundles.insert(id.clone(), bundle);
-            Ok(id)
+            config.bundles.insert(id.clone(), bundle.clone());
+            Ok((id, Some(bundle)))
         }
     }
 }
@@ -401,13 +418,16 @@ fn confirm_import_safety(
     ))
 }
 
-pub(crate) fn persist_imported_session(session: &SessionRecord) -> Result<()> {
+pub(crate) fn persist_imported_session(
+    session: &SessionRecord,
+    bundle: Option<crate::daemon::ImportedBundle>,
+) -> Result<()> {
     let session = session.clone();
     tokio::runtime::Handle::try_current().context(IMPORT_RUNTIME_CONTEXT)?;
     mj_core::runtime::block_on(async {
         crate::daemon::connect_or_start()
             .await?
-            .persist_imported_session(session)
+            .persist_imported_session(session, bundle)
             .await
     })?
 }

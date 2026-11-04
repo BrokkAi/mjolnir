@@ -76,6 +76,7 @@ pub(super) async fn prepare(
         config,
         cancelled,
         mj_core::relay::CaptureScope::TurnDelta,
+        None,
     )
     .await
 }
@@ -87,6 +88,7 @@ pub(super) async fn prepare_scoped(
     config: ReviewConfig,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
     scope: mj_core::relay::CaptureScope,
+    repositories: Option<Vec<std::path::PathBuf>>,
 ) -> Result<Prepared, StartRefusal> {
     let push = scope == mj_core::relay::CaptureScope::PushableCommits;
     // A sub-agent's changes are reviewed through its parent's turn. Asking
@@ -134,6 +136,14 @@ pub(super) async fn prepare_scoped(
             "the session's worker predates push review; restart the session".into(),
         ));
     }
+    if repositories.is_some()
+        && snapshot.operational.relay_protocol_version.unwrap_or(0)
+            < mj_core::relay::RELAY_WORKTREE_REVIEW_PROTOCOL
+    {
+        return Err(StartRefusal(
+            "the session's worker predates worktree review; restart the session".into(),
+        ));
+    }
     if !push
         && !matches!(
             snapshot.materialized.execution,
@@ -172,17 +182,22 @@ pub(super) async fn prepare_scoped(
     // the choice does. A capture that fails for any other reason is left to
     // the review, which captures again and reports the failure the way it
     // always has.
+    let scoped_repositories = repositories;
     let captured = {
         let handle = &handle;
         let baselines = &state.baselines;
-        after_background_work(session_id, deadline, &cancelled, move || async move {
-            handle
-                .reviewer(ReviewerAction::CaptureDelta {
-                    scope,
-                    baselines: baselines.clone(),
-                })
-                .await
-                .map_err(|error| format!("{error:#}"))
+        after_background_work(session_id, deadline, &cancelled, move || {
+            let repositories = scoped_repositories.clone();
+            async move {
+                handle
+                    .reviewer(ReviewerAction::CaptureDelta {
+                        repositories: repositories.clone(),
+                        scope,
+                        baselines: baselines.clone(),
+                    })
+                    .await
+                    .map_err(|error| format!("{error:#}"))
+            }
         })
         .await
     };

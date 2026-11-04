@@ -8,12 +8,10 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 /// A cold agent start plus one round trip to the billing backend. Generous
 /// because the alternative — reporting a timeout on a slow machine — reads to
@@ -90,14 +88,14 @@ pub async fn query(
     container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<GrokUsageReport, GrokUsageError> {
     let mut session = match container {
-        None => GrokUsageSession::spawn(&home, cwd, env)?,
+        None => GrokUsageSession::spawn(&home, cwd, env).await?,
         Some(check) => {
             check
                 .runtime
                 .ensure_image_async()
                 .await
                 .map_err(|error| GrokUsageError::ImageUnavailable(format!("{error:#}")))?;
-            GrokUsageSession::spawn_in_container(&check, env)?
+            GrokUsageSession::spawn_in_container(&check, env).await?
         }
     };
     // The exchange is bounded as a whole: a stalled agent must not hold the
@@ -117,90 +115,92 @@ fn grok_programs(home: &Path) -> Vec<PathBuf> {
 }
 
 struct GrokUsageSession {
-    child: Child,
+    child: crate::streamed_child::ProxyChild,
     /// The container the agent runs in, removed at shutdown.
     container: Option<crate::quota_runtime::QuotaContainer>,
     /// Held for the whole exchange on purpose: Grok Build stops when its stdin
     /// closes, so dropping this early kills the agent before it answers.
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdin: crate::streamed_child::ProxyWriter,
+    stdout: BufReader<crate::streamed_child::ProxyReader>,
+    /// Drains stderr so a chatty agent cannot block on a full pipe.
+    stderr: tokio::task::JoinHandle<()>,
 }
 
 impl GrokUsageSession {
-    fn spawn(
+    async fn spawn(
         home: &Path,
         cwd: PathBuf,
         env: HashMap<String, String>,
     ) -> Result<Self, GrokUsageError> {
         let programs = grok_programs(home);
-        let mut child = None;
+        let mut spawned = None;
         for (index, program) in programs.iter().enumerate() {
-            let mut command = Command::new(program);
-            command
-                .args(["agent", "stdio"])
-                .current_dir(&cwd)
-                .envs(&env)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true);
-            match command.spawn() {
-                Ok(spawned) => {
-                    child = Some(spawned);
+            let mut spec = mj_core::targets::CommandSpec::new(
+                mj_core::target_path::text(program),
+                ["agent", "stdio"],
+            );
+            spec.cwd = Some(cwd.clone());
+            spec.env = env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            match crate::streamed_child::spawn_proxy(&spec).await {
+                Ok(stdio) => {
+                    spawned = Some(stdio);
                     break;
                 }
                 Err(error)
-                    if error.kind() == std::io::ErrorKind::NotFound
+                    if crate::streamed_child::is_missing_program(&error)
                         && index + 1 < programs.len() => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(error) if crate::streamed_child::is_missing_program(&error) => {
                     return Err(GrokUsageError::NotInstalled);
                 }
-                Err(error) => return Err(GrokUsageError::Launch(error.to_string())),
+                Err(error) => return Err(GrokUsageError::Launch(format!("{error:#}"))),
             }
         }
-        let mut child = child.ok_or(GrokUsageError::NotInstalled)?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| GrokUsageError::Protocol("agent stdin unavailable".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| GrokUsageError::Protocol("agent stdout unavailable".into()))?;
-        Ok(Self {
-            child,
-            container: None,
-            stdin,
-            stdout: BufReader::new(stdout),
-        })
+        let stdio = spawned.ok_or(GrokUsageError::NotInstalled)?;
+        Ok(Self::from_stdio(stdio, None))
     }
 
-    fn spawn_in_container(
+    async fn spawn_in_container(
         check: &crate::quota_runtime::ContainerCheck,
         env: HashMap<String, String>,
     ) -> Result<Self, GrokUsageError> {
         let env = env.into_iter().collect();
         let launch = check.launch("grok", &["agent", "stdio"], &env);
-        let mut command = crate::quota_runtime::ContainerCheck::piped_command(&launch);
-        command.stderr(Stdio::null());
-        let mut child = command.spawn().map_err(|error| {
-            GrokUsageError::Launch(format!("{}: {error}", launch.program.display()))
-        })?;
-        let container = Some(launch.container);
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| GrokUsageError::Protocol("agent stdin unavailable".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| GrokUsageError::Protocol("agent stdout unavailable".into()))?;
-        Ok(Self {
+        let mut spec = mj_core::targets::CommandSpec::new(
+            mj_core::target_path::text(&launch.program),
+            launch.args.clone(),
+        );
+        spec.env = env;
+        let stdio = crate::streamed_child::spawn_proxy(&spec)
+            .await
+            .map_err(|error| {
+                GrokUsageError::Launch(format!("{}: {error:#}", launch.program.display()))
+            })?;
+        Ok(Self::from_stdio(stdio, Some(launch.container)))
+    }
+
+    fn from_stdio(
+        stdio: crate::streamed_child::ProxyStdio,
+        container: Option<crate::quota_runtime::QuotaContainer>,
+    ) -> Self {
+        let crate::streamed_child::ProxyStdio {
+            child,
+            stdin,
+            stdout,
+            stderr,
+        } = stdio;
+        let stderr = tokio::spawn(async move {
+            let _ = crate::streamed_child::collect_bounded(stderr, 64 * 1024).await;
+        });
+        Self {
             child,
             container,
             stdin,
             stdout: BufReader::new(stdout),
-        })
+            stderr,
+        }
     }
 
     async fn exchange(&mut self) -> Result<GrokUsageReport, GrokUsageError> {
@@ -275,6 +275,7 @@ impl GrokUsageSession {
         if let Err(error) = self.child.wait().await {
             tracing::warn!(%error, "could not reap the Grok usage process");
         }
+        self.stderr.abort();
         if let Some(container) = self.container {
             container.remove().await;
         }

@@ -1,6 +1,6 @@
 //! Keyed runtime publications. A cursor belongs to one daemon incarnation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
@@ -8,7 +8,7 @@ use mj_core::config::Config;
 use mj_core::native_agent::NativeAgentSummary;
 use mj_core::snapshot_map::{SharedSnapshot, SnapshotMap};
 use mj_core::state::{MaterializedSession, MoveOperation, ProjectionWindow, SessionRecord};
-use mj_core::subagent::{SubagentPolicy, SubagentRecord};
+use mj_core::subagent::{SubagentMetadata, SubagentPolicy};
 use mj_core::transcript::TranscriptItem;
 use serde::{Deserialize, Serialize};
 
@@ -19,14 +19,36 @@ use crate::review::RuntimeReviewView;
 pub struct RuntimeCursor {
     pub incarnation: String,
     pub sequence: u64,
+    /// Families whose historical session rows belong to this cursor's view.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub subagent_parents: BTreeSet<String>,
+}
+
+/// One atomic runtime snapshot used to start a replica without another download.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeBootstrap {
+    pub cursor: RuntimeCursor,
+    pub projection: RuntimeProjection,
+}
+
+impl RuntimeBootstrap {
+    pub fn into_replica(self) -> RuntimeReplica {
+        RuntimeReplica {
+            cursor: Some(self.cursor),
+            projection: self.projection,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeProjection {
+    #[serde(default)]
+    pub subagent_parents: BTreeSet<String>,
     /// Legacy ordering shared with one-shot management responses.
     pub revision: u64,
     pub records: SnapshotMap<String, SessionRecord>,
-    pub subagents: SnapshotMap<String, SubagentRecord>,
+    pub subagents: SnapshotMap<String, SubagentMetadata>,
     pub sessions: SnapshotMap<String, RuntimeSessionView>,
     pub moves: SnapshotMap<String, MoveOperation>,
     pub native_agents: SnapshotMap<String, NativeAgentSummary>,
@@ -38,6 +60,70 @@ pub struct RuntimeProjection {
     /// needs at its cursor, then follows them through deltas.
     #[serde(skip)]
     pub transcripts: SnapshotMap<String, SessionTail>,
+}
+
+impl RuntimeProjection {
+    /// Publish row detail for live work and the families the client has opened.
+    /// Compact relationship metadata remains available for counts/navigation.
+    pub fn for_subagent_parents(&self, parents: &BTreeSet<String>) -> Self {
+        let operations = self
+            .metadata
+            .lifecycles
+            .iter()
+            .map(|operation| operation.session_id.clone())
+            .chain(
+                self.moves
+                    .iter()
+                    .filter(|(_, operation)| operation.is_active())
+                    .map(|(id, _)| id.clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        let mut ancestors = parents.clone();
+        for parent in parents {
+            let mut id = parent.as_str();
+            let mut seen = BTreeSet::new();
+            while seen.insert(id.to_owned()) {
+                let Some(relation) = self.subagents.get(id) else {
+                    break;
+                };
+                ancestors.insert(relation.parent_session_id.clone());
+                id = &relation.parent_session_id;
+            }
+        }
+        let mut result = self.clone();
+        result.subagent_parents = parents.clone();
+        result.records = self.records.filtered(|id, record| {
+            let relation = self.subagents.get(id);
+            let in_family =
+                relation.is_some_and(|relation| parents.contains(&relation.parent_session_id));
+            let live = match relation {
+                None => record.state != mj_core::state::SessionState::Stopped,
+                Some(_) => !matches!(
+                    record.state,
+                    mj_core::state::SessionState::Stopped | mj_core::state::SessionState::Parked
+                ),
+            };
+            operations.contains(id)
+                || (!record.archived && (live || in_family || ancestors.contains(id)))
+        });
+        result
+            .subagents
+            .retain(|id, _| self.records.get(id).is_some_and(|record| !record.archived));
+        result
+            .sessions
+            .retain(|id, _| result.records.contains_key(id));
+        result.moves.retain(|id, _| result.records.contains_key(id));
+        result
+            .session_cpu
+            .retain(|id, _| result.records.contains_key(id));
+        result
+            .transcripts
+            .retain(|id, _| result.records.contains_key(id));
+        result
+            .native_agents
+            .retain(|_, agent| result.records.contains_key(&agent.agent.owner_session_id));
+        result
+    }
 }
 
 /// The daemon's hard container budget for one probed deployment host.
@@ -75,6 +161,10 @@ pub struct RuntimeMetadata {
     pub lifecycles: Vec<RuntimeLifecycleView>,
     pub reviews: Vec<RuntimeReviewView>,
     pub notices: Vec<RuntimeNotice>,
+    /// Requests to change the dashboard made on the person's behalf, newest
+    /// last. Bounded like `notices`; see [`crate::ui_request`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ui_requests: Vec<crate::ui_request::UiRequest>,
     /// The daemon's quota reports. The daemon is the only prober.
     #[serde(default)]
     pub quotas: SharedSnapshot<crate::quota::QuotaSnapshot>,
@@ -437,7 +527,7 @@ pub type KeyChanges<T> = Vec<(String, Option<T>)>;
 pub struct RuntimeDelta {
     pub revision: Option<u64>,
     pub records: KeyChanges<SessionRecord>,
-    pub subagents: KeyChanges<SubagentRecord>,
+    pub subagents: KeyChanges<SubagentMetadata>,
     pub sessions: KeyChanges<RuntimeSessionView>,
     pub moves: KeyChanges<MoveOperation>,
     pub native_agents: KeyChanges<NativeAgentSummary>,
@@ -603,6 +693,7 @@ mod tests {
         RuntimeCursor {
             incarnation: incarnation.into(),
             sequence,
+            subagent_parents: Default::default(),
         }
     }
 

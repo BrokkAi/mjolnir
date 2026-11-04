@@ -75,7 +75,8 @@ exit 64
 "#,
     );
     let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", tools.display());
-    let mut daemon = common::own_test_daemons(&mut Command::new(env!("CARGO_BIN_EXE_mj")))
+    let mut daemon_command = Command::new(env!("CARGO_BIN_EXE_mj"));
+    common::own_test_daemons(&mut daemon_command)
         .arg("daemon-run")
         .env("MJ_DATA_DIR", &data)
         .env("MJ_CONFIG_DIR", &config)
@@ -87,9 +88,11 @@ exit 64
         .env("MJOLNIR_NO_UPDATE_CHECK", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(std::process::Stdio::null());
+    let mut daemon = daemon_command.spawn().unwrap();
+    // The daemon starts Apple container through its node, the process that
+    // runs its commands on this computer, as the launcher provides one.
+    let _node = common::start_test_node(&daemon_command, &data);
 
     let deadline = Instant::now() + Duration::from_secs(30);
     while !started.exists() {
@@ -368,6 +371,55 @@ fn the_daemon_is_listed_as_mj_daemon_run() {
     assert_eq!(arguments, ["mj", "daemon-run"]);
 }
 
+/// A replacement daemon is a new start, and a client proves that from the
+/// daemon alone: no PID, no `/proc`, and the same answer on every platform.
+#[test]
+fn a_daemon_reports_a_fresh_identity_for_each_start() {
+    fn identity(storage: &common::DaemonStorage) -> mj_client::daemon::DaemonIdentity {
+        let metadata: mj_client::daemon::DaemonMetadata =
+            serde_json::from_slice(&fs::read(storage.path().join("data/daemon.json")).unwrap())
+                .unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut client = mj_client::daemon::DaemonClient::connect(metadata.clone())
+                .await
+                .unwrap();
+            let identity = client.identity().await.unwrap();
+            assert_eq!(identity.build_version, metadata.build_version);
+            assert_eq!(identity.placement, mj_client::daemon::DaemonPlacement::Host);
+            assert!(!identity.instance_id.is_empty());
+            // Stored settings come from the daemon, not the file.
+            assert!(!client.config().await.unwrap().phone.enabled);
+            identity
+        })
+    }
+
+    let storage = upgrade_storage();
+    let output = mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let before = identity(&storage);
+
+    let output = mj_core::subprocess::run_with_input(
+        upgrade_command(&storage).args(["daemon", "restart"]),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after = identity(&storage);
+    assert_ne!(
+        before.instance_id, after.instance_id,
+        "a restarted daemon must report a new start identity"
+    );
+}
+
 #[cfg(target_os = "linux")]
 // Hard-won: 92b39c9da: suspending the launcher's session deleted the daemon's working directory.
 #[test]
@@ -515,6 +567,8 @@ fn old_daemon_fixture() {
             token: "isolated-upgrade-fixture".into(),
             started_at: chrono::Utc::now().to_rfc3339(),
             build_version: version,
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
         let stop = tokio_util::sync::CancellationToken::new();
@@ -553,6 +607,12 @@ fn old_daemon_fixture() {
                                     DaemonReply::Done
                                 }
                                 DaemonAction::PrepareUpgrade => if busy { DaemonReply::UpgradePending } else { DaemonReply::Done },
+                                // A daemon from before `Identity` or
+                                // `Configuration` cannot decode the frame: it
+                                // drops the connection. Clients must treat
+                                // that as an unknown answer, not as a reason to
+                                // keep asking.
+                                DaemonAction::Identity | DaemonAction::Configuration => break,
                                 other => panic!("new client reused the old daemon: {other:?}"),
                             };
                             write_frame(&mut stream, &ResponseEnvelope {

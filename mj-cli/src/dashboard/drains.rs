@@ -86,6 +86,7 @@ impl DashboardContext {
         self.drain_worker_updates();
         self.drain_runtime_reviews();
         self.drain_runtime_notices();
+        self.drain_ui_requests();
         self.drain_runtime_config();
         while let Some(capabilities) = self.profile_capabilities.next_ready() {
             self.dashboard.set_profile_capabilities(capabilities);
@@ -116,6 +117,7 @@ impl DashboardContext {
             self.runtime_health.take_delivered(),
             self.runtime_reviews.take_delivered(),
             self.runtime_notices.take_delivered(),
+            self.runtime_ui_requests.take_delivered(),
             self.runtime_config.take_delivered(),
             self.lifecycle.take_delivered(),
             self.capacity.take_delivered(),
@@ -276,6 +278,23 @@ impl DashboardContext {
         }
     }
 
+    /// Apply each dashboard request published since the last one applied.
+    pub(crate) fn drain_ui_requests(&mut self) {
+        let mut latest = None;
+        while let Some(requests) = self.runtime_ui_requests.next_ready() {
+            latest = Some(requests);
+        }
+        let Some(requests) = latest else {
+            return;
+        };
+        for request in self.ui_request_cursor.take_new(&requests) {
+            let action = self.dashboard.apply_ui_request(request.clone());
+            if !matches!(action, DashboardAction::None) {
+                self.ui_request_actions.push(action);
+            }
+        }
+    }
+
     /// Applies the retained daemon projection to every warm chat. Absence is
     /// meaningful: it closes a review the previous projection held.
     pub(crate) fn apply_runtime_reviews_to_chats(&mut self) {
@@ -369,6 +388,15 @@ impl DashboardContext {
         let Some(update) = latest else {
             return;
         };
+        if update.subagent_parents != *self.runtime_subagent_parents.borrow() {
+            return;
+        }
+        if matches!(
+            self.dashboard.notice().as_deref(),
+            Some("Loading sub-agents…" | "Loading reviewers…")
+        ) {
+            self.dashboard.clear_notice();
+        }
         self.auto_afk.configure(
             self.controller.config.advanced.auto_afk_minutes > 0,
             update.operator_presence.away,
@@ -556,7 +584,7 @@ impl DashboardContext {
     pub(crate) fn apply_runtime_records(
         &mut self,
         records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
-        subagents: mj_core::snapshot_map::SnapshotMap<String, SubagentRecord>,
+        subagents: mj_core::snapshot_map::SnapshotMap<String, SubagentMetadata>,
         last_subagent_policies: std::collections::BTreeMap<
             String,
             mj_core::subagent::SubagentPolicy,
@@ -755,8 +783,6 @@ impl DashboardContext {
             }
             spawn_lifecycle_reload(
                 LifecycleReload { update, operation },
-                self.workspace_id.clone(),
-                self.client_id.clone(),
                 self.dashboard_io_tx.clone(),
             );
         }
@@ -821,6 +847,7 @@ pub(crate) fn refresh_subagent_counts(
     for chat in chats.values_mut() {
         let session_id = chat.session_id().to_owned();
         chat.set_subagent_count(dashboard.subagent_count_for(&session_id));
+        chat.set_reviewer_count(dashboard.reviewer_count_for(&session_id));
         chat.set_subagent_working_count(dashboard.working_subagent_count_for(&session_id));
     }
 }

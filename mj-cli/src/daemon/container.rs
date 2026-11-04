@@ -1,38 +1,35 @@
-//! Launching `mj daemon-run` inside a per-instance container.
+//! Launching `mj daemon-run` in a durable, container-native container.
 //!
-//! The daemon is the image's own `mj` ([`IMAGE_EXECUTABLE`]), built in the
-//! image's builder stage against the image's C library, and only an image
-//! whose `org.brokk.mjolnir.revision` label is this client's revision is used,
-//! so the daemon in the container is this build. Without such an image the
-//! daemon runs on the host and the launch says why and how to get one.
+//! The container is the daemon's machine. It has its own filesystem, its own
+//! network namespace, and one named volume mounted at [`VOLUME_MOUNT`]. The
+//! host supplies only three things: the engine command, a published loopback
+//! port, and the token. No host directory, network namespace, PID namespace or
+//! uid is shared with the container. A host directory the user explicitly
+//! wants inside a session belongs in `[daemon] mounts`.
 //!
-//! The container shares this computer's network and process namespaces, runs
-//! as this user's uid, and mounts `$HOME`, the data and configuration
-//! directories, `/tmp` and the user's runtime directory at the paths they
-//! have here. To every client the daemon is therefore the process it is on
-//! the host: the loopback address and token in `daemon.json`, a PID that
-//! `kill(2)` and `/proc` reach, and the same store lock.
-//!
-//! The container only holds processes; `sleep infinity` keeps it up between
-//! daemons. Local sessions' workers are started by the daemon and so run in
-//! it too, and survive a daemon handoff the way host workers do. A container
-//! is never stopped while anything but that placeholder runs in it. When the
-//! container's specification changes (image, mounts, engine socket), a new
-//! container is created beside the old one, the new daemon reattaches to the
-//! old one's workers through their sockets and host PIDs, and the old
-//! container is removed once it is idle.
+//! The container holds a `sleep infinity` placeholder so it can be reused
+//! across daemon processes. A daemon replacement starts a new daemon inside
+//! the same container; workers started by the daemon are processes in that
+//! container, and the data volume outlives both. The host client publishes
+//! `daemon.json` itself, because the container cannot write the host data
+//! directory.
 
 use anyhow::{Context, Result, bail, ensure};
-use mj_core::config::{DEFAULT_CONTAINER_IMAGE, DaemonConfig, DaemonRuntime, config_dir, data_dir};
+use mj_client::daemon::{
+    DaemonAction, DaemonClient, DaemonMetadata, DaemonPlacement, DaemonReply, PROTOCOL_VERSION,
+    metadata_path,
+};
+use mj_core::config::{DEFAULT_CONTAINER_IMAGE, DaemonConfig, DaemonRuntime, data_dir};
 use sha2::Digest;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::io::IsTerminal;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 /// Label carrying the instance identity, shared by every container this
 /// instance's daemons ever ran in.
 const INSTANCE_LABEL: &str = "ai.brokk.mjolnir.daemon-instance";
-/// Short engine queries: inspect, top, exec of the launch script.
+/// Short engine queries: inspect, top, port, exec of the launch script.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 /// Pulling the agent-dev image is gigabytes on a first start.
 const PULL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -41,24 +38,19 @@ const OUTPUT_LIMIT: usize = 1024 * 1024;
 const IMAGE_EXECUTABLE: &str = "/opt/mjolnir/mj";
 /// The Git revision the image's `mj` was built from.
 const REVISION_LABEL: &str = "org.brokk.mjolnir.revision";
-/// Variables that describe the launching shell or the host's file system
-/// layout rather than anything the daemon should inherit.
-const NOT_FORWARDED: &[&str] = &[
-    "PATH",
-    "HOSTNAME",
-    "PWD",
-    "OLDPWD",
-    "SHLVL",
-    "_",
-    "CONTAINER_HOST",
-    "MJ_UPGRADE_RESUME_FILE",
-    super::DAEMON_CONTAINER_ENV,
-    super::DEV_RESTART_STALE_DAEMON_ENV,
-];
+/// The one volume every daemon process of this instance uses.
+const VOLUME_MOUNT: &str = "/var/lib/mjolnir";
+/// The daemon listens on this port inside its own network namespace. The host
+/// publishes it on a random loopback port, so containers never collide.
+const CONTAINER_PORT: u16 = 8787;
+/// How often a launch checks whether the new daemon answers.
+const START_POLL: Duration = Duration::from_millis(200);
+/// How long a container daemon gets to answer its first Ping.
+const START_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(super) struct ContainerLaunch {
-    pub(super) pid: u32,
     pub(super) container: String,
+    pub(super) port: u16,
 }
 
 /// Where the configuration puts the daemon on this computer, decided once for
@@ -95,23 +87,190 @@ pub(super) async fn placement(config: &DaemonConfig) -> Result<Placement> {
 }
 
 /// Start a daemon in the container `spec` describes, creating the container
-/// first when it does not exist yet.
-pub(super) async fn launch(spec: &ContainerSpec, log_path: &Path) -> Result<ContainerLaunch> {
+/// and its volume when they do not exist yet.
+pub(super) async fn launch(spec: &ContainerSpec) -> Result<ContainerLaunch> {
     let program = spec.program();
-    // Housekeeping: a container left over must not stop the daemon starting.
-    if let Err(error) = remove_idle_predecessors(program, spec).await {
-        tracing::warn!(
-            error = format!("{error:#}"),
-            "could not remove earlier daemon containers"
-        );
-    }
+    remove_idle_predecessors(program, spec).await?;
     ensure_running(program, spec).await?;
-    prepare_log(log_path)?;
-    let pid = exec_daemon(program, spec, log_path).await?;
+    let port = published_port(program, &spec.name).await?;
+    let token = super::random_token()?;
+    let metadata = daemon_metadata(spec, port, token);
+    exec_daemon(program, spec, &metadata.token).await?;
+    wait_until_answering(program, spec, &metadata).await?;
+    super::write_launcher_metadata(&metadata)?;
     Ok(ContainerLaunch {
-        pid,
         container: spec.name.clone(),
+        port,
     })
+}
+
+fn daemon_metadata(spec: &ContainerSpec, port: u16, token: String) -> DaemonMetadata {
+    DaemonMetadata {
+        protocol_version: PROTOCOL_VERSION,
+        // The daemon's PID is a container PID. Clients ask `Identity`; this
+        // field is the frozen status shape and is never a host PID here.
+        pid: 0,
+        address: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        token,
+        started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        build_version: mj_client::build_identity::this_build().published(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Container {
+            name: spec.name.clone(),
+            runtime: Some(spec.engine),
+        },
+    }
+}
+
+async fn wait_until_answering(
+    program: &str,
+    spec: &ContainerSpec,
+    metadata: &DaemonMetadata,
+) -> Result<()> {
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        if let Ok(mut client) = DaemonClient::connect(metadata.clone()).await
+            && let Ok(DaemonReply::Pong) = client.request(DaemonAction::Ping).await
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let log = log_tail(program, &spec.name).await;
+            let error = if log.is_empty() {
+                anyhow::anyhow!(
+                    "daemon container {} did not answer on loopback port {} within {}s",
+                    spec.name,
+                    metadata.address.port(),
+                    START_TIMEOUT.as_secs()
+                )
+            } else {
+                anyhow::anyhow!(
+                    "daemon container {} did not answer on loopback port {} within {}s; log:\n{log}",
+                    spec.name,
+                    metadata.address.port(),
+                    START_TIMEOUT.as_secs()
+                )
+            };
+            let _ = remove_metadata();
+            return Err(error);
+        }
+        tokio::time::sleep(START_POLL).await;
+    }
+}
+
+/// The host file clients read. The container cannot write it, so the launcher
+/// publishes it once the daemon answers.
+pub(super) async fn is_running(runtime: DaemonRuntime, name: &str) -> Result<bool> {
+    let program = runtime
+        .engine()
+        .context("the daemon container has no engine")?;
+    let output = engine(
+        program,
+        ["inspect", "--format={{.State.Running}}", name],
+        QUERY_TIMEOUT,
+    )
+    .await?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
+
+/// Stop the daemon's container when it does not answer the protocol stop.
+/// This is the forced path; it stops the workers in the container too.
+pub(super) async fn stop(runtime: DaemonRuntime, name: &str) -> Result<()> {
+    let program = runtime
+        .engine()
+        .context("the daemon container has no engine")?;
+    let output = engine(program, ["stop", name], QUERY_TIMEOUT).await?;
+    if !output.status.success() {
+        return Err(failure(program, &format!("stop {name}"), &output));
+    }
+    Ok(())
+}
+
+/// The last part of the daemon log inside the container, for a launch failure.
+pub(super) async fn log_tail(program: &str, name: &str) -> String {
+    let output = engine(
+        program,
+        [
+            "exec",
+            name,
+            "tail",
+            "-c",
+            "65536",
+            &format!("{VOLUME_MOUNT}/daemon.log"),
+        ],
+        QUERY_TIMEOUT,
+    )
+    .await;
+    if let Ok(output) = &output
+        && output.status.success()
+    {
+        return String::from_utf8_lossy(&output.stdout).into_owned();
+    }
+    let logs = engine(program, ["logs", "--tail", "60", name], QUERY_TIMEOUT).await;
+    match logs {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Run `mj <args>` inside the configured daemon container, with the same
+/// roots the daemon uses. Returns false when this is a host placement, so the
+/// caller runs the command locally. The container process sets
+/// `MJ_IN_CONTAINER` so the nested command cannot try to launch another one.
+pub(crate) async fn exec_in_container(args: &[String]) -> Result<bool> {
+    if std::env::var_os("MJ_IN_CONTAINER").is_some() {
+        return Ok(false);
+    }
+    let config = super::load_daemon_config().await.unwrap_or_default();
+    if config.runtime.engine().is_none() {
+        return Ok(false);
+    }
+    let mut client = super::connect_or_start().await?;
+    let identity = client.identity().await?;
+    let DaemonPlacement::Container {
+        name,
+        runtime: Some(runtime),
+    } = identity.placement
+    else {
+        return Ok(false);
+    };
+    let program = runtime
+        .engine()
+        .context("the daemon container has no engine")?;
+    let mut command = std::process::Command::new(program);
+    command.args(["exec"]);
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        command.args(["--interactive", "--tty"]);
+    } else {
+        command.arg("--interactive");
+    }
+    command
+        .env("HOME", format!("{VOLUME_MOUNT}/home"))
+        .env("MJ_DATA_DIR", format!("{VOLUME_MOUNT}/data"))
+        .env("MJ_CONFIG_DIR", format!("{VOLUME_MOUNT}/config"))
+        .env("MJ_IN_CONTAINER", "1")
+        .arg(name)
+        .arg(IMAGE_EXECUTABLE)
+        .args(args);
+    let status = mj_core::subprocess::run_inherited(&mut command)
+        .with_context(|| format!("run mj {args:?} inside the daemon container"))?;
+    ensure!(
+        status.success(),
+        "mj {args:?} inside the daemon container failed ({status})"
+    );
+    Ok(true)
+}
+
+/// Remove the host metadata a stopped container daemon leaves behind.
+pub(super) fn remove_metadata() -> Result<()> {
+    match std::fs::remove_file(metadata_path()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("remove container daemon metadata"),
+    }
 }
 
 /// This client's Git revision, which the daemon image's label must carry.
@@ -214,24 +373,18 @@ async fn resolve_image(
 }
 
 /// Everything that decides what the daemon container looks like. Its digest
-/// names the container, so a change creates a new one instead of altering a
-/// container that may still hold workers.
+/// names the container, so a changed spec gets a new container instead of
+/// altering one that may still hold workers.
 pub(super) struct ContainerSpec {
     instance: String,
     pub(super) name: String,
     /// The image's id, so a retagged image gets a container of its own.
     image: String,
     engine: DaemonRuntime,
-    /// `(host, container)` bind mounts.
-    mounts: Vec<(PathBuf, PathBuf)>,
-    /// `KEY=VALUE` pairs fixed at creation.
-    environment: Vec<(String, String)>,
-    /// Further `run` arguments, such as the user and groups.
-    run_args: Vec<String>,
-    home: PathBuf,
-    /// Host `PATH` entries inside mounted directories, appended to the
-    /// image's `PATH`.
-    host_path: Vec<PathBuf>,
+    volume: String,
+    /// Explicit host directories the user asked to expose inside the
+    /// container, at the same absolute path. Nothing is mounted by default.
+    mounts: Vec<PathBuf>,
 }
 
 impl ContainerSpec {
@@ -241,114 +394,47 @@ impl ContainerSpec {
             .expect("a container spec has an engine")
     }
 
-    fn for_this_host(engine: DaemonRuntime, config: &DaemonConfig, image: String) -> Result<Self> {
-        let home = std::env::var_os("HOME")
-            .filter(|home| !home.is_empty())
-            .map(PathBuf::from)
-            .context("HOME is not set, so the daemon container has no home directory to mount")?;
-        let data = data_dir();
-        let configuration = config_dir();
-        std::fs::create_dir_all(&data)
-            .with_context(|| format!("create data directory {}", data.display()))?;
-        std::fs::create_dir_all(&configuration).with_context(|| {
-            format!("create configuration directory {}", configuration.display())
-        })?;
-        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    pub(super) fn runtime(&self) -> DaemonRuntime {
+        self.engine
+    }
 
-        let mut shared: Vec<PathBuf> = vec![home.clone(), data.clone(), configuration];
-        shared.push(PathBuf::from("/tmp"));
-        shared.extend(runtime_dir.clone());
+    fn for_this_host(engine: DaemonRuntime, config: &DaemonConfig, image: String) -> Result<Self> {
+        let data = data_dir();
+        let instance = short_digest(data.as_os_str().as_encoded_bytes());
+        let volume = format!("mj-{instance}-data");
+        let mut mounts = Vec::new();
         for mount in &config.mounts {
             ensure!(
                 mount.is_absolute(),
                 "`[daemon] mounts` entry {} must be an absolute path",
                 mount.display()
             );
-            shared.push(mount.clone());
-        }
-        let mut mounts: Vec<(PathBuf, PathBuf)> = Vec::new();
-        for path in shared {
-            if path.exists() && !mounts.iter().any(|(host, _)| *host == path) {
-                mounts.push((path.clone(), path));
+            if mount.exists() {
+                mounts.push(mount.clone());
+            } else {
+                bail!(
+                    "`[daemon] mounts` entry {} does not exist on this computer",
+                    mount.display()
+                );
             }
         }
-
-        let mut environment = vec![("HOME".to_owned(), home.display().to_string())];
-        let mut run_args = Vec::new();
-        let uid = unsafe { libc::getuid() };
-        let gid = unsafe { libc::getgid() };
-        match engine {
-            DaemonRuntime::Podman => {
-                // The engine's own socket lets the daemon reach the host's
-                // Podman for container sessions.
-                if let Some(socket) = podman_socket(runtime_dir.as_deref()) {
-                    environment.push((
-                        "CONTAINER_HOST".to_owned(),
-                        format!("unix://{}", socket.display()),
-                    ));
-                }
-                if uid != 0 {
-                    // The daemon and its workers run as this user's own uid on
-                    // the host, so this user's signals and `/proc` reach them.
-                    run_args.push("--userns=keep-id".to_owned());
-                }
-            }
-            DaemonRuntime::Host => bail!("the host daemon runtime has no container"),
-            DaemonRuntime::Docker => {
-                run_args.push(format!("--user={uid}:{gid}"));
-                // The image has no account for this uid; ssh and git need one.
-                for file in ["/etc/passwd", "/etc/group"] {
-                    mounts.push((PathBuf::from(file), PathBuf::from(file)));
-                }
-                let socket = PathBuf::from("/var/run/docker.sock");
-                if let Ok(metadata) = std::fs::metadata(&socket) {
-                    use std::os::unix::fs::MetadataExt;
-                    run_args.push(format!("--group-add={}", metadata.gid()));
-                    mounts.push((socket.clone(), socket));
-                }
-            }
-        }
-
-        let mounted = |entry: &Path| mounts.iter().any(|(_, inside)| entry.starts_with(inside));
-        let host_path = std::env::var_os("PATH")
-            .map(|path| {
-                std::env::split_paths(&path)
-                    .filter(|entry| entry.is_absolute() && mounted(entry))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        let instance = short_digest(data.as_os_str().as_encoded_bytes());
         let mut spec = Self {
             name: String::new(),
             instance,
             image,
             engine,
+            volume,
             mounts,
-            environment,
-            run_args,
-            home,
-            host_path,
         };
         let mut digest = sha2::Sha256::new();
         digest.update(spec.engine.engine().unwrap_or("host"));
         digest.update([0]);
         digest.update(&spec.image);
-        for (host, inside) in &spec.mounts {
-            digest.update([0]);
-            digest.update(host.as_os_str().as_encoded_bytes());
+        digest.update([0]);
+        digest.update(&spec.volume);
+        for mount in &spec.mounts {
             digest.update([1]);
-            digest.update(inside.as_os_str().as_encoded_bytes());
-        }
-        for (key, value) in &spec.environment {
-            digest.update([2]);
-            digest.update(key);
-            digest.update([3]);
-            digest.update(value);
-        }
-        for arg in &spec.run_args {
-            digest.update([4]);
-            digest.update(arg);
+            digest.update(mount.as_os_str().as_encoded_bytes());
         }
         let digest = mj_core::hex::lower_hex(digest.finalize());
         spec.name = format!("mj-daemon-{}-{}", spec.instance, &digest[..12]);
@@ -361,23 +447,18 @@ impl ContainerSpec {
             "--detach".into(),
             format!("--name={}", self.name).into(),
             format!("--label={INSTANCE_LABEL}={}", self.instance).into(),
-            "--network=host".into(),
-            "--pid=host".into(),
-            // Home directories carry their own SELinux labels; relabeling them
-            // for one container would break the host's use of them.
-            "--security-opt=label=disable".into(),
-            format!("--workdir={}", self.home.display()).into(),
+            // The host picks a free loopback port; the container always
+            // listens on its own fixed port.
+            format!("--publish=127.0.0.1::{CONTAINER_PORT}").into(),
+            format!("--volume={}:{VOLUME_MOUNT}", self.volume).into(),
+            format!("--workdir={VOLUME_MOUNT}").into(),
             "--entrypoint=sleep".into(),
         ];
-        args.extend(self.run_args.iter().map(OsString::from));
-        for (key, value) in &self.environment {
-            args.push(format!("--env={key}={value}").into());
-        }
-        for (host, inside) in &self.mounts {
+        for mount in &self.mounts {
             let mut volume = OsString::from("--volume=");
-            volume.push(host);
+            volume.push(mount);
             volume.push(":");
-            volume.push(inside);
+            volume.push(mount);
             args.push(volume);
         }
         args.push(self.image.clone().into());
@@ -386,24 +467,30 @@ impl ContainerSpec {
     }
 }
 
-/// The user's Podman API socket, started through systemd when it is not
-/// listening yet. `None` leaves the daemon without container sessions on this
-/// computer, which its own runtime checks then report.
-fn podman_socket(runtime_dir: Option<&Path>) -> Option<PathBuf> {
-    let socket = runtime_dir?.join("podman").join("podman.sock");
-    if !socket.exists() {
-        let mut command = std::process::Command::new("systemctl");
-        command.args(["--user", "start", "podman.socket"]);
-        match mj_core::subprocess::run_inherited(&mut command) {
-            Ok(status) if status.success() => {}
-            Ok(status) => tracing::warn!(%status, "could not start the user's Podman socket"),
-            Err(error) => tracing::warn!(
-                error = format!("{error:#}"),
-                "could not start the user's Podman socket"
-            ),
-        }
+/// The container engine's published loopback port for the daemon's fixed
+/// inside port.
+async fn published_port(program: &str, name: &str) -> Result<u16> {
+    let output = engine(
+        program,
+        ["port", name, &format!("{CONTAINER_PORT}/tcp")],
+        QUERY_TIMEOUT,
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(failure(
+            program,
+            &format!("read the published port of {name}"),
+            &output,
+        ));
     }
-    socket.exists().then_some(socket)
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Docker and Podman both answer `127.0.0.1:<port>`; an IPv6 host is
+    // bracketed, so the last colon still separates the port.
+    let port = text
+        .lines()
+        .find_map(|line| line.trim().rsplit(':').next()?.parse::<u16>().ok())
+        .with_context(|| format!("{program} reported no loopback port for {name}: {text:?}"))?;
+    Ok(port)
 }
 
 fn short_digest(bytes: &[u8]) -> String {
@@ -423,6 +510,22 @@ async fn engine(
         .with_context(|| format!("run {program}"))
 }
 
+async fn engine_with_env(
+    program: &str,
+    args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+    environment: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<std::process::Output> {
+    let mut command = tokio::process::Command::new(program);
+    command.args(args);
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    mj_core::subprocess::run_bounded(&mut command, OUTPUT_LIMIT, timeout)
+        .await
+        .with_context(|| format!("run {program}"))
+}
+
 fn failure(program: &str, action: &str, output: &std::process::Output) -> anyhow::Error {
     anyhow::anyhow!(
         "{program} could not {action} ({}): {}",
@@ -432,7 +535,8 @@ fn failure(program: &str, action: &str, output: &std::process::Output) -> anyhow
 }
 
 /// Remove this instance's containers from earlier specifications once nothing
-/// but their placeholder runs in them. One that still holds workers stays.
+/// but their placeholder runs in them. A container that still holds workers
+/// is left alone and blocks a second container from opening the same volume.
 async fn remove_idle_predecessors(program: &str, spec: &ContainerSpec) -> Result<()> {
     let listed = engine(
         program,
@@ -457,11 +561,9 @@ async fn remove_idle_predecessors(program: &str, spec: &ContainerSpec) -> Result
             .await?
             .is_some_and(|count| count > 1)
         {
-            tracing::info!(
-                container = name,
-                "an earlier daemon container still runs workers"
+            bail!(
+                "an earlier daemon container {name} still runs workers; finish or destroy those sessions before changing the daemon container"
             );
-            continue;
         }
         let removed = engine(program, ["rm", "--force", name], QUERY_TIMEOUT).await?;
         if removed.status.success() {
@@ -500,7 +602,6 @@ async fn processes_in(program: &str, name: &str) -> Result<Option<usize>> {
     if !top.status.success() {
         return Err(failure(program, &format!("list processes in {name}"), &top));
     }
-    // A header line, then one PID per line.
     Ok(Some(
         String::from_utf8_lossy(&top.stdout)
             .lines()
@@ -528,6 +629,14 @@ async fn ensure_running(program: &str, spec: &ContainerSpec) -> Result<()> {
         tracing::info!(container = %spec.name, "restarted the daemon container");
         return Ok(());
     }
+    let volume = engine(program, ["volume", "create", &spec.volume], QUERY_TIMEOUT).await?;
+    if !volume.status.success() {
+        return Err(failure(
+            program,
+            &format!("create data volume {}", spec.volume),
+            &volume,
+        ));
+    }
     let created = engine(program, spec.run_command(), QUERY_TIMEOUT).await?;
     if !created.status.success() {
         return Err(failure(program, &format!("create {}", spec.name), &created));
@@ -536,55 +645,32 @@ async fn ensure_running(program: &str, spec: &ContainerSpec) -> Result<()> {
     Ok(())
 }
 
-/// The daemon log is opened by the shell inside the container; create it here
-/// first so it keeps the owner-only mode a host launch gives it.
-fn prepare_log(log_path: &Path) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(log_path)
-        .with_context(|| format!("open daemon log {}", log_path.display()))?;
-    Ok(())
-}
-
-/// The shell run by `exec`: it detaches the daemon into a session of its own,
-/// exactly as `spawn_detached` does on the host, and prints its PID. The PID
-/// namespace is the host's, so that PID is the one clients see.
-const LAUNCH_SCRIPT: &str = r#"
-if [ -n "${MJ_DAEMON_HOST_PATH:-}" ]; then PATH="$PATH:$MJ_DAEMON_HOST_PATH"; fi
-export PATH
-unset MJ_DAEMON_HOST_PATH
-setsid bash -c 'exec -a mj "$0" daemon-run' "$0" </dev/null >>"$1" 2>&1 &
-printf '%s\n' "$!"
-"#;
-
-async fn exec_daemon(program: &str, spec: &ContainerSpec, log_path: &Path) -> Result<u32> {
-    let mut args: Vec<OsString> = vec!["exec".into()];
-    // A bare `--env NAME` copies the value from the engine command's own
-    // environment, which is this client's, so no value appears in an argument
-    // list another user could read.
-    for (name, _) in std::env::vars_os() {
-        let Some(name) = name.to_str() else { continue };
-        if NOT_FORWARDED.contains(&name) || spec.environment.iter().any(|(key, _)| key == name) {
-            continue;
-        }
-        args.push(format!("--env={name}").into());
-    }
-    if !spec.host_path.is_empty() {
-        let joined = std::env::join_paths(&spec.host_path).context("join host PATH entries")?;
-        let mut entry = OsString::from("--env=MJ_DAEMON_HOST_PATH=");
-        entry.push(joined);
-        args.push(entry);
-    }
-    args.push(format!("--env={}={}", super::DAEMON_CONTAINER_ENV, spec.name).into());
-    args.push(format!("--workdir={}", spec.home.display()).into());
-    args.push(spec.name.clone().into());
-    args.extend(["bash".into(), "-c".into(), LAUNCH_SCRIPT.into()]);
-    args.push(IMAGE_EXECUTABLE.into());
-    args.push(log_path.into());
-    let output = engine(program, args, QUERY_TIMEOUT).await?;
+/// Start a daemon process in the container's own filesystem. The token and
+/// the data roots are environment, never arguments, and the daemon's output
+/// goes to the volume's log.
+async fn exec_daemon(program: &str, spec: &ContainerSpec, token: &str) -> Result<()> {
+    let script = format!("exec {IMAGE_EXECUTABLE} daemon-run >>\"$MJ_DAEMON_LOG\" 2>&1");
+    let args: Vec<OsString> = vec![
+        "exec".into(),
+        "--detach".into(),
+        format!("--workdir={VOLUME_MOUNT}").into(),
+        "--env=HOME=/var/lib/mjolnir/home".into(),
+        "--env=MJ_DATA_DIR=/var/lib/mjolnir/data".into(),
+        "--env=MJ_CONFIG_DIR=/var/lib/mjolnir/config".into(),
+        format!("--env=MJ_DAEMON_LISTEN=0.0.0.0:{CONTAINER_PORT}").into(),
+        // The token is copied from this process's environment; `--env=NAME`
+        // keeps its value out of the engine's argument list.
+        "--env=MJ_DAEMON_TOKEN".into(),
+        format!("--env=MJ_DAEMON_CONTAINER={}", spec.name).into(),
+        format!("--env=MJ_DAEMON_CONTAINER_RUNTIME={program}").into(),
+        "--env=MJ_DAEMON_LOG=/var/lib/mjolnir/daemon.log".into(),
+        spec.name.clone().into(),
+        "sh".into(),
+        "-c".into(),
+        script.into(),
+    ];
+    let output =
+        engine_with_env(program, args, &[("MJ_DAEMON_TOKEN", token)], QUERY_TIMEOUT).await?;
     if !output.status.success() {
         return Err(failure(
             program,
@@ -592,9 +678,62 @@ async fn exec_daemon(program: &str, spec: &ContainerSpec, log_path: &Path) -> Re
             &output,
         ));
     }
-    let printed = String::from_utf8_lossy(&output.stdout);
-    printed
-        .trim()
-        .parse::<u32>()
-        .with_context(|| format!("read the daemon PID from {program} exec output {printed:?}"))
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(mounts: Vec<PathBuf>) -> ContainerSpec {
+        ContainerSpec {
+            instance: "instance".into(),
+            name: "mj-daemon-instance-abc".into(),
+            image: "image-id".into(),
+            engine: DaemonRuntime::Docker,
+            volume: "mj-instance-data".into(),
+            mounts,
+        }
+    }
+
+    /// The container is its own machine: a private network and PID
+    /// namespace, one data volume, and no implicit host home or path.
+    #[test]
+    fn a_daemon_container_shares_nothing_but_its_volume() {
+        let args = spec(vec![PathBuf::from("/srv/project")])
+            .run_command()
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.iter().any(|arg| arg == "--publish=127.0.0.1::8787"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--volume=mj-instance-data:/var/lib/mjolnir")
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--volume=/srv/project:/srv/project")
+        );
+        assert!(!args.iter().any(|arg| arg.contains("--network=host")));
+        assert!(!args.iter().any(|arg| arg.contains("--pid=host")));
+        assert!(!args.iter().any(|arg| arg.contains("--userns")));
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.starts_with("--volume="))
+                .count(),
+            2,
+            "only the data volume and an explicit mount may be present"
+        );
+    }
+
+    #[test]
+    fn a_container_daemon_publishes_no_host_pid() {
+        let metadata = daemon_metadata(&spec(Vec::new()), 43123, "token".into());
+        assert_eq!(metadata.pid, 0);
+        assert_eq!(metadata.address.port(), 43123);
+        assert!(matches!(
+            metadata.placement,
+            DaemonPlacement::Container { .. }
+        ));
+    }
 }

@@ -1067,6 +1067,7 @@ async fn a_same_session_context_refresh_updates_the_visible_header_without_losin
             title: "Original session title".into(),
             harness_kind: Some(HarnessKind::Codex),
             subagent_count: 0,
+            reviewer_count: 0,
         },
         "keep this draft".into(),
         Notices::default(),
@@ -1636,6 +1637,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
     assert!(prompt_title(&chat).is_empty());
 
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
+        dismiss_question_supported: false,
         pursuing_goal: Default::default(),
         checking_response: false,
         quota_recovery: None,
@@ -1659,6 +1661,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
     assert!(!prompt_title(&chat).contains("Background"));
 
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
+        dismiss_question_supported: false,
         pursuing_goal: Default::default(),
         checking_response: false,
         quota_recovery: None,
@@ -3001,7 +3004,9 @@ async fn golden_active_chat_render() {
     for ui_theme in theme::UiTheme::ALL {
         let mut controls = ChatState::new(&snapshot(), &[]);
         controls.set_subagent_count(2);
+        controls.set_reviewer_count(1);
         controls.set_session_activity(SessionActivity {
+            dismiss_question_supported: false,
             pursuing_goal: Default::default(),
             checking_response: false,
             quota_recovery: None,
@@ -3047,8 +3052,7 @@ async fn golden_active_chat_render() {
             &[neutral_styles],
         );
 
-        controls.subagent_control_focused = true;
-        controls.task_control_focused = true;
+        controls.prompt_control_focus = Some(PromptControl::Subagents);
         let focused = theme::with_theme(ui_theme, || active_golden_buffer(&mut controls, 100, 24));
         let focused_styles = format!(
             "subagents {} tasks {}",

@@ -55,6 +55,7 @@ pub enum CommandId {
     ResumeDialog,
     RenameSession,
     ChangedFiles,
+    DismissQuestion,
     ContainerSettings,
     MoveSession,
     CopySessionId,
@@ -277,6 +278,35 @@ fn selected_session_ready(dashboard: &DashboardState) -> Availability {
     } else {
         Availability::Hidden
     }
+}
+
+fn dismiss_question_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.command_session() else {
+        return Availability::Hidden;
+    };
+    if dashboard.question_dismissal_pending(&session.id) {
+        return Availability::Blocked("Dismissing question");
+    }
+    let Some(detail) = dashboard.session_details.get(&session.id) else {
+        return Availability::Blocked("No prose question is active");
+    };
+    if !session.state.is_active()
+        || detail.dismissible_question.is_none()
+        || !detail.pending_elicitations.is_empty()
+        || detail.current_turn_started_at.is_some()
+        || !detail.queued_prompts.is_empty()
+    {
+        return Availability::Blocked("No prose question is active");
+    }
+    if !detail.activity.dismiss_question_supported {
+        return Availability::Blocked("This worker does not support question dismissal yet");
+    }
+    if dashboard.session_operations.contains_key(&session.id)
+        || dashboard.unreachable_sessions.contains(&session.id)
+    {
+        return Availability::Blocked("Wait for the session to reconnect");
+    }
+    Availability::Ready
 }
 
 fn pin_session_available(dashboard: &DashboardState) -> Availability {
@@ -985,6 +1015,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: live_session,
     },
     CommandSpec {
+        id: CommandId::DismissQuestion,
+        label: "Dismiss question",
+        description: "Dismiss this question without sending input or granting approval.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: dismiss_question_available,
+    },
+    CommandSpec {
         id: CommandId::InterruptTurn,
         label: "Interrupt turn",
         description: "Stop the agent's running turn, as Esc does in the composer. The session keeps running.",
@@ -1563,6 +1605,7 @@ pub(crate) fn available(dashboard: &DashboardState, scope_filter: Option<Scope>)
                         | CommandId::RenameSession
                         | CommandId::ContainerSettings
                         | CommandId::ChangedFiles
+                        | CommandId::DismissQuestion
                         | CommandId::MoveSession
                         | CommandId::ChangeWorkspace
                         | CommandId::DestroySession
@@ -1647,6 +1690,7 @@ impl DashboardState {
                     | CommandId::RenameSession
                     | CommandId::ContainerSettings
                     | CommandId::ChangedFiles
+                    | CommandId::DismissQuestion
                     | CommandId::MoveSession
                     | CommandId::ChangeWorkspace
                     | CommandId::SuspendSession
@@ -1809,6 +1853,14 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::ChangedFiles => self.begin_changed_files(),
+            CommandId::DismissQuestion => match dismiss_question_available(self) {
+                Availability::Ready => self.begin_dismiss_question(),
+                Availability::Blocked(reason) => {
+                    self.set_notice(sentence(reason));
+                    DashboardAction::None
+                }
+                Availability::Hidden => DashboardAction::None,
+            },
             CommandId::InterruptTurn => match interrupt_available(self) {
                 Availability::Ready => self
                     .command_session_id()

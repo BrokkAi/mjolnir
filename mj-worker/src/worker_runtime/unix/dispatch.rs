@@ -1039,6 +1039,7 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
         | RelayCommand::RecordNotice { .. }
         | RelayCommand::SetSubagentWait { .. }
         | RelayCommand::SeedAssessmentContext { .. }
+        | RelayCommand::DismissQuestion { .. }
         | RelayCommand::SetQuotaRecovery { .. }
         | RelayCommand::ResolveSteering { .. }
         | RelayCommand::DeliverMailboxEvent { .. } => None,

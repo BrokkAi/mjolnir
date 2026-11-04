@@ -314,18 +314,27 @@ impl ConfigFiles {
     /// Reads `<home>/config.toml` and, when named, `<home>/<overlay>.config.toml`.
     /// Only a file that exists but cannot be read is an error here.
     pub fn read(home: &Path, overlay: Option<&str>) -> Result<Self> {
-        let read = |path: PathBuf| match std::fs::read_to_string(&path) {
+        Self::read_with(home, overlay, |path| match std::fs::read_to_string(path) {
             Ok(text) => Ok(Some(text)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
-        };
-        let base = read(home.join("config.toml"))?;
+        })
+    }
+
+    /// [`ConfigFiles::read`] with the file reads supplied by the caller, so a
+    /// daemon can read a profile home through its node.
+    pub fn read_with(
+        home: &Path,
+        overlay: Option<&str>,
+        read: impl Fn(&Path) -> Result<Option<String>>,
+    ) -> Result<Self> {
+        let base = read(&home.join("config.toml"))?;
         let overlay = match overlay {
             // An invalid name is refused by `layer`; never join it to a path.
             Some(name) if !is_overlay_name(name) => Some((name.to_owned(), None)),
             Some(name) => Some((
                 name.to_owned(),
-                read(home.join(format!("{name}{OVERLAY_SUFFIX}")))?,
+                read(&home.join(format!("{name}{OVERLAY_SUFFIX}")))?,
             )),
             None => None,
         };

@@ -126,10 +126,21 @@ async fn run_override(
         let findings = state.push_findings.clone().ok_or_else(|| {
             StartRefusal("no findings verdict is pending; call request_review".into())
         })?;
+        let protocol = control
+            .session(session_id.clone())
+            .await
+            .map_err(|error| StartRefusal(format!("{error:#}")))?
+            .view()
+            .snapshot
+            .and_then(|snapshot| snapshot.operational.relay_protocol_version)
+            .unwrap_or(0);
+        let repositories = (protocol >= mj_core::relay::RELAY_WORKTREE_REVIEW_PROTOCOL)
+            .then(|| findings.trees.keys().cloned().collect());
         let outcome = resolve::push_action(
             &control,
             &session_id,
             ReviewerAction::CaptureDelta {
+                repositories,
                 scope: mj_core::relay::CaptureScope::PushableCommits,
                 baselines: state.baselines.clone(),
             },
@@ -245,7 +256,9 @@ async fn run_override(
     {
         tracing::warn!(%session_id, %error, "could not pin the overridden push review baseline");
     }
-    state.baselines = trees;
+    // An override of a review scoped to one worktree leaves the other
+    // repositories' baselines where they were.
+    state.baselines.extend(trees);
     state.prior_review = None;
     state.push_findings = None;
     let (reply, saved) = oneshot::channel();

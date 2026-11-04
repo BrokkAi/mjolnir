@@ -89,7 +89,7 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
             );
             continue;
         }
-        state.subagents.insert(child_id, record);
+        state.subagents.insert(child_id, (&record).into());
     }
     load_targets(connection, &mut state)?;
     load_mounts(connection, &mut state)?;
@@ -226,8 +226,24 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
         insert_session(&tx, session)?;
     }
     for subagent in state.subagents.values() {
-        super::usage::record_child_accounting(&tx, subagent)?;
-        let record_json = serde_json::to_string(subagent)?;
+        // State contains metadata only. New launches must be registered with
+        // their complete intent; metadata saves preserve those stored fields.
+        let stored_json: String = tx
+            .query_row(
+                "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+                [&subagent.child_session_id],
+                |row| row.get(0),
+            )
+            .with_context(|| {
+                format!(
+                    "sub-agent {} must be registered with its launch intent before saving metadata",
+                    subagent.child_session_id
+                )
+            })?;
+        let mut stored: SubagentRecord = serde_json::from_str(&stored_json)?;
+        subagent.apply_to(&mut stored);
+        super::usage::record_child_accounting(&tx, &stored)?;
+        let record_json = serde_json::to_string(&stored)?;
         tx.execute(
             "INSERT INTO subagent_sessions(
                  child_session_id, parent_session_id, request_key, record_json

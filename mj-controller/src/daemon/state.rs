@@ -120,6 +120,7 @@ impl RuntimeState {
             worker_upgrade_observer,
             notices: Mutex::new(VecDeque::new()),
             next_notice_id: AtomicU64::new(1),
+            ui_requests: Mutex::new(ui_requests::UiRequestBoard::default()),
             quota: Mutex::new(QuotaBoard::default()),
             capacity: std::sync::OnceLock::new(),
             container_admission: tokio::sync::Mutex::new(()),
@@ -706,7 +707,7 @@ impl RuntimeState {
 
     pub(super) fn prune_dead_clients(&self) {
         self.attachments()
-            .retain(|_, attachment| process_is_alive(attachment.pid));
+            .retain(|_, attachment| attachment.renewed.elapsed() < ATTACHMENT_LEASE);
     }
 
     pub(super) fn workspace_has_active_resume(&self, workspace_id: &str) -> bool {
@@ -786,6 +787,10 @@ impl RuntimeState {
     /// it again on every tick, so a reload reaches it without a restart.
     pub fn with_config<T>(&self, read: impl FnOnce(&Config) -> T) -> T {
         read(&self.owner().controller().config)
+    }
+
+    pub fn with_controller<T>(&self, read: impl FnOnce(&Controller) -> T) -> T {
+        read(self.owner().controller())
     }
 
     /// Create a bundle under the daemon's config-mutation coordinator. The

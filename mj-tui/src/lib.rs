@@ -232,6 +232,15 @@ pub enum DashboardAction {
         away: bool,
     },
     None,
+    /// Read the host's global Git author identity before the first new
+    /// session; the result goes to [`DashboardState::apply_git_identity_check`].
+    CheckGitIdentity,
+    /// Write the host's global Git author identity; the result goes to
+    /// [`DashboardState::apply_git_identity_save`].
+    SaveGitIdentity {
+        name: String,
+        email: String,
+    },
     GoLaunch {
         recipe: mj_core::go::GoRecipe,
     },
@@ -546,6 +555,10 @@ pub enum DashboardAction {
     MarkAllRead {
         receipts: Vec<(String, u64)>,
     },
+    DismissQuestion {
+        session_id: String,
+        question: mj_core::assessment::InferredQuestion,
+    },
     OpenResumeDialog,
     ImportSession {
         profile_id: String,
@@ -848,6 +861,8 @@ pub(crate) enum Mode {
     SessionCpuReport(dialogs::SessionCpuReportDialog),
     SessionUsageReport(session_usage_report::SessionUsageDialog),
     EditContainer(ContainerEditor),
+    /// Asks for the host's missing Git author identity before a new session.
+    GitIdentity(dialogs::GitIdentityDialog),
     Importing(ImportProgress),
     ConfirmImportBundle(ImportBundleConfirmation),
     Confirm(ConfirmDialog),
@@ -979,6 +994,11 @@ pub struct DashboardState {
     /// The New wizard opened and the stored mount and project history should
     /// be read again, since sessions created after startup add to it.
     pub(crate) mount_history_refresh_pending: bool,
+    pub(crate) git_identity_gate: dialogs::GitIdentityGate,
+    /// The new-session action a settled Git identity check let through.
+    pub(crate) git_identity_followup: Option<DashboardAction>,
+    /// Dashboard requests (`mj ui`) waiting for the open dialog to close.
+    pub(crate) held_ui_requests: std::collections::VecDeque<mj_client::ui_request::UiRequest>,
     pub(crate) command_session_override: Option<String>,
     /// Persisted scroll offsets for the three list panes, so each scrolls only
     /// far enough to keep its selection visible instead of jumping back to the
@@ -1044,7 +1064,7 @@ pub struct DashboardState {
     pub(crate) sessions_filter: Tracked<Option<SessionsFilter>>,
     /// Filters retained independently for the top-level list and each nested
     /// sub-agent workspace. The active filter remains the single authority.
-    pub(crate) sessions_filters_by_scope: BTreeMap<Option<String>, Option<SessionsFilter>>,
+    pub(crate) sessions_filters_by_scope: BTreeMap<Option<ChildWorkspace>, Option<SessionsFilter>>,
     /// What the daemon said about the Sessions filter's text in conversations.
     pub(crate) sessions_text: Tracked<dashboard_sessions::SessionsTextSearch>,
     /// The commands run lately, newest first, for the palette's Recent group.
@@ -1137,7 +1157,7 @@ pub struct DashboardState {
     /// The local filter applied to the one global live session feed.
     active_workspace_id: Tracked<Option<String>>,
     /// Parent whose direct children temporarily replace the ordinary workspace tabs.
-    subagent_parent_id: Tracked<Option<String>>,
+    child_workspace: Tracked<Option<ChildWorkspace>>,
     pub(crate) native_agents: Tracked<BTreeMap<String, native_agents::NativeAgentPane>>,
     pub(crate) session_cpu: Tracked<
         mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>,
@@ -1213,11 +1233,13 @@ mod pane_controls;
 pub use dashboard_sessions::{AttentionEntry, AttentionLevel, InterruptAllTargets};
 mod dashboard_standby;
 mod dashboard_workspaces;
+use dashboard_workspaces::ChildWorkspace;
 pub use dashboard_workspaces::StoppedBySuspend;
 mod native_agents;
 mod session_cpu_report;
 mod session_usage_report;
 mod stopped_subagents;
+mod ui_requests;
 
 impl DashboardState {
     pub fn finish_spinner_style_save(&mut self) {
@@ -1288,6 +1310,9 @@ impl DashboardState {
             availability: Default::default(),
             project_directory_checks: BTreeMap::new(),
             mount_history_refresh_pending: false,
+            git_identity_gate: Default::default(),
+            git_identity_followup: None,
+            held_ui_requests: std::collections::VecDeque::new(),
 
             command_session_override: None,
             sessions_scroll: Cell::new(0),
@@ -1350,7 +1375,7 @@ impl DashboardState {
             workspace_names: BTreeMap::new(),
             workspace_order: vec![mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()],
             active_workspace_id: Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()).into(),
-            subagent_parent_id: Default::default(),
+            child_workspace: Default::default(),
             native_agents: Default::default(),
             session_cpu: Default::default(),
             native_sources: Default::default(),

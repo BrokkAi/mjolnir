@@ -12,6 +12,8 @@ fn newer_daemon_protocol_requires_updating_the_client() {
         token: "tok".into(),
         started_at: "2026-09-01T07:48:14Z".into(),
         build_version: "9.9.9".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     assert!(ensure_supported_daemon_protocol(&metadata(PROTOCOL_VERSION)).is_ok());
     assert!(ensure_supported_daemon_protocol(&metadata(PROTOCOL_VERSION - 1)).is_ok());
@@ -814,7 +816,6 @@ async fn client_presence_is_global_and_detach_and_prune_remove_it() {
     handle_action(
         DaemonAction::Attach {
             client_id: "client-a".into(),
-            pid: std::process::id(),
         },
         &metadata,
         &state,
@@ -822,9 +823,12 @@ async fn client_presence_is_global_and_detach_and_prune_remove_it() {
     )
     .await
     .expect("attach presence");
-    state
-        .attachments()
-        .insert("dead-client".into(), Attachment { pid: u32::MAX });
+    state.attachments().insert(
+        "dead-client".into(),
+        Attachment {
+            renewed: std::time::Instant::now() - ATTACHMENT_LEASE,
+        },
+    );
 
     let DaemonReply::Status(status) =
         handle_action(DaemonAction::Status, &metadata, &state, &cancellation)
@@ -928,7 +932,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
     state.attachments().insert(
         "client-a".into(),
         Attachment {
-            pid: std::process::id(),
+            renewed: std::time::Instant::now(),
         },
     );
     assert!(!state.workspace_has_active_resume("workspace-a"));
@@ -1274,6 +1278,8 @@ pub(super) fn test_metadata(address: SocketAddr) -> DaemonMetadata {
         token: "right-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     }
 }
 
@@ -1286,6 +1292,7 @@ async fn in_process_reviewer_forwarding_stops_when_the_caller_goes_away() {
             session_id: "session-1".into(),
             role: None,
             action: crate::session_manager::ReviewerAction::CaptureDelta {
+                repositories: None,
                 scope: Default::default(),
                 baselines: Default::default(),
             },
@@ -1449,7 +1456,7 @@ fn active_child_session_ids_skips_children_that_already_stopped() {
         runtime_test_subagent(&stopped_child.id, &parent.id),
     ]
     .into_iter()
-    .map(|subagent| (subagent.child_session_id.clone(), subagent))
+    .map(|subagent| (subagent.child_session_id.clone(), subagent.into()))
     .collect();
 
     let children = active_child_session_ids(&state, &parent.id);
@@ -1615,6 +1622,8 @@ async fn daemon_stops_serving_data_actions_once_shutdown_begins() {
         token: "right-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     let cancellation = CancellationToken::new();
     cancellation.cancel();
@@ -1690,6 +1699,8 @@ async fn management_stop_is_bounded_when_the_daemon_never_acknowledges() {
         token: "test-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     let mut client = ManagementClient::new(DaemonClient::connect(metadata).await.unwrap());
     let (mut peer, _) = listener.accept().await.unwrap();
@@ -1715,6 +1726,8 @@ async fn daemon_rejects_a_request_with_the_wrong_owner_token() {
         token: "right-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     let server_metadata = metadata.clone();
     let server = tokio::spawn(async move {
@@ -1754,6 +1767,8 @@ async fn the_daemon_rejects_a_client_one_protocol_behind_before_dispatch() {
         token: "right-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     let server_metadata = metadata.clone();
     let server = tokio::spawn(async move {
@@ -1855,6 +1870,8 @@ async fn daemon_serves_management_actions_for_any_protocol_version() {
             token: "right-token".into(),
             started_at: "now".into(),
             build_version: "test".into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         let server_metadata = metadata.clone();
         let server = tokio::spawn(async move {
@@ -2221,6 +2238,8 @@ async fn management_client_talks_to_every_released_protocol_version() {
             token: "tok".into(),
             started_at: "2026-09-01T07:48:14Z".into(),
             build_version: daemon_build.into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         let mut client = ManagementClient::new(DaemonClient::connect(metadata).await.unwrap());
         let status = client.status().await.unwrap();
@@ -6259,6 +6278,89 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
     );
 }
 
+// Hard-won: 0bd61a289: dashboard startup failed when live session state exceeded one frame.
+#[tokio::test]
+async fn dashboard_startup_larger_than_a_frame_arrives_whole() {
+    let mut session = runtime_test_session("large-draft", "workspace", SessionState::Running);
+    session.draft_input = "draft 🙂\n".repeat(MAX_FRAME_BYTES / 8);
+    let startup = DashboardStartup {
+        runtime: mj_client::runtime_feed::RuntimeBootstrap {
+            cursor: mj_client::runtime_feed::RuntimeCursor {
+                incarnation: "startup".into(),
+                sequence: 1,
+                subagent_parents: Default::default(),
+            },
+            projection: mj_client::runtime_feed::RuntimeProjection {
+                records: [(session.id.clone(), session)].into_iter().collect(),
+                ..Default::default()
+            },
+        },
+        metadata: Default::default(),
+        pane_sizes: Default::default(),
+        conversation_layouts: Default::default(),
+        queued_prompts: Default::default(),
+    };
+    let expected = serde_json::to_value(&startup).unwrap();
+    let payload_bytes = serde_json::to_vec(&startup).unwrap().len();
+    assert!(payload_bytes > MAX_FRAME_BYTES);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        for reply in [
+            DaemonReply::DashboardStartup(Box::new(startup)),
+            DaemonReply::Pong,
+        ] {
+            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+            match &reply {
+                DaemonReply::DashboardStartup(_) => assert!(matches!(
+                    request.action,
+                    DaemonAction::DashboardStartup { client_id, workspace_id } if client_id == "large-dashboard" && workspace_id == "workspace"
+                )),
+                _ => assert!(matches!(request.action, DaemonAction::Ping)),
+            }
+            super::serve::write_response(
+                &mut stream,
+                ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(reply),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    });
+    let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let proxy_address = proxy.local_addr().unwrap();
+    let copied = tokio::spawn(async move {
+        let (mut incoming, _) = proxy.accept().await.unwrap();
+        let mut outgoing = TcpStream::connect(address).await.unwrap();
+        tokio::io::copy_bidirectional(&mut incoming, &mut outgoing)
+            .await
+            .unwrap()
+    });
+    let mut client = mj_client::daemon::DaemonClient::connect(test_metadata(proxy_address))
+        .await
+        .unwrap();
+    let received = client
+        .dashboard_startup("large-dashboard".into(), "workspace".into())
+        .await
+        .expect("load the complete dashboard startup state");
+    assert_eq!(serde_json::to_value(received).unwrap(), expected);
+    assert!(matches!(
+        client.request(DaemonAction::Ping).await.unwrap(),
+        DaemonReply::Pong
+    ));
+    drop(client);
+    server.await.unwrap();
+    let (_, response_bytes) = copied.await.unwrap();
+    assert!(
+        response_bytes < (payload_bytes * 3 / 2) as u64,
+        "base64 chunks must stay near 4/3 of JSON size: {response_bytes} wire bytes for {payload_bytes} JSON bytes"
+    );
+}
+
 #[tokio::test]
 async fn oversized_response_reports_its_size_and_keeps_connection_usable() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -7707,6 +7809,241 @@ async fn child_close_cancel_before_commit_leaves_it_running_and_allows_a_fresh_c
     exercise_child_close_with_a_nested_workspace(true).await;
 }
 
+// Hard-won: 413864386: a child close held daemon handoff for a nonanswering worker's five-minute hello.
+#[cfg(unix)]
+#[tokio::test]
+async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_final_journal() {
+    use crate::controller::checkpoint::tests::{
+        LATCH_RELAY_HOLD_COMMAND, LATCH_RELAY_HOLD_PATH, LATCH_RELAY_JOURNALS_BEFORE_CLOSE,
+        LATCH_RELAY_SESSION, LATE_HARNESS_NOTIFICATION,
+    };
+    use mj_core::subagent::{SubagentToolAction, SubagentToolRequest};
+    const NAME: &str =
+        "child_close_yields_handoff_and_replays_its_durable_request_with_the_final_journal";
+    const PHASE: &str = "MJ_TEST_CHILD_CLOSE_HANDOFF_PHASE";
+    const ROOT: &str = "MJ_TEST_CHILD_CLOSE_HANDOFF_ROOT";
+    let Ok(phase) = std::env::var(PHASE) else {
+        let directory = tempfile::tempdir().unwrap();
+        for phase in ["blocked", "recovery"] {
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(module_path!(), NAME),
+            )
+            .env(PHASE, phase)
+            .env(ROOT, directory.path())
+            .env(LATCH_RELAY_HOLD_COMMAND, "begin_checkpoint")
+            .env(
+                LATCH_RELAY_HOLD_PATH,
+                directory.path().join("recovery-hold"),
+            )
+            .env(LATCH_RELAY_JOURNALS_BEFORE_CLOSE, LATE_HARNESS_NOTIFICATION)
+            .env("MJ_INSTANCE", "child-close-handoff")
+            .isolated_store(directory.path())
+            .run();
+        }
+        return;
+    };
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
+    let worker_root = root.join(LATCH_RELAY_SESSION);
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let final_output = "journal output retained across daemon handoff ".repeat(4096);
+    let request = SubagentToolRequest {
+        request_id: "same-child-close-across-handoff".into(),
+        originating_command_id: None,
+        created_at_ms: 1234,
+        action: SubagentToolAction::CloseAgent {
+            child_session_id: LATCH_RELAY_SESSION.into(),
+        },
+    };
+    if phase == "blocked" {
+        seed_live_session(&root, &worker_root);
+        let mut journal =
+            mj_worker::relay::DurableRelay::open(&worker_root, LATCH_RELAY_SESSION, "1.0.0")
+                .unwrap();
+        journal
+            .record_observation(mj_core::relay::RelayObservation::Warning {
+                message: final_output,
+            })
+            .unwrap();
+        drop(journal);
+        let workspace = crate::database::create_workspace("Child close handoff").unwrap();
+        let parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+        crate::database::save_session(&parent).unwrap();
+        let mut child =
+            runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Running);
+        child.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        });
+        crate::database::save_subagent_session(
+            &child,
+            &runtime_test_subagent(LATCH_RELAY_SESSION, parent_id),
+        )
+        .unwrap();
+        let channels = crate::session_manager::spawn_session_manager().unwrap();
+        channels
+            .targets
+            .send(vec![crate::session_manager::RelaySessionTarget {
+                session_id: LATCH_RELAY_SESSION.into(),
+                spec: CommandSpec::new("sleep", ["600"]),
+                worker_recovery: None,
+                project_memory: None,
+            }])
+            .unwrap();
+        let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
+        let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+            channels.control.clone(),
+            &recovery.observer(),
+        );
+        let state = Arc::new(RuntimeState::new_with_controller_loader(
+            channels.control.clone(),
+            Controller::load().unwrap(),
+            recovery.observer(),
+            upgrades.observer(),
+            Vec::new(),
+            Controller::load,
+        ));
+        let backend = Arc::new(crate::server_runtime::api::ApiBackend::new(
+            channels.control.client(),
+            Arc::new({
+                let state = state.clone();
+                move |id| state.session_state(id)
+            }),
+            state.clone(),
+        ));
+        let pending = tokio::spawn(async move {
+            backend
+                .execute_subagent_tool_durable(parent_id.into(), request)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let yielded = state
+                    .owner()
+                    .lifecycle
+                    .get(LATCH_RELAY_SESSION)
+                    .is_some_and(|active| {
+                        active.is_running() && active.upgrade_work.lock().unwrap().is_none()
+                    });
+                if yielded {
+                    break;
+                }
+                assert!(
+                    !pending.is_finished(),
+                    "the unavailable worker must still be waiting"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the durable child close must release upgrade admission");
+        assert!(
+            crate::upgrade::gate().try_close(),
+            "{:?}",
+            crate::upgrade::active_labels()
+        );
+        // The daemon stops delegation delivery before interrupting lifecycles.
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(2), state.cancel_and_wait_lifecycles())
+            .await
+            .expect("shutdown must interrupt the pending relay lease")
+            .unwrap();
+        channels.shutdown.shutdown().await.unwrap();
+        let stored = crate::database::load_state().unwrap();
+        let child = &stored.sessions[LATCH_RELAY_SESSION];
+        assert_eq!(child.state, SessionState::Closing);
+        assert_eq!(
+            child.target,
+            Some(mj_core::state::TargetLocator::LocalBare {
+                worker_root: worker_root.clone(),
+            })
+        );
+        assert!(
+            child.public_error().is_none(),
+            "handoff is not a failed close"
+        );
+        assert!(
+            worker_root.exists(),
+            "the final journal must survive handoff"
+        );
+        assert!(
+            crate::database::load_delegation(parent_id, "same-child-close-across-handoff")
+                .unwrap()
+                .unwrap()
+                .1
+                .is_none()
+        );
+    } else {
+        let controller = Controller::load().unwrap();
+        assert!(interrupted_suspend_session_ids(&controller).contains(&LATCH_RELAY_SESSION.into()));
+        let (channels, state) = serve_live_session(&worker_root, false).await;
+        // Startup recovery and replay can arrive in either order. The
+        // lifecycle owner must coalesce the unkeyed recovery and keyed replay.
+        let recovering = tokio::spawn({
+            let state = state.clone();
+            async move { state.suspend_session(LATCH_RELAY_SESSION.into()).await }
+        });
+        let hold = root.join("recovery-hold");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !hold.with_extension("reached").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("recovery must reach the worker barrier");
+        let backend = Arc::new(crate::server_runtime::api::ApiBackend::new(
+            channels.control.client(),
+            Arc::new({
+                let state = state.clone();
+                move |id| state.session_state(id)
+            }),
+            state,
+        ));
+        let replaying = tokio::spawn({
+            let backend = backend.clone();
+            let request = request.clone();
+            async move {
+                backend
+                    .execute_subagent_tool_durable(parent_id.into(), request)
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !replaying.is_finished(),
+            "replay must join recovery rather than refuse it"
+        );
+        std::fs::write(hold.with_extension("release"), b"go").unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(30), replaying)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        recovering.await.unwrap().unwrap();
+        assert!(!closed.result.is_error, "{}", closed.result.message);
+        let repeated = backend
+            .execute_subagent_tool_durable(parent_id.into(), request)
+            .await
+            .unwrap();
+        assert_eq!(closed.result, repeated.result);
+        channels.shutdown.shutdown().await.unwrap();
+        let stored = crate::database::load_state().unwrap();
+        assert_eq!(
+            stored.sessions[LATCH_RELAY_SESSION].state,
+            SessionState::Stopped
+        );
+        assert!(!worker_root.exists());
+        let history = crate::database::load_materialized_session(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        assert!(
+            serde_json::to_string(&history)
+                .unwrap()
+                .contains(&final_output)
+        );
+    }
+}
+
 #[cfg(unix)]
 async fn exercise_child_close_with_a_nested_workspace(cancel_before_commit: bool) {
     use crate::controller::checkpoint::tests::{LATCH_RELAY_HOLD_PATH, LATCH_RELAY_SESSION};
@@ -8327,6 +8664,7 @@ async fn runtime_publication_crosses_frame_limit_atomically_and_keeps_connection
                         cursor: RuntimeCursor {
                             incarnation: "test".into(),
                             sequence: 1,
+                            subagent_parents: Default::default(),
                         },
                         projection: Box::new(projection),
                     },
@@ -9190,9 +9528,10 @@ async fn resume_candidates_are_inactive_top_level_sessions_with_every_adopted_na
     for record in [live, stopped, lost, child] {
         state.sessions.insert(record.id.clone(), record);
     }
-    state
-        .subagents
-        .insert("child".into(), runtime_test_subagent("child", "live"));
+    state.subagents.insert(
+        "child".into(),
+        runtime_test_subagent("child", "live").into(),
+    );
     let candidates = test_runtime_state_holding(state).resume_candidates();
     let ids = candidates
         .candidates
@@ -9237,9 +9576,10 @@ async fn go_startup_session_falls_back_when_the_remembered_session_is_archived()
             .collect(),
         ..mj_core::state::State::default()
     };
-    state
-        .subagents
-        .insert(child.id.clone(), runtime_test_subagent(&child.id, "parent"));
+    state.subagents.insert(
+        child.id.clone(),
+        runtime_test_subagent(&child.id, "parent").into(),
+    );
     let runtime = test_runtime_state_holding(state);
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();

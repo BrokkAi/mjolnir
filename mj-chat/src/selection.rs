@@ -22,8 +22,6 @@ use unicode_width::UnicodeWidthStr;
 pub enum SurfaceId {
     /// Chat transcript rows.
     Transcript,
-    /// Reviewer transcript rows, beside the primary's during a turn review.
-    ReviewerTranscript,
     /// Scrollable message body of an elicitation dialog.
     ElicitationMessage,
     /// Prompt editor.

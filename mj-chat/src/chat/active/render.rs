@@ -1,5 +1,8 @@
 use super::*;
+use crate::chat::PromptControl;
 use crate::chat::rendering::sanitize_terminal_text;
+#[cfg(test)]
+use ratatui::layout::{Constraint, Direction, Layout};
 
 /// Draws a chat across a whole frame, the way the combined surface lays it out
 /// when nothing else is competing for the rows.
@@ -56,7 +59,7 @@ pub(crate) fn render_in(
 ) {
     chat.footer_command_areas.borrow_mut().clear();
     chat.voice_form.begin_frame();
-    if chat.composer_replaced() || chat.turn_review_split() {
+    if chat.composer_replaced() || chat.turn_review_active() {
         chat.voice_form.cancel_pointer();
     }
     chat.frame_surfaces.clear();
@@ -68,14 +71,14 @@ pub(crate) fn render_in(
     // overlay rectangle, not in the band the transcript happens to have been
     // given.
     let inner = regions.overlay;
-    let mut transcript_area = regions.transcript;
+    let transcript_area = regions.transcript;
     let prompt_area = regions.prompt;
 
     // An open question replaces the composer, but only with the natural
     // height of its current page (up to half of the combined conversation
     // bands). The transcript is rendered into the rows left above it so its
     // viewport, scrollbar, and selection row space describe what is visible.
-    // This branch deliberately runs before the ordinary prompt/split drawing:
+    // This branch deliberately runs before the ordinary prompt/review drawing:
     // no hidden prompt or autocomplete surface may survive underneath the
     // question, and both visible scrollable surfaces remain registered.
     if let Some(question_height) = chat.elicitation.as_ref().map(|dialog| {
@@ -108,9 +111,8 @@ pub(crate) fn render_in(
         chat.config_chip_areas.clear();
         chat.task_control_area = None;
         chat.subagent_control_area = None;
+        chat.reviewer_control_area = None;
         chat.task_dialog_area = None;
-        chat.reviewer_area = None;
-        chat.turn_review_action_areas.clear();
         chat.voice_form.cancel_pointer();
         chat.voice_form
             .end_frame(crate::chat::VoiceControl::Microphone);
@@ -141,101 +143,37 @@ pub(crate) fn render_in(
         return;
     }
 
-    let split = chat.turn_review_split();
-    // Review panes replace the composer, so retain their existing activity
-    // row. Normal conversations put the spinner in the composer border.
-    let activity_area =
-        (split && chat.needs_animation() && transcript_area.height > 3).then(|| {
-            transcript_area.height -= 1;
-            Rect::new(
-                transcript_area.x,
-                transcript_area.bottom(),
-                transcript_area.width,
-                1,
-            )
-        });
-    // The button lives on the prompt border, so it is not part of
-    // the selectable prompt interior. Clear the hitbox first because a split
-    // view or modal may replace the composer for this frame.
     chat.voice_button_area = None;
     chat.config_chip_areas.clear();
     chat.task_control_area = None;
     chat.subagent_control_area = None;
+    chat.reviewer_control_area = None;
     chat.task_dialog_area = None;
-    let (primary_area, reviewer_area) = if split {
-        let halves = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(transcript_area);
-        (halves[0], Some(halves[1]))
-    } else {
-        (transcript_area, None)
-    };
     render_transcript(
         frame,
-        primary_area,
+        transcript_area,
         chat,
         transcript_selected,
         regions.title_controls,
         regions.title_lead,
         regions.pane_focused,
     );
-    chat.reviewer_area = None;
-    if let Some(area) = reviewer_area
-        && let Some(review) = chat.turn_review_mut()
-    {
-        let (inner, top, total) =
-            crate::chat::turn_review::render_turn_review_pane(frame, area, review);
-        // Route the wheel to whichever review tab is selected.
-        chat.reviewer_area = Some(area);
-        chat.frame_surfaces.push(SurfaceFrame::scrollable(
-            SurfaceId::ReviewerTranscript,
-            inner,
-            top,
-            total,
-        ));
-    }
-    if chat.turn_review_split() {
-        // The split has no composer: a review is synchronous, so the only
-        // input while it is up is which of its actions to take.
+    if chat.turn_review_active() {
         let status = chat
             .turn_review()
             .map(crate::chat::turn_review::TurnReview::status)
             .unwrap_or_default();
-        let buttons = match chat.turn_review_mut() {
-            Some(review) => crate::chat::turn_review::render_turn_review_actions(
-                frame,
-                prompt_area,
-                review,
-                &status,
-            ),
-            None => Vec::new(),
-        };
-        chat.turn_review_action_areas = buttons;
+        let mut block = theme::panel(prompt_focused).title(format!(" {status} "));
+        for title in prompt_bottom_titles(chat, prompt_area, prompt_focused) {
+            block = block.title_bottom(title);
+        }
+        let actions_area = block.inner(prompt_area);
+        frame.render_widget(block, prompt_area);
+        if let Some(review) = chat.turn_review_mut() {
+            crate::chat::turn_review::render_turn_review_actions(frame, actions_area, review);
+        }
     } else {
-        chat.turn_review_action_areas.clear();
         render_composer_band(frame, prompt_area, chat, prompt_focused, None);
-    }
-    if let Some(area) = activity_area {
-        let mut activity = if area.width >= 48 {
-            chat.activity_spinner()
-        } else {
-            Line::from(crate::spinner::compact_span(
-                chat.spinner_style,
-                crate::spinner::elapsed_ms(),
-            ))
-        };
-        activity.spans.insert(0, Span::raw("  "));
-        let status = chat
-            .turn_review()
-            .and_then(|review| review.view.activity_label())
-            .map_or_else(|| prompt_title(chat), |label| format!(" {label} "));
-        activity.spans.push(Span::styled(status, theme::muted()));
-        frame.render_widget(
-            Paragraph::new(truncate_line_to_width(activity, usize::from(area.width)))
-                .style(theme::base()),
-            area,
-        );
     }
     if let Some(footer) = regions.footer {
         render_chat_footer(frame, footer, chat, prompt_focused);
@@ -302,6 +240,15 @@ pub(crate) fn render_chat_footer(
     );
     let composer_keys = if !prompt_focused {
         format!("Tab pane{sep}PgUp/PgDn transcript")
+    } else if chat.turn_review_active() && chat.elicitation.is_none() {
+        if chat
+            .turn_review()
+            .is_some_and(crate::chat::turn_review::TurnReview::has_report)
+        {
+            format!("v details{sep}Down controls{sep}Enter act{sep}Esc cancel")
+        } else {
+            format!("Down review controls{sep}Enter act{sep}Esc cancel")
+        }
     } else if chat.voice_active {
         format!("Listening… click the microphone to stop{sep}PgUp/PgDn transcript")
     } else if !chat.queued_prompts.is_empty() {
@@ -477,143 +424,8 @@ pub(crate) fn render_composer_band(
     if let Some(activity_title) = activity_title {
         prompt_block = prompt_block.title(activity_title.right_aligned());
     }
-    chat.task_control_area = None;
-    chat.subagent_control_area = None;
-    let bottom_width = prompt_area.width.saturating_sub(2);
-    let queue_control = prompt_bottom_queue_control(chat);
-    let task_label = (chat.background_task_count() > 0).then(|| {
-        format!(
-            " Tasks ({}) {} ",
-            chat.background_task_count(),
-            theme::glyphs().navigate
-        )
-    });
-    // A session created with sub-agents shows the entry, dimmed and not
-    // clickable, before its first child exists, so the user can find where
-    // they will appear. The Sub-agents chord is greyed on the same condition.
-    let subagents_ready = chat.subagent_count() > 0;
-    let subagent_label = if subagents_ready {
-        Some(format!(
-            " Subagents{}{} {} ",
-            theme::footer_separator(),
-            chat.subagent_working_count,
-            theme::glyphs().navigate
-        ))
-    } else {
-        chat.subagents_enabled
-            .then(|| format!(" Subagents{}0 ", theme::footer_separator()))
-    };
-    let command_hints = (prompt_focused && prompt_area.width >= 56).then(|| {
-        // A standby composer cannot send, so the hint says what Enter does
-        // there instead of advertising a send that would be refused.
-        if chat.standby {
-            Line::from(vec![
-                Span::styled(" Enter ", theme::key_hint()),
-                Span::styled(" keeps the draft ", theme::hint_description()),
-            ])
-            .right_aligned()
-        } else {
-            Line::from(vec![
-                Span::styled(" Enter ", theme::key_hint()),
-                Span::styled(" send  ", theme::hint_description()),
-                Span::styled(" / ", theme::key_hint()),
-                Span::styled(" commands ", theme::hint_description()),
-            ])
-            .right_aligned()
-        }
-    });
-    let queue_width = queue_control.as_ref().map_or(0, Line::width);
-    let task_width = task_label.as_ref().map_or(0, |label| display_width(label));
-    let subagent_width = subagent_label
-        .as_ref()
-        .map_or(0, |label| display_width(label));
-    let command_width = command_hints.as_ref().map_or(0, Line::width);
-    let task_separator_width = usize::from(queue_control.is_some() && task_label.is_some()) * 2;
-    // Fit queue/control text first, then a complete task button, then hints.
-    let left_with_task = queue_width + task_separator_width + task_width;
-    let show_task = task_label.is_some() && left_with_task <= usize::from(bottom_width);
-    let mut left_width = if show_task {
-        left_with_task
-    } else {
-        queue_width
-    };
-    let subagent_separator_width = usize::from(left_width > 0) * 2;
-    let show_subagents = subagent_label.is_some()
-        && left_width + subagent_separator_width + subagent_width <= usize::from(bottom_width);
-    if show_subagents {
-        left_width += subagent_separator_width + subagent_width;
-    }
-    let show_command_hints = command_hints.is_some()
-        && left_width + usize::from(left_width > 0) + command_width <= usize::from(bottom_width);
-    let mut bottom_spans = Vec::new();
-    let mut bottom_left_width = 0usize;
-    if let Some(queue_control) = queue_control {
-        bottom_left_width = queue_width;
-        bottom_spans.extend(queue_control.spans);
-    }
-    if show_task {
-        let task_start = bottom_left_width + task_separator_width;
-        if bottom_left_width > 0 {
-            bottom_spans.push(Span::raw(" ·"));
-        }
-        let task_label = task_label.expect("show_task implies a task label");
-        let task_width = u16::try_from(task_width).expect("task label fits in u16");
-        chat.task_control_area = Some(Rect::new(
-            prompt_area
-                .x
-                .saturating_add(1)
-                .saturating_add(u16::try_from(task_start).unwrap_or(u16::MAX)),
-            prompt_area.bottom().saturating_sub(1),
-            task_width,
-            1,
-        ));
-        bottom_spans.push(Span::styled(
-            task_label,
-            if chat.task_control_focused() {
-                theme::focus_control()
-            } else {
-                // The surface and navigation glyph advertise the action.
-                theme::actionable_chip()
-            },
-        ));
-        bottom_left_width = task_start + usize::from(task_width);
-    }
-    if show_subagents {
-        let separator_width = usize::from(bottom_left_width > 0) * 2;
-        let subagent_start = bottom_left_width + separator_width;
-        if bottom_left_width > 0 {
-            bottom_spans.push(Span::raw(" ·"));
-        }
-        let label = subagent_label.expect("show_subagents implies a label");
-        let width = u16::try_from(subagent_width).expect("subagent label fits in u16");
-        chat.subagent_control_area = subagents_ready.then(|| {
-            Rect::new(
-                prompt_area
-                    .x
-                    .saturating_add(1)
-                    .saturating_add(u16::try_from(subagent_start).unwrap_or(u16::MAX)),
-                prompt_area.bottom().saturating_sub(1),
-                width,
-                1,
-            )
-        });
-        bottom_spans.push(Span::styled(
-            label,
-            if !subagents_ready {
-                theme::hint_description()
-            } else if chat.subagent_control_focused() {
-                theme::focus_control()
-            } else {
-                // The surface and navigation glyph advertise the action.
-                theme::actionable_chip()
-            },
-        ));
-    }
-    if !bottom_spans.is_empty() {
-        prompt_block = prompt_block.title_bottom(Line::from(bottom_spans).left_aligned());
-    }
-    if show_command_hints {
-        prompt_block = prompt_block.title_bottom(command_hints.expect("presence checked"));
+    for title in prompt_bottom_titles(chat, prompt_area, prompt_focused) {
+        prompt_block = prompt_block.title_bottom(title);
     }
     if let Some(note) = note {
         prompt_block = prompt_block.title_bottom(note);
@@ -730,6 +542,7 @@ pub(crate) fn render_composer_band(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn prompt_title(chat: &ChatState) -> String {
     let title = prompt_title_parts(chat).join(" · ");
     if title.is_empty() {
@@ -1038,4 +851,196 @@ pub(crate) fn render_background_task_dialog(frame: &mut Frame, area: Rect, chat:
 /// right.
 pub(crate) fn prompt_content_width(width: u16) -> usize {
     usize::from(width.saturating_sub(5)).max(1)
+}
+
+/// Shared navigation controls on ordinary composers and synchronous review prompts.
+fn prompt_bottom_titles(
+    chat: &mut ChatState,
+    prompt_area: Rect,
+    prompt_focused: bool,
+) -> Vec<Line<'static>> {
+    chat.task_control_area = None;
+    chat.subagent_control_area = None;
+    chat.reviewer_control_area = None;
+    let bottom_width = prompt_area.width.saturating_sub(2);
+    let queue_control = prompt_bottom_queue_control(chat);
+    let task_label = (chat.background_task_count() > 0).then(|| {
+        format!(
+            " Tasks ({}) {} ",
+            chat.background_task_count(),
+            theme::glyphs().navigate
+        )
+    });
+    // A session created with sub-agents shows the entry, dimmed and not
+    // clickable, before its first child exists, so the user can find where
+    // they will appear. The Sub-agents chord is greyed on the same condition.
+    let subagents_ready = chat.subagent_count() > 0;
+    let subagent_label = if subagents_ready {
+        Some(format!(
+            " Subagents{}{} {} ",
+            theme::footer_separator(),
+            chat.subagent_working_count,
+            theme::glyphs().navigate
+        ))
+    } else {
+        chat.subagents_enabled
+            .then(|| format!(" Subagents{}0 ", theme::footer_separator()))
+    };
+    let reviewer_label = (chat.reviewer_count > 0).then(|| {
+        format!(
+            " Reviewers{}{} {} ",
+            theme::footer_separator(),
+            chat.reviewer_count,
+            theme::glyphs().navigate
+        )
+    });
+    let reviewer_width = reviewer_label
+        .as_ref()
+        .map_or(0, |label| display_width(label));
+    let command_hints = (prompt_focused && !chat.turn_review_active() && prompt_area.width >= 56)
+        .then(|| {
+            // A standby composer cannot send, so the hint says what Enter does
+            // there instead of advertising a send that would be refused.
+            if chat.standby {
+                Line::from(vec![
+                    Span::styled(" Enter ", theme::key_hint()),
+                    Span::styled(" keeps the draft ", theme::hint_description()),
+                ])
+                .right_aligned()
+            } else {
+                Line::from(vec![
+                    Span::styled(" Enter ", theme::key_hint()),
+                    Span::styled(" send  ", theme::hint_description()),
+                    Span::styled(" / ", theme::key_hint()),
+                    Span::styled(" commands ", theme::hint_description()),
+                ])
+                .right_aligned()
+            }
+        });
+    let queue_width = queue_control.as_ref().map_or(0, Line::width);
+    let task_width = task_label.as_ref().map_or(0, |label| display_width(label));
+    let subagent_width = subagent_label
+        .as_ref()
+        .map_or(0, |label| display_width(label));
+    let command_width = command_hints.as_ref().map_or(0, Line::width);
+    let task_separator_width = usize::from(queue_control.is_some() && task_label.is_some()) * 2;
+    // Fit queue/control text first, then a complete task button, then hints.
+    let left_with_task = queue_width + task_separator_width + task_width;
+    let show_task = task_label.is_some() && left_with_task <= usize::from(bottom_width);
+    let mut left_width = if show_task {
+        left_with_task
+    } else {
+        queue_width
+    };
+    let subagent_separator_width = usize::from(left_width > 0) * 2;
+    let show_subagents = subagent_label.is_some()
+        && left_width + subagent_separator_width + subagent_width <= usize::from(bottom_width);
+    if show_subagents {
+        left_width += subagent_separator_width + subagent_width;
+    }
+    let reviewer_separator_width = usize::from(left_width > 0) * 2;
+    let show_reviewers = reviewer_label.is_some()
+        && left_width + reviewer_separator_width + reviewer_width <= usize::from(bottom_width);
+    if show_reviewers {
+        left_width += reviewer_separator_width + reviewer_width;
+    }
+    let show_command_hints = command_hints.is_some()
+        && left_width + usize::from(left_width > 0) + command_width <= usize::from(bottom_width);
+    let mut bottom_spans = Vec::new();
+    let mut bottom_left_width = 0usize;
+    if let Some(queue_control) = queue_control {
+        bottom_left_width = queue_width;
+        bottom_spans.extend(queue_control.spans);
+    }
+    if show_task {
+        let task_start = bottom_left_width + task_separator_width;
+        if bottom_left_width > 0 {
+            bottom_spans.push(Span::raw(" ·"));
+        }
+        let task_label = task_label.expect("show_task implies a task label");
+        let task_width = u16::try_from(task_width).expect("task label fits in u16");
+        chat.task_control_area = Some(Rect::new(
+            prompt_area
+                .x
+                .saturating_add(1)
+                .saturating_add(u16::try_from(task_start).unwrap_or(u16::MAX)),
+            prompt_area.bottom().saturating_sub(1),
+            task_width,
+            1,
+        ));
+        bottom_spans.push(Span::styled(
+            task_label,
+            if chat.task_control_focused() {
+                theme::focus_control()
+            } else {
+                // The surface and navigation glyph advertise the action.
+                theme::actionable_chip()
+            },
+        ));
+        bottom_left_width = task_start + usize::from(task_width);
+    }
+    if show_subagents {
+        let separator_width = usize::from(bottom_left_width > 0) * 2;
+        let subagent_start = bottom_left_width + separator_width;
+        if bottom_left_width > 0 {
+            bottom_spans.push(Span::raw(" ·"));
+        }
+        let label = subagent_label.expect("show_subagents implies a label");
+        let width = u16::try_from(subagent_width).expect("subagent label fits in u16");
+        chat.subagent_control_area = subagents_ready.then(|| {
+            Rect::new(
+                prompt_area
+                    .x
+                    .saturating_add(1)
+                    .saturating_add(u16::try_from(subagent_start).unwrap_or(u16::MAX)),
+                prompt_area.bottom().saturating_sub(1),
+                width,
+                1,
+            )
+        });
+        bottom_spans.push(Span::styled(
+            label,
+            if !subagents_ready {
+                theme::hint_description()
+            } else if chat.subagent_control_focused() {
+                theme::focus_control()
+            } else {
+                // The surface and navigation glyph advertise the action.
+                theme::actionable_chip()
+            },
+        ));
+        bottom_left_width = subagent_start + usize::from(width);
+    }
+    if show_reviewers {
+        let separator_width = usize::from(bottom_left_width > 0) * 2;
+        let start = bottom_left_width + separator_width;
+        if bottom_left_width > 0 {
+            bottom_spans.push(Span::raw(" ·"));
+        }
+        chat.reviewer_control_area = Some(Rect::new(
+            prompt_area
+                .x
+                .saturating_add(1)
+                .saturating_add(u16::try_from(start).unwrap_or(u16::MAX)),
+            prompt_area.bottom().saturating_sub(1),
+            u16::try_from(reviewer_width).unwrap_or(u16::MAX),
+            1,
+        ));
+        bottom_spans.push(Span::styled(
+            reviewer_label.expect("show_reviewers implies a label"),
+            if chat.prompt_control_focus == Some(PromptControl::Reviewers) {
+                theme::focus_control()
+            } else {
+                theme::actionable_chip()
+            },
+        ));
+    }
+    let mut titles = Vec::new();
+    if !bottom_spans.is_empty() {
+        titles.push(Line::from(bottom_spans).left_aligned());
+    }
+    if show_command_hints {
+        titles.push(command_hints.expect("presence checked"));
+    }
+    titles
 }

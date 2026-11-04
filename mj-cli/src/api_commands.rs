@@ -277,7 +277,7 @@ pub(crate) struct MessageArgs {
 
 /// The session this process runs inside, which Mjolnir names in
 /// `MJ_SESSION_ID` for every harness session; `None` in the user's own shell.
-fn calling_session() -> Result<Option<String>> {
+pub(crate) fn calling_session() -> Result<Option<String>> {
     std::env::var_os("MJ_SESSION_ID")
         .map(|value| {
             value
@@ -1361,10 +1361,7 @@ async fn follow_handoff(continuation: Vec<String>) -> Result<ApiClient> {
         Ok(client) => return Ok(client),
         Err(error) => error,
     };
-    let target = tokio::task::spawn_blocking(crate::daemon::upgraded_daemon_executable)
-        .await
-        .context("inspect the upgraded daemon task failed")??;
-    let Some(target) = target else {
+    let Some(target) = crate::daemon::upgraded_daemon_executable().await? else {
         return Err(error);
     };
     Err(crate::daemon::continue_under_upgraded_build(

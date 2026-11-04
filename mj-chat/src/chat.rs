@@ -21,11 +21,9 @@ mod input;
 mod pasted_paths;
 mod remote;
 mod rendering;
-mod reviewer_pane;
 mod submissions;
 mod transcript;
 mod turn_review;
-mod viewport;
 
 #[cfg(test)]
 mod test_support;
@@ -252,6 +250,7 @@ pub enum ChatEventOutcome {
         reverse: bool,
     },
     OpenSubagents,
+    OpenReviewers,
     /// The host decides whether the durable startup queue or the worker owns this ID.
     RecallQueuedPrompt {
         session_id: String,
@@ -275,6 +274,7 @@ pub enum ChatAction {
     TurnControl(mj_core::relay::RelayCommand),
     None,
     OpenSubagents,
+    OpenReviewers,
     Prompt(String),
     RunShell(String),
     RemoveQueuedPrompt {
@@ -449,6 +449,15 @@ pub struct SessionHeaderIdentity {
     pub harness_kind: Option<HarnessKind>,
     /// Direct children owned by this parent session.
     pub subagent_count: usize,
+    /// Reviewer children, kept separate from ordinary subagents.
+    pub reviewer_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptControl {
+    Tasks,
+    Subagents,
+    Reviewers,
 }
 
 /// The session facts the chat needs to run reviewers and keep per-workspace
@@ -546,12 +555,8 @@ pub struct ChatState {
     /// the display so the primary can surface immediately when that review
     /// request is answered or withdrawn.
     pending_elicitations: Vec<ElicitationRequest>,
-    /// Where the reviewer pane sat on the last frame, for pointer routing.
-    reviewer_area: Option<Rect>,
-    /// The turn-review view owns the pane while findings await a decision.
+    /// The daemon-owned review projected into prompt status and actions.
     turn_review: Option<Box<TurnReview>>,
-    /// Where the turn review's action buttons sat on the last frame.
-    turn_review_action_areas: Vec<(turn_review::ReviewAction, Rect)>,
     /// What `[review]` says, mirrored from the config the TUI already drains,
     /// so `/review status` and the composer title can report it.
     review_config: mj_core::config::ReviewConfig,
@@ -617,7 +622,7 @@ pub struct ChatState {
     /// Each entry pairs the config key its click opens with its hitbox.
     config_chip_areas: Vec<(&'static str, Rect)>,
     /// The embedded background-task control and its dialog.
-    task_control_focused: bool,
+    prompt_control_focus: Option<PromptControl>,
     task_dialog_open: bool,
     task_dialog_scroll: usize,
     task_dialog_max_scroll: usize,
@@ -627,7 +632,8 @@ pub struct ChatState {
     /// The session runs with Mjolnir sub-agents, whether or not any exist.
     subagents_enabled: bool,
     subagent_working_count: usize,
-    subagent_control_focused: bool,
+    reviewer_count: usize,
+    reviewer_control_area: Option<Rect>,
     subagent_control_area: Option<Rect>,
     task_dialog_area: Option<Rect>,
     /// The opaque ids represented by the last frame's visible Stop controls.
@@ -746,9 +752,7 @@ impl ChatState {
             claimed_agent_terminals: BTreeMap::new(),
             elicitation: None,
             pending_elicitations: Vec::new(),
-            reviewer_area: None,
             turn_review: None,
-            turn_review_action_areas: Vec::new(),
             review_config: mj_core::config::ReviewConfig::default(),
             session_review: None,
             review_unavailable: None,
@@ -792,7 +796,7 @@ impl ChatState {
             voice_button_area: None,
             voice_form: voice_form(),
             config_chip_areas: Vec::new(),
-            task_control_focused: false,
+            prompt_control_focus: None,
             task_dialog_open: false,
             task_dialog_scroll: 0,
             task_dialog_max_scroll: 0,
@@ -801,7 +805,8 @@ impl ChatState {
             subagent_count: 0,
             subagents_enabled: false,
             subagent_working_count: 0,
-            subagent_control_focused: false,
+            reviewer_count: 0,
+            reviewer_control_area: None,
             subagent_control_area: None,
             task_dialog_area: None,
             task_dialog_control_ids: Vec::new(),
@@ -880,6 +885,7 @@ impl ChatState {
         state.standby = true;
         state.bind_composer_session(Some(session_id));
         state.set_subagent_count(header.subagent_count);
+        state.set_reviewer_count(header.reviewer_count);
         state.set_header_summary(header.target, header.profile, header.title);
         if let Some(harness_kind) = header.harness_kind {
             state.set_harness_kind(harness_kind);

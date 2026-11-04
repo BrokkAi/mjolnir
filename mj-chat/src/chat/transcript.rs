@@ -752,9 +752,7 @@ impl ChatState {
     }
 
     fn transcript_scrollbar_covered(&self) -> bool {
-        self.elicitation.is_none()
-            && (self.config_picker_active()
-                || (self.turn_review_active() && !self.turn_review_split()))
+        self.elicitation.is_none() && self.config_picker_active()
     }
 
     /// Handles the primary transcript's one-cell scrollbar. A drag is kept

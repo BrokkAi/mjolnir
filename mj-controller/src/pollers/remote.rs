@@ -2,6 +2,7 @@ use super::*;
 
 pub fn spawn_remote_dashboard_worker_poller(
     workspace_id: String,
+    bootstrap: mj_client::runtime_feed::RuntimeReplica,
 ) -> Result<RemoteDashboardWorkerPoller> {
     let channels = spawn_remote_session_manager()?;
     let crate::session_manager::RemoteSessionManagerChannels {
@@ -12,27 +13,41 @@ pub fn spawn_remote_dashboard_worker_poller(
         publisher,
         mut requests,
     } = channels;
-    let (state_tx, state_rx) = tokio::sync::watch::channel(RuntimeStateUpdate::default());
-    let (reviews_tx, reviews_rx) = tokio::sync::watch::channel(Vec::new());
-    let (notices_tx, notices_rx) = tokio::sync::watch::channel(Vec::new());
-    let (quotas_tx, quotas_rx) = tokio::sync::watch::channel(Default::default());
-    let (capabilities_tx, capabilities_rx) = tokio::sync::watch::channel(Default::default());
-    let (config_tx, config_rx) = tokio::sync::watch::channel(mj_core::config::Config::default());
+    let metadata = &bootstrap.projection.metadata;
+    let (reviews_tx, reviews_rx) = tokio::sync::watch::channel(metadata.reviews.clone());
+    let (notices_tx, notices_rx) = tokio::sync::watch::channel(metadata.notices.clone());
+    let (ui_requests_tx, ui_requests_rx) =
+        tokio::sync::watch::channel(metadata.ui_requests.clone());
+    let (quotas_tx, quotas_rx) = tokio::sync::watch::channel(metadata.quotas.clone().into_inner());
+    let (capabilities_tx, capabilities_rx) =
+        tokio::sync::watch::channel(metadata.profile_capabilities.clone().into_inner());
+    let (config_tx, config_rx) = tokio::sync::watch::channel(metadata.installed_config());
+    let initial_native_agents = bootstrap.projection.native_agents.clone();
+    let (state_tx, state_rx) = tokio::sync::watch::channel(runtime_state_update(
+        bootstrap.projection.clone(),
+        Default::default(),
+    ));
     let (health_tx, health_rx) = tokio::sync::watch::channel(RuntimeFeedHealth::default());
+    let initial_scope = bootstrap
+        .cursor
+        .as_ref()
+        .map(|cursor| cursor.subagent_parents.clone())
+        .unwrap_or_default();
+    let (subagent_parents, scopes) = tokio::sync::watch::channel(initial_scope);
     tokio::spawn(async move {
-        let replica = Arc::new(tokio::sync::Mutex::new(
-            mj_client::runtime_feed::RuntimeReplica::default(),
-        ));
+        let replica = Arc::new(tokio::sync::Mutex::new(bootstrap));
         let tails = Arc::clone(&replica);
         let mut feed = spawn_runtime_feed_with(
             workspace_id,
             move |_, revision| {
                 let replica = replica.clone();
-                async move { poll_daemon_runtime(replica, revision).await }
+                let scopes = scopes.clone();
+                async move { poll_daemon_runtime(replica, revision, scopes).await }
             },
             move |session_id| load_session_tail(Arc::clone(&tails), session_id),
         );
         let mut native = super::native_agents::NativeAgentLoader::default();
+        native.update_snapshot(initial_native_agents);
         let mut request_order = crate::session_manager::SessionRequestOrder::new();
         loop {
             tokio::select! {
@@ -56,9 +71,9 @@ pub fn spawn_remote_dashboard_worker_poller(
                 update = feed.updates.recv() => {
                     match update {
                         Some(RuntimeFeedUpdate::Snapshot(snapshot)) => {
-                            let metadata = snapshot.metadata;
+                            let metadata = &snapshot.metadata;
                             send_if_changed(&config_tx, metadata.installed_config());
-                            native.update_snapshot(snapshot.native_agents);
+                            native.update_snapshot(snapshot.native_agents.clone());
                             health_tx.send_if_modified(|health| {
                                 let recovered = health.refresh_error.take().is_some();
                                 let native_error = native.error();
@@ -66,27 +81,13 @@ pub fn spawn_remote_dashboard_worker_poller(
                                 health.native_error = native_error;
                                 recovered || changed
                             });
-                            publish_runtime_state(&state_tx, RuntimeStateUpdate {
-                                last_subagent_policies: metadata.last_subagent_policies,
-                                operator_presence: metadata.operator_presence,
-                                native_agents: native.views_snapshot(),
-                                session_cpu: snapshot.session_cpu,
-                                workspace_names: metadata.workspace_names,
-                                revision: snapshot.revision,
-                                records: snapshot.records,
-                                lifecycles: metadata.lifecycles,
-                                moves: snapshot.moves,
-                                subagents: snapshot.subagents,
-                                launch_recency: metadata.launch_recency.into_inner(),
-                                recent_launch: metadata.recent_launch,
-                                container_upgrade_sessions: metadata.container_upgrade_sessions,
-                                storage: metadata.storage.into_inner(),
-                                container_capacities: metadata.container_capacities.into_inner(),
-                            });
-                            send_if_changed(&reviews_tx, metadata.reviews);
-                            send_if_changed(&capabilities_tx, metadata.profile_capabilities.into_inner());
-                            send_if_changed(&notices_tx, metadata.notices);
-                            send_if_changed(&quotas_tx, metadata.quotas.into_inner());
+                            let next = runtime_state_update((*snapshot).clone(), native.views_snapshot());
+                            publish_runtime_state(&state_tx, next);
+                            send_if_changed(&reviews_tx, metadata.reviews.clone());
+                            send_if_changed(&capabilities_tx, metadata.profile_capabilities.clone().into_inner());
+                            send_if_changed(&notices_tx, metadata.notices.clone());
+                            send_if_changed(&ui_requests_tx, metadata.ui_requests.clone());
+                            send_if_changed(&quotas_tx, metadata.quotas.clone().into_inner());
                         }
                         Some(RuntimeFeedUpdate::Session { session_id, view }) => {
                             if mirror_daemon_view(&targets, &publisher, session_id, *view).await.is_err() { return; }
@@ -116,8 +117,10 @@ pub fn spawn_remote_dashboard_worker_poller(
         control,
         shutdown,
         state: state_rx,
+        subagent_parents,
         reviews: reviews_rx,
         notices: notices_rx,
+        ui_requests: ui_requests_rx,
         quotas: quotas_rx,
         profile_capabilities: capabilities_rx,
         config: config_rx,
@@ -137,6 +140,34 @@ pub(super) fn send_if_changed<T: PartialEq>(tx: &tokio::sync::watch::Sender<T>, 
         *current = value;
         true
     })
+}
+
+fn runtime_state_update(
+    snapshot: mj_client::runtime_feed::RuntimeProjection,
+    native_agents: mj_core::snapshot_map::SnapshotMap<
+        String,
+        mj_core::native_agent::NativeAgentView,
+    >,
+) -> RuntimeStateUpdate {
+    let metadata = snapshot.metadata;
+    RuntimeStateUpdate {
+        subagent_parents: snapshot.subagent_parents,
+        last_subagent_policies: metadata.last_subagent_policies,
+        operator_presence: metadata.operator_presence,
+        native_agents,
+        session_cpu: snapshot.session_cpu,
+        workspace_names: metadata.workspace_names,
+        revision: snapshot.revision,
+        records: snapshot.records,
+        lifecycles: metadata.lifecycles,
+        moves: snapshot.moves,
+        subagents: snapshot.subagents,
+        launch_recency: metadata.launch_recency.into_inner(),
+        recent_launch: metadata.recent_launch,
+        container_upgrade_sessions: metadata.container_upgrade_sessions,
+        storage: metadata.storage.into_inner(),
+        container_capacities: metadata.container_capacities.into_inner(),
+    }
 }
 
 /// The same for the records snapshot, whose revision moves with every
@@ -232,7 +263,9 @@ pub(super) async fn load_session_tail(
         }
         mj_client::runtime_feed::SessionTailReply::NoTail => Ok(None),
         mj_client::runtime_feed::SessionTailReply::ResetRequired => {
-            replica.cursor = None;
+            if replica.cursor.as_ref() == Some(&cursor) {
+                replica.cursor = None;
+            }
             Err(anyhow::Error::new(super::runtime_feed::TailCursorExpired))
         }
     }
@@ -241,12 +274,40 @@ pub(super) async fn load_session_tail(
 pub(super) async fn poll_daemon_runtime(
     replica: Arc<tokio::sync::Mutex<mj_client::runtime_feed::RuntimeReplica>>,
     after_revision: u64,
+    mut scopes: tokio::sync::watch::Receiver<std::collections::BTreeSet<String>>,
 ) -> Result<mj_client::runtime_feed::RuntimeProjection> {
-    let mut replica = replica.lock().await;
     loop {
+        let parents = scopes.borrow_and_update().clone();
+        let (cursor, revision) = {
+            let mut replica = replica.lock().await;
+            if replica
+                .cursor
+                .as_ref()
+                .is_some_and(|cursor| cursor.subagent_parents != parents)
+            {
+                replica.cursor = None;
+            }
+            (replica.cursor.clone(), replica.projection.revision)
+        };
         let mut daemon = mj_client::daemon::connect_existing().await?;
-        let wait = after_revision != 0 && after_revision == replica.projection.revision;
-        let frame = daemon.runtime_changes(replica.cursor.clone(), wait).await?;
+        let wait = cursor.is_some() && after_revision != 0 && after_revision == revision;
+        // A pending read never owns the replica: transcript-tail requests must
+        // be able to use its current cursor while the daemon waits for changes.
+        let frame = tokio::select! {
+            changed = scopes.changed() => {
+                changed.context("dashboard family subscription stopped")?;
+                continue;
+            }
+            frame = daemon.runtime_changes_for_subagent_parents(cursor.clone(), wait, parents.clone()) => frame?,
+        };
+        if *scopes.borrow() != parents {
+            continue;
+        }
+        let mut replica = replica.lock().await;
+        // An expired tail can invalidate a cursor while this request waits.
+        if replica.cursor != cursor {
+            continue;
+        }
         if let Err(error) = replica.apply(frame) {
             replica.cursor = None;
             return Err(error);
@@ -261,6 +322,162 @@ pub(super) async fn poll_daemon_runtime(
 #[cfg(test)]
 mod expired_tail_cursor_tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    #[tokio::test]
+    async fn bootstrap_poll_keeps_tails_available_and_cancels_the_old_family_scope() {
+        const CHILD: &str = "MJ_TEST_RUNTIME_BOOTSTRAP_SCOPE";
+        const TEST: &str = "bootstrap_poll_keeps_tails_available_and_cancels_the_old_family_scope";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(module_path!(), TEST),
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "bootstrap-family-scope")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        use mj_client::daemon::{
+            DaemonAction, DaemonMetadata, DaemonReply, RequestEnvelope, ResponseEnvelope,
+        };
+        use mj_client::runtime_feed::{
+            RuntimeBootstrap, RuntimeCursor, RuntimeFrame, RuntimeProjection, SessionTailReply,
+        };
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: mj_client::daemon::PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "bootstrap-scope".into(),
+            started_at: "2026-11-04T00:00:00Z".into(),
+            build_version: "test".into(),
+            instance_id: String::new(),
+            placement: mj_client::daemon::DaemonPlacement::Host,
+        };
+        let path = mj_client::daemon::metadata_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let cursor = RuntimeCursor {
+            incarnation: "bootstrap-daemon".into(),
+            sequence: 42,
+            subagent_parents: Default::default(),
+        };
+        let replica = Arc::new(tokio::sync::Mutex::new(
+            RuntimeBootstrap {
+                cursor: cursor.clone(),
+                projection: RuntimeProjection {
+                    revision: 7,
+                    ..Default::default()
+                },
+            }
+            .into_replica(),
+        ));
+        let (scopes, scope_rx) = tokio::sync::watch::channel(BTreeSet::new());
+        let held = Arc::new(tokio::sync::Notify::new());
+        let server_held = held.clone();
+        let server = tokio::spawn(async move {
+            let (mut old_poll, _) = listener.accept().await.unwrap();
+            let request: RequestEnvelope =
+                mj_client::daemon::read_frame(&mut old_poll).await.unwrap();
+            assert!(
+                matches!(request.action, DaemonAction::RuntimeChanges { cursor: Some(ref requested), wait: true, ref subagent_parents } if requested == &cursor && subagent_parents.is_empty()),
+                "startup must follow its bootstrap cursor instead of downloading another snapshot"
+            );
+            server_held.notify_one();
+            let (mut tail, _) = listener.accept().await.unwrap();
+            let request: RequestEnvelope = mj_client::daemon::read_frame(&mut tail).await.unwrap();
+            assert!(
+                matches!(request.action, DaemonAction::SessionTail { cursor: ref requested, .. } if requested == &cursor)
+            );
+            mj_client::daemon::write_frame(
+                &mut tail,
+                &ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(DaemonReply::SessionTail(Box::new(SessionTailReply::NoTail))),
+                },
+            )
+            .await
+            .unwrap();
+            let (mut fresh, _) = listener.accept().await.unwrap();
+            let request: RequestEnvelope = mj_client::daemon::read_frame(&mut fresh).await.unwrap();
+            let DaemonAction::RuntimeChanges {
+                cursor: None,
+                wait: false,
+                subagent_parents,
+            } = request.action
+            else {
+                panic!("scope changes need a fresh snapshot");
+            };
+            assert_eq!(subagent_parents, BTreeSet::from(["parent".to_owned()]));
+            mj_client::daemon::write_frame(
+                &mut fresh,
+                &ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(DaemonReply::RuntimeChanges(Box::new(
+                        RuntimeFrame::Snapshot {
+                            cursor: RuntimeCursor {
+                                incarnation: "replacement-daemon".into(),
+                                sequence: 1,
+                                subagent_parents: subagent_parents.clone(),
+                            },
+                            projection: Box::new(RuntimeProjection {
+                                revision: 1,
+                                subagent_parents,
+                                ..Default::default()
+                            }),
+                        },
+                    ))),
+                },
+            )
+            .await
+            .unwrap();
+            let mut byte = [0];
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), old_poll.read(&mut byte))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0,
+                "the old long poll must be disconnected"
+            );
+        });
+        let poll = tokio::spawn(poll_daemon_runtime(replica.clone(), 7, scope_rx));
+        tokio::time::timeout(Duration::from_secs(2), held.notified())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                load_session_tail(replica.clone(), "session".into())
+            )
+            .await
+            .expect("a long poll must not hold the replica lock")
+            .unwrap()
+            .is_none()
+        );
+        scopes.send(BTreeSet::from(["parent".to_owned()])).unwrap();
+        let projection = tokio::time::timeout(Duration::from_secs(2), poll)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            projection.subagent_parents,
+            BTreeSet::from(["parent".to_owned()])
+        );
+        assert_eq!(
+            replica.lock().await.cursor.as_ref().unwrap().incarnation,
+            "replacement-daemon"
+        );
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn expired_session_tail_cursor_clears_the_replica_cursor_before_retry() {
@@ -295,6 +512,8 @@ mod expired_tail_cursor_tests {
             token: "tail-cursor-test-token".into(),
             started_at: "2026-10-05T00:00:00Z".into(),
             build_version: "test".into(),
+            instance_id: String::new(),
+            placement: mj_client::daemon::DaemonPlacement::Host,
         };
         let metadata_path = mj_client::daemon::metadata_path();
         std::fs::create_dir_all(metadata_path.parent().unwrap()).expect("create isolated data dir");
@@ -328,6 +547,7 @@ mod expired_tail_cursor_tests {
         let cursor = RuntimeCursor {
             incarnation: "previous-daemon".into(),
             sequence: 42,
+            subagent_parents: Default::default(),
         };
         let replica = Arc::new(tokio::sync::Mutex::new(RuntimeReplica {
             cursor: Some(cursor.clone()),

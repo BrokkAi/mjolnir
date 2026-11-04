@@ -12,7 +12,7 @@ use crate::theme;
 use anyhow::Result;
 use crossterm::event::Event;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Padding, Paragraph, Wrap};
@@ -46,8 +46,6 @@ use super::rendering::{
     voice_button_glyph, voice_button_line, wrap_styled_line,
 };
 
-#[cfg(test)]
-use super::PromptPayload;
 use super::composer::ComposerIoUpdate;
 #[cfg(test)]
 use super::composer::{AttachmentResult, MAX_ATTACHMENT_TASKS};
@@ -57,6 +55,8 @@ use super::{
     ChatRegions, ChatSessionContext, ChatState, MOUSE_SCROLL_ROWS, Notices, SessionHeaderIdentity,
     queued_prompt_preview,
 };
+#[cfg(test)]
+use super::{PromptControl, PromptPayload};
 #[cfg(test)]
 use crate::clipboard::ClipboardContent;
 
@@ -83,10 +83,6 @@ pub enum ChatDaemonRequest {
 }
 
 const MAX_DIFFSTAT_TASKS: usize = 2;
-/// How long an idle reviewing role waits before reading its journal again. An
-/// attach answers immediately even when nothing has been journaled, so without
-/// this a review with several roles would spin on empty pages.
-const REVIEW_POLL_IDLE_INTERVAL: Duration = Duration::from_millis(200);
 const SESSION_ACTOR_RECONNECT_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
@@ -123,11 +119,6 @@ enum ChatIoUpdate {
     LinkOpenFailed {
         url: String,
         error: String,
-    },
-    /// A page of one reviewing role's own relay events.
-    TurnReviewEvents {
-        role: String,
-        result: std::result::Result<Box<mj_core::state::MaterializedSession>, String>,
     },
 }
 
@@ -294,9 +285,7 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
         }
         // Reviewer updates are handled where the session handle is, because
         // acting on one starts more reviewer work.
-        ChatIoUpdate::ReviewerStarted(_)
-        | ChatIoUpdate::ReviewerNotice(_)
-        | ChatIoUpdate::TurnReviewEvents { .. } => {}
+        ChatIoUpdate::ReviewerStarted(_) | ChatIoUpdate::ReviewerNotice(_) => {}
         ChatIoUpdate::SessionReconnected(_) => {
             unreachable!("session reconnects are applied by ActiveChat")
         }
@@ -445,7 +434,6 @@ pub struct ActiveChat {
     /// independently reacquires the same actor, finishes just afterwards.
     reconnect_notice_pending_sync: bool,
     /// Reviewer journals this chat is already reading.
-    reviewed_roles: std::collections::BTreeSet<String>,
     persistence: Option<tokio::sync::mpsc::UnboundedSender<ChatDaemonRequest>>,
     /// A cached question may arrive in the newly attached review stream a few
     /// ticks after the chat itself opens. Keep it here until that exact source
@@ -656,6 +644,7 @@ impl ActiveChat {
         };
         state.set_history_context(&bundle_id);
         state.set_subagent_count(header.subagent_count);
+        state.set_reviewer_count(header.reviewer_count);
         state.set_header_summary(header.target, header.profile, header.title);
         state.restore_draft(draft);
         state.notices = notices;
@@ -722,7 +711,6 @@ impl ActiveChat {
             session_feed_expected: false,
             session_retiring: false,
             reconnect_notice_pending_sync: false,
-            reviewed_roles: std::collections::BTreeSet::new(),
             persistence,
             deferred_elicitation_draft: None,
             earlier_task: None,

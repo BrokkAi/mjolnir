@@ -18,6 +18,63 @@ pub fn own_test_daemons(command: &mut Command) -> &mut Command {
     command.env(DAEMON_OWNER_ENV, std::process::id().to_string())
 }
 
+/// A node beside a daemon a test started directly, as the launcher starts one
+/// beside every daemon it launches: the daemon runs its commands on it. Killed
+/// when the test drops it.
+#[allow(dead_code)]
+pub struct TestNode(std::process::Child);
+
+impl Drop for TestNode {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Start a node for the daemon `daemon` started, once that daemon publishes
+/// its endpoint under `data`. The node gets the daemon's environment, because
+/// it is where the daemon's commands, and any fake tools on `PATH`, run.
+#[allow(dead_code)]
+pub fn start_test_node(daemon: &Command, data: &Path) -> TestNode {
+    let metadata = data.join("daemon.json");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let published = loop {
+        if let Ok(bytes) = std::fs::read(&metadata)
+            && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        {
+            break value;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never published {}",
+            metadata.display()
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    let endpoint = serde_json::json!({
+        "address": published["address"],
+        "token": published["token"],
+        "build_version": published["build_version"],
+    });
+    std::fs::write(
+        data.join("node-endpoint.json"),
+        serde_json::to_vec(&endpoint).unwrap(),
+    )
+    .unwrap();
+    let mut node = Command::new(daemon.get_program());
+    for (key, value) in daemon.get_envs() {
+        match value {
+            Some(value) => node.env(key, value),
+            None => node.env_remove(key),
+        };
+    }
+    node.arg("node")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    TestNode(node.spawn().expect("start the test node"))
+}
+
 /// The variable [`own_test_daemons`] sets, for launchers other than
 /// [`Command`] such as a pseudo console.
 pub const DAEMON_OWNER_ENV: &str = "MJ_DAEMON_OWNER_PID";
@@ -37,8 +94,18 @@ pub struct AgentIsolation {
 #[allow(dead_code)]
 impl AgentIsolation {
     pub fn under(root: &Path) -> Self {
+        // A host's own Git config must not reach the fixture, and the
+        // dashboard asks for a commit author before a new session when the
+        // global config has none.
+        let git_config = root.join(".gitconfig");
+        std::fs::write(
+            &git_config,
+            "[user]\n\tname = Mjolnir Test\n\temail = test@example.invalid\n",
+        )
+        .expect("write the fixture's global Git config");
         Self {
             set: vec![
+                ("GIT_CONFIG_GLOBAL", git_config),
                 ("HOME", root.to_path_buf()),
                 // `mj_core::path_input::user_home` reads it on Windows.
                 ("USERPROFILE", root.to_path_buf()),

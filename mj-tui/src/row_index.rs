@@ -9,7 +9,7 @@ use mj_core::snapshot_map::SnapshotMap;
 #[derive(Default)]
 pub(crate) struct RowIndex {
     records: SnapshotMap<String, SessionRecord>,
-    relations: SnapshotMap<String, mj_core::subagent::SubagentRecord>,
+    relations: SnapshotMap<String, mj_core::subagent::SubagentMetadata>,
     pub(crate) live: BTreeSet<String>,
     children: BTreeMap<String, BTreeSet<String>>,
     pub(crate) active_children: BTreeMap<String, BTreeSet<String>>,
@@ -98,11 +98,25 @@ impl DashboardState {
         self.row_index.borrow()
     }
 
-    pub(crate) fn managed_child_count(&self, parent: &str) -> usize {
-        self.synchronized_row_index()
-            .children
-            .get(parent)
-            .map_or(0, BTreeSet::len)
+    pub(crate) fn managed_child_ids_of_kind(
+        &self,
+        parent: &str,
+        kind: mj_core::subagent::SubagentKind,
+    ) -> Vec<String> {
+        self.managed_child_ids(parent)
+            .into_iter()
+            .filter(|id| {
+                self.state
+                    .subagents
+                    .get(id)
+                    .is_some_and(|relation| relation.kind == kind)
+            })
+            .collect()
+    }
+
+    pub fn reviewer_count_for(&self, parent: &str) -> usize {
+        self.managed_child_ids_of_kind(parent, mj_core::subagent::SubagentKind::Reviewer)
+            .len()
     }
 
     pub(crate) fn managed_active_child_ids(&self, parent: &str) -> Vec<String> {

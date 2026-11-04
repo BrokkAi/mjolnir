@@ -407,6 +407,14 @@ impl SetupDialog {
     }
 }
 
+#[cfg(test)]
+impl SetupDialog {
+    /// The open page's path.
+    pub(crate) fn page(&self) -> &[String] {
+        &self.path
+    }
+}
+
 mod draft;
 mod events;
 mod form;

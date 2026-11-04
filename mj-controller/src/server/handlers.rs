@@ -1144,6 +1144,65 @@ async fn catalog_response(
         })
 }
 
+/// The commit author in this host's global Git configuration. Sessions
+/// inherit it, so the new-session form asks for one when a part is missing.
+pub(super) async fn read_git_identity() -> Result<Json<crate::controller::GitIdentity>, ApiError> {
+    // Reading runs `git`, so it stays off the async runtime.
+    tokio::task::spawn_blocking(crate::controller::controller_git_identity)
+        .await
+        .map_err(|error| git_identity_failure("read", anyhow::anyhow!("{error}")))?
+        .map(Json)
+        .map_err(|error| git_identity_failure("read", error))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GitIdentityRequest {
+    name: String,
+    email: String,
+}
+
+/// Save the commit author with `git config --global` on this host and answer
+/// with the identity Git now reports, so the form can confirm what it wrote.
+pub(super) async fn save_git_identity(
+    State(state): State<ServerState>,
+    Json(request): Json<GitIdentityRequest>,
+) -> Response<Body> {
+    // A short write the person can repeat, so a waiting handoff refuses it
+    // and the browser sends it again to the next daemon.
+    let Ok(admission) = state
+        .upgrade_gate
+        .enter_unless_draining("viewer Git identity")
+    else {
+        return upgrade_pending_response();
+    };
+    let saved = tokio::task::spawn_blocking(move || {
+        let _admission = admission;
+        crate::controller::set_controller_git_identity(&request.name, &request.email)
+    })
+    .await;
+    match saved {
+        Ok(Ok(identity)) => Json(identity).into_response(),
+        // Validation and Git's own refusal both read as a sentence the form
+        // shows beside the fields.
+        Ok(Err(error)) => {
+            ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("{error:#}")).into_response()
+        }
+        Err(error) => git_identity_failure("save", anyhow::anyhow!("{error}")).into_response(),
+    }
+}
+
+fn git_identity_failure(verb: &'static str, error: anyhow::Error) -> ApiError {
+    tracing::warn!(
+        error = format!("{error:#}"),
+        "{verb} controller Git identity failed"
+    );
+    ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("could not {verb} the Git identity: {error:#}"),
+    )
+}
+
 /// Engine inspection runs in the controller's supervised background work.
 pub(super) async fn preview_container_upgrade(
     State(state): State<ServerState>,

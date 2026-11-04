@@ -3,7 +3,7 @@ title: Turn review
 description: Configure one independent reviewer and resolve findings between agent turns.
 ---
 
-Mjolnir can review work at the end of each turn or before an agent pushes commits. Choose the trigger in **Settings → Code Review** or in `config.toml`. A reviewer runs as a hidden child session of the session it reviews. It uses the profile, model, and effort selected in review settings. It does not appear in the agent's `list_agents` results or count against the child-session limit. Its transcript appears in the review view.
+Mjolnir can review work at the end of each turn or before an agent pushes commits. Choose the trigger in **Settings → Code Review** or in `config.toml`. A reviewer runs as a hidden child session of the session it reviews. It uses the profile, model, and effort selected in review settings. It does not appear in the agent's `list_agents` results or count against the child-session limit. Open **Reviewers** on the prompt’s bottom border to read its conversation in a virtual workspace.
 
 ## Configure a reviewer
 
@@ -135,7 +135,7 @@ mj review status --session <id>
 
 ## Read and resolve a verdict
 
-The review view provides **Overview**, the reviewer's transcript, and **Verdict**. Use Tab to move among them. The web viewer shows the same reviewer role and status.
+The parent conversation stays visible at full width throughout review, including when findings arrive. The **Reviewers** button on the prompt’s bottom border opens the reviewer sessions using the same virtual workspace as Subagents. Use its close control, or Escape from the Sessions list, to return to the parent. Review status, a findings summary, and resolution actions appear in the prompt area. Reviewer conversations use the ordinary session view. **Read details** (or `v`) opens the complete findings, failure reason, or delivery/action error in the existing text reader; scroll with Page Up/Down and press Escape to return without resolving the review. The web viewer shows the same reviewer role and status.
 
 Resolution depends on the verdict:
 

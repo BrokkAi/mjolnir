@@ -639,19 +639,22 @@ impl DashboardState {
     }
 
     fn ordered_sessions_unfiltered(&self) -> Vec<&SessionRecord> {
-        if let Some(parent_id) = self.subagent_parent_id.as_deref() {
+        if let Some(workspace) = self.child_workspace.as_ref() {
+            let parent_id = &workspace.parent_id;
             let mut children = self
-                .managed_child_ids(parent_id)
+                .managed_child_ids_of_kind(parent_id, workspace.kind)
                 .into_iter()
                 .filter_map(|id| self.state.sessions.get(&id))
                 .collect::<Vec<_>>();
-            children.extend(
-                self.native_by_parent
-                    .get(parent_id)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|id| self.state.sessions.get(id)),
-            );
+            if workspace.kind == mj_core::subagent::SubagentKind::Worker {
+                children.extend(
+                    self.native_by_parent
+                        .get(parent_id)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|id| self.state.sessions.get(id)),
+                );
+            }
             children.sort_by_cached_key(|session| {
                 let group = if let Some(pane) = self.native_agents.get(&session.id) {
                     if pane.agent.state == mj_core::native_agent::NativeAgentState::Running {
@@ -1036,7 +1039,7 @@ impl DashboardState {
         workspace_id: &str,
         session_id: &str,
     ) -> DashboardAction {
-        if self.subagent_parent_id.is_some() {
+        if self.child_workspace.is_some() {
             self.close_subagent_workspace();
         }
         if self.active_workspace_id.as_deref() != Some(workspace_id) {
@@ -1090,7 +1093,12 @@ impl DashboardState {
             };
             let parent_workspace = parent.workspace_id.clone();
             if self.active_workspace_id() == Some(parent_workspace.as_str()) {
-                self.open_subagent_workspace(parent_id);
+                let kind = self.state.subagents[session_id].kind;
+                if kind == mj_core::subagent::SubagentKind::Reviewer {
+                    self.open_reviewer_workspace(parent_id);
+                } else {
+                    self.open_subagent_workspace(parent_id);
+                }
                 self.select_active_session(session_id);
                 self.clear_filter_hiding_selection();
                 return self.open_selected_session();

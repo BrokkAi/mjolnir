@@ -31,8 +31,11 @@ impl ProviderAuthCache {
         self.files.retain(|source, _| sources.contains(source));
         for (home, overlay) in sources {
             let described = mj_core::codex_provider::describe_config(&home, overlay.as_deref());
-            let files = match mj_core::codex_provider::ConfigFiles::read(&home, overlay.as_deref())
-            {
+            let files = match mj_core::codex_provider::ConfigFiles::read_with(
+                &home,
+                overlay.as_deref(),
+                crate::host_fs::read_optional_sync,
+            ) {
                 Ok(files) => files,
                 Err(error) => {
                     tracing::warn!(error = %format!("{error:#}"), config = %described, "cannot read credential provider configuration");

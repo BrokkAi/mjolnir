@@ -1692,7 +1692,10 @@ impl Controller {
         ) || !worker_subagent_queue_enabled(
             &session.subagents.clone().unwrap_or_default(),
             session.harness_kind,
-            self.state.subagents.get(session_id),
+            self.state
+                .subagents
+                .get(session_id)
+                .map(|child| child.handback_tool),
             true,
         ) {
             return Ok(outcome);
@@ -2632,7 +2635,7 @@ pub(crate) fn parent_tools_enabled(
 pub(crate) fn worker_subagent_queue_enabled(
     policy: &mj_core::subagent::SubagentPolicy,
     harness: mj_core::config::HarnessKind,
-    subagent: Option<&mj_core::subagent::SubagentRecord>,
+    subagent: Option<bool>,
     agent_mailboxes_enabled: bool,
 ) -> bool {
     let managed_subagent = subagent.is_some();
@@ -2640,7 +2643,7 @@ pub(crate) fn worker_subagent_queue_enabled(
     mj_core::worker_launch::resolve_subagent_mcp_role(
         &launch_policy,
         managed_subagent,
-        subagent.is_some_and(|record| record.handback_tool),
+        subagent.unwrap_or(false),
         agent_mailboxes_enabled,
         !managed_subagent,
     )

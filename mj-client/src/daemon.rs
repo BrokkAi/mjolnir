@@ -1,4 +1,5 @@
 //! Authenticated local daemon protocol and client transport.
+mod chunk_bytes;
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
 use agent_client_protocol::v1::schema::ContentBlock;
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 /// Durable terminal results for caller-owned startup prompt identities.
@@ -34,6 +35,15 @@ pub fn metadata_path() -> PathBuf {
     data_dir().join("daemon.json")
 }
 
+/// The environment variable naming the container a daemon was launched in.
+///
+/// The launcher sets it, and the daemon reads it to report its placement. A
+/// host daemon does not have it.
+pub const DAEMON_CONTAINER_ENV: &str = "MJ_DAEMON_CONTAINER";
+
+/// The environment variable naming the engine that owns the daemon container.
+pub const DAEMON_CONTAINER_RUNTIME_ENV: &str = "MJ_DAEMON_CONTAINER_RUNTIME";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonMetadata {
@@ -43,6 +53,94 @@ pub struct DaemonMetadata {
     pub token: String,
     pub started_at: String,
     pub build_version: String,
+    /// Random per-start identity. It is skipped on disk so older clients keep
+    /// reading `daemon.json`; clients ask the daemon for it with `Identity`.
+    #[serde(skip)]
+    pub instance_id: String,
+    /// Where this daemon runs. Also skipped on disk: the running daemon is its
+    /// owner, and a container daemon can report it on every platform.
+    #[serde(skip)]
+    pub placement: DaemonPlacement,
+}
+
+/// Where the daemon runs, as the daemon itself reports it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "placement")]
+pub enum DaemonPlacement {
+    #[default]
+    Host,
+    Container {
+        name: String,
+        /// The engine that owns the container, when the launcher reported it.
+        /// `None` is a container daemon from before this action existed.
+        #[serde(default)]
+        runtime: Option<mj_core::config::DaemonRuntime>,
+    },
+}
+
+impl DaemonPlacement {
+    /// The container name when this placement is a container.
+    pub fn container(&self) -> Option<&str> {
+        match self {
+            Self::Host => None,
+            Self::Container { name, .. } => Some(name),
+        }
+    }
+}
+
+/// One daemon start, as the daemon reports it to a client.
+///
+/// Unlike the frozen [`DaemonStatus`], this action is not part of the
+/// management subset. It answers the questions clients used to ask the
+/// operating system: is this the daemon I connected to before, where does it
+/// run, and which build is it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonIdentity {
+    pub instance_id: String,
+    pub build_version: String,
+    pub placement: DaemonPlacement,
+}
+
+/// What automatic first-run setup found and configured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirstRunSetupReport {
+    pub agents: Vec<mj_core::config::HarnessKind>,
+    pub repository: Option<String>,
+}
+
+impl FirstRunSetupReport {
+    pub fn summary(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self.agents.is_empty() {
+            lines.push(
+                "No installed coding agent was found. Mjolnir can install and sign in to one for you."
+                    .to_owned(),
+            );
+        } else {
+            lines.push(format!(
+                "Agents: {}.",
+                self.agents
+                    .iter()
+                    .map(|kind| kind.display_name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some(repository) = &self.repository {
+            lines.push(format!("Project: {repository}."));
+        }
+        lines
+    }
+}
+
+/// A project synthesized while importing a native session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportedBundle {
+    pub bundle_id: String,
+    pub bundle: mj_core::config::ProjectBundle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +349,38 @@ pub struct WikiRestoreRequest {
     pub resource_allocation: Option<SessionResourceAllocation>,
 }
 
+/// What the terminal dashboard reads from the store before it takes the
+/// terminal. The daemon assembles it, so a client never opens the store, which
+/// may live in a container volume the client cannot reach.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DashboardStartup {
+    /// The snapshot and cursor from which the runtime feed continues.
+    pub runtime: crate::runtime_feed::RuntimeBootstrap,
+    pub metadata: StoredSessionMetadata,
+    pub pane_sizes: std::collections::BTreeMap<String, mj_core::workspace::PaneSizes>,
+    pub conversation_layouts:
+        std::collections::BTreeMap<String, mj_core::workspace::ConversationLayout>,
+    pub queued_prompts: std::collections::BTreeMap<String, Vec<mj_core::relay::QueuedPrompt>>,
+}
+
+/// Stored per-workspace layouts, keyed by workspace id.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceLayouts {
+    pub pane_sizes: std::collections::BTreeMap<String, mj_core::workspace::PaneSizes>,
+    pub conversation_layouts:
+        std::collections::BTreeMap<String, mj_core::workspace::ConversationLayout>,
+}
+
+/// The store-wide metadata the dashboard keeps beside its session rows.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredSessionMetadata {
+    pub mount_history: mj_core::snapshot_map::SnapshotMap<String, Vec<PathBuf>>,
+    pub container_sizes: mj_core::snapshot_map::SnapshotMap<String, HostContainerSize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSnapshot {
@@ -421,6 +551,31 @@ pub struct RegisteredSession {
     pub remembered_container_size: Option<(String, HostContainerSize)>,
 }
 
+/// The commit author in the daemon host's Git configuration. Sessions on the
+/// host use it directly and container sessions inherit it, so without both
+/// parts no session can commit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitIdentity {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    /// The global configuration picks an identity per directory with
+    /// `includeIf`, which only applies inside a repository. Writing a plain
+    /// identity would override those choices, so it is not offered.
+    #[serde(default)]
+    pub per_directory: bool,
+}
+
+impl GitIdentity {
+    pub fn is_complete(&self) -> bool {
+        self.name.is_some() && self.email.is_some()
+    }
+
+    /// Whether a surface should offer to set the identity.
+    pub fn needs_setup(&self) -> bool {
+        !self.is_complete() && !self.per_directory
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DraftPreview {
@@ -464,8 +619,46 @@ pub enum DaemonAction {
     /// treat any failure, including a dropped connection or an error frame,
     /// as "unknown" and say nothing about what the upgrade is waiting for.
     UpgradeBlockers,
+    /// This daemon's per-start identity, build and placement. Added after
+    /// protocol 74, so it is deliberately not part of the frozen management
+    /// subset: a client asks only a daemon of its own protocol.
+    Identity,
+    /// The configuration the daemon serves. Clients read it here instead of
+    /// opening `config.toml`, which belongs to the daemon.
+    Configuration,
+    /// Discover and persist the first-run configuration in the daemon's own
+    /// environment. A client in another placement asks its daemon instead of
+    /// writing the client's `config.toml`.
+    RunFirstRunSetup,
+    /// Run the doctor in the daemon's own environment and return the
+    /// actionable errors, which a client shows after first-run setup.
+    RunDoctor,
+    /// Check a project's Git remotes before a new session starts, in the
+    /// environment that owns the project paths.
+    NewSessionRemoteRepairs {
+        bundle_id: String,
+        target_id: String,
+    },
+    /// Apply the remote-tracking repairs a preflight proposed, in the
+    /// environment that owns the project checkout.
+    RepairRepositoryRemotes {
+        bundle_id: String,
+        repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
+    },
+    /// The project source label for a session, read in the environment that
+    /// owns the checkout.
+    SessionProjectSource {
+        session_id: String,
+    },
     Status,
     WebViewerAccess,
+    /// The daemon host's Git commit author, which its sessions inherit.
+    GitIdentity,
+    /// Write the daemon host's global Git commit author.
+    SetGitIdentity {
+        name: String,
+        email: String,
+    },
     RecoverWebViewer(crate::web::WebViewerRecovery),
     InspectWebListener,
     ListWorkspaces,
@@ -488,9 +681,15 @@ pub enum DaemonAction {
     DeleteWorkspace {
         workspace_id: String,
     },
+    /// Turn this connection into a node connection (`mj_core::node`). After
+    /// the `Done` reply the daemon speaks HTTP/2 on it as the client and the
+    /// node serves.
+    NodeConnect {
+        node_id: String,
+    },
+    /// Take or renew a client's attachment lease.
     Attach {
         client_id: String,
-        pid: u32,
     },
     Detach {
         client_id: String,
@@ -524,6 +723,10 @@ pub enum DaemonAction {
     },
     PersistImportedSession {
         session: Box<SessionRecord>,
+        /// A project the import synthesized. The daemon writes it with the
+        /// session, so a client never edits the daemon's configuration.
+        #[serde(default)]
+        bundle: Option<ImportedBundle>,
     },
     SetSessionTitle {
         session_id: String,
@@ -606,9 +809,54 @@ pub enum DaemonAction {
     Snapshot {
         workspace_id: String,
     },
+    /// Everything the terminal dashboard reads from the store at startup.
+    DashboardStartup {
+        client_id: String,
+        workspace_id: String,
+    },
+    /// Stored pane sizes and conversation layouts of these workspaces.
+    WorkspaceLayouts {
+        workspace_ids: Vec<String>,
+    },
+    /// Mount history and remembered container sizes.
+    StoredSessionMetadata,
+    /// The stored tail of a session's projection, at most `items` transcript
+    /// entries, or `None` when the session has no stored projection.
+    StoredProjectionTail {
+        session_id: String,
+        items: usize,
+    },
+    /// The stored projection summary of one session.
+    StoredSessionSummary {
+        session_id: String,
+    },
+    /// Check that a stopped session's checkpointed repositories can be
+    /// fetched again before it resumes on `target_id`.
+    ResumeRepositoryPreflight {
+        session_id: String,
+        target_id: String,
+    },
+    /// Point one of a stopped session's repositories at a new origin, then
+    /// check the sources again.
+    ReplaceResumeRepositoryOrigin {
+        session_id: String,
+        repository_id: String,
+        replacement: String,
+    },
+    /// How much session storage an archive age would free.
+    ArchiveSpacePreview {
+        older_than_days: Option<u32>,
+    },
+    /// Save the terminal Setup editor's configuration, checked against the
+    /// stored sessions it would disturb. Both are configuration JSON.
+    SaveSetup {
+        original: String,
+        updated: String,
+    },
     RuntimeChanges {
         cursor: Option<crate::runtime_feed::RuntimeCursor>,
         wait: bool,
+        subagent_parents: std::collections::BTreeSet<String>,
     },
     /// One live session's transcript tail as it was at `cursor`, so the
     /// deltas after that cursor apply to it exactly.
@@ -835,13 +1083,28 @@ pub enum DaemonReply {
     /// Labels for the work holding an automatic handoff open, empty when
     /// nothing is. Answers `DaemonAction::UpgradeBlockers`.
     UpgradeBlockers(Vec<String>),
+    Identity(DaemonIdentity),
+    Configuration(Box<Config>),
+    FirstRunSetup(Option<FirstRunSetupReport>),
+    DoctorErrors(Vec<String>),
+    RemoteRepairs(Vec<mj_core::local_git::LocalRemoteRepair>),
+    ProjectSource(mj_core::state::ProjectSourceIdentity),
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
+    GitIdentity(GitIdentity),
     WebListeners(Vec<crate::web::WebListenerProcess>),
     SubagentOptions(mj_core::subagent::SubagentOptions),
     Workspaces(Vec<WorkspaceListing>),
     Workspace(WorkspaceRecord),
     Snapshot(WorkspaceSnapshot),
+    DashboardStartup(Box<DashboardStartup>),
+    WorkspaceLayouts(WorkspaceLayouts),
+    StoredSessionMetadata(StoredSessionMetadata),
+    StoredProjectionTail(Option<Box<MaterializedSession>>),
+    StoredSessionSummary(Option<Box<MaterializedSessionSummary>>),
+    SavedSetup(Box<Config>),
+    ArchiveSpacePreview(ArchiveSpacePreview),
+    ResumeRepositoryPreflight(Box<ResumeRepositorySourcePreflight>),
     RuntimeChanges(Box<crate::runtime_feed::RuntimeFrame>),
     SessionTail(Box<crate::runtime_feed::SessionTailReply>),
     ResumeCandidates(Box<ResumeCandidates>),
@@ -850,6 +1113,7 @@ pub enum DaemonReply {
     /// Transport fragments of one chunked reply (see
     /// [`DaemonReply::is_chunked`]); never exposed to consumers.
     ReplyChunk {
+        #[serde(with = "chunk_bytes")]
         bytes: Vec<u8>,
         finished: bool,
     },
@@ -882,7 +1146,11 @@ impl DaemonReply {
     pub fn is_chunked(&self) -> bool {
         matches!(
             self,
-            Self::RuntimeChanges(_) | Self::SessionTail(_) | Self::ResumeCandidates(_)
+            Self::Configuration(_)
+                | Self::DashboardStartup(_)
+                | Self::RuntimeChanges(_)
+                | Self::SessionTail(_)
+                | Self::ResumeCandidates(_)
         )
     }
 }
@@ -1116,24 +1384,6 @@ pub fn process_is_zombie(pid: u32) -> bool {
         .is_some_and(|process| process.status() == sysinfo::ProcessStatus::Zombie)
 }
 
-/// Wait for a process to leave, within [`STOP_TIMEOUT`].
-///
-/// The error says the process was still running rather than that it "did not
-/// stop": a daemon that is still winding down has not refused, and the two
-/// read very differently to somebody deciding whether to reach for a kill.
-pub async fn wait_for_exit(pid: u32) -> Result<()> {
-    wait_for_exit_within(pid, STOP_TIMEOUT).await
-}
-
-async fn wait_for_exit_within(pid: u32, timeout: Duration) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    while daemon_process_is_alive(pid) {
-        ensure!(Instant::now() < deadline, "process {pid} is still running");
-        tokio::time::sleep(RETRY_DELAY).await;
-    }
-    Ok(())
-}
-
 /// Whether a daemon that Mjolnir launched in its own process group is alive.
 ///
 /// Reaping is deliberately confined to this daemon-specific path. Attachment
@@ -1360,11 +1610,6 @@ impl DaemonClient {
         })
     }
 
-    /// The process this client is connected to.
-    pub fn daemon_pid(&self) -> u32 {
-        self.metadata.pid
-    }
-
     /// Speak the daemon's advertised dialect, not this build's: management
     /// requests must reach daemons of any protocol version, and the frozen
     /// subset encodes identically across all of them.
@@ -1430,6 +1675,80 @@ impl DaemonClient {
         response
             .result
             .map_err(|message| anyhow::Error::new(DaemonRefusal(message)))
+    }
+
+    pub async fn identity(&mut self) -> Result<DaemonIdentity> {
+        match self.request(DaemonAction::Identity).await? {
+            DaemonReply::Identity(identity) => Ok(identity),
+            reply => bail!("unexpected daemon identity reply {reply:?}"),
+        }
+    }
+
+    /// The configuration the daemon serves. Clients use this instead of
+    /// opening the daemon's `config.toml`.
+    pub async fn config(&mut self) -> Result<Config> {
+        match self.request(DaemonAction::Configuration).await? {
+            DaemonReply::Configuration(config) => Ok(*config),
+            reply => bail!("unexpected daemon configuration reply {reply:?}"),
+        }
+    }
+
+    pub async fn run_first_run_setup(&mut self) -> Result<Option<FirstRunSetupReport>> {
+        match self.request(DaemonAction::RunFirstRunSetup).await? {
+            DaemonReply::FirstRunSetup(report) => Ok(report),
+            reply => bail!("unexpected first-run setup reply {reply:?}"),
+        }
+    }
+
+    pub async fn run_doctor(&mut self) -> Result<Vec<String>> {
+        match self.request(DaemonAction::RunDoctor).await? {
+            DaemonReply::DoctorErrors(errors) => Ok(errors),
+            reply => bail!("unexpected doctor reply {reply:?}"),
+        }
+    }
+
+    pub async fn new_session_remote_repairs(
+        &mut self,
+        bundle_id: String,
+        target_id: String,
+    ) -> Result<Vec<mj_core::local_git::LocalRemoteRepair>> {
+        match self
+            .request(DaemonAction::NewSessionRemoteRepairs {
+                bundle_id,
+                target_id,
+            })
+            .await?
+        {
+            DaemonReply::RemoteRepairs(repairs) => Ok(repairs),
+            reply => bail!("unexpected new-session preflight reply {reply:?}"),
+        }
+    }
+
+    pub async fn repair_repository_remotes(
+        &mut self,
+        bundle_id: String,
+        repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::RepairRepositoryRemotes { bundle_id, repairs })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected remote-repair reply {reply:?}"),
+        }
+    }
+
+    pub async fn session_project_source(
+        &mut self,
+        session_id: String,
+    ) -> Result<mj_core::state::ProjectSourceIdentity> {
+        match self
+            .request(DaemonAction::SessionProjectSource { session_id })
+            .await?
+        {
+            DaemonReply::ProjectSource(source) => Ok(source),
+            reply => bail!("unexpected project-source reply {reply:?}"),
+        }
     }
 
     pub async fn status(&mut self) -> Result<DaemonStatus> {
@@ -1510,6 +1829,23 @@ impl DaemonClient {
         }
     }
 
+    pub async fn git_identity(&mut self) -> Result<GitIdentity> {
+        match self.request(DaemonAction::GitIdentity).await? {
+            DaemonReply::GitIdentity(identity) => Ok(identity),
+            reply => bail!("unexpected git-identity reply {reply:?}"),
+        }
+    }
+
+    pub async fn set_git_identity(&mut self, name: String, email: String) -> Result<GitIdentity> {
+        match self
+            .request(DaemonAction::SetGitIdentity { name, email })
+            .await?
+        {
+            DaemonReply::GitIdentity(identity) => Ok(identity),
+            reply => bail!("unexpected set-git-identity reply {reply:?}"),
+        }
+    }
+
     pub async fn rename_profile(&mut self, old_id: String, new_id: String) -> Result<()> {
         match self
             .request(DaemonAction::RenameProfile { old_id, new_id })
@@ -1587,11 +1923,8 @@ impl DaemonClient {
         }
     }
 
-    pub async fn attach(&mut self, client_id: String, pid: u32) -> Result<()> {
-        match self
-            .request(DaemonAction::Attach { client_id, pid })
-            .await?
-        {
+    pub async fn attach(&mut self, client_id: String) -> Result<()> {
+        match self.request(DaemonAction::Attach { client_id }).await? {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected attach reply {reply:?}"),
         }
@@ -1704,10 +2037,15 @@ impl DaemonClient {
         }
     }
 
-    pub async fn persist_imported_session(&mut self, session: SessionRecord) -> Result<()> {
+    pub async fn persist_imported_session(
+        &mut self,
+        session: SessionRecord,
+        bundle: Option<ImportedBundle>,
+    ) -> Result<()> {
         match self
             .request(DaemonAction::PersistImportedSession {
                 session: Box::new(session),
+                bundle,
             })
             .await?
         {
@@ -1984,13 +2322,150 @@ impl DaemonClient {
         }
     }
 
+    pub async fn dashboard_startup(
+        &mut self,
+        client_id: String,
+        workspace_id: String,
+    ) -> Result<DashboardStartup> {
+        match self
+            .request(DaemonAction::DashboardStartup {
+                client_id,
+                workspace_id,
+            })
+            .await?
+        {
+            DaemonReply::DashboardStartup(startup) => Ok(*startup),
+            reply => bail!("unexpected dashboard startup reply {reply:?}"),
+        }
+    }
+
+    pub async fn workspace_layouts(
+        &mut self,
+        workspace_ids: Vec<String>,
+    ) -> Result<WorkspaceLayouts> {
+        match self
+            .request(DaemonAction::WorkspaceLayouts { workspace_ids })
+            .await?
+        {
+            DaemonReply::WorkspaceLayouts(layouts) => Ok(layouts),
+            reply => bail!("unexpected workspace layouts reply {reply:?}"),
+        }
+    }
+
+    pub async fn stored_session_metadata(&mut self) -> Result<StoredSessionMetadata> {
+        match self.request(DaemonAction::StoredSessionMetadata).await? {
+            DaemonReply::StoredSessionMetadata(metadata) => Ok(metadata),
+            reply => bail!("unexpected stored session metadata reply {reply:?}"),
+        }
+    }
+
+    pub async fn stored_projection_tail(
+        &mut self,
+        session_id: String,
+        items: usize,
+    ) -> Result<Option<MaterializedSession>> {
+        match self
+            .request(DaemonAction::StoredProjectionTail { session_id, items })
+            .await?
+        {
+            DaemonReply::StoredProjectionTail(tail) => Ok(tail.map(|tail| *tail)),
+            reply => bail!("unexpected stored projection tail reply {reply:?}"),
+        }
+    }
+
+    pub async fn stored_session_summary(
+        &mut self,
+        session_id: String,
+    ) -> Result<Option<MaterializedSessionSummary>> {
+        match self
+            .request(DaemonAction::StoredSessionSummary { session_id })
+            .await?
+        {
+            DaemonReply::StoredSessionSummary(summary) => Ok(summary.map(|summary| *summary)),
+            reply => bail!("unexpected stored session summary reply {reply:?}"),
+        }
+    }
+
+    pub async fn resume_repository_preflight(
+        &mut self,
+        session_id: String,
+        target_id: String,
+    ) -> Result<ResumeRepositorySourcePreflight> {
+        match self
+            .request(DaemonAction::ResumeRepositoryPreflight {
+                session_id,
+                target_id,
+            })
+            .await?
+        {
+            DaemonReply::ResumeRepositoryPreflight(preflight) => Ok(*preflight),
+            reply => bail!("unexpected resume repository preflight reply {reply:?}"),
+        }
+    }
+
+    pub async fn replace_resume_repository_origin(
+        &mut self,
+        session_id: String,
+        repository_id: String,
+        replacement: String,
+    ) -> Result<ResumeRepositorySourcePreflight> {
+        match self
+            .request(DaemonAction::ReplaceResumeRepositoryOrigin {
+                session_id,
+                repository_id,
+                replacement,
+            })
+            .await?
+        {
+            DaemonReply::ResumeRepositoryPreflight(preflight) => Ok(*preflight),
+            reply => bail!("unexpected repository origin replacement reply {reply:?}"),
+        }
+    }
+
+    pub async fn archive_space_preview(
+        &mut self,
+        older_than_days: Option<u32>,
+    ) -> Result<ArchiveSpacePreview> {
+        match self
+            .request(DaemonAction::ArchiveSpacePreview { older_than_days })
+            .await?
+        {
+            DaemonReply::ArchiveSpacePreview(preview) => Ok(preview),
+            reply => bail!("unexpected archive space preview reply {reply:?}"),
+        }
+    }
+
+    pub async fn save_setup(&mut self, original: String, updated: String) -> Result<Config> {
+        match self
+            .request(DaemonAction::SaveSetup { original, updated })
+            .await?
+        {
+            DaemonReply::SavedSetup(config) => Ok(*config),
+            reply => bail!("unexpected setup save reply {reply:?}"),
+        }
+    }
+
     pub async fn runtime_changes(
         &mut self,
         cursor: Option<crate::runtime_feed::RuntimeCursor>,
         wait: bool,
     ) -> Result<crate::runtime_feed::RuntimeFrame> {
+        self.runtime_changes_for_subagent_parents(cursor, wait, Default::default())
+            .await
+    }
+
+    pub async fn runtime_changes_for_subagent_parents(
+        &mut self,
+        cursor: Option<crate::runtime_feed::RuntimeCursor>,
+        wait: bool,
+        subagent_parents: std::collections::BTreeSet<String>,
+    ) -> Result<crate::runtime_feed::RuntimeFrame> {
         match self
-            .request(DaemonAction::RuntimeChanges { cursor, wait })
+            .request(DaemonAction::RuntimeChanges {
+                cursor,
+                wait,
+                subagent_parents,
+            })
             .await?
         {
             DaemonReply::RuntimeChanges(frame) => Ok(*frame),
@@ -2437,6 +2912,15 @@ impl ManagementClient {
         self.inner.metadata.protocol_version
     }
 
+    /// The endpoint this management client dialed.
+    pub fn metadata(&self) -> &DaemonMetadata {
+        &self.inner.metadata
+    }
+
+    pub async fn identity(&mut self) -> Result<DaemonIdentity> {
+        self.inner.identity().await
+    }
+
     pub async fn status(&mut self) -> Result<DaemonStatus> {
         self.inner.status().await
     }
@@ -2445,20 +2929,6 @@ impl ManagementClient {
         tokio::time::timeout(STOP_TIMEOUT, self.inner.stop())
             .await
             .context("Mjolnir daemon did not acknowledge the stop before the deadline")?
-    }
-
-    /// Ask the daemon to stop and wait for its process to actually exit.
-    pub async fn stop_and_wait(mut self) -> Result<()> {
-        let pid = self.inner.metadata.pid;
-        self.stop().await?;
-        wait_for_exit_within(pid, STOP_DRAIN_TIMEOUT)
-            .await
-            .with_context(|| {
-                format!(
-                    "Mjolnir daemon {pid} accepted the stop but was still running after {}s",
-                    STOP_DRAIN_TIMEOUT.as_secs()
-                )
-            })
     }
 }
 
@@ -2514,8 +2984,18 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Explicit Ignore and Suspend preserves checkpoint verification while omitting nested repositories.
 // Web viewer access includes the bound local connection address.
 // Review role rows carry their child session IDs; older strict clients reject them.
+// Dashboards read stored state through the daemon instead of opening the store,
+// and client attachments are renewable leases rather than client process IDs.
+// Nodes connect with NodeConnect and then speak the node protocol.
+// Dashboard startup uses chunked replies, which older clients reject for this reply type.
+// Shared state publishes child metadata; launch intent remains in the daemon store.
+// Startup seeds runtime cursors with family scope; reply chunks use base64 bytes.
+// Clients read and set the daemon host's Git commit author.
+// The daemon reports its per-start identity, build and placement instead of
+// clients reading its PID and `/proc`, and it serves the configuration that
+// owns the store instead of clients opening `config.toml`.
 // SessionReview::Inherit adds a value older API clients cannot deserialize.
-pub const PROTOCOL_VERSION: u32 = 72;
+pub const PROTOCOL_VERSION: u32 = 82;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -2662,6 +3142,8 @@ mod tests {
             token: "old-restart-daemon".into(),
             started_at: "test".into(),
             build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -2692,6 +3174,8 @@ mod tests {
             token: "abandoned-prompt-test".into(),
             started_at: "test".into(),
             build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -2744,6 +3228,8 @@ mod tests {
             token: "subagent-discovery-test".into(),
             started_at: "test".into(),
             build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         let options: mj_core::subagent::SubagentOptions =
             serde_json::from_value(serde_json::json!({
@@ -2837,6 +3323,8 @@ mod tests {
             token: "test-token".into(),
             started_at: "test".into(),
             build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         let action = DaemonAction::SubmitSessionCommand {
             inherited_draft: None,

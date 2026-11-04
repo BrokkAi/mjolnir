@@ -1,5 +1,7 @@
 # Run the daemon in a container, chosen in Settings
 
+Superseded by `.agents/plans/portable-daemon-container.md`: this design only works on Linux, because it shares the host's network and PID namespaces and bind-mounts host paths. Keep this file as history only.
+
 This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds. It follows `.agents/PLANS.md`.
 
 

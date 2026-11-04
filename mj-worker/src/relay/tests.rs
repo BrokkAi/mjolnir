@@ -7722,6 +7722,7 @@ fn push_review_requests_require_protocol_43_and_old_turn_captures_still_decode()
     use mj_core::relay::{CaptureScope, ReviewerRequest};
     for request in [
         ReviewerRequest::CaptureDelta {
+            repositories: None,
             baselines: Default::default(),
             scope: CaptureScope::PushableCommits,
         },
@@ -7736,6 +7737,26 @@ fn push_review_requests_require_protocol_43_and_old_turn_captures_still_decode()
         assert!(!request.supported_at(42));
         assert!(request.supported_at(43));
     }
+    let scoped = mj_core::relay::RelayRequest::Reviewer {
+        role: None,
+        request: ReviewerRequest::CaptureDelta {
+            repositories: Some(vec![std::path::PathBuf::from("/worktree")]),
+            baselines: Default::default(),
+            scope: CaptureScope::PushableCommits,
+        },
+    };
+    assert!(!scoped.supported_at(48));
+    assert!(scoped.supported_at(49));
+    let legacy = ReviewerRequest::CaptureDelta {
+        repositories: None,
+        baselines: Default::default(),
+        scope: CaptureScope::TurnDelta,
+    };
+    assert!(
+        !serde_json::to_string(&legacy)
+            .unwrap()
+            .contains("repositories")
+    );
     let old: ReviewerRequest = serde_json::from_value(
         serde_json::json!({"action":"capture_delta","params":{"baselines":{}}}),
     )
@@ -7743,6 +7764,7 @@ fn push_review_requests_require_protocol_43_and_old_turn_captures_still_decode()
     assert!(matches!(
         old,
         ReviewerRequest::CaptureDelta {
+            repositories: None,
             scope: CaptureScope::TurnDelta,
             ..
         }

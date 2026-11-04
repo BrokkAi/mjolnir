@@ -14,7 +14,7 @@ use crate::relay::{
     RELAY_EVENT_GENESIS_DIGEST, RelayOperationalState, SequencedEvent, WorkerEvent,
 };
 use crate::snapshot_map::SnapshotMap;
-use crate::subagent::SubagentRecord;
+use crate::subagent::SubagentMetadata;
 use crate::targets::{AdditionalMount, validate_additional_mounts};
 
 pub const STATE_VERSION: u32 = 1;
@@ -369,7 +369,8 @@ pub struct MaterializedSession {
 
 /// The small portion of a durable projection needed to populate dashboard
 /// rows before the live session delivers its full transcript snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaterializedSessionSummary {
     pub session_id: String,
     pub applied_event_ordinal: u64,
@@ -2279,7 +2280,8 @@ fn repository_source_identity(repository: &ProjectRepository) -> Option<ProjectS
         })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectSourceIdentity {
     pub key: String,
     pub short: String,
@@ -2391,7 +2393,7 @@ pub struct State {
     /// Child sessions keyed by their session id. The relationship lives in
     /// controller state so every control surface sees the same session family.
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
-    pub subagents: SnapshotMap<String, SubagentRecord>,
+    pub subagents: SnapshotMap<String, SubagentMetadata>,
     /// Recently used source directories, keyed by `local` or SSH host name.
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
     pub mount_history: SnapshotMap<String, Vec<PathBuf>>,
@@ -2523,7 +2525,7 @@ pub fn session_is_live(record: &SessionRecord, in_operation: bool, parent_live: 
 /// membership settles parent before child.
 pub fn live_session_ids(
     sessions: &SnapshotMap<String, SessionRecord>,
-    subagents: &SnapshotMap<String, SubagentRecord>,
+    subagents: &SnapshotMap<String, SubagentMetadata>,
     operations: &BTreeSet<String>,
 ) -> BTreeSet<String> {
     let mut live = sessions
@@ -3044,6 +3046,32 @@ pub struct RecoveryScan {
     /// them and the scan was not widened to all instances.
     #[serde(default)]
     pub hidden_other_instances: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ResumeRepositorySourceMismatch {
+    pub session_id: String,
+    pub bundle_id: String,
+    pub repository_id: String,
+    pub missing_commit: String,
+    pub archived_origin: String,
+    pub configured_origin: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResumeRepositorySourcePreflight {
+    Ready(ResumeRepositorySourceReceipt),
+    RepositoryMoved(ResumeRepositorySourceMismatch),
+    /// The resume converts a local checkout into an isolated workspace. The
+    /// receipt is already valid; the preview is what a person has to confirm
+    /// before the checkout is snapshotted and the session moves off this
+    /// machine.
+    ConvertingRawCheckout {
+        receipt: ResumeRepositorySourceReceipt,
+        preview: Box<RawConversionPreview>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

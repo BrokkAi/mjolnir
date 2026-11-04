@@ -2258,9 +2258,8 @@ fn sub_agents_are_never_offered_for_resume() {
     let mut state = state_with(vec![owner.clone(), managed_child.clone()]);
     state.subagents.insert(
         managed_child.id.clone(),
-        mj_core::subagent::SubagentRecord {
+        mj_core::subagent::SubagentMetadata {
             kind: mj_core::subagent::SubagentKind::Worker,
-            reviewer_launch: None,
             child_session_id: managed_child.id.clone(),
             parent_session_id: owner.id.clone(),
             task_name: "lane".into(),
@@ -2268,7 +2267,6 @@ fn sub_agents_are_never_offered_for_resume() {
             model: None,
             effort: None,
             working_directory: std::path::PathBuf::new(),
-            initial_prompt: "work in the lane".into(),
             request_key: "request-1".into(),
             created_at: managed_child.created_at.clone(),
             noticed_turn: None,

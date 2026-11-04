@@ -57,6 +57,10 @@ pub enum RelayCommand {
         expected: RelayCursor,
         context: Box<crate::assessment::ContextHistory>,
     },
+    /// Dismiss only the inferred question belonging to this completed turn.
+    DismissQuestion {
+        question: crate::assessment::InferredQuestion,
+    },
     /// Start an empty native conversation, preserving the logical session.
     ClearContext,
     Prompt {
@@ -198,6 +202,7 @@ impl RelayCommand {
 
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::DismissQuestion { .. } => super::RELAY_DISMISS_QUESTION_PROTOCOL,
             Self::ApplyQueuedFor { .. } => super::RELAY_TURN_CONTROLS_PROTOCOL,
             Self::SetSubagentWait { .. } => super::RELAY_SUBAGENT_WAIT_PROTOCOL,
             Self::DeliverMailboxEvent { event } => event.body.minimum_relay_protocol(),
@@ -255,6 +260,7 @@ impl RelayCommand {
                 | Self::RecordNotice { .. }
                 | Self::SetQuotaRecovery { .. }
                 | Self::SeedAssessmentContext { .. }
+                | Self::DismissQuestion { .. }
                 | Self::InstallPromptContext { .. }
                 | Self::DeliverMailboxEvent { .. }
         )
@@ -320,6 +326,7 @@ impl RelayCommand {
             | Self::SetSubagentWait { .. }
             | Self::SetQuotaRecovery { .. }
             | Self::SeedAssessmentContext { .. }
+            | Self::DismissQuestion { .. }
             | Self::InstallPromptContext { .. }
             | Self::DeliverMailboxEvent { .. } => RelayCommandKind::RecordNotice,
         }

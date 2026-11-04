@@ -36,9 +36,11 @@ impl ReviewCapture {
         let _admission =
             ReviewerAdmission::acquire(self.primary_relay.clone(), "review capture".to_owned())?;
         match request {
-            mj_core::relay::ReviewerRequest::CaptureDelta { baselines, scope } => {
-                self.capture_delta(baselines, scope).await
-            }
+            mj_core::relay::ReviewerRequest::CaptureDelta {
+                baselines,
+                scope,
+                repositories,
+            } => self.capture_delta(baselines, scope, repositories).await,
             mj_core::relay::ReviewerRequest::RecordReviewed { trees } => {
                 tokio::task::spawn_blocking(move || -> Result<()> {
                     for (root, (tree, commit)) in trees {
@@ -77,6 +79,7 @@ impl ReviewCapture {
         &self,
         baselines: std::collections::BTreeMap<PathBuf, String>,
         scope: mj_core::relay::CaptureScope,
+        requested: Option<Vec<PathBuf>>,
     ) -> Result<RelayResponseBody> {
         anyhow::ensure!(
             self.review_capture,
@@ -86,6 +89,7 @@ impl ReviewCapture {
              needs an eligible reviewer in Settings before it starts; resume or restart the session after configuring one"
         );
         let roots = self.roots();
+        let cwd = self.cwd.clone();
         let untracked_at_start = self
             .untracked_at_start
             .lock()
@@ -93,25 +97,37 @@ impl ReviewCapture {
             .clone();
         let session_id = self.session_id.clone();
         let repositories = tokio::task::spawn_blocking(move || {
-            let repositories = crate::review::capture::discover_repositories(
+            let discovered = crate::review::capture::discover_repositories(
                 &mj_checkpoint::archive::SystemGit,
                 &roots,
             );
+            let (repositories, origins) = match requested {
+                Some(paths) => scoped_repositories(&cwd, &discovered, &paths)?,
+                None => (discovered, Default::default()),
+            };
             if scope == mj_core::relay::CaptureScope::PushableCommits {
                 return repositories
                     .iter()
                     .map(|root| {
                         let git = &mj_checkpoint::archive::SystemGit;
-                        let start = crate::review::capture::ensure_session_start_head(
-                            git,
-                            root,
-                            &session_id,
-                        )?
+                        let start = match origins.get(root) {
+                            Some(origin) => crate::review::capture::linked_worktree_start(
+                                git,
+                                root,
+                                origin,
+                                &session_id,
+                            )?,
+                            None => crate::review::capture::ensure_session_start_head(
+                                git,
+                                root,
+                                &session_id,
+                            )?,
+                        }
                         .ok_or_else(|| anyhow::anyhow!("the repository has no HEAD commit"))?;
                         let capture =
                             crate::review::capture::capture_pushable_commits(git, root, &start)?;
                         let mut delta = capture.delta;
-                        delta.base_commit = Some(capture.base.commit().to_owned());
+                        delta.base_commit = capture.base.commit().map(str::to_owned);
                         delta.head_commit = Some(capture.head_commit);
                         Ok(delta)
                     })
@@ -165,12 +181,352 @@ impl ReviewCapture {
     }
 }
 
+/// The requested repositories, each with the workspace checkout of the same
+/// repository it belongs to when it is not itself a workspace root.
+fn scoped_repositories(
+    cwd: &std::path::Path,
+    discovered: &[PathBuf],
+    paths: &[PathBuf],
+) -> Result<(Vec<PathBuf>, std::collections::BTreeMap<PathBuf, PathBuf>)> {
+    let git = &mj_checkpoint::archive::SystemGit;
+    let common = |root: &std::path::Path| -> Result<PathBuf> {
+        let output = crate::review::capture::checked_git(
+            git,
+            root,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        let path = PathBuf::from(String::from_utf8(output)?.trim());
+        std::fs::canonicalize(&path)
+            .with_context(|| format!("resolve Git common directory for {}", root.display()))
+    };
+    let allowed = discovered
+        .iter()
+        .map(|root| Ok((common(root)?, root.clone())))
+        .collect::<Result<Vec<_>>>()?;
+    let mut selected = Vec::new();
+    let mut origins = std::collections::BTreeMap::new();
+    for path in paths {
+        let directory = if path.is_absolute() {
+            path.clone()
+        } else {
+            cwd.join(path)
+        };
+        // Resolved as discovery resolves a root, so an override's recapture
+        // reports the same repository keys the verdict recorded.
+        let root = crate::review::capture::repository_root(git, &directory)
+            .ok_or_else(|| anyhow::anyhow!("{} is not in a Git repository", path.display()))?;
+        let repository = common(&root)?;
+        let Some((_, origin)) = allowed.iter().find(|(common, _)| common == &repository) else {
+            anyhow::bail!(
+                "{} is not a worktree of a workspace repository",
+                path.display()
+            );
+        };
+        if !discovered.contains(&root) {
+            origins.insert(root.clone(), origin.clone());
+        }
+        if !selected.contains(&root) {
+            selected.push(root);
+        }
+    }
+    Ok((selected, origins))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mj_core::relay::{
         RELAY_PROTOCOL_VERSION, RelayRequest, RelayRequestEnvelope, ReviewerRequest,
     };
+
+    #[tokio::test]
+    async fn scoped_push_capture_ignores_dirty_root_and_accepts_linked_worktree() {
+        use crate::test_support::git;
+        use mj_checkpoint::archive::GitCommandRunner;
+        use mj_core::relay::CaptureScope;
+        let temp = tempfile::tempdir().unwrap();
+        // Git reports resolved paths; macOS temporary directories sit behind a symlink.
+        let temp_root = temp.path().canonicalize().unwrap();
+        let root = temp_root.join("root");
+        std::fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.name", "Review Test"]);
+        git(&root, &["config", "user.email", "review@example.invalid"]);
+        std::fs::write(root.join("tracked.rs"), "base\n").unwrap();
+        git(&root, &["add", "tracked.rs"]);
+        git(&root, &["commit", "-qm", "base"]);
+        let base = git(&root, &["rev-parse", "HEAD"]);
+        let worktree = temp_root.join("linked");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "feature",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(worktree.join("tracked.rs"), "feature\n").unwrap();
+        git(&worktree, &["commit", "-qam", "feature"]);
+        std::fs::write(root.join("tracked.rs"), "dirty\n").unwrap();
+        let relay_dir = temp_root.join("relay");
+        std::fs::create_dir(&relay_dir).unwrap();
+        let capture = Arc::new(ReviewCapture {
+            session_id: "scoped-test".into(),
+            cwd: root.clone(),
+            additional_directories: Vec::new(),
+            review_capture: true,
+            untracked_at_start: Default::default(),
+            primary_relay: Arc::new(Mutex::new(
+                DurableRelay::open(&relay_dir, "scoped-test", "1.0.0").unwrap(),
+            )),
+            operation: tokio::sync::Mutex::new(()),
+        });
+        let mut reviewed_tree = String::new();
+        for path in [worktree.clone(), PathBuf::from("../linked")] {
+            let result = capture
+                .handle(ReviewerRequest::CaptureDelta {
+                    repositories: Some(vec![path]),
+                    baselines: Default::default(),
+                    scope: CaptureScope::PushableCommits,
+                })
+                .await
+                .unwrap();
+            let RelayResponseBody::Ok {
+                payload: RelayResponsePayload::ReviewDelta { repositories },
+            } = result
+            else {
+                panic!("missing delta")
+            };
+            assert_eq!(repositories.len(), 1);
+            assert_eq!(repositories[0].root, worktree);
+            reviewed_tree = repositories[0].current_tree.clone();
+            assert_eq!(repositories[0].base_commit.as_deref(), Some(base.trim()));
+            assert_eq!(
+                repositories[0].head_commit.as_deref(),
+                Some(git(&worktree, &["rev-parse", "HEAD"]).trim())
+            );
+        }
+        let head = git(&worktree, &["rev-parse", "HEAD"]);
+        capture
+            .handle(ReviewerRequest::RecordReviewed {
+                trees: std::collections::BTreeMap::from([(
+                    worktree.clone(),
+                    (reviewed_tree, head.trim().to_owned()),
+                )]),
+            })
+            .await
+            .unwrap();
+        crate::review::hook::install_pre_push_hook(&mj_checkpoint::archive::SystemGit, &worktree)
+            .unwrap();
+        let remote = temp_root.join("remote.git");
+        std::fs::create_dir(&remote).unwrap();
+        git(&remote, &["init", "-q", "--bare"]);
+        git(
+            &worktree,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        let output = mj_checkpoint::archive::SystemGit
+            .run(
+                &worktree,
+                &mj_checkpoint::archive::GitCommand {
+                    arguments: vec![
+                        "push".into(),
+                        "origin".into(),
+                        "HEAD:refs/heads/feature".into(),
+                    ],
+                    stdin: Vec::new(),
+                    env: vec![("MJ_REVIEW_GATE".into(), "1".into())],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let unrelated = temp_root.join("unrelated");
+        std::fs::create_dir(&unrelated).unwrap();
+        git(&unrelated, &["init", "-q"]);
+        assert!(
+            capture
+                .handle(ReviewerRequest::CaptureDelta {
+                    repositories: Some(vec![unrelated]),
+                    baselines: Default::default(),
+                    scope: CaptureScope::PushableCommits,
+                })
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("not a worktree of a workspace repository")
+        );
+    }
+
+    /// A worktree made after the session started has no start of its own, and
+    /// a repository without main, master or origin/HEAD has no default branch
+    /// to bound it. Its first review still covers the commits it already holds.
+    #[tokio::test]
+    async fn scoped_push_capture_starts_a_new_worktree_at_its_fork_point() {
+        use crate::test_support::git;
+        use mj_core::relay::CaptureScope;
+        let temp = tempfile::tempdir().unwrap();
+        let temp_root = temp.path().canonicalize().unwrap();
+        let root = temp_root.join("root");
+        std::fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "trunk"]);
+        git(&root, &["config", "user.name", "Review Test"]);
+        git(&root, &["config", "user.email", "review@example.invalid"]);
+        std::fs::write(root.join("tracked.rs"), "base\n").unwrap();
+        git(&root, &["add", "tracked.rs"]);
+        git(&root, &["commit", "-qm", "base"]);
+        let base = git(&root, &["rev-parse", "HEAD"]);
+        crate::review::capture::ensure_session_start_head(
+            &mj_checkpoint::archive::SystemGit,
+            &root,
+            "fork-test",
+        )
+        .unwrap();
+        let worktree = temp_root.join("lane");
+        git(
+            &root,
+            &["worktree", "add", "-qb", "lane", worktree.to_str().unwrap()],
+        );
+        std::fs::write(worktree.join("tracked.rs"), "lane\n").unwrap();
+        git(&worktree, &["commit", "-qam", "lane work"]);
+        std::fs::write(root.join("other.rs"), "root\n").unwrap();
+        git(&root, &["add", "other.rs"]);
+        git(&root, &["commit", "-qm", "root moves on"]);
+        let relay_dir = temp_root.join("relay");
+        std::fs::create_dir(&relay_dir).unwrap();
+        let capture = Arc::new(ReviewCapture {
+            session_id: "fork-test".into(),
+            cwd: root.clone(),
+            additional_directories: Vec::new(),
+            review_capture: true,
+            untracked_at_start: Default::default(),
+            primary_relay: Arc::new(Mutex::new(
+                DurableRelay::open(&relay_dir, "fork-test", "1.0.0").unwrap(),
+            )),
+            operation: tokio::sync::Mutex::new(()),
+        });
+        let result = capture
+            .handle(ReviewerRequest::CaptureDelta {
+                repositories: Some(vec![PathBuf::from("../lane")]),
+                baselines: Default::default(),
+                scope: CaptureScope::PushableCommits,
+            })
+            .await
+            .unwrap();
+        let RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ReviewDelta { repositories },
+        } = result
+        else {
+            panic!("missing delta")
+        };
+        assert_eq!(repositories.len(), 1);
+        let delta = &repositories[0];
+        assert_eq!(delta.root, worktree);
+        assert_eq!(delta.base_commit.as_deref(), Some(base.trim()));
+        assert_eq!(
+            delta.head_commit.as_deref(),
+            Some(git(&worktree, &["rev-parse", "HEAD"]).trim())
+        );
+        assert_eq!(
+            delta
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tracked.rs"]
+        );
+    }
+
+    /// An orphan branch shares no history with the session start or the
+    /// default branch, so every commit it holds is reviewed.
+    #[tokio::test]
+    async fn scoped_push_capture_reviews_an_orphan_worktree_from_the_empty_tree() {
+        use crate::test_support::git;
+        use mj_core::relay::CaptureScope;
+        let temp = tempfile::tempdir().unwrap();
+        let temp_root = temp.path().canonicalize().unwrap();
+        let root = temp_root.join("root");
+        std::fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.name", "Review Test"]);
+        git(&root, &["config", "user.email", "review@example.invalid"]);
+        std::fs::write(root.join("tracked.rs"), "base\n").unwrap();
+        git(&root, &["add", "tracked.rs"]);
+        git(&root, &["commit", "-qm", "base"]);
+        crate::review::capture::ensure_session_start_head(
+            &mj_checkpoint::archive::SystemGit,
+            &root,
+            "orphan-test",
+        )
+        .unwrap();
+        let worktree = temp_root.join("solo");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        git(&worktree, &["checkout", "-q", "--orphan", "solo"]);
+        git(&worktree, &["rm", "-rqf", "."]);
+        std::fs::write(worktree.join("solo.rs"), "solo\n").unwrap();
+        git(&worktree, &["add", "solo.rs"]);
+        git(&worktree, &["commit", "-qm", "orphan work"]);
+        let relay_dir = temp_root.join("relay");
+        std::fs::create_dir(&relay_dir).unwrap();
+        let capture = Arc::new(ReviewCapture {
+            session_id: "orphan-test".into(),
+            cwd: root.clone(),
+            additional_directories: Vec::new(),
+            review_capture: true,
+            untracked_at_start: Default::default(),
+            primary_relay: Arc::new(Mutex::new(
+                DurableRelay::open(&relay_dir, "orphan-test", "1.0.0").unwrap(),
+            )),
+            operation: tokio::sync::Mutex::new(()),
+        });
+        let result = capture
+            .handle(ReviewerRequest::CaptureDelta {
+                repositories: Some(vec![worktree.clone()]),
+                baselines: Default::default(),
+                scope: CaptureScope::PushableCommits,
+            })
+            .await
+            .unwrap();
+        let RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ReviewDelta { repositories },
+        } = result
+        else {
+            panic!("missing delta")
+        };
+        assert_eq!(repositories.len(), 1);
+        let delta = &repositories[0];
+        assert_eq!(delta.root, worktree);
+        assert_eq!(delta.base_commit, None);
+        assert_eq!(delta.base_kind.as_deref(), Some("no shared history"));
+        assert_eq!(
+            delta.head_commit.as_deref(),
+            Some(git(&worktree, &["rev-parse", "HEAD"]).trim())
+        );
+        assert_eq!(
+            delta
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["solo.rs"]
+        );
+        assert!(delta.patch.contains("+solo"), "{}", delta.patch);
+    }
 
     #[tokio::test]
     async fn push_capture_and_recording_use_the_committed_git_tree() {
@@ -215,6 +571,7 @@ mod tests {
         });
         let result = capture
             .handle(ReviewerRequest::CaptureDelta {
+                repositories: None,
                 baselines: Default::default(),
                 scope: CaptureScope::PushableCommits,
             })
@@ -280,6 +637,7 @@ mod tests {
         std::fs::write(repository.join("tracked.rs"), "dirty\n").unwrap();
         let error = capture
             .handle(ReviewerRequest::CaptureDelta {
+                repositories: None,
                 baselines: Default::default(),
                 scope: CaptureScope::PushableCommits,
             })
@@ -295,6 +653,7 @@ mod tests {
         let request = RelayRequest::Reviewer {
             role: None,
             request: ReviewerRequest::CaptureDelta {
+                repositories: None,
                 scope: Default::default(),
                 baselines: Default::default(),
             },
@@ -315,6 +674,7 @@ mod tests {
             request: RelayRequest::Reviewer {
                 role: None,
                 request: ReviewerRequest::CaptureDelta {
+                    repositories: None,
                     scope: Default::default(),
                     baselines: Default::default(),
                 },

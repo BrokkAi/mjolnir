@@ -29,6 +29,7 @@ mj-tui.workspace = true
 # `mj acp` serves the protocol on its own standard input and output.
 agent-client-protocol = { workspace = true, features = ["stdio"] }
 anyhow.workspace = true
+getrandom.workspace = true
 # Encodes the PowerShell script that posts Windows desktop notifications.
 base64.workspace = true
 chrono.workspace = true

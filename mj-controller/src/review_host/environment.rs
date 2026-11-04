@@ -40,6 +40,7 @@ pub trait ReviewEnvironment: Send + Sync {
         reviewer: &ReviewerIdentity,
         prompt: String,
         request_key: String,
+        working_directory: Option<std::path::PathBuf>,
     ) -> Result<String, String>;
 
     fn start_child<'a>(
@@ -234,6 +235,7 @@ impl ReviewEnvironment for ControllerEnvironment {
         reviewer: &ReviewerIdentity,
         prompt: String,
         request_key: String,
+        working_directory: Option<std::path::PathBuf>,
     ) -> Result<String, String> {
         let mut controller = crate::controller::Controller::load().map_err(|e| format!("{e:#}"))?;
         let mut launch = controller
@@ -252,7 +254,7 @@ impl ReviewEnvironment for ControllerEnvironment {
                 model: reviewer.main.model.clone(),
                 effort: reviewer.main.effort.clone(),
                 fast_mode: reviewer.main.fast_mode,
-                working_directory: Default::default(),
+                working_directory: working_directory.unwrap_or_default(),
                 initial_prompt: prompt,
                 request_key,
                 report_root: None,

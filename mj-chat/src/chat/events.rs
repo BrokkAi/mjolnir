@@ -27,7 +27,7 @@ impl ChatState {
                     || self.elicitation.is_some()
                     || self.config_picker_active()
                     || self.task_dialog_open
-                    || self.task_control_focused
+                    || self.prompt_control_focus.is_some()
                     || self.history_search.is_some()
                     || self.turn_review_active()
                 {

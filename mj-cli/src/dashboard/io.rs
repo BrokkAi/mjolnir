@@ -1,9 +1,8 @@
 //! One-shot background jobs the dashboard starts and the updates they report.
 //!
-//! Each job runs on a blocking task and answers over the dashboard's single
-//! [`DashboardIoUpdate`] channel, so no filesystem, database, or process work
-//! ever happens on the render loop. Failures travel as `Err` payloads rather
-//! than being dropped.
+//! Network jobs run as async tasks; synchronous work uses blocking tasks.
+//! Both answer over the dashboard's single [`DashboardIoUpdate`] channel,
+//! keeping work off the render loop and reporting failures as `Err` payloads.
 
 mod spawn;
 pub(crate) use spawn::*;
@@ -89,6 +88,11 @@ pub(crate) enum DashboardIoUpdate {
         session_id: String,
         result: std::result::Result<Box<PreparedMaterializedSessionDetail>, String>,
     },
+    QuestionDismissed {
+        session_id: String,
+        question: mj_core::assessment::InferredQuestion,
+        result: std::result::Result<u64, String>,
+    },
     /// A bounded tail of a resumed session's stored transcript, loaded off the
     /// event loop so the conversation is not blank while the poller catches up.
     TranscriptTailSeed {
@@ -96,6 +100,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     StoredSessionSummary {
         session_id: String,
+        generation: u64,
         result: std::result::Result<PreparedMaterializedSessionSummary, String>,
     },
     /// The stored tail of a stopped sub-agent's conversation, which is read
@@ -155,7 +160,7 @@ pub(crate) enum DashboardIoUpdate {
     GoPrepared {
         workspace_id: String,
         retry: Box<DashboardAction>,
-        result: Box<std::result::Result<(Config, mj_core::go::GoRecipe), String>>,
+        result: Box<std::result::Result<mj_core::go::GoRecipe, String>>,
     },
     RemotePreflight {
         generation: u64,
@@ -228,6 +233,11 @@ pub(crate) enum DashboardIoUpdate {
     /// The daemon's answer to a Refresh: it accepted the request, or it could
     /// not be reached.
     QuotaRefreshRequested(std::result::Result<(), String>),
+    /// The host's global Git author identity, read before the first new
+    /// session of this run.
+    GitIdentityChecked(std::result::Result<mj_client::daemon::GitIdentity, String>),
+    /// The host's global Git author identity after the dialog saved it.
+    GitIdentitySaved(std::result::Result<mj_client::daemon::GitIdentity, String>),
     WebAccess {
         generation: u64,
         access: WebViewerAccess,
@@ -281,7 +291,7 @@ pub(crate) enum DashboardIoUpdate {
         error: String,
     },
     FirstRunStarted,
-    FirstRunConfigured(mj_controller::setup::SetupReport),
+    FirstRunConfigured(mj_client::daemon::FirstRunSetupReport),
     FirstRunChecked(std::result::Result<Option<Vec<String>>, String>),
     SetupSaved {
         generation: u64,
@@ -535,13 +545,22 @@ pub(crate) struct DashboardMetadata {
     container_sizes: mj_core::snapshot_map::SnapshotMap<String, mj_core::state::HostContainerSize>,
 }
 
-impl From<Controller> for DashboardMetadata {
-    fn from(controller: Controller) -> Self {
+impl From<mj_client::daemon::StoredSessionMetadata> for DashboardMetadata {
+    fn from(stored: mj_client::daemon::StoredSessionMetadata) -> Self {
         Self {
-            mount_history: controller.state.mount_history,
-            container_sizes: controller.state.container_sizes,
+            mount_history: stored.mount_history,
+            container_sizes: stored.container_sizes,
         }
     }
+}
+
+/// The store's session metadata, read by the daemon, which alone opens the store.
+pub(crate) async fn stored_session_metadata() -> Result<DashboardMetadata> {
+    crate::daemon::connect_or_start()
+        .await?
+        .stored_session_metadata()
+        .await
+        .map(DashboardMetadata::from)
 }
 
 impl DashboardMetadata {
@@ -798,6 +817,9 @@ impl DashboardContext {
             DashboardIoUpdate::MaterializedSessionProjection { session_id, result } => {
                 self.finish_materialized_projection(session_id, result);
             }
+            DashboardIoUpdate::QuestionDismissed { session_id, question, result } => {
+                self.dashboard.question_dismissal_finished(&session_id, question, result);
+            }
             DashboardIoUpdate::TranscriptTailSeed { materialized } => {
                 let viewed_through_event_ordinal = self
                     .controller
@@ -805,13 +827,19 @@ impl DashboardContext {
                     .sessions
                     .get(&materialized.session_id)
                     .map_or(0, |session| session.viewed_through_event_ordinal);
-                self.request_materialized_projection(*materialized, viewed_through_event_ordinal);
+                self.request_materialized_projection(
+                    (*materialized).into(),
+                    viewed_through_event_ordinal,
+                );
             }
             DashboardIoUpdate::StoppedSubagentTranscript { session_id, result } => {
                 self.dashboard
                     .set_stopped_subagent_transcript(&session_id, result);
             }
-            DashboardIoUpdate::StoredSessionSummary { session_id, result } => {
+            DashboardIoUpdate::StoredSessionSummary { session_id, generation, result } => {
+                if !self.summary_reads.finish(&session_id, generation) {
+                    return;
+                }
                 match result {
                     Ok(summary) => {
                         self.dashboard
@@ -936,7 +964,7 @@ impl DashboardContext {
                 retry,
                 result,
             } => match *result {
-                Ok((_config, recipe)) => {
+                Ok(recipe) => {
                     let action = self.dashboard.go_launch_action(workspace_id, recipe);
                     super::actions::start_session_launch(self, action);
                 }
@@ -1159,6 +1187,12 @@ impl DashboardContext {
                     .dashboard
                     .set_notice(format!("Could not rename {what}: {error}")),
             },
+            DashboardIoUpdate::GitIdentityChecked(result) => {
+                self.dashboard.apply_git_identity_check(result)
+            }
+            DashboardIoUpdate::GitIdentitySaved(result) => {
+                self.dashboard.apply_git_identity_save(result)
+            }
             DashboardIoUpdate::QuotaRefreshRequested(Ok(())) => {}
             DashboardIoUpdate::QuotaRefreshRequested(Err(error)) => {
                 self.manual_quota_refresh_cycles = None;
@@ -1303,7 +1337,7 @@ impl DashboardContext {
                 self.dashboard.release_availability_check();
                 match result {
                 Ok(Some(errors)) => self.dashboard.welcome_checked(errors),
-                Ok(None) => {}
+                Ok(None) => self.dashboard.welcome_not_needed(),
                 Err(error) => self.dashboard.welcome_checked(vec![format!(
                     "Setup could not finish: {error}. Run `mj setup` to retry."
                 )]),
@@ -2373,6 +2407,70 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
+    // Hard-won: 0bd61a289: summary hydration exhausted the blocking pool while awaiting nested metadata reads.
+    #[test]
+    fn stored_summary_bursts_leave_the_blocking_pool_available() {
+        const CHILD: &str = "MJ_TEST_SUMMARY_BLOCKING_POOL";
+        const TEST: &str =
+            "dashboard::io::tests::stored_summary_bursts_leave_the_blocking_pool_available";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        // Refuse before startup can launch anything. Even this refusal needs
+        // connection metadata, just as successful summary reads do.
+        let metadata = daemon::DaemonMetadata {
+            protocol_version: daemon::PROTOCOL_VERSION + 1,
+            pid: std::process::id(),
+            address: "127.0.0.1:1".parse().unwrap(),
+            token: "summary-pool-test".into(),
+            started_at: "2026-11-04T00:00:00Z".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: crate::daemon::DaemonPlacement::Host,
+        };
+        std::fs::write(
+            daemon::metadata_path(),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let completed = runtime.block_on(async {
+            let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
+            let permits = Arc::new(tokio::sync::Semaphore::new(4));
+            for id in 0..64 {
+                spawn_stored_session_summary(
+                    id.to_string(),
+                    0,
+                    id,
+                    Arc::clone(&permits),
+                    updates.clone(),
+                );
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                for _ in 0..64 {
+                    let Some(DashboardIoUpdate::StoredSessionSummary { result, .. }) =
+                        results.recv().await
+                    else {
+                        panic!("expected a summary result")
+                    };
+                    assert!(result.is_err(), "the newer daemon must be refused");
+                }
+                // Attachment renewal and chat preparation need this pool too.
+                tokio::task::spawn_blocking(|| ()).await.unwrap();
+            })
+            .await
+        });
+        // A regression must fail without hanging runtime shutdown on the
+        // deadlocked blocking task.
+        runtime.shutdown_timeout(Duration::from_secs(1));
+        completed.expect("summary network waits must not starve connection metadata reads");
+    }
+
     #[test]
     fn asynchronous_saves_leave_the_blocking_pool_available_for_connection_metadata() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -2568,126 +2666,6 @@ mod tests {
             "app-2"
         );
         assert_eq!(config.bundles.len(), 2);
-    }
-
-    const LIFECYCLE_RELOAD_CHILD: &str = "MJ_TEST_LIFECYCLE_RELOAD_CHILD";
-
-    /// A load started before a runtime update must not resurrect old records
-    /// or remove a newer session when the lifecycle completion arrives.
-    #[tokio::test]
-    async fn a_lifecycle_reload_preserves_newer_runtime_records() {
-        if crate::test_support::rerun_in_isolated_child(
-            LIFECYCLE_RELOAD_CHILD,
-            "dashboard::io::tests::a_lifecycle_reload_preserves_newer_runtime_records",
-        ) {
-            return;
-        }
-        let _writer = mj_controller::database::install_isolated_test_writer();
-
-        let mut config = Config::default();
-        config.profiles.insert(
-            "codex".into(),
-            mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Codex,
-                home: PathBuf::from("/home/dev/.codex"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
-            },
-        );
-        config.bundles.insert(
-            "project".into(),
-            ProjectBundle {
-                primary_repo: "project".into(),
-                repositories: vec![ProjectRepository {
-                    id: "project".into(),
-                    github: Some("owner/project".into()),
-                    local: None,
-                    destination: PathBuf::from("project"),
-                    git_ref: None,
-                }],
-            },
-        );
-        config.targets.insert(
-            "podman".into(),
-            mj_core::config::TargetTemplate::LocalPodman {
-                container: mj_core::config::ContainerTemplate {
-                    build_cache: None,
-                    image: "example.invalid/hel-test:latest".into(),
-                    pull_policy: Default::default(),
-                    platform: None,
-                    cpus: None,
-                    memory: None,
-                    environment: Default::default(),
-                    workspace_storage: Default::default(),
-                },
-            },
-        );
-        config.save().unwrap();
-
-        let database = mj_controller::database::database_path();
-        let alpha = mj_controller::database::create_workspace_at(&database, "alpha").unwrap();
-        let beta = mj_controller::database::create_workspace_at(&database, "beta").unwrap();
-        mj_controller::database::save_session(&lifecycle_session(
-            "session-alpha-live",
-            &alpha.id,
-            SessionState::Running,
-        ))
-        .unwrap();
-        mj_controller::database::save_session(&lifecycle_session(
-            "session-alpha-stopped",
-            &alpha.id,
-            SessionState::Stopped,
-        ))
-        .unwrap();
-        mj_controller::database::save_session(&lifecycle_session(
-            "session-beta-live",
-            &beta.id,
-            SessionState::Running,
-        ))
-        .unwrap();
-
-        let (updates_tx, mut updates_rx) =
-            tokio::sync::mpsc::unbounded_channel::<DashboardIoUpdate>();
-        spawn_lifecycle_reload(
-            LifecycleReload {
-                update: DashboardLifecycleUpdate {
-                    session_id: "session-beta-live".into(),
-                    result: Ok(LifecycleSuccess::Created),
-                    operation: Arc::new(AtomicBool::new(false)),
-                },
-                operation: None,
-            },
-            beta.id.clone(),
-            "client-1".into(),
-            updates_tx,
-        );
-
-        let DashboardIoUpdate::LifecycleReloaded(reloaded) =
-            updates_rx.recv().await.expect("the reload reports back")
-        else {
-            panic!("the reload reports through LifecycleReloaded");
-        };
-        let loaded = reloaded.result.expect("the reload succeeds");
-        let mut current = State::default();
-        current.sessions.insert(
-            "newer-session".into(),
-            lifecycle_session("newer-session", &beta.id, SessionState::Running),
-        );
-        loaded.apply(&mut current);
-        assert_eq!(
-            current
-                .sessions
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec!["newer-session"],
-            "a completed background load cannot replace newer runtime records"
-        );
     }
 
     fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {

@@ -1,6 +1,6 @@
 ---
 name: mj
-description: Configure Mjolnir (mj) for the user or drive its coding sessions from localhost. Use for requests to configure mj profiles, targets, review, delegation, or interface preferences; to start and steer sessions; or to diagnose the daemon.
+description: Configure Mjolnir (mj) for the user, arrange their dashboard, or drive its coding sessions from localhost. Use for requests to configure mj profiles, targets, review, delegation, or interface preferences; to resize panes, show a session, or change a setting in the dashboard; to start and steer sessions; or to diagnose the daemon.
 ---
 
 # Configure and drive Mjolnir
@@ -44,6 +44,30 @@ agent preparation guide. `mj set-config` changes one live session's harness
 settings (model, effort, etc.); it does not edit the user's mj defaults. In an
 interactive conversation, `/config` lists every setting the harness advertises,
 `/config <key>` opens its values, and `/config <key> <value>` applies one.
+
+## Change the user's dashboard for them
+
+When the user asks to rearrange what they see, or to change a setting, while
+their dashboard (plain `mj`) is open, do it for them with `mj ui` instead of
+explaining which keys to press. Their dashboard applies the request as if they
+had pressed the keys.
+
+```sh
+mj ui pane profiles maximized          # sessions | targets | profiles; minimized | standard | maximized
+mj ui show <session-id> --right        # or --below; no flag shows it in the main conversation
+mj ui settings notify.bell=false advanced.auto_afk_minutes=30
+```
+
+`mj ui settings` opens Settings on the page of the first change with every
+change filled in but not saved; tell the user to review it and press Save.
+Paths are the configuration reference's keys joined with dots (`theme`,
+`keys.prefix`, `review.trigger`); a value that reads as JSON is used as JSON,
+anything else as text, and `null` clears a field. The whole request is checked
+first: an unknown setting or value is refused with the reason and nothing
+changes, so correct it and send it again. A 409 means no dashboard is open;
+then edit the configuration file as described above, or ask the user to start
+`mj`. Prefer `mj ui settings` whenever a dashboard is open, so the user sees and
+approves each change.
 
 ## Check availability first
 

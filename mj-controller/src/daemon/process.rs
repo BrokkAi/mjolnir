@@ -26,12 +26,22 @@ pub async fn run_daemon_process() -> Result<()> {
     // Checked before the store is locked so a bad value fails fast and leaves
     // no daemon state behind.
     let owner_pid = owner_pid_to_watch()?;
+    let cancellation = crate::termination::Coordinator::install().token();
+    // A container-native daemon runs every command beside itself, inside its
+    // own container. A host daemon routes host work to the node. Tests that
+    // run a daemon in-process never reach this line.
+    if mj_core::config::env_override("DAEMON_CONTAINER").is_none() {
+        crate::node_registry::install_command_host(cancellation.clone())?;
+        crate::node_registry::install_host_fs(cancellation.clone())?;
+    }
     let opening = Instant::now();
     let guard = ControllerStoreGuard::acquire()?;
     let database_writer = guard.start_database_writer()?;
     log_startup_phase("open the store", opening);
     let epilogue_started = AtomicBool::new(false);
-    let mut outcome = run_daemon_runtime(&epilogue_started, owner_pid).await;
+    let mut outcome = run_daemon_runtime(&epilogue_started, owner_pid, cancellation.clone()).await;
+    cancellation.cancel();
+    crate::node_registry::registry().finish().await;
     if !epilogue_started.load(Ordering::Acquire) {
         // Initialization failed before the runtime-owned epilogue existed.
         // The same process-level bound still applies to closing the writer.
@@ -59,6 +69,7 @@ pub async fn run_daemon_process() -> Result<()> {
 pub(super) async fn run_daemon_runtime(
     epilogue_started: &AtomicBool,
     owner_pid: Option<u32>,
+    cancellation: CancellationToken,
 ) -> Result<()> {
     let progress = super::diagnostics::DaemonProgressMonitor::start()?;
     // Before this daemon can start a checkpoint, so every checkpoint file older
@@ -101,19 +112,57 @@ pub(super) async fn run_daemon_runtime(
         .await
         .context("earlier sessions' profile home link task failed")?;
     }
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+    // The launcher may choose the endpoint and token, so it can hand them to
+    // the node before the daemon is ready; otherwise the daemon picks both.
+    let listen = match mj_core::config::env_override("DAEMON_LISTEN") {
+        Some(address) => address
+            .parse::<SocketAddr>()
+            .with_context(|| format!("MJ_DAEMON_LISTEN is not an address: {address:?}"))?,
+        None => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+    };
+    let listener = TcpListener::bind(listen)
         .await
-        .context("bind Mjolnir daemon loopback endpoint")?;
+        .with_context(|| format!("bind the Mjolnir daemon endpoint {listen}"))?;
+    let token = match mj_core::config::env_override("DAEMON_TOKEN") {
+        Some(token) if !token.is_empty() => token,
+        _ => random_hex::<32>()?,
+    };
     let metadata = DaemonMetadata {
         protocol_version: PROTOCOL_VERSION,
         pid: std::process::id(),
         address: listener.local_addr()?,
-        token: random_hex::<32>()?,
+        token: token.clone(),
         started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         // The version, with the revision and build times as semver build
         // metadata that older clients ignore; see `mj_client::build_identity`.
         build_version: mj_client::build_identity::this_build().published(),
+        // This is the daemon's own answer to "which start are you": a fresh
+        // random value every time the process starts, so a client can tell a
+        // replacement from the daemon it was talking to without a PID.
+        instance_id: random_hex::<16>()?,
+        // The launcher names the container in the environment. Keeping this
+        // answer in the daemon means clients no longer read `/proc`.
+        placement: match mj_core::config::env_override("DAEMON_CONTAINER") {
+            Some(name) if !name.trim().is_empty() => DaemonPlacement::Container {
+                name,
+                runtime: match mj_core::config::env_override("DAEMON_CONTAINER_RUNTIME").as_deref()
+                {
+                    Some("podman") => Some(mj_core::config::DaemonRuntime::Podman),
+                    Some("docker") => Some(mj_core::config::DaemonRuntime::Docker),
+                    _ => None,
+                },
+            },
+            _ => DaemonPlacement::Host,
+        },
     };
+    // Startup recovery can run commands, and commands run on the node, so the
+    // node has to be able to connect before this daemon is ready for clients.
+    let early_accept_stop = CancellationToken::new();
+    let early_accept = tokio::spawn(accept_nodes_while_starting(
+        listener,
+        token,
+        early_accept_stop.clone(),
+    ));
     let workspaces = tokio::task::spawn_blocking(crate::database::list_workspaces)
         .await
         .context("daemon workspace load task panicked")??;
@@ -163,7 +212,6 @@ pub(super) async fn run_daemon_runtime(
             .map(|target| target.session_id.clone())
             .collect(),
     );
-    let cancellation = crate::termination::Coordinator::install().token();
     let apple_container_startup = spawn_apple_container_startup(
         state.clone(),
         cancellation.clone(),
@@ -328,6 +376,7 @@ pub(super) async fn run_daemon_runtime(
         cancellation.clone(),
         state.clone(),
     );
+    let compatibility_watch = spawn_store_compatibility_watch(cancellation.clone());
     let image_refresh = spawn_image_refresher(
         {
             let state = state.clone();
@@ -390,7 +439,11 @@ pub(super) async fn run_daemon_runtime(
         let recovery_state = state.clone();
         let recovery_shutdown = cancellation.clone();
         let updates = interrupted_close_tx.clone();
-        let upgrade_work = startup_work.clone();
+        // A child's durable close is resumed by every daemon. Its worker
+        // connection may be unavailable for minutes and must not hold startup
+        // admission after the daemon begins serving.
+        let upgrade_work =
+            (!controller.state.subagents.contains_key(&session_id)).then(|| startup_work.clone());
         let interrupted_close_task = tokio::spawn(async move {
             let _upgrade_work = upgrade_work;
             let result = tokio::select! {
@@ -563,6 +616,10 @@ pub(super) async fn run_daemon_runtime(
     // hook or the event loop, flows through the same bounded epilogue.
     let mut auto_afk = auto_afk::spawn(state.clone(), cancellation.clone());
     let mut auto_afk_outcome = None;
+    early_accept_stop.cancel();
+    let listener = early_accept
+        .await
+        .context("the startup node acceptor failed")?;
     let mut outcome = async {
         write_metadata(&daemon_metadata_path, &metadata)?;
         reach_test_hook("daemon_metadata_before_listening").await?;
@@ -604,6 +661,7 @@ pub(super) async fn run_daemon_runtime(
                     progress.phase(ServingPhase::IdleCheck);
                     state.prune_dead_clients();
                     if state.attachments().is_empty() {
+                        crate::node_registry::registry().dismiss_node_on_exit();
                         break;
                     }
                 }
@@ -613,6 +671,7 @@ pub(super) async fn run_daemon_runtime(
                         && !process_is_alive(owner)
                     {
                         tracing::info!(owner_pid = owner, "daemon owner process exited; shutting down");
+                        crate::node_registry::registry().dismiss_node_on_exit();
                         break;
                     }
                 }
@@ -855,6 +914,11 @@ pub(super) async fn run_daemon_runtime(
         &mut outcome,
         "join controller target refresher",
         target_refresh.await.map_err(anyhow::Error::new),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join store compatibility watch",
+        compatibility_watch.await.map_err(anyhow::Error::new),
     );
     epilogue.record(
         &mut outcome,
@@ -1106,13 +1170,16 @@ pub(super) fn spawn_manager_target_refresher(
             .expect("daemon owns the writer")
             .clone();
         let mut revisions = state.revisions();
-        let mut compatibility = tokio::time::interval(Duration::from_millis(500));
-        compatibility.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut refresh = tokio::time::interval(Duration::from_millis(500));
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut installed = None;
         let mut credential_installed = None;
         let mut auth = crate::pollers::ProviderAuthCache::default();
         let mut auth_profiles = None;
         let mut staged_sources = None;
+        tokio::select! {
+        _ = cancellation.cancelled() => {},
+        _ = async {
         loop {
             let inputs = {
                 let owner = state.owner();
@@ -1258,13 +1325,12 @@ pub(super) fn spawn_manager_target_refresher(
                 changed = revisions.changed() => {
                     if changed.is_err() { return; }
                 }
-                _ = compatibility.tick() => {
+                _ = refresh.tick() => {
                     let mut inactivity = state.config_mutation.lock().await;
                     let mut cache = auth.clone();
                     let staging = inputs.clone();
                     let preference_owner = state.clone();
                     let refreshed = tokio::task::spawn_blocking(move || {
-                        crate::database::check_read_compatibility()?;
                         let config = Config::load()?;
                         let recent_changed = {
                             // Serialize the cache refresh with create's persisted write so
@@ -1298,11 +1364,6 @@ pub(super) fn spawn_manager_target_refresher(
                             if changed || recent_changed { state.publish_revision(); }
                         }
                         Ok(Err(error)) => {
-                            if error.chain().any(|cause| cause.downcast_ref::<StoreSchemaMismatch>().is_some()) {
-                                tracing::error!(%error, "daemon store schema diverged underneath the daemon; shutting down");
-                                cancellation.cancel();
-                                return;
-                            }
                             tracing::warn!(error = format!("{error:#}"), "could not refresh daemon configuration");
                         }
                         Err(error) => {
@@ -1311,6 +1372,49 @@ pub(super) fn spawn_manager_target_refresher(
                             return;
                         }
                     }
+                }
+            }
+        }
+        } => {}
+        }
+    })
+}
+
+/// Store compatibility is a mandatory guard, independent of optional profile,
+/// target and credential preparation. A mismatch owns daemon cancellation.
+fn spawn_store_compatibility_watch(cancellation: CancellationToken) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => return,
+                _ = interval.tick() => {}
+            }
+            let check = tokio::task::spawn_blocking(crate::database::check_read_compatibility);
+            let result = tokio::select! {
+                _ = cancellation.cancelled() => return,
+                result = check => result,
+            };
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error))
+                    if error
+                        .chain()
+                        .any(|cause| cause.downcast_ref::<StoreSchemaMismatch>().is_some()) =>
+                {
+                    tracing::error!(%error, "daemon store schema diverged underneath the daemon; shutting down");
+                    cancellation.cancel();
+                    return;
+                }
+                Ok(Err(error)) => tracing::warn!(
+                    error = format!("{error:#}"),
+                    "could not check daemon store compatibility"
+                ),
+                Err(error) => {
+                    tracing::error!(%error, "daemon store compatibility reader failed");
+                    cancellation.cancel();
+                    return;
                 }
             }
         }
@@ -1389,6 +1493,74 @@ pub(super) async fn refresh_runtime_controller(state: &RuntimeState) {
             error = format!("{error:#}"),
             "could not refresh daemon controller state"
         );
+    }
+}
+
+/// Accept node connections while the daemon starts, and nothing else: no
+/// client can use a daemon that has not published itself. Returns the
+/// listener once the daemon is ready to serve everyone on it.
+async fn accept_nodes_while_starting(
+    listener: TcpListener,
+    token: String,
+    stop: CancellationToken,
+) -> TcpListener {
+    let mut connections = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => break,
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => {
+                    connections.spawn(serve_while_starting(stream, token.clone()));
+                }
+                Err(error) => tracing::warn!(%error, "could not accept a connection while starting"),
+            },
+            Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                match joined {
+                    Ok(Err(error)) => tracing::debug!(error = format!("{error:#}"), "startup connection ended"),
+                    Err(error) => tracing::warn!(%error, "startup connection task failed"),
+                    Ok(Ok(())) => {}
+                }
+            }
+        }
+    }
+    // An adopted node lives in the registry; a refused client has its answer.
+    connections.detach_all();
+    listener
+}
+
+async fn serve_while_starting(mut stream: TcpStream, token: String) -> Result<()> {
+    let request: RequestEnvelope = read_frame(&mut stream).await?;
+    let request_id = request.request_id;
+    let protocol_version = request.protocol_version;
+    match request.action {
+        DaemonAction::NodeConnect { node_id }
+            if request.token == token && protocol_version == PROTOCOL_VERSION =>
+        {
+            write_response(
+                &mut stream,
+                ResponseEnvelope {
+                    protocol_version,
+                    request_id,
+                    result: Ok(DaemonReply::Done),
+                },
+            )
+            .await?;
+            crate::node_registry::registry()
+                .adopt(stream, node_id)
+                .await
+        }
+        _ => {
+            write_response(
+                &mut stream,
+                ResponseEnvelope {
+                    protocol_version,
+                    request_id,
+                    result: Err("the Mjolnir daemon is still starting".to_owned()),
+                },
+            )
+            .await
+        }
     }
 }
 

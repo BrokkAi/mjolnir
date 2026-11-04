@@ -51,31 +51,9 @@ use super::{
     target_profile_home,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResumeRepositorySourceMismatch {
-    pub session_id: String,
-    pub bundle_id: String,
-    pub repository_id: String,
-    pub missing_commit: String,
-    pub archived_origin: String,
-    pub configured_origin: String,
-}
-
-pub use mj_core::state::ResumeRepositorySourceReceipt;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResumeRepositorySourcePreflight {
-    Ready(ResumeRepositorySourceReceipt),
-    RepositoryMoved(ResumeRepositorySourceMismatch),
-    /// The resume converts a local checkout into an isolated workspace. The
-    /// receipt is already valid; the preview is what a person has to confirm
-    /// before the checkout is snapshotted and the session moves off this
-    /// machine.
-    ConvertingRawCheckout {
-        receipt: ResumeRepositorySourceReceipt,
-        preview: Box<mj_core::state::RawConversionPreview>,
-    },
-}
+pub use mj_core::state::{
+    ResumeRepositorySourceMismatch, ResumeRepositorySourcePreflight, ResumeRepositorySourceReceipt,
+};
 
 struct ResumeRepositoryBundles {
     checkpoint_sha256: String,
@@ -690,7 +668,10 @@ impl Controller {
                             .clone()
                             .unwrap_or_default(),
                         profile.kind,
-                        self.state.subagents.get(session_id),
+                        self.state
+                            .subagents
+                            .get(session_id)
+                            .map(|child| child.handback_tool),
                         true,
                     );
             resume_notices.extend(mj_core::subagent::stopped_subagents_notice(

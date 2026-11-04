@@ -87,7 +87,7 @@ impl ApiClient {
         loop {
             let started = std::time::Instant::now();
             let mut client = daemon::connect_or_start().await?;
-            let pid = client.daemon_pid();
+            let instance_id = client.identity().await?.instance_id;
             let daemon_ready = started.elapsed();
             let error = match Self::connect_to(&mut client).await {
                 Ok(connected) => {
@@ -96,7 +96,7 @@ impl ApiClient {
                     let total = started.elapsed();
                     if total >= Duration::from_millis(250) {
                         tracing::info!(
-                            pid,
+                            %instance_id,
                             daemon_ms = daemon_ready.as_millis(),
                             api_ms = (total - daemon_ready).as_millis(),
                             "connected to the daemon's API"
@@ -113,12 +113,12 @@ impl ApiClient {
                 std::time::Instant::now() < deadline
             } else {
                 replaced += 1;
-                replaced <= 3 && daemon::daemon_was_replaced(pid).await
+                replaced <= 3 && daemon::daemon_was_replaced(&instance_id).await
             };
             if !follow {
                 return Err(error);
             }
-            tracing::info!(%error, pid, "the daemon was replaced while this client connected; connecting to its replacement");
+            tracing::info!(%error, %instance_id, "the daemon was replaced while this client connected; connecting to its replacement");
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
@@ -336,6 +336,14 @@ impl ApiClient {
             .send(self.http.post(self.url(path)).timeout(timeout).json(body))
             .await?;
         decode(response).await
+    }
+
+    /// Ask the attached dashboards to change what they show (`mj ui`).
+    pub(crate) async fn request_ui(
+        &self,
+        body: &mj_client::ui_request::UiRequestBody,
+    ) -> Result<mj_client::ui_request::UiRequestReceipt> {
+        self.post_json("/ui/requests", body, REQUEST_TIMEOUT).await
     }
 
     pub(crate) async fn workspaces(&self) -> Result<WorkspaceListResponse> {

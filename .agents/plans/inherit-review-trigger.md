@@ -22,9 +22,16 @@ After this change, reviewer options without `--review` inherit the configured tr
 - [x] (2026-11-04) Validate subagent filter transitions and rendering, preserve top-level filters, and complete final Clippy on the combined tree.
 - [x] (2026-11-04) Commit the validated review-inheritance checkpoint as `71850aa7d`.
 - [x] (2026-11-04) Commit subagent-list defaults as `6eb3146b8` and request the required before-push review.
-- [ ] Address review findings: route every automatic/native scope exit through the shared filter transition, preserve native navigation under nonediting filters, and keep children with open reviews visible in the web view.
+- [x] (2026-11-04) Address all first-review findings and pass focused native navigation, suspend restoration, and web review-visibility regressions; commit as `2f0d27ea1`.
 - [ ] Validate review corrections, commit them, obtain a clean before-push review, and push to `origin/master`.
-- [ ] Integrate fetched upstream `5238411cd` on the current branch, preserve any newer migration/protocol history and reviewer-workspace behavior, and validate affected merged code before final review.
+- [x] (2026-11-04) Resolve integration with upstream `5238411cd`, preserve migration history, use client protocol 82, and make child filters kind-aware. All-target TUI/client check and Worker/Reviewer isolation regression passed.
+- [x] (2026-11-04) Validate merged browser behavior: 58 Node checks and all 19 dashboard Playwright cases passed.
+- [ ] Complete merged-tree Rust suites and Clippy, commit the merge, obtain a clean before-push review, and push.
+- [x] (2026-11-04) Pass merged core/client/controller/CLI-library suites, workspace formatting and Clippy; resolve both TUI compact/history failures and pass six focused TUI regressions plus crate Clippy.
+- [x] (2026-11-04) Resolve merged CLI integration failures without weakening assertions: strict incompatible-store exit and all nine PTY failure reruns pass.
+- [x] (2026-11-04) Move the mandatory compatibility check to an independently supervised task and cancel optional target refresh on shutdown. All three store-divergence integration cases passed; strict breaking-revision exit passed in under one second.
+- [x] (2026-11-04) Repair isolated PTY profile/tool fixtures and implement completion of unnecessary first-run setup without leaving Welcome open or replacing another dialog.
+- [x] (2026-11-04) Pass nine PTY cases, all four Welcome dialog cases, final workspace Clippy, and formatting. The merged implementation is ready for the merge commit and renewed review.
 
 ## Surprises & Discoveries
 
@@ -51,8 +58,19 @@ The worker and daemon already distinguish the triggers: turn completion only arm
 - Decision: A web child with an open `turn_review` remains visible regardless of harness idleness.
   Rationale: Running review or a pending review decision is work or attention, and existing UI already treats review presence as authoritative.
   Date/Author: 2026-11-04, parent agent after independent review.
+- Decision: Scope filter identity uses upstream's complete `ChildWorkspace` identity (parent plus kind), and the default hides idle only for Worker scopes.
+  Rationale: Upstream added distinct Reviewer workspaces. Sharing only a parent ID would leak filters between them and unexpectedly hide reviewer history.
+  Date/Author: 2026-11-04, parent agent during upstream integration.
+- Decision: Mandatory store compatibility enforcement runs independently of optional provider, target, and credential preparation; optional preparation is cancellable during daemon shutdown.
+  Rationale: The existing real migration regression showed schema mismatch rejected by the writer while the daemon remained alive. Its only periodic guard was behind optional refresh work; moving that single owner removes the dependency instead of extending the exit timeout.
+  Date/Author: 2026-11-04, parent agent accepting isolated daemon regression evidence.
+- Decision: A no-setup completion clears pending Welcome and closes only an active Welcome dialog.
+  Rationale: Startup now requests setup asynchronously even for configured installations. The old no-op completion left Welcome permanently discovering; an unrelated Settings draft must remain intact.
+  Date/Author: 2026-11-04, parent agent after PTY diagnosis.
 
 ## Outcomes & Retrospective
+
+The integrated implementation is validated. Merged browser checks passed 58 Node checks and all 19 Playwright dashboard cases. Merged core (561 passed, four ignored), client (44 passed), controller (2,267 passed, 19 ignored), and CLI-library (236 passed) suites passed. Both initially failing TUI compact/history workflows and four directly affected guards passed after preserving unknown relationships and explicitly selecting All for history. The live store-divergence cases passed (three total), including strict incompatible-revision exit in under one second after making its guard independent of optional preparation. All nine previously failing PTY cases and all four Welcome cases passed after completing the no-setup state transition and correcting isolated fixture prerequisites. Final workspace Clippy and formatting passed. Evidence for the final startup checks is `.mj/agents/45af5a7af38c6f18cf3f14cfce887b54/summary.txt`; implementation acceptance is complete pending committed-tree review and Git delivery.
 
 Review inheritance implementation and validation passed: core 553 passed/4 ignored, client 43 passed, controller 2,255 passed/19 ignored, and CLI library 231 plus its integration targets. The focused inherited-review HTTP test also passed. Logs are in `.mj/agents/96db413dbd2386a48ffbb29510d32ce0`.
 
@@ -64,7 +82,7 @@ The additional subagent-list defaults and transition/browser regressions are com
 
 `mj-cli/src/api_commands.rs::session_review` constructs the session choice for both `mj new` and `mj import`; `mj-cli/src/import.rs` shares the helper. `mj-core/src/config/tests.rs` covers the JSON shape stored in the session record. CLI tests already parse real command arguments and examine the shared choice.
 
-The database stores session choices as JSON. A new enum value is incompatible with older readers, even without an SQL column change. Migration 107 raises the reader/writer floor to 107 transactionally with its migration marker and revision. Client/daemon protocol 72 protects the API enum boundary. Workers receive the resolved three-value trigger, so their relay and checkpoint formats do not change.
+The database stores session choices as JSON. A new enum value is incompatible with older readers, even without an SQL column change. Migration 107 raises the reader/writer floor to 107 transactionally with its migration marker and revision. The integrated client/daemon protocol is 82: upstream supplies revisions through 81, and this task adds the enum boundary. Workers receive the resolved three-value trigger, so this task adds no relay or checkpoint format change; upstream relay 49 remains intact.
 
 Human documentation is `docs/src/content/docs/turn-review.md`; the bundled agent configuration reference is `mj-core/assets/skills/mj/references/configuration.md`. Both currently state that reviewer-only flags select turn review and must describe inheritance instead.
 
@@ -100,7 +118,7 @@ Audit handbacks live under `.mj/agents/ee18e6282b5b03702ea6e3e4edbabaa4`, `.mj/a
 
 ## Interfaces and Dependencies
 
-No crate or external dependency is added. `SessionReview::Inherit` is the new stored/shared choice. Its optional fields retain existing types. `SessionReview::trigger` returns `Option<ReviewTrigger>`; `ReviewConfig::for_session` remains the sole place combining global and session settings. `mj-controller/src/database.rs` and `database/schema.rs` define schema revision and floor 107, and `mj-client/src/daemon.rs` defines protocol 72. Server action decoding accepts inherit and validates its model/effort text through the same path as explicit choices.
+This task adds no crate or external dependency. `SessionReview::Inherit` is the new stored/shared choice. Its optional fields retain existing types. `SessionReview::trigger` returns `Option<ReviewTrigger>`; `ReviewConfig::for_session` remains the sole place combining global and session settings. `mj-controller/src/database.rs` and `database/schema.rs` define schema revision and floor 107, and integrated `mj-client/src/daemon.rs` defines protocol 82. Server action decoding accepts inherit and validates its model/effort text through the same path as explicit choices. Terminal filter scope identity includes both parent and child kind from `ChildWorkspace`, so reviewer history and worker filters remain independent.
 
 Revision note (2026-11-04): Created after the user confirmed the off default and requested an audit for remaining end-of-turn assumptions.
 
@@ -121,3 +139,13 @@ Revision note (2026-11-04): Recorded successful final three history/menu reruns,
 Revision note (2026-11-04): The first before-push review found three unique valid gaps (one reported twice): native navigation under filters, automatic scope exits bypassing filter restoration, and web review activity being hidden. Acceptance is reopened for these corrections and their regressions.
 
 Revision note (2026-11-04): Upstream advanced to 5238411cd with significant concurrent changes. Integration is required before final delivery; a focused investigation is mapping compatibility counters and shared reviewer-workspace changes while review corrections receive focused validation.
+
+Revision note (2026-11-04): Focused review-fix tests passed and were committed as 2f0d27ea1. Merge of 5238411cd is in progress with client protocol 82 (upstream 81 plus this task), unchanged relay 49, and retained local migration 107/floor 107 after upstream's unchanged migration history through 106. Filter ownership is being ported to kind-aware ChildWorkspace scopes.
+
+Revision note (2026-11-04): Merge conflicts and kind-aware filter ownership are resolved. The merged all-target TUI/client check, Worker/Reviewer isolation regression, 58 Node checks, and all 19 browser dashboard cases passed. Full affected Rust suites and workspace Clippy are running before the merge commit and renewed review.
+
+Revision note (2026-11-04): Merged core/client/controller/CLI-library suites and workspace Clippy passed. Fixed compact-child loading lost during the semantic merge and explicitly enabled All in the reviewer-kind history fixture; six TUI regressions passed. Remaining CLI integration failures are isolated to startup test environment/readiness and mandatory incompatible-store exit; these are being diagnosed without weakening assertions or changing mbx storage.
+
+Revision note (2026-11-04): Fixed mandatory schema-check scheduling and optional refresh cancellation; the strict exit test and all store-divergence cases pass. PTY fixtures now provide actual profile homes and required host commands. A separate production bug opened Welcome before the setup RPC and never retired it on a no-setup result; the completion transition and dialog-ordering regression are implemented. The nine PTY failures and final lint are being rerun before merge delivery.
+
+Revision note (2026-11-04): All remaining PTY, Welcome, and store-divergence regressions passed, and final workspace Clippy/formatting are clean. The integration is ready to commit and undergo renewed before-push review.

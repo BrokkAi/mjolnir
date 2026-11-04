@@ -56,6 +56,7 @@ axum = "0.8"
 # needs a C toolchain and complicates cross-compilation.
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 base64 = "0.22"
+bytes = "1"
 # `clock` enables local-time support so `Local` can render reset timestamps in
 # the machine's wall-clock time (DST-correct); `default-features = false` drops
 # the wasm-only bits.
@@ -67,6 +68,9 @@ dirs = "6"
 # on the pure-Rust deflate without a C toolchain.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 getrandom = "0.3"
+# The node protocol: HTTP/2 streams over a connection the node opened.
+h2 = "0.4"
+http = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 imbl = { version = "7.0.2", features = ["serde"] }
 libc = "0.2"

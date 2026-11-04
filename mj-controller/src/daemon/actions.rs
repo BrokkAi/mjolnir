@@ -33,6 +33,87 @@ pub(super) async fn handle_action(
                 .map(ToString::to_string)
                 .collect(),
         )),
+        DaemonAction::Identity => Ok(DaemonReply::Identity(DaemonIdentity {
+            instance_id: metadata.instance_id.clone(),
+            build_version: metadata.build_version.clone(),
+            placement: metadata.placement.clone(),
+        })),
+        DaemonAction::Configuration => Ok(DaemonReply::Configuration(Box::new(
+            state.with_config(Clone::clone),
+        ))),
+        DaemonAction::RunFirstRunSetup => {
+            let report = blocking(|| {
+                let executor = crate::targets::ProcessExecutor;
+                let report = crate::setup::run_setup(
+                    &mj_core::config::config_path(),
+                    &mj_core::config::data_dir(),
+                    false,
+                    &executor,
+                    &|| false,
+                    || {},
+                )?;
+                Ok(report.map(|report| FirstRunSetupReport {
+                    agents: report.agents,
+                    repository: report.repository,
+                }))
+            })
+            .await?;
+            if report.is_some() {
+                refresh_runtime_controller(state).await;
+            }
+            Ok(DaemonReply::FirstRunSetup(report))
+        }
+        DaemonAction::RunDoctor => {
+            let errors = blocking(|| {
+                let executor = crate::targets::ProcessExecutor;
+                let checks = crate::doctor::run_with_config_path(
+                    &mj_core::config::config_path(),
+                    &executor,
+                    crate::doctor::current_apple_platform(&executor),
+                    crate::doctor::DoctorOptions { smoke: false },
+                );
+                Ok(crate::setup::actionable_errors(&checks))
+            })
+            .await?;
+            Ok(DaemonReply::DoctorErrors(errors))
+        }
+        DaemonAction::NewSessionRemoteRepairs {
+            bundle_id,
+            target_id,
+        } => {
+            let controller = state
+                .with_config(|config| crate::controller::config_only_controller(config.clone()));
+            let repairs = blocking(move || {
+                let executor = crate::targets::CancellableProcessExecutor::new(
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                )
+                .with_deadline(Duration::from_secs(30));
+                let result =
+                    controller.preflight_new_session(&bundle_id, &target_id, None, &executor)?;
+                Ok(result.remote_repairs)
+            })
+            .await?;
+            Ok(DaemonReply::RemoteRepairs(repairs))
+        }
+        DaemonAction::RepairRepositoryRemotes { bundle_id, repairs } => {
+            let controller = state
+                .with_config(|config| crate::controller::config_only_controller(config.clone()));
+            blocking(move || {
+                let bundle = controller
+                    .config
+                    .bundles
+                    .get(&bundle_id)
+                    .context("unknown bundle")?;
+                let executor = crate::targets::CancellableProcessExecutor::new(
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                )
+                .with_deadline(Duration::from_secs(30));
+                mj_core::local_git::apply_repository_remote_repairs(bundle, &repairs, &executor)
+            })
+            .await?;
+            refresh_runtime_controller(state).await;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::Status => {
             state.prune_dead_clients();
             Ok(DaemonReply::Status(DaemonStatus {
@@ -46,6 +127,20 @@ pub(super) async fn handle_action(
         DaemonAction::WebViewerAccess => {
             Ok(DaemonReply::WebViewerAccess(state.web_viewer.access()))
         }
+        // Git runs in the daemon's environment, which is the one its
+        // sessions inherit; a client's environment may differ.
+        DaemonAction::GitIdentity => {
+            tokio::task::spawn_blocking(crate::controller::controller_git_identity)
+                .await
+                .context("Git identity read panicked")?
+                .map(DaemonReply::GitIdentity)
+        }
+        DaemonAction::SetGitIdentity { name, email } => tokio::task::spawn_blocking(move || {
+            crate::controller::set_controller_git_identity(&name, &email)
+        })
+        .await
+        .context("Git identity save panicked")?
+        .map(DaemonReply::GitIdentity),
         DaemonAction::SubagentOptions {
             profile,
             model,
@@ -130,8 +225,18 @@ pub(super) async fn handle_action(
             state.close_workspace(workspace_id).await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::Attach { client_id, pid } => {
-            state.attachments().insert(client_id, Attachment { pid });
+        DaemonAction::NodeConnect { .. } => {
+            bail!(
+                "a node connection is taken over by the connection loop, not handled as a request"
+            )
+        }
+        DaemonAction::Attach { client_id } => {
+            state.attachments().insert(
+                client_id,
+                Attachment {
+                    renewed: std::time::Instant::now(),
+                },
+            );
             state.ever_attached.store(true, Ordering::Release);
             Ok(DaemonReply::Done)
         }
@@ -221,10 +326,42 @@ pub(super) async fn handle_action(
             blocking(move || crate::database::save_workspace_layout(&workspace_id, layout)).await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::PersistImportedSession { session } => {
-            blocking(move || crate::import::persist_imported_session_locally(&session)).await?;
+        DaemonAction::PersistImportedSession { session, bundle } => {
+            blocking(move || {
+                if let Some(imported) = bundle {
+                    let ImportedBundle { bundle_id, bundle } = imported;
+                    Config::update(|config| {
+                        if let Some(existing) = config.bundles.get(&bundle_id) {
+                            anyhow::ensure!(
+                                existing == &bundle,
+                                "bundle {bundle_id:?} changed during import; retry the import"
+                            );
+                        } else {
+                            config.bundles.insert(bundle_id.clone(), bundle);
+                        }
+                        Ok(())
+                    })?;
+                }
+                crate::import::persist_imported_session_locally(&session)
+            })
+            .await?;
             refresh_runtime_controller(state).await;
             Ok(DaemonReply::Done)
+        }
+        DaemonAction::SessionProjectSource { session_id } => {
+            let controller = state.with_controller(|controller| crate::controller::Controller {
+                config: controller.config.clone(),
+                state: controller.state.clone(),
+            });
+            let source = blocking(move || {
+                let executor = crate::targets::CancellableProcessExecutor::new(
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                )
+                .with_deadline(Duration::from_secs(8));
+                controller.resolve_session_project_source(&session_id, &executor)
+            })
+            .await?;
+            Ok(DaemonReply::ProjectSource(source))
         }
         DaemonAction::SetSessionTitle { session_id, title } => {
             let title =
@@ -401,8 +538,122 @@ pub(super) async fn handle_action(
             let snapshot = blocking(move || workspace_snapshot(&workspace_id)).await?;
             Ok(DaemonReply::Snapshot(snapshot))
         }
-        DaemonAction::RuntimeChanges { cursor, wait } => Ok(DaemonReply::RuntimeChanges(Box::new(
-            state.runtime_changes(cursor, wait).await?,
+        DaemonAction::DashboardStartup {
+            client_id,
+            workspace_id,
+        } => {
+            let stored = blocking(move || dashboard_reads::dashboard_stored(&workspace_id)).await?;
+            let frame = state
+                .runtime_changes_for_subagent_parents(None, false, stored.subagent_parents)
+                .await?;
+            let mj_client::runtime_feed::RuntimeFrame::Snapshot {
+                cursor,
+                mut projection,
+            } = frame
+            else {
+                bail!("dashboard bootstrap did not produce a runtime snapshot");
+            };
+            let records = std::mem::take(&mut projection.records);
+            projection.records =
+                blocking(move || dashboard_reads::client_read_frontiers(records, &client_id))
+                    .await?;
+            let queued_prompts = stored
+                .queued_prompts
+                .into_iter()
+                .filter(|(id, _)| projection.records.contains_key(id))
+                .collect();
+            Ok(DaemonReply::DashboardStartup(Box::new(DashboardStartup {
+                runtime: mj_client::runtime_feed::RuntimeBootstrap {
+                    cursor,
+                    projection: *projection,
+                },
+                metadata: stored.metadata,
+                pane_sizes: stored.layouts.pane_sizes,
+                conversation_layouts: stored.layouts.conversation_layouts,
+                queued_prompts,
+            })))
+        }
+        DaemonAction::WorkspaceLayouts { workspace_ids } => Ok(DaemonReply::WorkspaceLayouts(
+            blocking(move || dashboard_reads::workspace_layouts(workspace_ids)).await?,
+        )),
+        DaemonAction::StoredSessionMetadata => Ok(DaemonReply::StoredSessionMetadata(
+            blocking(dashboard_reads::stored_session_metadata).await?,
+        )),
+        DaemonAction::StoredProjectionTail { session_id, items } => {
+            let tail = blocking(move || {
+                crate::database::load_materialized_projection_tail(&session_id, items)
+            })
+            .await?;
+            Ok(DaemonReply::StoredProjectionTail(
+                tail.map(|(session, _)| Box::new(session)),
+            ))
+        }
+        DaemonAction::StoredSessionSummary { session_id } => {
+            let summary =
+                blocking(move || crate::database::load_materialized_session_summary(&session_id))
+                    .await?;
+            Ok(DaemonReply::StoredSessionSummary(summary.map(Box::new)))
+        }
+        DaemonAction::ResumeRepositoryPreflight {
+            session_id,
+            target_id,
+        } => {
+            let controller = blocking(Controller::load).await?;
+            let executor = repository_preflight_executor();
+            let preflight = controller
+                .preflight_resume_repository_sources(&session_id, &target_id, &executor)
+                .await?;
+            Ok(DaemonReply::ResumeRepositoryPreflight(Box::new(preflight)))
+        }
+        DaemonAction::ReplaceResumeRepositoryOrigin {
+            session_id,
+            repository_id,
+            replacement,
+        } => {
+            ensure!(
+                !crate::controller::move_session::move_owns_session(&session_id),
+                "session is moving; repair its repository after Move finishes"
+            );
+            let mut controller = blocking(Controller::load).await?;
+            let executor = repository_preflight_executor();
+            let preflight = controller
+                .replace_resume_repository_origin(
+                    &session_id,
+                    &repository_id,
+                    &replacement,
+                    &executor,
+                )
+                .await?;
+            refresh_runtime_controller(state).await;
+            Ok(DaemonReply::ResumeRepositoryPreflight(Box::new(preflight)))
+        }
+        DaemonAction::ArchiveSpacePreview { older_than_days } => {
+            Ok(DaemonReply::ArchiveSpacePreview(
+                blocking(move || crate::sessionwiki::archive_space_preview(older_than_days))
+                    .await?,
+            ))
+        }
+        DaemonAction::SaveSetup { original, updated } => {
+            let saved = blocking(move || {
+                let sessions = crate::database::load_state()?;
+                mj_client::settings::save::save_at(
+                    &mj_core::config::config_path(),
+                    &original,
+                    &updated,
+                    &sessions,
+                )
+            })
+            .await?;
+            Ok(DaemonReply::SavedSetup(Box::new(saved)))
+        }
+        DaemonAction::RuntimeChanges {
+            cursor,
+            wait,
+            subagent_parents,
+        } => Ok(DaemonReply::RuntimeChanges(Box::new(
+            state
+                .runtime_changes_for_subagent_parents(cursor, wait, subagent_parents)
+                .await?,
         ))),
         DaemonAction::SessionTail { session_id, cursor } => Ok(DaemonReply::SessionTail(Box::new(
             state.session_tail(&session_id, &cursor),
@@ -789,6 +1040,8 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::Stop => {
+            // Stopping, not handing off: the node goes with this daemon.
+            crate::node_registry::registry().dismiss_node_on_exit();
             // A destroy in flight was acknowledged as accepted and nothing
             // about it is durable, so the stop waits for it, up to a bound
             // (#1191). The reply does not wait.
@@ -820,7 +1073,12 @@ pub(super) fn upgrade_request_activity(
     if matches!(
         action,
         DaemonAction::RecordOperatorActivity
+            // A draining daemon still needs its node to finish the bounded
+            // work the handoff waits for.
+            | DaemonAction::NodeConnect { .. }
             | DaemonAction::Ping
+            | DaemonAction::Identity
+            | DaemonAction::Configuration
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade
@@ -836,6 +1094,13 @@ pub(super) fn upgrade_request_activity(
     } else {
         crate::upgrade::activity("client request").map(Some)
     }
+}
+
+/// Repository preflights fetch over the network. The 30 seconds the terminal
+/// always allowed them also bound how long a handoff waits for one.
+fn repository_preflight_executor() -> CancellableProcessExecutor {
+    CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
+        .with_deadline(Duration::from_secs(30))
 }
 
 /// Destroy requests carry a flag, not a controller enum, so the wire protocol

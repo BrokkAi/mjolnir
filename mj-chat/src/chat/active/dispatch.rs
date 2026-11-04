@@ -116,6 +116,7 @@ impl ActiveChat {
         match action {
             ChatAction::None => return ChatEventOutcome::None,
             ChatAction::OpenSubagents => return ChatEventOutcome::OpenSubagents,
+            ChatAction::OpenReviewers => return ChatEventOutcome::OpenReviewers,
             ChatAction::Prompt(text) => {
                 let images = self.state.take_submitting_images();
                 if !images.is_empty() && !self.state.prompt_images_supported {

@@ -47,7 +47,11 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
-    fn request_review(&self, _session_id: String) -> BoxFuture<'_, Result<serde_json::Value>> {
+    fn request_review(
+        &self,
+        _session_id: String,
+        _path: Option<String>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async { bail!("push review is unavailable") })
     }
 
@@ -208,13 +212,28 @@ pub trait ExportRuntime: Send + Sync {
     ) -> BoxFuture<'static, Result<Option<String>>> {
         Box::pin(async { anyhow::bail!("SessionWiki restore is unavailable") })
     }
+
+    /// Publish a dashboard request (`mj ui`) to the attached dashboards.
+    fn request_ui(
+        &self,
+        _body: mj_client::ui_request::UiRequestBody,
+    ) -> std::result::Result<
+        mj_client::ui_request::UiRequestReceipt,
+        mj_client::ui_request::UiRequestRefusal,
+    > {
+        Err(mj_client::ui_request::UiRequestRefusal::NoDashboard)
+    }
 }
 
 impl ExportRuntime for RuntimeState {
-    fn request_review(&self, session_id: String) -> BoxFuture<'_, Result<serde_json::Value>> {
+    fn request_review(
+        &self,
+        session_id: String,
+        path: Option<String>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async move {
             self.review_host()
-                .begin_push(&session_id)
+                .begin_push(&session_id, path)
                 .await
                 .map_err(|error| anyhow!("request_review refused: {}", error.0))
         })
@@ -391,6 +410,16 @@ impl ExportRuntime for RuntimeState {
                 .await?
                 .map(|registered| registered.session.id))
         })
+    }
+
+    fn request_ui(
+        &self,
+        body: mj_client::ui_request::UiRequestBody,
+    ) -> std::result::Result<
+        mj_client::ui_request::UiRequestReceipt,
+        mj_client::ui_request::UiRequestRefusal,
+    > {
+        RuntimeState::request_ui(self, body)
     }
 }
 
@@ -866,9 +895,9 @@ impl ApiBackend {
                     serde_json::from_slice(&output).context("decode the saved fetch")?;
                 Ok(serde_json::to_value(saved)?)
             }
-            SubagentToolAction::RequestReview {} => {
+            SubagentToolAction::RequestReview { path } => {
                 self.exports
-                    .request_review(parent_session_id.to_owned())
+                    .request_review(parent_session_id.to_owned(), path.clone())
                     .await
             }
             SubagentToolAction::OverrideReview { reason } => {
@@ -2786,6 +2815,16 @@ impl SubagentBackend for ApiBackend {
     fn wiki_search(&self, query: String, limit: usize) -> BoxFuture<'_, Result<WikiSearchPage>> {
         let runtime = Arc::clone(&self.exports);
         Box::pin(async move { runtime.wiki_search(query, limit).await })
+    }
+
+    fn request_ui(
+        &self,
+        body: mj_client::ui_request::UiRequestBody,
+    ) -> std::result::Result<
+        mj_client::ui_request::UiRequestReceipt,
+        mj_client::ui_request::UiRequestRefusal,
+    > {
+        self.exports.request_ui(body)
     }
 
     fn wiki_brief(

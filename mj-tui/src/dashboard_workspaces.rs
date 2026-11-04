@@ -19,6 +19,12 @@ pub(crate) struct SubagentStoppedBySuspend {
     shown: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ChildWorkspace {
+    pub parent_id: String,
+    pub kind: mj_core::subagent::SubagentKind,
+}
+
 impl DashboardState {
     /// The workspace currently used as the Sessions-pane filter.
     pub fn active_workspace_id(&self) -> Option<&str> {
@@ -26,20 +32,64 @@ impl DashboardState {
     }
 
     pub fn subagent_parent_id(&self) -> Option<&str> {
-        self.subagent_parent_id.as_deref()
+        self.child_workspace
+            .as_ref()
+            .map(|workspace| workspace.parent_id.as_str())
+    }
+
+    pub fn reviewers_workspace_open(&self) -> bool {
+        self.child_workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.kind == mj_core::subagent::SubagentKind::Reviewer)
+    }
+
+    pub(crate) fn child_workspace_for(&self, child: &str) -> Option<ChildWorkspace> {
+        Some(ChildWorkspace {
+            parent_id: self.subagent_parent_for(child)?,
+            kind: self
+                .state
+                .subagents
+                .get(child)
+                .map_or(mj_core::subagent::SubagentKind::Worker, |relation| {
+                    relation.kind
+                }),
+        })
     }
 
     pub fn open_subagent_workspace(&mut self, parent_id: String) {
+        self.open_child_workspace(parent_id, mj_core::subagent::SubagentKind::Worker);
+    }
+
+    pub fn open_reviewer_workspace(&mut self, parent_id: String) {
+        self.open_child_workspace(parent_id, mj_core::subagent::SubagentKind::Reviewer);
+    }
+
+    fn open_child_workspace(&mut self, parent_id: String, kind: mj_core::subagent::SubagentKind) {
         if !self.state.sessions.contains_key(&parent_id) {
             return;
         }
-        self.switch_subagent_scope(Some(parent_id));
+        self.switch_child_scope(Some(ChildWorkspace {
+            parent_id: parent_id.clone(),
+            kind,
+        }));
         // The pane now lists a different set of rows; the parent list's
         // scroll position means nothing here.
         self.sessions_scroll.set(0);
         self.set_current_session(None);
-        if let Some(child) = self.derive_ordered_sessions().0.first() {
-            let child = child.id.clone();
+        // Compact relationships still need a selection to load their details;
+        // only rows with known activity can be excluded by the idle filter.
+        let child = self
+            .derive_ordered_sessions()
+            .0
+            .into_iter()
+            .map(|session| session.id.clone())
+            .chain(
+                self.managed_child_ids_of_kind(&parent_id, kind)
+                    .into_iter()
+                    .filter(|id| !self.state.sessions.contains_key(id)),
+            )
+            .next();
+        if let Some(child) = child {
             self.select_active_session(&child);
         }
         self.focus = Focus::Sessions;
@@ -47,27 +97,33 @@ impl DashboardState {
     }
 
     pub fn close_subagent_workspace(&mut self) {
-        let Some(parent_id) = self.subagent_parent_id.as_ref().cloned() else {
+        let Some(workspace) = self.child_workspace.as_ref().cloned() else {
             return;
         };
-        self.switch_subagent_scope(self.subagent_parent_for(&parent_id));
+        let parent_id = workspace.parent_id;
+        let next = self.child_workspace_for(&parent_id);
+        self.switch_child_scope(next);
         self.sessions_scroll.set(0);
         self.select_active_session(&parent_id);
         self.clamp_selections();
     }
 
-    pub(crate) fn switch_subagent_scope(&mut self, parent_id: Option<String>) {
-        let previous_parent = std::mem::replace(&mut *self.subagent_parent_id, parent_id.clone());
+    pub(crate) fn switch_child_scope(&mut self, next: Option<ChildWorkspace>) {
+        if *self.child_workspace == next {
+            return;
+        }
+        let previous = std::mem::replace(&mut *self.child_workspace, next.clone());
         self.sessions_filters_by_scope
-            .insert(previous_parent, self.sessions_filter.take());
+            .insert(previous, self.sessions_filter.take());
         *self.sessions_filter = self
             .sessions_filters_by_scope
-            .remove(&parent_id)
+            .remove(&next)
             .unwrap_or_else(|| {
-                parent_id.map(|_| SessionsFilter {
-                    state: Some(SessionStateFilter::NotIdle),
-                    ..Default::default()
-                })
+                next.filter(|workspace| workspace.kind == mj_core::subagent::SubagentKind::Worker)
+                    .map(|_| SessionsFilter {
+                        state: Some(SessionStateFilter::NotIdle),
+                        ..Default::default()
+                    })
             });
     }
 
@@ -122,14 +178,11 @@ impl DashboardState {
                             })
                     }
                 };
-                let shown = [
-                    self.subagent_parent_id.as_deref(),
-                    self.selected_session_id(),
-                ]
-                .into_iter()
-                .flatten()
-                .chain(self.navigation.sessions().values().map(String::as_str))
-                .any(|id| id == child.id);
+                let shown = [self.subagent_parent_id(), self.selected_session_id()]
+                    .into_iter()
+                    .flatten()
+                    .chain(self.navigation.sessions().values().map(String::as_str))
+                    .any(|id| id == child.id);
                 suspending.then(|| SubagentStoppedBySuspend {
                     session_id: child.id.clone(),
                     parent_id: parent_id.clone(),
@@ -158,11 +211,12 @@ impl DashboardState {
                 .filter(|child| child.parent_id == parent_id)
                 .collect::<Vec<_>>();
             let in_view = children.iter().any(|child| child.shown)
-                || self.subagent_parent_id.as_deref() == Some(parent_id.as_str());
+                || self.subagent_parent_id() == Some(parent_id.as_str());
             if !in_view {
                 continue;
             }
-            self.switch_subagent_scope(self.subagent_parent_for(&parent_id));
+            let next = self.child_workspace_for(&parent_id);
+            self.switch_child_scope(next);
             self.select_active_session(&parent_id);
             self.clamp_selections();
             let titles = children
@@ -279,7 +333,18 @@ impl DashboardState {
             if self.state.sessions.get(&parent_id).is_some_and(|record| {
                 Some(record.workspace_id.as_str()) == self.active_workspace_id()
             }) {
-                self.open_subagent_workspace(parent_id);
+                if self
+                    .navigation_session
+                    .as_deref()
+                    .and_then(|child| self.state.subagents.get(child))
+                    .is_some_and(|relation| {
+                        relation.kind == mj_core::subagent::SubagentKind::Reviewer
+                    })
+                {
+                    self.open_reviewer_workspace(parent_id);
+                } else {
+                    self.open_subagent_workspace(parent_id);
+                }
                 if let Some(session) = self.navigation_session.clone() {
                     self.select_active_session(&session);
                     self.clear_filter_hiding_selection();
@@ -344,7 +409,12 @@ impl DashboardState {
     /// Select a conversation immediately, retaining the current keyboard focus.
     /// Pinned sessions stay in their pane; other sessions replace Browse.
     pub fn select_active_session(&mut self, session_id: &str) {
-        if !self.state.sessions.contains_key(session_id) {
+        // Navigation owns the selection immediately, even while the daemon
+        // is loading the row detail for this family's compact relationship.
+        let unloaded_child = self.state.subagents.get(session_id).is_some_and(|child| {
+            self.subagent_parent_id() == Some(child.parent_session_id.as_str())
+        });
+        if !self.state.sessions.contains_key(session_id) && !unloaded_child {
             return;
         }
         let pane = self

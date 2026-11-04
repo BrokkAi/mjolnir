@@ -5,15 +5,15 @@
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│› · ACP pretty                                                                                                        │
 │  Idle  podman                                                                                                        │
-│  │ No message                                                                                                        │
-│  │             ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│                │  Sub-agents Native                                                                 │                │
+│  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │             │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Dismiss question — No prose question is active.                                   │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -47,15 +47,15 @@ menu popup action: None
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
-│› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│› · ACP pretty na                                                                                                                         │
 │  Idle  podman  c                                                                                                                         │
-│  │ No messages y                                                                                                                         │
-│  │                ╭ × ACP pretty name ───────────────────────────────────────────────────────────────────────────────╮                   │
-│                   │  Sub-agents Native                                                                               │                   │
+│  │ No messages y  ╭ × ACP pretty name ───────────────────────────────────────────────────────────────────────────────╮                   │
+│  │                │  Sub-agents Native                                                                               │                   │
 │                   │  CPU        no CPU data yet                                                                      │                   │
 │                   │                                                                                                  │                   │
 │                   │  Content  ─────────────────────────────────────────────────────────────────────────────────────  │                   │
 │                   │  Changed files — The session's target is not running.                                  ctrl+b d  │                   │
+│                   │  Dismiss question — No prose question is active.                                                 │                   │
 │                   │  Organize  ────────────────────────────────────────────────────────────────────────────────────  │                   │
 │                   │  Rename…                                                                         ctrl+b shift+t  │                   │
 │                   │  Pin…                                                                                            │                   │
@@ -89,15 +89,15 @@ menu popup action: None
 ╭ Sessions ───────────────────── ▁   ▄ ╮│                                      │
 │ Create   Open   Filter: _____________││                                      │
 │hel ──────────────────────────────────││                                      │
-│› · ACP pretty name               ◇ ⋯ ││                                      │
+│› · ACP                                                                       │
 │  Idle                                                                        │
-│  │ No m                                                                      │
-│  │       ╭ × ACP pretty name ────────────────────────────────────╮           │
-│          │  Sub-agents Native                                    │           │
+│  │ No m  ╭ × ACP pretty name ────────────────────────────────────╮           │
+│  │       │  Sub-agents Native                                    │           │
 │          │  CPU        no CPU data yet                           │           │
-│          │                                                       │  conversat│
-│          │  Content  ──────────────────────────────────────────  │           │
+│          │                                                       │           │
+│          │  Content  ──────────────────────────────────────────  │  conversat│
 │          │  Changed files — The session's target is …  ctrl+b d  │           │
+│          │  Dismiss question — No prose question is active.      │           │
 │          │  Organize  ─────────────────────────────────────────  │           │
 │          │  Rename…                              ctrl+b shift+t  │           │
 │          │  Pin…                                                 │           │
@@ -216,15 +216,15 @@ first Escape action: None
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│› · ACP pretty                                                                                                        │
 │  Idle  podman                                                                                                        │
-│  │ No message                                                                                                        │
-│  │             ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│                │  Sub-agents Native                                                                 │                │
+│  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │             │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Dismiss question — No prose question is active.                                   │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │

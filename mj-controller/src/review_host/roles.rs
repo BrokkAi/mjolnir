@@ -7,6 +7,7 @@ impl HostState {
                 self.review_step(
                     session_id,
                     ReviewerAction::CaptureDelta {
+                        repositories: None,
                         baselines,
                         scope: Default::default(),
                     },

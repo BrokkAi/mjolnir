@@ -39,6 +39,11 @@ pub use mj_client::target::DEFAULT_IMAGE;
 pub struct DiscoveredHome {
     pub kind: HarnessKind,
     pub path: PathBuf,
+    /// The harness's conventional home rather than one named by its own home
+    /// variable. Automatic detection leaves a conventional home alone once
+    /// that harness already has a profile: a managed launch can create the
+    /// directory without the user installing a second copy.
+    pub conventional: bool,
     /// A Codex profile overlay in this home, `<path>/<name>.config.toml`.
     /// Every overlay is offered as a profile of its own beside the home.
     pub codex_profile: Option<String>,
@@ -132,6 +137,37 @@ pub fn discover_runtimes(executor: &impl CommandExecutor) -> Vec<RuntimeProbe> {
 /// merging into an existing configuration.
 pub fn profiles_config(homes: &[DiscoveredHome]) -> Config {
     build_config(homes, None)
+}
+
+/// The profiles automatic detection may add to `existing`.
+///
+/// A harness's conventional home is created by the harness itself, including
+/// when Mjolnir's managed installation starts it. Once that harness has a
+/// profile, such a directory is not evidence of a second installation the
+/// user chose, so automatic detection leaves it alone. A home named by the
+/// harness's own environment variable, or a Codex profile overlay, is still a
+/// distinct installation and may add a profile. Explicit detection keeps
+/// using [`profiles_config`] so it can import another installation.
+pub fn automatic_profiles_config(existing: &Config, homes: &[DiscoveredHome]) -> Config {
+    build_config(&without_conventional_duplicates(existing, homes), None)
+}
+
+fn without_conventional_duplicates(
+    existing: &Config,
+    homes: &[DiscoveredHome],
+) -> Vec<DiscoveredHome> {
+    let configured = existing
+        .profiles
+        .values()
+        .map(|profile| profile.kind)
+        .collect::<BTreeSet<_>>();
+    homes
+        .iter()
+        .filter(|home| {
+            home.codex_profile.is_some() || !home.conventional || !configured.contains(&home.kind)
+        })
+        .cloned()
+        .collect()
 }
 
 /// Point each discovered profile of a harness that reads an API key (DSH's
@@ -236,10 +272,11 @@ fn discover_installed_harnesses(
         if homes.iter().any(|home| home.kind == kind) {
             continue;
         }
-        let Some(home) = overrides
+        let Some((home, conventional)) = overrides
             .get(&kind)
             .cloned()
-            .or_else(|| user_home.map(|home| home.join(kind.default_home_leaf())))
+            .map(|home| (home, false))
+            .or_else(|| user_home.map(|home| (home.join(kind.default_home_leaf()), true)))
         else {
             continue;
         };
@@ -249,6 +286,7 @@ fn discover_installed_harnesses(
             homes.push(DiscoveredHome {
                 kind,
                 path: home,
+                conventional,
                 codex_profile: None,
                 authenticated: true,
             });
@@ -258,6 +296,7 @@ fn discover_installed_harnesses(
             homes.push(DiscoveredHome {
                 kind,
                 path: home,
+                conventional,
                 codex_profile: None,
                 authenticated: false,
             });
@@ -328,6 +367,7 @@ pub(crate) fn discover_harness_homes_with_executor(
                         ),
                         kind,
                         path: path.clone(),
+                        conventional: is_default_home,
                         codex_profile,
                     }
                 })

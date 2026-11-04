@@ -120,6 +120,7 @@ impl CommandPalette {
 
 const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::ChangedFiles,
+    CommandId::DismissQuestion,
     CommandId::RenameSession,
     CommandId::PinSession,
     CommandId::UnpinSession,
@@ -779,7 +780,7 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
         let mut section = None;
         for (index, entry) in palette.entries.iter().enumerate() {
             let next = match entry.id {
-                CommandId::OpenSession | CommandId::ChangedFiles => 0,
+                CommandId::OpenSession | CommandId::ChangedFiles | CommandId::DismissQuestion => 0,
                 CommandId::RenameSession
                 | CommandId::PinSession
                 | CommandId::UnpinSession
@@ -1667,6 +1668,152 @@ mod tests {
         );
         let lines = drawn(&mut dashboard, 120, 40);
         append_golden_state(&mut output, "disabled Unpin remains open", 120, 40, &lines);
+
+        let session = running_session();
+        let mut dashboard = dashboard_with_session(session.clone());
+        dashboard.set_session_activity(
+            &session.id,
+            mj_client::usage_format::SessionActivity {
+                dismiss_question_supported: true,
+                ..Default::default()
+            },
+        );
+        let mut materialized = crate::test_support::materialized_session_for(
+            &session.id,
+            vec![crate::test_support::agent_message(
+                2,
+                "Waiting on you to choose a target.",
+            )],
+        );
+        materialized.applied_event_ordinal = 4;
+        materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
+        materialized.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+            command_id: "prompt-1".into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: Some(1),
+            completed_ordinal: 3,
+            completed_at_ms: 100_000,
+            outcome: mj_core::state::TurnOutcomeKind::Completed {
+                stop_reason: "EndTurn".into(),
+            },
+            diagnostic: None,
+            usage: None,
+        });
+        let mut assessment = mj_core::assessment::TurnAssessment::pending(
+            "prompt-1".into(),
+            3,
+            100_000,
+            mj_core::activity::verdict::CompletionEvidence {
+                stop_reason: "EndTurn".into(),
+                diagnostic: None,
+            },
+        );
+        assessment.status = mj_core::assessment::Status::Assessed;
+        assessment.action = Some(mj_core::assessment::Action::AwaitInput);
+        let project = |dashboard: &mut DashboardState,
+                       materialized: &mj_core::state::MaterializedSession,
+                       assessment: &mj_core::assessment::TurnAssessment| {
+            dashboard.apply_prepared_materialized_session(
+                crate::PreparedMaterializedSessionDetail::from_assessed_materialized(
+                    materialized.clone(),
+                    Some(assessment),
+                    0,
+                    Default::default(),
+                ),
+            );
+        };
+        project(&mut dashboard, &materialized, &assessment);
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "active prose question", 120, 40, &lines);
+        let dismiss = point(&lines, "Dismiss question");
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), dismiss));
+        let action =
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), dismiss));
+        append_golden_value(&mut output, "dismiss exact question", &action);
+        let DashboardAction::DismissQuestion {
+            session_id,
+            question,
+        } = action
+        else {
+            panic!("dismissal action");
+        };
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "dismissal in flight", 120, 40, &lines);
+        dashboard.question_dismissal_finished(
+            &session_id,
+            question.clone(),
+            Err("Worker disconnected".into()),
+        );
+        append_golden_value(&mut output, "dismissal failure", dashboard.notice());
+        assert_eq!(
+            dashboard.attention_level(&session_id),
+            crate::AttentionLevel::Waiting
+        );
+        assert_eq!(
+            (spec(CommandId::DismissQuestion).available)(&dashboard),
+            Availability::Ready
+        );
+        assert!(matches!(
+            dashboard.dispatch_command(CommandId::DismissQuestion),
+            DashboardAction::DismissQuestion { .. }
+        ));
+        dashboard.question_dismissal_finished(&session_id, question.clone(), Ok(5));
+        assert_ne!(
+            (spec(CommandId::DismissQuestion).available)(&dashboard),
+            Availability::Ready,
+            "an acknowledgement alone must not enable another request before publication"
+        );
+        assessment.status = mj_core::assessment::Status::Superseded;
+        assessment.reason = "question_dismissed".into();
+        materialized.applied_event_ordinal = 6;
+        project(&mut dashboard, &materialized, &assessment);
+        assert_ne!(
+            dashboard.attention_level(&session_id),
+            crate::AttentionLevel::Waiting
+        );
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "question dismissed", 120, 40, &lines);
+
+        // A later question is eligible again. Its publication can overtake
+        // the acknowledgement without leaving dismissal stuck in flight.
+        let outcome = materialized.last_turn_outcome.as_mut().unwrap();
+        outcome.command_id = "prompt-2".into();
+        outcome.completed_ordinal = 8;
+        materialized.applied_event_ordinal = 9;
+        assessment.turn_id = "prompt-2".into();
+        assessment.completed_ordinal = 8;
+        assessment.status = mj_core::assessment::Status::Assessed;
+        assessment.reason = "user_input_required".into();
+        project(&mut dashboard, &materialized, &assessment);
+        assert_eq!(
+            (spec(CommandId::DismissQuestion).available)(&dashboard),
+            Availability::Ready
+        );
+        let DashboardAction::DismissQuestion { question: next, .. } =
+            dashboard.dispatch_command(CommandId::DismissQuestion)
+        else {
+            panic!("new dismissal");
+        };
+        dashboard.question_dismissal_finished(&session_id, question, Ok(5));
+        assert!(
+            dashboard.question_dismissal_pending(&session_id),
+            "an old callback cannot finish the new request"
+        );
+        assessment.status = mj_core::assessment::Status::Superseded;
+        assessment.reason = "question_dismissed".into();
+        materialized.applied_event_ordinal = 11;
+        project(&mut dashboard, &materialized, &assessment);
+        dashboard.question_dismissal_finished(&session_id, next, Ok(10));
+        assert!(!dashboard.question_dismissal_pending(&session_id));
+        append_golden_value(
+            &mut output,
+            "publication before acknowledgement",
+            dashboard.notice(),
+        );
 
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "session-action-menu", &output);
     }

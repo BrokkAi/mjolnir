@@ -196,6 +196,7 @@ impl DashboardState {
             }),
             harness_kind: session.as_ref().map(|session| session.harness_kind),
             subagent_count: self.subagent_count_for(session_id),
+            reviewer_count: self.reviewer_count_for(session_id),
         }
     }
 

@@ -336,11 +336,6 @@ impl DashboardContext {
             SurfaceId::ElicitationMessage => self
                 .focused_chat()
                 .and_then(|chat| chat.elicitation_selection_text(&range)),
-            // The reviewer pane scrolls its own rows, so the text a selection
-            // covers comes out of that pane rather than off this frame.
-            SurfaceId::ReviewerTranscript => self
-                .focused_chat()
-                .and_then(|chat| chat.reviewer_selection_text(&range)),
             _ => self.selection_text.take(),
         };
         let Some(text) = extracted.filter(|text| !text.trim().is_empty()) else {

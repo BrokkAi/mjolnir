@@ -747,16 +747,8 @@ fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
 
 /// A sub-agent whose first prompt was refused for good was recorded as
 /// failed on a bare target, with its worker stopped.
-fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -> Controller {
-    let mut session = checkpoint_test_session(session_id);
-    session.state = SessionState::Error;
-    session.last_error = Some("this agent does not offer high as a effort".into());
-    session.checkpoint = None;
-    session.target_template_id = "local".into();
-    session.target = Some(TargetLocator::LocalBare {
-        worker_root: worker_root.to_owned(),
-    });
-    let relation = mj_core::subagent::SubagentRecord {
+fn failed_subagent_relation(session_id: &str) -> mj_core::subagent::SubagentRecord {
+    mj_core::subagent::SubagentRecord {
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
         child_session_id: session_id.into(),
@@ -772,7 +764,19 @@ fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -
         noticed_turn: None,
         reported_finish: None,
         handback_tool: true,
-    };
+    }
+}
+
+fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -> Controller {
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Error;
+    session.last_error = Some("this agent does not offer high as a effort".into());
+    session.checkpoint = None;
+    session.target_template_id = "local".into();
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: worker_root.to_owned(),
+    });
+    let relation = failed_subagent_relation(session_id);
     let mut config = Config::default();
     config
         .targets
@@ -781,7 +785,7 @@ fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -
         config,
         state: State {
             sessions: [(session_id.into(), session)].into_iter().collect(),
-            subagents: [(session_id.into(), relation)].into_iter().collect(),
+            subagents: [(session_id.into(), relation.into())].into_iter().collect(),
             ..State::default()
         },
     }
@@ -801,9 +805,14 @@ fn seed_child_reports(
     });
     crate::database::save_session(&parent).unwrap();
     controller.state.sessions.insert(parent_id.into(), parent);
-    let relation = controller.state.subagents.get_mut(child_id).unwrap();
+    let mut relation = failed_subagent_relation(child_id);
     relation.parent_session_id = parent_id.into();
-    crate::database::save_subagent_session(&controller.state.sessions[child_id], relation).unwrap();
+    controller
+        .state
+        .subagents
+        .insert(child_id.into(), (&relation).into());
+    crate::database::save_subagent_session(&controller.state.sessions[child_id], &relation)
+        .unwrap();
     let root = directory.join("project/.mj/agents");
     std::fs::create_dir_all(root.join(child_id)).unwrap();
     std::fs::create_dir_all(root.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")).unwrap();
