@@ -13,7 +13,7 @@ pub(crate) use mj_client::daemon::*;
 pub(crate) use mj_client::executable::process_executable_path;
 pub(crate) use mj_controller::daemon::run_daemon_process;
 
-mod container;
+pub(crate) mod container;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

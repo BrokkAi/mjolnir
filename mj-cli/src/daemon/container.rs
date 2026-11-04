@@ -22,6 +22,7 @@ use mj_client::daemon::{
 use mj_core::config::{DEFAULT_CONTAINER_IMAGE, DaemonConfig, DaemonRuntime, data_dir};
 use sha2::Digest;
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -213,6 +214,54 @@ pub(super) async fn log_tail(program: &str, name: &str) -> String {
         Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
         Err(_) => String::new(),
     }
+}
+
+/// Run `mj <args>` inside the configured daemon container, with the same
+/// roots the daemon uses. Returns false when this is a host placement, so the
+/// caller runs the command locally. The container process sets
+/// `MJ_IN_CONTAINER` so the nested command cannot try to launch another one.
+pub(crate) async fn exec_in_container(args: &[String]) -> Result<bool> {
+    if std::env::var_os("MJ_IN_CONTAINER").is_some() {
+        return Ok(false);
+    }
+    let config = super::load_daemon_config().await.unwrap_or_default();
+    if config.runtime.engine().is_none() {
+        return Ok(false);
+    }
+    let mut client = super::connect_or_start().await?;
+    let identity = client.identity().await?;
+    let DaemonPlacement::Container {
+        name,
+        runtime: Some(runtime),
+    } = identity.placement
+    else {
+        return Ok(false);
+    };
+    let program = runtime
+        .engine()
+        .context("the daemon container has no engine")?;
+    let mut command = std::process::Command::new(program);
+    command.args(["exec"]);
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        command.args(["--interactive", "--tty"]);
+    } else {
+        command.arg("--interactive");
+    }
+    command
+        .env("HOME", format!("{VOLUME_MOUNT}/home"))
+        .env("MJ_DATA_DIR", format!("{VOLUME_MOUNT}/data"))
+        .env("MJ_CONFIG_DIR", format!("{VOLUME_MOUNT}/config"))
+        .env("MJ_IN_CONTAINER", "1")
+        .arg(name)
+        .arg(IMAGE_EXECUTABLE)
+        .args(args);
+    let status = mj_core::subprocess::run_inherited(&mut command)
+        .with_context(|| format!("run mj {args:?} inside the daemon container"))?;
+    ensure!(
+        status.success(),
+        "mj {args:?} inside the daemon container failed ({status})"
+    );
+    Ok(true)
 }
 
 /// Remove the host metadata a stopped container daemon leaves behind.

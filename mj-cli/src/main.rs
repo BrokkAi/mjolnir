@@ -1019,7 +1019,14 @@ async fn run_command(
                 .map(|()| DashboardExit::Normal)
         }
         Some(Command::Doctor(args)) => doctor(args).map(|()| DashboardExit::Normal),
-        Some(Command::Setup(args)) => setup(args).map(|()| DashboardExit::Normal),
+        Some(Command::Setup(args)) => {
+            if args.command.is_none()
+                && daemon::container::exec_in_container(&["setup".to_owned()]).await?
+            {
+                return Ok(DashboardExit::Normal);
+            }
+            setup(args).map(|()| DashboardExit::Normal)
+        }
         Some(Command::Import(args)) => {
             let workspace_id =
                 resolve_store_workspace(args.workspace().or(requested_workspace).as_deref())
@@ -1091,7 +1098,27 @@ async fn run_command(
             println!("{}", serde_json::to_string_pretty(&sources)?);
             Ok(DashboardExit::Normal)
         }
-        Some(Command::Login(args)) => login(args).await.map(|()| DashboardExit::Normal),
+        Some(Command::Login(args)) => {
+            let mut forwarded = vec!["login".to_owned()];
+            if let Some(profile) = &args.profile {
+                forwarded.push("--profile".to_owned());
+                forwarded.push(profile.clone());
+            }
+            if args.setup_token {
+                forwarded.push("--setup-token".to_owned());
+            }
+            if let Some(method) = &args.method {
+                forwarded.push("--method".to_owned());
+                forwarded.push(method.clone());
+            }
+            if args.cli {
+                forwarded.push("--cli".to_owned());
+            }
+            if daemon::container::exec_in_container(&forwarded).await? {
+                return Ok(DashboardExit::Normal);
+            }
+            login(args).await.map(|()| DashboardExit::Normal)
+        }
         Some(Command::New(args)) => {
             let workspace = args.workspace.or(requested_workspace);
             api_commands::new_session(args, workspace)

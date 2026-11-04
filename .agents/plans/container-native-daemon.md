@@ -28,7 +28,8 @@ The status says the daemon is in a container. `docker inspect` shows no host net
 - [x] (2026-11-04) Stop, restart, and handoff follow the container daemon's endpoint instead of the host store guard. Forced stop uses the container engine.
 - [x] (2026-11-04) The agent-dev image creates `/var/lib/mjolnir/home`, `/var/lib/mjolnir/data`, and `/var/lib/mjolnir/config` owned by its runtime user, so a fresh named volume is writable.
 - [ ] Publish a dedicated daemon image and build script, or document the agent-dev image as the daemon image until then.
-- [ ] Make container-mode setup and config use container paths by default, and make the first-run setup write them into the volume.
+- [x] (2026-11-04) `mj setup` and `mj login` in container placement run inside the daemon container with the volume's `HOME`, data and config roots. The nested process carries `MJ_IN_CONTAINER` so it cannot try to launch another container.
+- [ ] Make the dashboard's automatic first-run setup write the volume's configuration rather than the host file.
 - [ ] Give local session workers and their harness homes a container-native layout under the volume; verify a real turn in container placement.
 - [ ] Add Docker/Podman end-to-end validation and a guard that the container has no host namespaces and no implicit mounts.
 - [ ] Update human documentation and the Kubernetes manifest.
