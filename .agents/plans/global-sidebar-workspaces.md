@@ -20,6 +20,8 @@ The Sessions sidebar should retain its chosen width across workspaces and applic
 - [x] (2026-11-04) Committed review fixes as `def5f54e8` and merged the concurrent upstream macOS fixture adjustment without conflicts.
 - [x] (2026-11-04) Full core, client, controller, TUI, and CLI suites passed after the fixes and merge, including integration, PTY, and doctest suites. Workspace clippy passed with warnings denied; formatting and diff checks passed.
 - [x] (2026-11-04) Prepared the completed, validated tree for renewed review and publication; the session's review record tracks that gate and the subsequent push.
+- [x] (2026-11-04) Addressed the subsequent attention review finding: tiny dropdown rows now use the existing live styled workspace badges, including inactive workspaces, with badges before names so clipping cannot hide them.
+- [x] (2026-11-04) Extended the attention golden to cover pending questions, a failure arriving while the dropdown is open, and selecting the affected workspace. Reproduced the missing badge before the fix; focused and full five-crate validation plus workspace clippy passed afterward.
 
 ## Surprises & Discoveries
 
@@ -32,6 +34,8 @@ Dragging outside the workspace pane also needs ownership in `component_handles_m
 Review found that a configuration-file save can precede the daemon's periodic publication by 500 ms. A new dashboard can therefore hold an older sidebar size even after a successful file write. Sidebar saves now use a dedicated daemon configuration mutation, with the mutation coordinator holding ownership through persistence and publication before acknowledging success.
 
 Review also found that measuring workspace height against the whole frame did not reserve the other panes' actual allocation. A stacked sidebar must reserve only one workspace content row as its minimum, then grow its workspace rows with surplus. A side-by-side sidebar must clamp its workspace height against its final allocated band while preserving a Sessions pane.
+
+A subsequent review found that the tiny chooser omitted inactive workspaces' attention badges. Its rows now derive those badges during rendering using `workspace_attention_summary` and `attention_badge`, the same helpers as the tabs. Popup measurement uses those same styled rows, so counts fit and updates are visible while the chooser stays open.
 
 ## Decision Log
 
@@ -50,10 +54,13 @@ Review also found that measuring workspace height against the whole frame did no
 - Decision: Keep a single allocator for stacked rows, with flexible workspace growth above compact Sessions, and measure wide-sidebar workspace height only after its band is allocated.
   Rationale: Allows overflow to scroll on short terminals and prevents workspace geometry from crossing into Targets or Profiles.
   Date/Author: 2026-11-04 / Codex.
+- Decision: Show live styled attention badges before workspace names in the tiny dropdown.
+  Rationale: Preserves questions and failures in inactive workspaces, keeps updates visible without reopening, and prevents long names from clipping the badge.
+  Date/Author: 2026-11-04 / Codex.
 
 ## Outcomes & Retrospective
 
-All requested behaviors and both review corrections are implemented, committed, and validated. The existing workspace-manager golden shows medium/large overflow, wheel and track navigation, selected-workspace visibility, and the tiny chooser. The combined-dashboard golden additionally shows overflow on short stacked and wide terminals. The deterministic startup regression proves a saved choice is published before acknowledgement without relying on the daemon's periodic refresh. Publication follows the session's mandatory review gate.
+All requested behaviors and review corrections are implemented and validated. The existing workspace-manager golden shows medium/large overflow, wheel and track navigation, selected-workspace visibility, and the tiny chooser. The combined-dashboard golden additionally shows overflow on short stacked and wide terminals. The attention golden covers current and inactive badges and updates while the chooser is open. The deterministic startup regression proves a saved choice is published before acknowledgement without relying on the daemon's periodic refresh. Publication follows the session's mandatory review gate.
 
 ## Context and Orientation
 
@@ -95,6 +102,8 @@ Review regressions reproduced both defects before the fix (`/mnt/optane/tmp/mj-s
 
 Final review-fix validation passed in `/mnt/optane/tmp/mj-sidebar-review-tests-final.log`: client 44 tests, controller 2,273 tests, core 562 tests plus subprocess checks, TUI 570 tests, CLI 236 unit tests, and all integration/PTY/doctest suites. `/mnt/optane/tmp/mj-sidebar-review-clippy.log` records a successful `cargo clippy --all-targets -- -D warnings` run. Formatting and whitespace checks also passed.
 
+The attention regression failed before the correction in `/mnt/optane/tmp/mj-sidebar-attention-before.log` and passed afterward in `mj-sidebar-attention-after.log`. The full five-crate suites, integration/PTY tests, and doctests passed again in `mj-sidebar-attention-tests-final.log`; workspace clippy passed in `mj-sidebar-attention-clippy.log`. Formatting and whitespace checks passed.
+
 ## Interfaces and Dependencies
 
 Use the existing `PaneSize`, `PaneSizes`, `WorkspaceSettingPersistence`, `PaneMenu`, Ratatui, and theme glyph/scrollbar helpers. `DaemonClient::save_sidebar_size` sends the additive `DaemonAction::SaveSidebarSize` operation; the controller coordinates its file transaction and publication under `config_mutation`, with the admission label `sidebar size setting`. Add no crate or external dependency. Keep shared workspace row interpretation in `mj-tui/src/workspaces.rs` and use it from the combined layout.
@@ -110,3 +119,5 @@ Revision 2026-11-04: Recorded both accepted review findings and their ownership/
 Revision 2026-11-04: Recorded deterministic before/after evidence and the dedicated daemon operation, which avoids optimistic snapshot updates and session-store reads for sidebar saves.
 
 Revision 2026-11-04: Recorded the completed review corrections, clean upstream merge, and final full validation. Review and publication are tracked by the session gate.
+
+Revision 2026-11-04: Recorded the subsequent attention-badge correction and its focused and full validation before renewed review.

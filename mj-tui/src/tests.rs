@@ -2647,6 +2647,45 @@ fn golden_attention_navigation() {
         .expect("unread badge on folded heading");
     writeln!(output, "folded heading: {heading}").expect("write folded heading");
 
+    let mut dropdown = dashboard_with_attention_mix();
+    dropdown.set_active_workspace(Some("default".into()));
+    dropdown.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
+    drawn(&mut dropdown, 120, 40);
+    chord(&mut dropdown, CommandId::FocusWorkspaces);
+    dropdown.handle_key(key(KeyCode::Enter));
+    // Hard-won: f82d5aa4b: the tiny workspace dropdown hid attention in inactive workspaces.
+    let lines = append_attention_state(
+        &mut output,
+        "tiny workspace dropdown shows current and inactive attention",
+        &mut dropdown,
+        120,
+        40,
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("!1 Default (current)"))
+    );
+    assert!(lines.iter().any(|line| line.contains("!1 Other")));
+    dropdown.state.sessions.get_mut("remote").unwrap().state = SessionState::Error;
+    let lines = append_attention_state(
+        &mut output,
+        "open workspace dropdown updates an inactive failure badge",
+        &mut dropdown,
+        120,
+        40,
+    );
+    assert!(lines.iter().any(|line| line.contains("×1 Other")));
+    dropdown.handle_key(key(KeyCode::Down));
+    let action = dropdown.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        action,
+        DashboardAction::SelectWorkspace {
+            workspace_id: "other".into()
+        }
+    );
+    writeln!(output, "attention dropdown action: {action:?}").unwrap();
+
     let mut priority = dashboard_with_attention_mix();
     priority.set_active_workspace(Some("default".into()));
     let mut config = priority.config.clone();
