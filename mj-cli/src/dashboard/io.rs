@@ -160,7 +160,7 @@ pub(crate) enum DashboardIoUpdate {
     GoPrepared {
         workspace_id: String,
         retry: Box<DashboardAction>,
-        result: Box<std::result::Result<(Config, mj_core::go::GoRecipe), String>>,
+        result: Box<std::result::Result<mj_core::go::GoRecipe, String>>,
     },
     RemotePreflight {
         generation: u64,
@@ -964,7 +964,7 @@ impl DashboardContext {
                 retry,
                 result,
             } => match *result {
-                Ok((_config, recipe)) => {
+                Ok(recipe) => {
                     let action = self.dashboard.go_launch_action(workspace_id, recipe);
                     super::actions::start_session_launch(self, action);
                 }

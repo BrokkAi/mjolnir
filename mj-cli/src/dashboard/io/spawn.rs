@@ -1268,21 +1268,13 @@ pub(crate) fn spawn_imported_session_apply(
                 .get(&session.bundle_id)
                 .cloned()
                 .context("import worker did not return its session bundle")?;
-            Config::update(|config| {
-                if let Some(existing) = config.bundles.get(&session.bundle_id) {
-                    anyhow::ensure!(
-                        existing == &bundle,
-                        "bundle {:?} changed during import; retry the import",
-                        session.bundle_id
-                    );
-                } else {
-                    config
-                        .bundles
-                        .insert(session.bundle_id.clone(), bundle.clone());
-                }
-                Ok(())
-            })?;
-            persist_imported_session(&session)?;
+            persist_imported_session(
+                &session,
+                Some(crate::daemon::ImportedBundle {
+                    bundle_id: session.bundle_id.clone(),
+                    bundle: bundle.clone(),
+                }),
+            )?;
             Ok(ImportedDashboardSessionApply {
                 harness: imported.harness,
                 native_session_id: pending.native_session_id,
@@ -1376,6 +1368,7 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
 /// launch is the daemon's.
 pub(crate) fn spawn_dashboard_create_session(
     action: DashboardAction,
+    config: Config,
     go_save: Option<(std::path::PathBuf, mj_core::go::GoRecipe, bool)>,
     updates: UnboundedSender<DashboardIoUpdate>,
     lifecycle_updates: UnboundedSender<DashboardLifecycleUpdate>,
@@ -1412,8 +1405,9 @@ pub(crate) fn spawn_dashboard_create_session(
                 .context("save fast-start setup; session has not been started")?;
             }
             // The new-session preflight reads configuration and runs git; it
-            // never needs the store, which only the daemon opens.
-            let controller = mj_controller::controller::config_only_controller(Config::load()?);
+            // never needs the store, which only the daemon opens. The config
+            // is the daemon's published one, not a file this client reads.
+            let controller = mj_controller::controller::config_only_controller(config);
             let executor = CancellableProcessExecutor::new(cancelled.clone())
                 .with_deadline(Duration::from_secs(30));
             if project_directory.is_none() {

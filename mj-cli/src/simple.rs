@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use mj_core::config::{Config, TargetTemplate};
+use mj_core::config::TargetTemplate;
 use mj_core::go::{GoPreferences, GoRecipe};
 use std::path::PathBuf;
 
@@ -32,7 +32,9 @@ pub(crate) fn prepare(args: SimpleArgs) -> Result<mj_tui::GoMode> {
         directory.display()
     );
 
-    let config = Config::load()?;
+    let config = mj_core::runtime::block_on(async {
+        crate::daemon::connect_or_start().await?.config().await
+    })??;
     let preferences = GoPreferences::load(&GoPreferences::path())?;
     let saved = preferences.recipe(&directory);
     let profile_id = saved

@@ -102,6 +102,14 @@ pub struct DaemonIdentity {
     pub placement: DaemonPlacement,
 }
 
+/// A project synthesized while importing a native session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportedBundle {
+    pub bundle_id: String,
+    pub bundle: mj_core::config::ProjectBundle,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceListing {
@@ -582,6 +590,9 @@ pub enum DaemonAction {
     /// protocol 74, so it is deliberately not part of the frozen management
     /// subset: a client asks only a daemon of its own protocol.
     Identity,
+    /// The configuration the daemon serves. Clients read it here instead of
+    /// opening `config.toml`, which belongs to the daemon.
+    Configuration,
     Status,
     WebViewerAccess,
     /// The daemon host's Git commit author, which its sessions inherit.
@@ -655,6 +666,10 @@ pub enum DaemonAction {
     },
     PersistImportedSession {
         session: Box<SessionRecord>,
+        /// A project the import synthesized. The daemon writes it with the
+        /// session, so a client never edits the daemon's configuration.
+        #[serde(default)]
+        bundle: Option<ImportedBundle>,
     },
     SetSessionTitle {
         session_id: String,
@@ -1012,6 +1027,7 @@ pub enum DaemonReply {
     /// nothing is. Answers `DaemonAction::UpgradeBlockers`.
     UpgradeBlockers(Vec<String>),
     Identity(DaemonIdentity),
+    Configuration(Box<Config>),
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
     GitIdentity(GitIdentity),
@@ -1069,7 +1085,8 @@ impl DaemonReply {
     pub fn is_chunked(&self) -> bool {
         matches!(
             self,
-            Self::DashboardStartup(_)
+            Self::Configuration(_)
+                | Self::DashboardStartup(_)
                 | Self::RuntimeChanges(_)
                 | Self::SessionTail(_)
                 | Self::ResumeCandidates(_)
@@ -1606,6 +1623,15 @@ impl DaemonClient {
         }
     }
 
+    /// The configuration the daemon serves. Clients use this instead of
+    /// opening the daemon's `config.toml`.
+    pub async fn config(&mut self) -> Result<Config> {
+        match self.request(DaemonAction::Configuration).await? {
+            DaemonReply::Configuration(config) => Ok(*config),
+            reply => bail!("unexpected daemon configuration reply {reply:?}"),
+        }
+    }
+
     pub async fn status(&mut self) -> Result<DaemonStatus> {
         match self.request(DaemonAction::Status).await? {
             DaemonReply::Status(status) => Ok(status),
@@ -1892,10 +1918,15 @@ impl DaemonClient {
         }
     }
 
-    pub async fn persist_imported_session(&mut self, session: SessionRecord) -> Result<()> {
+    pub async fn persist_imported_session(
+        &mut self,
+        session: SessionRecord,
+        bundle: Option<ImportedBundle>,
+    ) -> Result<()> {
         match self
             .request(DaemonAction::PersistImportedSession {
                 session: Box::new(session),
+                bundle,
             })
             .await?
         {
@@ -2837,8 +2868,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Startup seeds runtime cursors with family scope; reply chunks use base64 bytes.
 // Clients read and set the daemon host's Git commit author.
 // The daemon reports its per-start identity, build and placement instead of
-// clients reading its PID and `/proc`.
-pub const PROTOCOL_VERSION: u32 = 75;
+// clients reading its PID and `/proc`, and it serves the configuration that
+// owns the store instead of clients opening `config.toml`.
+pub const PROTOCOL_VERSION: u32 = 76;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

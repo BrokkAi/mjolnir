@@ -388,6 +388,8 @@ fn a_daemon_reports_a_fresh_identity_for_each_start() {
             assert_eq!(identity.build_version, metadata.build_version);
             assert_eq!(identity.placement, mj_client::daemon::DaemonPlacement::Host);
             assert!(!identity.instance_id.is_empty());
+            // Stored settings come from the daemon, not the file.
+            assert!(!client.config().await.unwrap().phone.enabled);
             identity
         })
     }
@@ -605,11 +607,12 @@ fn old_daemon_fixture() {
                                     DaemonReply::Done
                                 }
                                 DaemonAction::PrepareUpgrade => if busy { DaemonReply::UpgradePending } else { DaemonReply::Done },
-                                // A daemon from before `Identity` cannot decode
-                                // the frame: it drops the connection. Clients
-                                // must treat that as an unknown identity, not
-                                // as a reason to keep asking.
-                                DaemonAction::Identity => break,
+                                // A daemon from before `Identity` or
+                                // `Configuration` cannot decode the frame: it
+                                // drops the connection. Clients must treat
+                                // that as an unknown answer, not as a reason to
+                                // keep asking.
+                                DaemonAction::Identity | DaemonAction::Configuration => break,
                                 other => panic!("new client reused the old daemon: {other:?}"),
                             };
                             write_frame(&mut stream, &ResponseEnvelope {

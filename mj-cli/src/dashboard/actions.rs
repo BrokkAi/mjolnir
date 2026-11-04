@@ -212,11 +212,12 @@ pub(crate) async fn apply_dashboard_action(
                     recipe: recipe.clone(),
                 };
                 context.dashboard.set_notice("Preparing session…");
+                let config = context.controller.config.clone();
                 super::io::spawn_critical_io(
                     context.critical_operations.clone(),
                     "preparing fast-start session",
                     context.dashboard_io_tx.clone(),
-                    move || crate::go::resolve_recipe(&go.directory, recipe),
+                    move || crate::go::resolve_recipe(&config, &go.directory, recipe),
                     move |result| DashboardIoUpdate::GoPrepared {
                         workspace_id,
                         retry: Box::new(retry),
@@ -1276,12 +1277,13 @@ pub(crate) async fn apply_dashboard_action(
                 context.cancel_session_preflight();
                 context.dashboard.begin_remote_session_preflight(generation);
             }
+            // The daemon's config is the one the session was planned against.
+            let config = context.controller.config.clone();
             let (cancelled, _) = spawn_cancellable_io_with_token(
                 context.critical_operations.clone(),
                 "repairing Git tracking",
                 context.dashboard_io_tx.clone(),
                 move |cancelled| {
-                    let config = mj_core::config::Config::load()?;
                     let bundle = config.bundles.get(&bundle_id).context("unknown bundle")?;
                     let executor = CancellableProcessExecutor::new(cancelled)
                         .with_deadline(std::time::Duration::from_secs(30));
@@ -1898,6 +1900,7 @@ fn start_session_launch_with_repository_preflight(
             let go_save = context.dashboard.remember_go_launch(&action);
             spawn_dashboard_create_session(
                 action,
+                context.controller.config.clone(),
                 go_save,
                 context.dashboard_io_tx.clone(),
                 context.lifecycle_updates_tx.clone(),
