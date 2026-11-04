@@ -189,6 +189,8 @@ Clients read the SQLite store directly (dashboard state, workspace layout, mount
 
 Local container sessions bind-mount host paths (project workspaces, build caches, the git cache, attachments). A daemon in a container cannot name those paths for the host engine, so the engine commands that create them must run on the node, not in the daemon.
 
+The node filesystem streams are enough for plain host files, but not for every host operation the daemon performs. SessionWiki's adapters live in the `sessionwiki` crate and call `std::fs` internally, so a `HostFs` handle cannot redirect their scan; the index build must run on the node or the crate needs a VFS. OpenCode login import opens a host SQLite database (including WAL state), and managed worker installation holds file locks and installs executables, so those need node-side execution rather than a byte stream. These are design decisions for the remaining HostFs work, not mechanical call-site replacements. (2026-11-04)
+
 
 The dashboard was a second writer. Repairing a stopped session's repository origin before resume (`replace_resume_repository_origin`) ran in the terminal process and saved the session record and `config.toml` itself. It now runs in the daemon. Most other `Controller::load()` calls in the dashboard loaded the whole store and then ignored it: lifecycle closures never used the controller they were given, and reloads only needed mount history and container sizes.
 
