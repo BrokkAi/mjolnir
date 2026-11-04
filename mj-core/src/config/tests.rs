@@ -2299,6 +2299,33 @@ fn a_disabled_profile_loads_instead_of_failing() {
 #[test]
 fn a_session_review_choice_is_stored_in_a_stable_shape() {
     // Stored in `sessions.review_json`; older and newer releases read it.
+    let inherit = SessionReview::Inherit {
+        count: std::num::NonZeroUsize::new(2),
+        model: Some("gpt-6-astra".into()),
+        effort: Some("high".into()),
+        tier: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&inherit).unwrap(),
+        r#"{"mode":"inherit","count":2,"model":"gpt-6-astra","effort":"high"}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<SessionReview>(
+            r#"{"mode":"inherit","count":2,"model":"gpt-6-astra","effort":"high"}"#
+        )
+        .unwrap(),
+        inherit
+    );
+    let inherited_tier = SessionReview::Inherit {
+        count: None,
+        model: None,
+        effort: None,
+        tier: Some("extended".into()),
+    };
+    assert_eq!(
+        serde_json::to_string(&inherited_tier).unwrap(),
+        r#"{"mode":"inherit"}"#
+    );
     let on = SessionReview::Turn {
         count: None,
         model: Some("gpt-6-astra".into()),
@@ -2355,7 +2382,7 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
         assert_eq!(serde_json::to_string(&choice).unwrap(), value);
         assert_eq!(
             ReviewConfig::default().for_session(Some(&choice)).trigger,
-            choice.trigger()
+            choice.trigger().unwrap()
         );
         let global = ReviewConfig {
             count: std::num::NonZeroUsize::new(4).unwrap(),
@@ -2372,6 +2399,21 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
         serde_json::from_str::<SessionReview>(r#"{"mode":"off"}"#).unwrap(),
         SessionReview::Off
     );
+
+    // Session-only model/count overrides must preserve each live global trigger.
+    for trigger in [ReviewTrigger::Off, ReviewTrigger::Turn, ReviewTrigger::Push] {
+        let global = ReviewConfig {
+            trigger,
+            count: std::num::NonZeroUsize::new(4).unwrap(),
+            ..Default::default()
+        };
+        let effective = global.for_session(Some(&inherit));
+        assert_eq!(effective.trigger, trigger);
+        assert_eq!(effective.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(effective.count.get(), 2);
+        assert_eq!(effective.effort.as_deref(), Some("high"));
+        assert_eq!(inherit.trigger(), None);
+    }
 }
 
 #[test]

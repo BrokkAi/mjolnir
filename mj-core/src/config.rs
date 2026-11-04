@@ -240,6 +240,19 @@ impl From<ReviewConfigInput> for ReviewConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum SessionReview {
+    /// Follow the current `[review]` trigger, with optional session settings.
+    Inherit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<std::num::NonZeroUsize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+        /// Deprecated review tier. Accepted in old session records and API
+        /// requests, ignored, and omitted from newly serialized values.
+        #[serde(default, skip_serializing)]
+        tier: Option<String>,
+    },
     /// Never review this session automatically. A manual `/review` still runs.
     Off,
     /// Review every turn. A field left empty keeps the `[review]` value; a
@@ -273,11 +286,12 @@ pub enum SessionReview {
 }
 
 impl SessionReview {
-    pub fn trigger(&self) -> ReviewTrigger {
+    pub fn trigger(&self) -> Option<ReviewTrigger> {
         match self {
-            Self::Off => ReviewTrigger::Off,
-            Self::Turn { .. } => ReviewTrigger::Turn,
-            Self::Push { .. } => ReviewTrigger::Push,
+            Self::Inherit { .. } => None,
+            Self::Off => Some(ReviewTrigger::Off),
+            Self::Turn { .. } => Some(ReviewTrigger::Turn),
+            Self::Push { .. } => Some(ReviewTrigger::Push),
         }
     }
 }
@@ -299,7 +313,13 @@ impl ReviewConfig {
             None => {}
             Some(SessionReview::Off) => config.trigger = ReviewTrigger::Off,
             Some(
-                choice @ (SessionReview::Turn {
+                choice @ (SessionReview::Inherit {
+                    model,
+                    effort,
+                    count,
+                    ..
+                }
+                | SessionReview::Turn {
                     model,
                     effort,
                     count,
@@ -312,7 +332,9 @@ impl ReviewConfig {
                     ..
                 }),
             ) => {
-                config.trigger = choice.trigger();
+                if let Some(trigger) = choice.trigger() {
+                    config.trigger = trigger;
+                }
                 if model.is_some() {
                     config.model.clone_from(model);
                 }

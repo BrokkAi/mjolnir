@@ -633,10 +633,10 @@ pub(super) fn deserialize_session_review<'de, D: serde::Deserializer<'de>>(
         .map(|value| {
             if !matches!(
                 value.get("mode").and_then(serde_json::Value::as_str),
-                Some("off" | "turn" | "push")
+                Some("inherit" | "off" | "turn" | "push")
             ) {
                 return Err(serde::de::Error::custom(
-                    "review.mode must be off, turn, or push",
+                    "review.mode must be inherit, off, turn, or push",
                 ));
             }
             serde_json::from_value(value).map_err(serde::de::Error::custom)

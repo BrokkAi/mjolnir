@@ -52,9 +52,9 @@ away.
 - **Shared project memory.** Supported harnesses share synchronized project
   memory across sessions and targets. Muse currently cannot receive the
   injected memory tools; see the [harness limitations](https://mjolnir.brokk.ai/profiles/#harness-limitations).
-- **Adversarial review.** Turn it on and an independent reviewer, on a different
-  provider when one is available, checks each turn's work and reports
-  actionable findings.
+- **Adversarial review.** Choose end-of-turn or before-push review. Independent
+  reviewers, on a different provider when one is available, check the work and
+  report actionable findings.
 - **Multi-repo projects.** Bundle several repositories so they provision,
   checkpoint, move, and restore together.
 - **Agent and editor integration.** Drive sessions through `mj new`, `mj prompt`,

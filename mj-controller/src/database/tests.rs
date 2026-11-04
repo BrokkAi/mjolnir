@@ -1304,6 +1304,48 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     );
 }
 
+// Hard-won: 06cfc1cfe: reviewer-only flags replaced before-push review with end-of-turn.
+#[test]
+fn inherited_session_review_survives_lifecycle_writes_and_keeps_trigger_inheritance() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut record = session("session-1", "project-1");
+    record.review = Some(mj_core::config::SessionReview::Inherit {
+        count: std::num::NonZeroUsize::new(3),
+        model: Some("gpt-6-astra".into()),
+        effort: Some("high".into()),
+        tier: None,
+    });
+    save_session_to(&database, &record).unwrap();
+    record.state = SessionState::Running;
+    save_lifecycle_session_to(&database, &record).unwrap();
+
+    let loaded = load_state_from(&database).unwrap();
+    let review = loaded.sessions["session-1"].review.as_ref().unwrap();
+    assert_eq!(
+        review,
+        &mj_core::config::SessionReview::Inherit {
+            count: std::num::NonZeroUsize::new(3),
+            model: Some("gpt-6-astra".into()),
+            effort: Some("high".into()),
+            tier: None,
+        }
+    );
+    for trigger in [
+        mj_core::config::ReviewTrigger::Off,
+        mj_core::config::ReviewTrigger::Turn,
+        mj_core::config::ReviewTrigger::Push,
+    ] {
+        let global = mj_core::config::ReviewConfig {
+            trigger,
+            ..mj_core::config::ReviewConfig::default()
+        };
+        let effective = global.for_session(Some(review));
+        assert_eq!(effective.trigger, trigger);
+        assert_eq!(effective.count.get(), 3);
+    }
+}
+
 #[test]
 fn a_session_keeps_its_project_memory_and_mailbox_opt_outs_through_lifecycle_writes() {
     let directory = tempfile::tempdir().unwrap();

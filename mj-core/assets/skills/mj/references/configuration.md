@@ -367,13 +367,13 @@ writes `trigger`, not `enabled`.
 
 `mj new --review off|turn|push` and `mj import <harness> --review off|turn|push`
 set the trigger for one session, overriding `[review]`. `--review-model <model>`
-and `--review-effort <effort>` set reviewer choices. `--review-count <count>` overrides the number of reviewers for that session. Without `--review`, any of these options selects `turn`; an explicit `--review off` remains off. In Auto, Mjolnir picks an enabled profile that offers
+and `--review-effort <effort>` set reviewer choices while keeping the configured trigger. `--review-count <count>` overrides the number of reviewers for that session. Use `--review off|turn|push` to select a trigger explicitly. In Auto, Mjolnir picks an enabled profile that offers
 the model, including DSH or any other enabled profile. Auto always uses High effort; the effort override applies only to a named reviewer profile.
 `/review` remains available when the trigger is `off`.
 
 The deprecated `mj new --review-tier quick|extended` option still accepts
-either value and selects `turn` when used without `--review`, but the value is
-ignored. `mj import <harness>` accepts the same compatibility option. Existing
+either value, but the value is ignored and does not change the configured
+trigger. `mj import <harness>` accepts the same compatibility option. Existing
 `tier` values in session settings are also ignored.
 
 In the terminal, these review fields are edited inside **Settings** so one Save or
