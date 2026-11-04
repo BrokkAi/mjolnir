@@ -221,7 +221,7 @@ fn every_launch_adds_newly_installed_agents_and_keeps_disabled_profiles_off() {
 fn automatic_detection_leaves_a_configured_harness_conventional_home_alone() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    let managed = homes(directory.path(), &[HarnessKind::Mimo]);
+    let managed = homes(directory.path(), &[HarnessKind::Kimi]);
     run_setup_with_discovery(
         &path,
         directory.path(),
@@ -234,8 +234,8 @@ fn automatic_detection_leaves_a_configured_harness_conventional_home_alone() {
     .unwrap();
 
     let conventional = DiscoveredHome {
-        kind: HarnessKind::Mimo,
-        path: directory.path().join(".mimocode"),
+        kind: HarnessKind::Kimi,
+        path: directory.path().join(".kimi-code"),
         conventional: true,
         codex_profile: None,
         authenticated: true,
@@ -251,15 +251,15 @@ fn automatic_detection_leaves_a_configured_harness_conventional_home_alone() {
     // A home named by the harness's own home variable is a distinct
     // installation and is still added.
     let named = DiscoveredHome {
-        kind: HarnessKind::Mimo,
-        path: directory.path().join("work/mimo"),
+        kind: HarnessKind::Kimi,
+        path: directory.path().join("work/kimi"),
         conventional: false,
         codex_profile: None,
         authenticated: true,
     };
     assert_eq!(
         add_profiles_for(&path, &[named], &|| false).unwrap(),
-        ["mimo-2"]
+        ["kimi-2"]
     );
 }
 

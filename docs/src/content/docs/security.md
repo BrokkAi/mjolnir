@@ -61,7 +61,6 @@ controls:
 | Grok Build | always approve with its sandbox disabled |
 | Muse Code | the `:ask-me` permission profile in its staged settings, `allowAll` approvals with auto-review off, and `--disable-sandbox` (no permission checks; set `muse_auto_review = true` on the profile to restore the reviewer, which can still deny) |
 | OpenCode | `"permission": "allow"` in the staged `opencode.json` |
-| MiMo Code | `MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1` |
 | DSH | dsh-acp's `permission_mode` `allow`, selected on every session open |
 
 Kimi's mode is named `auto`, but in this context it approves every call. It is
@@ -76,9 +75,9 @@ permission checks (`allowAll` approvals with auto-review off) and disables
 only the sandbox there; a profile with `muse_auto_review = true` keeps the
 review in containers too. With guardian approvals the sandbox
 stays on, even when a profile's `MUSE_SERVE_ARGS` passes `--disable-sandbox`.
-Kimi Code cannot preserve approvals. OpenCode and MiMo Code ask before tools
-according to their permission rules, but run every command directly on the
-host: both projects state that their permission system is not a sandbox. DSH
+Kimi Code cannot preserve approvals. OpenCode asks before tools according to
+its permission rules, but runs every command directly on the host: the project
+states that its permission system is not a sandbox. DSH
 under configured approvals selects dsh-acp's `permission_mode` `ask`, so every
 write, command, and MCP tool call asks first, but it has no sandbox either:
 commands run directly on the host, and only its file tools are confined to the
@@ -126,7 +125,6 @@ home from a harness-specific allowlist:
 | Grok Build | Authentication, config, agent ID, instructions, skills, and plugins |
 | Muse Code | Authentication, settings, trust configuration, instructions, skills, and rules |
 | OpenCode | Authentication, configuration, instructions, and skills |
-| MiMo Code | Authentication and the complete `config/` tree, including instructions, skills, agents, and plugins |
 | DSH | Instructions and skills (which DSH does not read); its API key reaches the session through the environment, not a file |
 
 Symbolic links inside an allowlisted profile entry are followed: the session

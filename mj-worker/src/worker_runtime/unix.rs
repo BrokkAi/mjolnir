@@ -1580,11 +1580,7 @@ async fn prepare_and_start_harness(
     if config.execution_policy == ExecutionPolicy::ConfiguredApprovals
         && matches!(
             config.harness,
-            HarnessKind::Kimi
-                | HarnessKind::Grok
-                | HarnessKind::OpenCode
-                | HarnessKind::Mimo
-                | HarnessKind::Muse
+            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::OpenCode | HarnessKind::Muse
         )
     {
         let budget = preparation_step(
@@ -1620,14 +1616,7 @@ async fn prepare_and_start_harness(
                     harness,
                     policy,
                 )?;
-                super::json_gh_rules::configure_json_gh_rules(
-                    &root,
-                    &session_id,
-                    &home,
-                    harness,
-                    policy,
-                    &mut environment,
-                )?;
+                super::json_gh_rules::configure_json_gh_rules(harness, policy, &mut environment)?;
                 environment.retain(|name, value| {
                     native_explicit_environment.contains_key(name)
                         || native_base_environment.get(name) != Some(value)

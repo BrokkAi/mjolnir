@@ -310,8 +310,8 @@ fn detecting_profiles_on_a_machine_without_an_agent_says_so_plainly() {
     assert_eq!(
         notice,
         "No coding agent installation was found on this machine. Add a profile, choose Sign in, \
-         or install Codex, Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, MiMo Code, or \
-         DSH, sign in to it once, and choose Detect profiles again."
+         or install Codex, Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, or DSH, \
+         sign in to it once, and choose Detect profiles again."
     );
 }
 
@@ -354,7 +354,7 @@ fn a_profile_page_hides_codex_only_settings_for_other_kinds() {
             .iter()
             .all(|key| keys("codex").contains(&(*key).to_owned()))
     );
-    for kind in ["claude", "kimi", "grok", "muse", "opencode", "mimo", "dsh"] {
+    for kind in ["claude", "kimi", "grok", "muse", "opencode", "dsh"] {
         assert!(
             !keys(kind)
                 .iter()

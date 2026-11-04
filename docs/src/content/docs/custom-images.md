@@ -42,7 +42,7 @@ deliver only part of an equivalent environment setting.
 ## ACP bridges
 
 For each harness, Mjolnir first looks for an image-baked bridge binary on
-`PATH`: `codex-acp`, `claude-agent-acp`, `kimi`, `grok`, `opencode`, `mimo`, or `dsh-acp`. If it doesn't find
+`PATH`: `codex-acp`, `claude-agent-acp`, `kimi`, `grok`, `opencode`, or `dsh-acp`. If it doesn't find
 one, the worker installs Mjolnir's exact pinned artifact into a leased cache.
 Codex and Claude Code use `npm ci`; the other harnesses use their direct
 artifacts or pinned packages. Mjolnir reuses Node.js 22+ with npm and npx from
@@ -58,10 +58,6 @@ reports the missing glibc loader before downloading an unusable archive.
 
 An image-baked `opencode` must be OpenCode 2, because each session imports its
 logins with `opencode auth import` before it starts.
-
-MiMo Code falls back to Mjolnir's managed installation of its pinned native
-release, which needs no Node runtime. Bake MiMo Code 0.1.16's `mimo` from its
-release archive and set `MIMOCODE_DISABLE_AUTOUPDATE=1` to avoid installing it.
 
 DSH speaks ACP itself, so `dsh-acp` is both its bridge and its agent. Without
 `dsh-acp` on `PATH`, a session falls back to `npx -y @brokkai/dsh-acp@0.5.0`,

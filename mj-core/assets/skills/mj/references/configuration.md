@@ -634,7 +634,7 @@ home = "/home/me/.codex-work"
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
 | `enabled` | boolean | no | `true` | Disabled profiles stay configured but cannot be selected for new work, login, import, review, quota reporting, or utility-model inference. Existing running sessions continue. |
-| `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `muse`, `opencode`, `mimo`, or `dsh`. `deepseek`, the removed DeepSeek harness, fails to load. |
+| `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `muse`, `opencode`, or `dsh`. `deepseek`, the removed DeepSeek harness, fails to load. A profile whose kind is `mimo`, the removed MiMo Code harness, is ignored with a warning when the configuration loads and is removed from the file on the next save. |
 | `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
 | `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` reads that variable from the environment Mjolnir started with unless it is set here; when it is set in neither, the profile cannot start, the configuration still loads, and `mj doctor` says how to supply it. A DSH profile takes `DEEPSEEK_API_KEY` from the key saved in DSH (`.credentials.yaml` in its home) first, then the environment Mjolnir started with, then `.env` in its home, and only then from this table. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
@@ -643,13 +643,10 @@ home = "/home/me/.codex-work"
 
 The profile's harness-home variable cannot appear in `environment`; set `home`
 instead. Those variables are `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
-`KIMI_CODE_HOME`, `GROK_HOME`, MiMo Code's `MIMOCODE_HOME`, DSH's
+`KIMI_CODE_HOME`, `GROK_HOME`, DSH's
 `DSH_ACP_DATA_DIR`, and `XDG_CONFIG_HOME` for Muse and OpenCode. Muse and
 OpenCode also reserve `XDG_DATA_HOME`; their homes must end in `/muse` and `/opencode`,
-respectively. A MiMo Code profile at the conventional `~/.mimocode` home reads
-the stock `~/.config/mimocode` configuration and
-`~/.local/share/mimocode/auth.json` login; every other MiMo home is a
-`MIMOCODE_HOME` root. A DSH profile also cannot set `DSH_ACP_SYSTEM_PROMPT`
+respectively. A DSH profile also cannot set `DSH_ACP_SYSTEM_PROMPT`
 (put instructions in `AGENTS.md` in the profile home) or
 `DSH_ACP_PERMISSION_MODE` (the target's permission mode decides it); a profile
 that sets either fails to load. Other dsh-acp settings may go in
@@ -1268,7 +1265,6 @@ Harness-home variables influence automatic first-run discovery and explicit
 | Grok Build | `GROK_HOME` | `~/.grok` |
 | Muse Code | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` |
 | OpenCode | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` |
-| MiMo Code | `MIMOCODE_HOME` | `~/.mimocode` (the stock install keeps `config/` and `data/` in XDG) |
 | DSH | `DSH_ACP_DATA_DIR` | `~/.dsh` |
 
 The release installer separately accepts `MJOLNIR_INSTALL_DIR` (preferred over

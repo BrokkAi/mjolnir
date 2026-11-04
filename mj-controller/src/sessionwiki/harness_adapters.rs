@@ -47,7 +47,6 @@ pub(super) const fn tool_name(kind: HarnessKind) -> &'static str {
         HarnessKind::Grok => "grok-build",
         HarnessKind::Muse => "muse",
         HarnessKind::OpenCode => "opencode",
-        HarnessKind::Mimo => "mimo",
         HarnessKind::Dsh => "dsh",
     }
 }
@@ -70,8 +69,6 @@ fn adapted_tool_name(kind: HarnessKind) -> Option<&'static str> {
         // so Mjolnir relies on the stock one: its sessions are SQLite rows
         // rather than transcripts this adapter could index.
         HarnessKind::OpenCode => None,
-        // MiMo Code also stores sessions in SQLite, with a distinct schema.
-        HarnessKind::Mimo => None,
         // No adapter reads dsh-acp's session records yet.
         HarnessKind::Dsh => None,
     }

@@ -1531,7 +1531,7 @@ impl Config {
         if contents.trim().is_empty() {
             return Ok(Self::default());
         }
-        let document: toml::Value = contents
+        let mut document: toml::Value = contents
             .parse()
             .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
         if let Some(found) = newer_version(&document) {
@@ -1552,6 +1552,18 @@ impl Config {
             );
         }
         reject_removed_profile_overrides(&contents)?;
+        let removed = drop_removed_harness_profiles(&mut document);
+        let contents = if removed.is_empty() {
+            contents
+        } else {
+            tracing::warn!(
+                config = %path.display(),
+                profiles = ?removed,
+                "ignoring profiles for a harness Mjolnir no longer supports; the next save removes them"
+            );
+            toml::to_string(&document)
+                .with_context(|| format!("rewrite Mjolnir config {}", path.display()))?
+        };
         // Version 2 adds Podman workspace storage; version 3 restores the
         // spinner preference; version 4 adds stopped-session visibility;
         // version 5 adds the terminal theme preference; version 6 adds

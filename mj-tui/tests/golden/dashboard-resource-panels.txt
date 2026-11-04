@@ -189,11 +189,11 @@
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly       Resets  5H Resets                       │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
-│                                      ││  mimo-1    MiMo Code    ▕   n/a    ▏                                         │
+│                                      ││              Harness      Weekly       Resets  5H Resets                     │
+│                                      ││  claude-1    Claude Code  refreshing…                                        │
+│                                      ││  codex-1     Codex        refreshing…                                        │
+│                                      ││  codex-2     Codex        refreshing…                                        │
+│                                      ││  opencode-1  OpenCode     ▕   n/a    ▏                                       │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === Claude Fable weekly quota (140x28) ===

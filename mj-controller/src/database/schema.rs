@@ -1636,7 +1636,9 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
 
     // Breaking: older daemons do not know the `mimo` harness. They skip such
     // sessions when loading state, and a full state save would delete them, so
-    // the compatibility floor rises with the new harness kind.
+    // the compatibility floor rises with the new harness kind. MiMo Code has
+    // since been removed; the constraint keeps admitting `mimo` so rows an
+    // earlier release wrote stay readable, and loading skips them.
     if version < 90 {
         migrate_mimo_harness_kind(connection)?;
     }

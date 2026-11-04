@@ -221,7 +221,6 @@ fn ambient_native_harness_is_available(
         HarnessKind::Kimi => "kimi",
         HarnessKind::Grok => "grok",
         HarnessKind::OpenCode => "opencode",
-        HarnessKind::Mimo => "mimo",
         HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Muse | HarnessKind::Dsh => {
             return Ok(false);
         }
@@ -477,12 +476,7 @@ mod tests {
 
     #[test]
     fn built_in_native_container_fallbacks_are_managed_only_when_target_tools_are_missing() {
-        for harness in [
-            HarnessKind::Kimi,
-            HarnessKind::Grok,
-            HarnessKind::OpenCode,
-            HarnessKind::Mimo,
-        ] {
+        for harness in [HarnessKind::Kimi, HarnessKind::Grok, HarnessKind::OpenCode] {
             let (command, args) =
                 mj_core::harness_runtime::fallback_launch(harness, ExecutionPolicy::Unconstrained);
             assert!(
@@ -498,19 +492,14 @@ mod tests {
             );
         }
         let tools = tempfile::tempdir().unwrap();
-        for command in ["kimi", "grok", "opencode", "mimo"] {
+        for command in ["kimi", "grok", "opencode"] {
             mj_core::test_hooks::install_fake_command(tools.path(), command, "#!/bin/sh\nexit 0\n");
         }
         let environment = BTreeMap::from([(
             "PATH".to_owned(),
             tools.path().to_string_lossy().into_owned(),
         )]);
-        for harness in [
-            HarnessKind::Kimi,
-            HarnessKind::Grok,
-            HarnessKind::OpenCode,
-            HarnessKind::Mimo,
-        ] {
+        for harness in [HarnessKind::Kimi, HarnessKind::Grok, HarnessKind::OpenCode] {
             assert!(
                 ambient_native_harness_is_available(harness, &environment).unwrap(),
                 "{} should reuse its target-provided executable",

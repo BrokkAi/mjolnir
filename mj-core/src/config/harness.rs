@@ -18,7 +18,6 @@ pub enum HarnessKind {
     Grok,
     Muse,
     OpenCode,
-    Mimo,
     Dsh,
 }
 
@@ -216,75 +215,13 @@ fn absolute_environment_path(name: &str) -> Option<PathBuf> {
         .filter(|path| path.is_absolute())
 }
 
-/// The XDG base directory `name`, or `fallback` beneath the user's home.
-fn xdg_home(name: &str, fallback: &str) -> Option<PathBuf> {
-    absolute_environment_path(name)
-        .or_else(|| crate::path_input::user_home().map(|home| home.join(fallback)))
-}
-
-/// MiMo Code's stock directory in the XDG tree `name` names, such as
-/// `~/.local/share/mimocode`. The stock install names these trees after its
-/// program, `mimocode`, not after Mjolnir's `mimo` harness id.
-fn mimo_stock_xdg_dir(name: &str, fallback: &str) -> Option<PathBuf> {
-    xdg_home(name, fallback).map(|base| base.join("mimocode"))
-}
-
-/// Whether a MiMo Code profile's own `config/` tree carries a configuration
-/// file, which makes it authoritative over the stock XDG configuration.
-fn mimo_config_is_seeded(config: &Path) -> bool {
-    ["mimocode.jsonc", "mimocode.json"]
-        .into_iter()
-        .any(|name| config.join(name).is_file())
-}
-
-/// MiMo Code's configuration trees for a profile `home`, lowest priority
-/// first. See [`HarnessKind::configuration_sources`].
-fn mimo_configuration_sources(
-    home: &Path,
-    is_default_home: bool,
-    stock_config: Option<&Path>,
-) -> Vec<PathBuf> {
-    let managed = home.join("config");
-    let mut sources = Vec::new();
-    if is_default_home
-        && !mimo_config_is_seeded(&managed)
-        && let Some(stock) = stock_config
-    {
-        sources.push(stock.to_path_buf());
-    }
-    sources.push(managed);
-    sources
-}
-
-/// MiMo Code's data directory for a profile `home`. See
-/// [`HarnessKind::data_source`].
-fn mimo_data_source(home: &Path, is_default_home: bool, stock_data: Option<&Path>) -> PathBuf {
-    let managed = home.join("data");
-    if is_default_home
-        && !managed.join("auth.json").is_file()
-        && let Some(stock) = stock_data
-    {
-        stock.to_path_buf()
-    } else {
-        managed
-    }
-}
-
 /// The file inside a harness home that proves the harness is logged in.
 ///
 /// Setup, quota checks, credential sync, and the target-side worker all read
 /// the same path, so it is decided here beside [`HarnessKind`] rather than in
 /// any one of them.
 pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf {
-    match kind {
-        // MiMo Code's stock installation keeps its login in the XDG data
-        // directory rather than beneath the installer's `~/.mimocode`
-        // directory, which is what a conventional profile home names.
-        // `data_source` resolves that layout and the MIMOCODE_HOME layout a
-        // configured root uses.
-        HarnessKind::Mimo => kind.data_source(home).join("auth.json"),
-        _ => home.join(kind.credential_file_name()),
-    }
+    home.join(kind.credential_file_name())
 }
 
 impl HarnessKind {
@@ -314,13 +251,6 @@ impl HarnessKind {
             self.home_env().into(),
             crate::target_path::text(config_root),
         );
-        if self == Self::Mimo {
-            environment.insert(
-                "MIMOCODE_CONFIG_DIR".into(),
-                crate::target_path::text(&crate::target_path::join(home, Path::new("config"))),
-            );
-            environment.insert("MIMOCODE_DISABLE_AUTOUPDATE".into(), "1".into());
-        }
         if self == Self::Kimi {
             // Kimi treats a session lock recorded under another hostname, or
             // under a live process with the recorded PID, as held forever.
@@ -350,27 +280,6 @@ impl HarnessKind {
         host: HarnessHost,
         environment: &mut BTreeMap<String, String>,
     ) {
-        // A MiMo Code profile at the conventional home names the directory the
-        // official installer populates with its executable. That install keeps
-        // configuration and the login in the person's XDG trees, so pointing
-        // `MIMOCODE_HOME` at the installer directory for `mj login` would
-        // start a second, empty profile and leave the person's own one
-        // untouched. The exception is a login Mjolnir already wrote into the
-        // profile root: update that login in place, while still reading the
-        // person's stock configuration so their providers are offered.
-        if self == Self::Mimo && self.is_default_home(home) {
-            if home.join("data/auth.json").is_file() {
-                environment.insert(self.home_env().into(), crate::target_path::text(home));
-                if let Some(stock) = mimo_stock_xdg_dir("XDG_CONFIG_HOME", ".config") {
-                    environment.insert(
-                        "MIMOCODE_CONFIG_DIR".into(),
-                        crate::target_path::text(&stock),
-                    );
-                }
-                environment.insert("MIMOCODE_DISABLE_AUTOUPDATE".into(), "1".into());
-            }
-            return;
-        }
         if self.keeps_login_in_home(host) && !self.is_own_nested_home(home) {
             self.configure_home_environment(home, environment);
         }
@@ -397,43 +306,6 @@ impl HarnessKind {
             .join("profiles")
             .join(profile_id)
             .join(self.id())
-    }
-
-    /// The configuration trees a session stages for `home`, lowest priority
-    /// first.
-    ///
-    /// Every harness has one, at `home` itself. MiMo Code's stock installation
-    /// is the exception: its configuration is the XDG configuration directory,
-    /// `~/.config/mimocode`, while its data and login are in
-    /// `~/.local/share/mimocode`. A profile whose home is the conventional
-    /// `~/.mimocode` therefore names the installer's directory. Its own
-    /// `config/` tree still stages last so Mjolnir's synced skills and any
-    /// managed settings win, with the person's stock configuration beneath
-    /// them until the profile has a configuration file of its own. Any other
-    /// MiMo home is a `MIMOCODE_HOME` root and stages only its `config/` tree.
-    pub fn configuration_sources(self, home: &Path) -> Vec<PathBuf> {
-        if self != Self::Mimo {
-            return vec![home.to_path_buf()];
-        }
-        let stock = mimo_stock_xdg_dir("XDG_CONFIG_HOME", ".config");
-        mimo_configuration_sources(home, self.is_default_home(home), stock.as_deref())
-    }
-
-    /// The directory holding the login and native session data a session
-    /// stages for `home`.
-    ///
-    /// Every harness keeps it at `home` itself. MiMo Code's stock installation
-    /// keeps it in the XDG data directory, `~/.local/share/mimocode`; a
-    /// `MIMOCODE_HOME` root keeps it in `data/` beneath that root. The
-    /// conventional `~/.mimocode` profile uses the XDG tree unless the profile
-    /// root already holds its own login, which is how a `mj login` against a
-    /// MIMOCODE_HOME root is found again.
-    pub fn data_source(self, home: &Path) -> PathBuf {
-        if self != Self::Mimo {
-            return home.to_path_buf();
-        }
-        let stock = mimo_stock_xdg_dir("XDG_DATA_HOME", ".local/share");
-        mimo_data_source(home, self.is_default_home(home), stock.as_deref())
     }
 
     /// Whether `home` is the person's own home for a harness with an XDG home
@@ -504,14 +376,13 @@ impl HarnessKind {
         }
     }
 
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::Codex,
         Self::Claude,
         Self::Kimi,
         Self::Grok,
         Self::Muse,
         Self::OpenCode,
-        Self::Mimo,
         Self::Dsh,
     ];
 
@@ -524,7 +395,6 @@ impl HarnessKind {
             Self::Grok => "GROK_HOME",
             Self::Muse => "XDG_CONFIG_HOME",
             Self::OpenCode => "XDG_CONFIG_HOME",
-            Self::Mimo => "MIMOCODE_HOME",
             // dsh-acp has no home of its own; its data directory holds its
             // sessions and would otherwise default to `.dsh-acp` inside the
             // directory it runs in.
@@ -542,7 +412,6 @@ impl HarnessKind {
             Self::Grok => ".grok",
             Self::Muse => ".config/muse",
             Self::OpenCode => ".config/opencode",
-            Self::Mimo => ".mimocode",
             // DeepSeek's own CLI, `dsh`, keeps its home here. Detection keys
             // off the user's DeepSeek installation; the dsh-acp bridge that
             // serves a session is installed on demand and proves nothing
@@ -566,7 +435,6 @@ impl HarnessKind {
             Self::Grok => "auth.json",
             Self::Muse => "auth.json",
             Self::OpenCode => ".data/opencode/mjolnir-credentials.json",
-            Self::Mimo => "data/auth.json",
             // dsh-acp keeps no login: it reads its key from its environment
             // ([`HarnessKind::api_key_variable`]), so every DSH profile
             // authenticates with an API key and nothing that decides a login
@@ -589,13 +457,9 @@ impl HarnessKind {
     pub const fn api_key_variable(self) -> Option<&'static str> {
         match self {
             Self::Dsh => Some("DEEPSEEK_API_KEY"),
-            Self::Codex
-            | Self::Claude
-            | Self::Kimi
-            | Self::Grok
-            | Self::Muse
-            | Self::OpenCode
-            | Self::Mimo => None,
+            Self::Codex | Self::Claude | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode => {
+                None
+            }
         }
     }
 
@@ -614,13 +478,9 @@ impl HarnessKind {
                     "the target's permission mode decides it",
                 ),
             ],
-            Self::Codex
-            | Self::Claude
-            | Self::Kimi
-            | Self::Grok
-            | Self::Muse
-            | Self::OpenCode
-            | Self::Mimo => &[],
+            Self::Codex | Self::Claude | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode => {
+                &[]
+            }
         }
     }
 
@@ -646,7 +506,6 @@ impl HarnessKind {
             Self::Grok => "grok",
             Self::Muse => "muse",
             Self::OpenCode => "opencode",
-            Self::Mimo => "mimo",
             // DeepSeek's `dsh`, not the dsh-acp bridge Mjolnir installs to
             // serve sessions: a machine carrying the bridge but no DeepSeek
             // installation has nothing to detect.
@@ -660,13 +519,9 @@ impl HarnessKind {
             Self::Claude => "CLAUDE.md",
             // dsh-acp reads AGENTS.md from its data directory and workspace
             // roots ([`crate::harness_runtime::dsh_acp_script`]).
-            Self::Codex
-            | Self::Kimi
-            | Self::Grok
-            | Self::Muse
-            | Self::OpenCode
-            | Self::Mimo
-            | Self::Dsh => "AGENTS.md",
+            Self::Codex | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode | Self::Dsh => {
+                "AGENTS.md"
+            }
         }
     }
 
@@ -685,7 +540,6 @@ impl HarnessKind {
             | Self::Muse
             | Self::OpenCode
             | Self::Dsh => &["skills"],
-            Self::Mimo => &["config/skills"],
         }
     }
 
@@ -707,7 +561,7 @@ impl HarnessKind {
         match self {
             Self::Claude => &["skills/synced", "skills/.trash"],
             Self::Codex => &["skills/.system"],
-            Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo | Self::Dsh => &[],
+            Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode | Self::Dsh => &[],
         }
     }
 
@@ -720,7 +574,6 @@ impl HarnessKind {
             Self::Grok => "grok",
             Self::Muse => "muse",
             Self::OpenCode => "opencode",
-            Self::Mimo => "mimo",
             Self::Dsh => "dsh",
         }
     }
@@ -734,7 +587,6 @@ impl HarnessKind {
             Self::Grok => "Grok Build",
             Self::Muse => "Muse Code",
             Self::OpenCode => "OpenCode",
-            Self::Mimo => "MiMo Code",
             Self::Dsh => "DSH",
         }
     }
@@ -749,9 +601,6 @@ impl HarnessKind {
                 "Install it with `npm install -g @openai/codex` (Node.js 22 or newer)".to_owned()
             }
             Self::Claude => "Install it with `npm install -g @anthropic-ai/claude-code`".to_owned(),
-            Self::Mimo => {
-                "Install it with `curl -fsSL https://mimo.xiaomi.com/install | bash`".to_owned()
-            }
             Self::Dsh => "Install it with `npm install -g @brokkai/dsh-acp` (Node.js 22 or newer), or from a release archive at https://github.com/BrokkAi/dsh-acp/releases".to_owned(),
             other => format!("Install the {} CLI", other.display_name()),
         }
@@ -938,20 +787,6 @@ impl HarnessKind {
                     object_version: None,
                 }),
             }),
-            // This is MiMo Code's own unconstrained startup mode. It injects
-            // an allow-all base rule and also bypasses the forced confirmation
-            // for irreversible shell deletes; explicit deny rules still win.
-            (Self::Mimo, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
-                label: "dangerously-skip-permissions",
-                acp_mode: None,
-                acp_mode_selector: None,
-                acp_setting: None,
-                launch_flag: None,
-                launch_environment: Some(("MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS", "1")),
-                launch_argument: None,
-                session_sandbox: None,
-                staged_setting: None,
-            }),
             // dsh-acp has no sandbox to disable; `allow` stops it asking.
             (Self::Dsh, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "permission-allow",
@@ -1058,10 +893,10 @@ impl HarnessKind {
     /// would leave that confinement before running it. Only such a harness is
     /// fit for a raw target, where nothing else contains it.
     ///
-    /// A permission prompt alone is not a guardian. OpenCode and MiMo Code ask
-    /// before tools according to their permission rules, but run every
-    /// command directly on the host; both projects' own `SECURITY.md` say
-    /// their permission system is not a sandbox.
+    /// A permission prompt alone is not a guardian. OpenCode asks before
+    /// tools according to its permission rules, but runs every command
+    /// directly on the host; its own `SECURITY.md` says its permission system
+    /// is not a sandbox.
     pub const fn supports_guardian_approvals(self) -> bool {
         matches!(self, Self::Codex | Self::Claude | Self::Grok | Self::Muse)
     }
@@ -1093,7 +928,7 @@ impl HarnessKind {
         match self {
             Self::Claude => Some(".claude.json"),
             Self::Kimi => Some("mcp.json"),
-            Self::Codex | Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo | Self::Dsh => None,
+            Self::Codex | Self::Grok | Self::Muse | Self::OpenCode | Self::Dsh => None,
         }
     }
 
@@ -1122,7 +957,6 @@ impl HarnessKind {
             Self::Kimi | Self::Grok => &["sessions"],
             Self::Muse => &[".data/muse/sessions"],
             Self::OpenCode => &[".data/opencode"],
-            Self::Mimo => &["data"],
             Self::Dsh => &["sessions"],
         }
     }
@@ -1141,7 +975,7 @@ impl HarnessKind {
         match self {
             Self::Grok => Some("bin/agent"),
             Self::Claude => Some("node_modules/.bin/claude"),
-            Self::Codex | Self::Kimi | Self::Muse | Self::OpenCode | Self::Mimo | Self::Dsh => None,
+            Self::Codex | Self::Kimi | Self::Muse | Self::OpenCode | Self::Dsh => None,
         }
     }
 
@@ -1154,7 +988,6 @@ impl HarnessKind {
             Self::Kimi => vec!["acp"],
             Self::Grok => ["agent"].into_iter().chain(flag).chain(["stdio"]).collect(),
             Self::OpenCode => vec!["acp"],
-            Self::Mimo => vec!["acp"],
         }
     }
 }
@@ -2161,76 +1994,6 @@ mod tests {
             inputs.capabilities_key("muse", true),
             upgraded.capabilities_key("muse", true),
             "a new managed installation advertises new models and efforts"
-        );
-    }
-
-    /// The stock MiMo Code installation keeps its configuration and login in
-    /// XDG, not beneath the installer's `~/.mimocode` directory. A profile at
-    /// that conventional home must adopt both, while its own synced skills
-    /// still stage over the stock configuration and its own login wins once it
-    /// has one.
-    #[test]
-    fn a_conventional_mimo_home_adopts_the_stock_xdg_configuration_and_login() {
-        let root = tempfile::tempdir().unwrap();
-        let home = root.path().join(".mimocode");
-        let stock_config = root.path().join(".config/mimocode");
-        let stock_data = root.path().join(".local/share/mimocode");
-        std::fs::create_dir_all(home.join("config/skills/mj")).unwrap();
-        std::fs::create_dir_all(&stock_config).unwrap();
-        std::fs::create_dir_all(&stock_data).unwrap();
-        std::fs::write(stock_data.join("auth.json"), b"{}").unwrap();
-
-        assert_eq!(
-            mimo_configuration_sources(&home, true, Some(&stock_config)),
-            vec![stock_config.clone(), home.join("config")],
-            "synced skills sit over the person's stock configuration"
-        );
-        assert_eq!(
-            mimo_data_source(&home, true, Some(&stock_data)),
-            stock_data,
-            "an empty installer directory adopts the person's stock login"
-        );
-
-        std::fs::write(home.join("config/mimocode.jsonc"), b"{}").unwrap();
-        assert_eq!(
-            mimo_configuration_sources(&home, true, Some(&stock_config)),
-            vec![home.join("config")],
-            "a profile configuration replaces the stock one rather than merging"
-        );
-
-        std::fs::create_dir_all(home.join("data")).unwrap();
-        std::fs::write(home.join("data/auth.json"), b"{}").unwrap();
-        assert_eq!(
-            mimo_data_source(&home, true, Some(&stock_data)),
-            home.join("data"),
-            "a login Mjolnir created in the profile root wins over the stock one"
-        );
-
-        // Hard-won: MiMo sessions staged no login because the stock trees were
-        // looked up under the harness id, `~/.local/share/mimo`.
-        for (variable, fallback) in [
-            ("XDG_CONFIG_HOME", ".config"),
-            ("XDG_DATA_HOME", ".local/share"),
-        ] {
-            assert_eq!(
-                mimo_stock_xdg_dir(variable, fallback)
-                    .unwrap()
-                    .file_name()
-                    .unwrap(),
-                "mimocode",
-                "MiMo Code 0.1.15 names its {variable} tree `mimocode`"
-            );
-        }
-
-        assert_eq!(
-            HarnessKind::Mimo.configuration_sources(&home),
-            vec![home.join("config")],
-            "a configured MIMOCODE_HOME root never reads the stock trees"
-        );
-        assert_eq!(
-            harness_authentication_marker(HarnessKind::Mimo, &home),
-            home.join("data/auth.json"),
-            "a staged home proves its login beside its own data"
         );
     }
 }

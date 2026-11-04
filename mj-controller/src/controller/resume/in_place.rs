@@ -486,10 +486,8 @@ impl Controller {
             .clone();
         self.validate_muse_resume_destination(previous, profile.kind, target_template_id)?;
         ensure!(
-            !matches!(
-                profile.kind,
-                mj_core::config::HarnessKind::Muse | mj_core::config::HarnessKind::Mimo
-            ) || previous.additional_mounts.is_empty(),
+            profile.kind != mj_core::config::HarnessKind::Muse
+                || previous.additional_mounts.is_empty(),
             "{} ACP supports one workspace root; attached directories are unsupported",
             profile.kind.display_name()
         );

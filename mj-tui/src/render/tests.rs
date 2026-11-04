@@ -3336,17 +3336,19 @@ fn golden_dashboard_resource_panels() {
         &mut dashboard,
     );
 
-    let mut mimo_config = config();
-    let mut mimo = mimo_config.profiles["codex-1"].clone();
-    mimo.kind = HarnessKind::Mimo;
-    mimo.home = std::path::PathBuf::from("/profiles/mimo");
-    mimo_config.profiles.insert("mimo-1".into(), mimo);
-    let mut dashboard = DashboardState::new(mimo_config, State::default(), BTreeMap::new());
+    let mut opencode_config = config();
+    let mut opencode = opencode_config.profiles["codex-1"].clone();
+    opencode.kind = HarnessKind::OpenCode;
+    opencode.home = std::path::PathBuf::from("/profiles/opencode");
+    opencode_config
+        .profiles
+        .insert("opencode-1".into(), opencode);
+    let mut dashboard = DashboardState::new(opencode_config, State::default(), BTreeMap::new());
     dashboard.apply_quota(ProfileQuota {
-        harness: HarnessKind::Mimo,
+        harness: HarnessKind::OpenCode,
         extra: Some(NOT_REPORTED_LABEL.into()),
         refreshed_at_epoch_seconds: 0,
-        ..api_quota("mimo-1")
+        ..api_quota("opencode-1")
     });
     append_dashboard_golden(
         &mut output,

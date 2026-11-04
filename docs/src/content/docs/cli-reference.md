@@ -98,12 +98,12 @@ The profile may be omitted only when exactly one is configured. Mjolnir installs
 or reuses the same pinned harness a session uses, starts it as an ACP agent, and
 asks it which authentication methods it advertises. It then runs a `terminal`
 method's command, uses a known terminal action for a bridge that describes one
-in text only (OpenCode and MiMo), or completes an agent method through ACP
+in text only (OpenCode), or completes an agent method through ACP
 `authenticate` (Codex). Use `--method` to choose when several methods are
 offered, or `--cli` to skip ACP and run the harness command found on `PATH`
 exactly as earlier releases did. If the harness advertises no ACP login, Mjolnir
 also falls back to that command-line login. A profile pointed at your own
-OpenCode, Muse, or MiMo home signs in through that installed CLI, so the pinned binary
+OpenCode or Muse home signs in through that installed CLI, so the pinned binary
 never runs against a login database it does not own. The same flow is available
 from the dashboard: Settings → Agent Profiles, select a profile, then **Sign in**. A profile that authenticates with an
 API key, such as a DSH profile or a Codex profile with a custom provider, has no
@@ -136,8 +136,8 @@ mj import <harness> (--session <uuid> | --latest) [options]
 ```
 
 `<harness>` is one of `claude`, `codex`, `kimi`, `grok`, or `muse`. OpenCode
-and MiMo Code keep their sessions in SQLite stores and are not importable yet;
-DSH sessions are not importable yet either.
+keeps its sessions in a SQLite store and is not importable yet; DSH sessions
+are not importable yet either.
 
 | Option | Meaning |
 | --- | --- |
@@ -700,7 +700,6 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `CLAUDE_CONFIG_DIR` | Claude Code home used by setup discovery and native import. |
 | `KIMI_CODE_HOME` | Kimi Code home used by setup discovery and native import. |
 | `GROK_HOME` | Grok Build home used by setup discovery and native import. |
-| `MIMOCODE_HOME` | MiMo Code profile root used by setup discovery; contains `config/` and `data/`. A profile at the conventional `~/.mimocode` home uses the stock `~/.config/mimocode` and `~/.local/share/mimocode` trees instead. |
 | `DSH_ACP_DATA_DIR` | DSH home used by setup discovery. |
 | `DEEPSEEK_API_KEY` | DSH's API key, passed to DSH sessions when DSH's own credentials hold none. It outranks the profile's `environment`. |
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | Muse configuration and external native session storage roots, respectively. |

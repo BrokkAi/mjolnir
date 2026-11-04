@@ -93,8 +93,7 @@ chosen harness's controls:
 The unconstrained translation is Codex `agent-full-access`, Claude Code
 `bypassPermissions` with its sandbox disabled, Kimi Code `auto`, Grok Build
 always-approve with its sandbox disabled, and OpenCode
-`"permission": "allow"` in `opencode.json`. MiMo Code starts with
-`MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1`, and DSH selects dsh-acp's
+`"permission": "allow"` in `opencode.json`. DSH selects dsh-acp's
 `permission_mode` `allow`. Those all approve every action;
 Kimi's mode happens to be named `auto` but is not a risk-selective guardian.
 Muse instead stages `:ask-me`, selects `allowAll` approvals, turns
@@ -106,10 +105,10 @@ approval so critical actions can still be denied. Muse's guardian on raw
 targets is that same review with the sandbox kept on.
 
 Codex, Claude Code, Grok Build, and Muse Code can preserve guardian approvals
-on raw targets. Kimi Code cannot. OpenCode and MiMo Code ask before tools
-according to their permission rules, and DSH, with dsh-acp's `permission_mode`
-`ask`, asks before every write, command, and MCP tool call. None of the three
-has a sandbox, so a prompt is the only thing between the agent and the host.
+on raw targets. Kimi Code cannot. OpenCode asks before tools
+according to its permission rules, and DSH, with dsh-acp's `permission_mode`
+`ask`, asks before every write, command, and MCP tool call. Neither has a
+sandbox, so a prompt is the only thing between the agent and the host.
 The dashboard's new-session and resume wizards display a prominent warning
 when any of these is selected without an isolation boundary; `mj new`, the
 API, and the web viewer do not warn. Read [Security boundaries](/security/)

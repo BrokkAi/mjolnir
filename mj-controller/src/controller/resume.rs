@@ -91,15 +91,15 @@ impl Drop for ResumePhaseTimer<'_> {
 }
 
 impl Controller {
-    /// Muse and MiMo Code have one workspace root; Muse native restore also
-    /// relocates its metadata.
+    /// Muse has one workspace root, and its native restore relocates its
+    /// metadata.
     pub(super) fn validate_muse_resume_destination(
         &self,
         source: &SessionRecord,
         destination_harness: HarnessKind,
         _target_id: &str,
     ) -> Result<()> {
-        if !matches!(destination_harness, HarnessKind::Muse | HarnessKind::Mimo) {
+        if destination_harness != HarnessKind::Muse {
             return Ok(());
         }
         let checkout = self.state.checkout(&source.id)?;
@@ -1644,10 +1644,7 @@ impl Controller {
         // incompatible target fails here instead of during provisioning.
         self.validate_muse_resume_destination(&previous, profile.kind, target_id)?;
         ensure!(
-            !matches!(
-                profile.kind,
-                HarnessKind::Muse | HarnessKind::Mimo
-            ) || previous.additional_mounts.is_empty(),
+            profile.kind != HarnessKind::Muse || previous.additional_mounts.is_empty(),
             "{} ACP supports one workspace root; attached directories are unsupported",
             profile.kind.display_name()
         );

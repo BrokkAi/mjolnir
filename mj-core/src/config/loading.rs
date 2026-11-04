@@ -44,6 +44,53 @@ pub(super) fn reject_removed_profile_overrides(contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// Harness kinds an earlier release accepted in a profile's `kind`.
+const REMOVED_HARNESS_KINDS: [&str; 1] = ["mimo"];
+
+/// Whether `profile`, a `[profiles.<id>]` table, names a removed harness.
+pub(super) fn is_removed_harness_profile(profile: &toml::Value) -> bool {
+    profile
+        .get("kind")
+        .and_then(toml::Value::as_str)
+        .is_some_and(|kind| REMOVED_HARNESS_KINDS.contains(&kind))
+}
+
+/// Take out every profile whose harness this build no longer supports, and a
+/// `[review]` profile choice naming one, returning the removed profile ids.
+/// Such a profile cannot start a session, so the file still loads without it
+/// and the next save leaves it out.
+pub(super) fn drop_removed_harness_profiles(document: &mut toml::Value) -> Vec<String> {
+    let Some(profiles) = document
+        .get_mut("profiles")
+        .and_then(toml::Value::as_table_mut)
+    else {
+        return Vec::new();
+    };
+    let removed: Vec<String> = profiles
+        .iter()
+        .filter(|(_, profile)| is_removed_harness_profile(profile))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &removed {
+        profiles.remove(id);
+    }
+    if let Some(review) = document
+        .get_mut("review")
+        .and_then(toml::Value::as_table_mut)
+        && review
+            .get("profile")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|profile| removed.iter().any(|id| id == profile))
+    {
+        // Model and effort overrides belong to the named profile; Auto has
+        // none.
+        for key in ["profile", "model", "effort"] {
+            review.remove(key);
+        }
+    }
+    removed
+}
+
 /// Read a configuration override under its `MJ_` name. Mjolnir shares no
 /// state or environment with hel installs; there is no legacy fallback.
 pub fn env_override_os(name: &str) -> Option<std::ffi::OsString> {

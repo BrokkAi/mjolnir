@@ -220,9 +220,6 @@ pub fn locate_native_session(
         HarnessKind::OpenCode => bail!(
             "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
         ),
-        HarnessKind::Mimo => bail!(
-            "MiMo Code keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
-        ),
         HarnessKind::Dsh => bail!("Mjolnir cannot import DSH sessions yet"),
     };
     Ok(LocatedNativeSession {
@@ -249,7 +246,7 @@ pub fn native_session_id_from_path(harness: HarnessKind, path: &Path) -> Option<
         HarnessKind::Muse => path.parent()?.file_name()?.to_str().map(str::to_owned),
         // OpenCode sessions live in SQLite rows, not files, so no transcript
         // path carries their id; DSH sessions are not imported.
-        HarnessKind::OpenCode | HarnessKind::Mimo | HarnessKind::Dsh => None,
+        HarnessKind::OpenCode | HarnessKind::Dsh => None,
     }
 }
 
@@ -296,9 +293,6 @@ pub fn list_native_session_sources(
         HarnessKind::OpenCode => bail!(
             "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet"
         ),
-        HarnessKind::Mimo => bail!(
-            "MiMo Code keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet"
-        ),
         HarnessKind::Dsh => bail!("Mjolnir cannot enumerate DSH sessions yet"),
         other => bail!("{other:?} keeps one session per file; there is nothing to enumerate"),
     };
@@ -332,9 +326,6 @@ pub fn read_native_transcript(
         HarnessKind::OpenCode => bail!(
             "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
         ),
-        HarnessKind::Mimo => bail!(
-            "MiMo Code keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
-        ),
         HarnessKind::Dsh => bail!("Mjolnir cannot import DSH sessions yet"),
     }
 }
@@ -343,10 +334,7 @@ pub fn read_native_transcript(
 /// harnesses that keep sessions in a database, and DSH, cannot be scanned yet;
 /// callers skip them instead of reporting the scan as a failure.
 pub fn native_sessions_enumerable(harness: HarnessKind) -> bool {
-    !matches!(
-        harness,
-        HarnessKind::OpenCode | HarnessKind::Mimo | HarnessKind::Dsh
-    )
+    !matches!(harness, HarnessKind::OpenCode | HarnessKind::Dsh)
 }
 
 /// Scan a harness home newest first, reporting after every candidate.
@@ -424,9 +412,6 @@ pub fn scan_native_sessions(
         }),
         HarnessKind::OpenCode => bail!(
             "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet"
-        ),
-        HarnessKind::Mimo => bail!(
-            "MiMo Code keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet"
         ),
         HarnessKind::Dsh => bail!("Mjolnir cannot enumerate DSH sessions yet"),
     }

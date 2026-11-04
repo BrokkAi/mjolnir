@@ -15,8 +15,8 @@ selects Mjolnir's `unconstrained` execution policy. The `permissions` setting is
 only available for a bare runtime on an SSH machine. Mjolnir translates the policy into the
 selected harness's own control: Codex `agent-full-access`, Claude Code
 `bypassPermissions`, Kimi Code `auto`, Grok Build's `--always-approve` launch
-flag, OpenCode's `"permission": "allow"` config setting, MiMo Code's
-dangerously-skip-permissions startup mode, or DSH's `permission_mode` `allow`.
+flag, OpenCode's `"permission": "allow"` config setting, or DSH's
+`permission_mode` `allow`.
 Muse stages `:ask-me`, selects `allowAll` approvals, turns muse-acp's auto-review
 off, and disables only the sandbox (`--disable-sandbox`), so it runs without
 permission checks like OpenCode. A Muse profile with `muse_auto_review = true`
@@ -28,7 +28,7 @@ calls.
 
 Bare localhost sessions preserve configured approvals for supported harnesses.
 Codex, Claude Code, Grok Build, and Muse Code expose guardian modes. Kimi Code
-does not, and neither do OpenCode, MiMo Code, and DSH: they ask before tools
+does not, and neither do OpenCode and DSH: they ask before tools
 (DSH before every write, command, and MCP tool call), but run every command
 directly on the host without a sandbox. The dashboard warns against running
 any of these on a raw, unsandboxed target.
@@ -95,7 +95,7 @@ Mjolnir ships a reference container image with everything a session needs
 pre-installed: Rust, Go, cargo-nextest, Node 24, OpenJDK 25, Python 3 with its
 native development headers and library, uv, Git, GitHub CLI, the `slopcop`
 check CLI, and every harness Mjolnir launches at its pinned version: the Codex
-and Claude ACP bridges, Muse Code with `muse-acp`, MiMo Code, Kimi Code, Grok,
+and Claude ACP bridges, Muse Code with `muse-acp`, Kimi Code, Grok,
 OpenCode, and dsh-acp. It also carries
 Playwright's Chromium system libraries and the pre-installed Chromium headless
 shell in `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so headless browser tests need no

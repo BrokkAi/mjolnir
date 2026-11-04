@@ -904,13 +904,6 @@ fn every_harness_is_pointed_at_its_staged_home() {
             home,
             "{kind:?}"
         );
-        if kind == HarnessKind::Mimo {
-            assert_eq!(environment["MIMOCODE_DISABLE_AUTOUPDATE"], "1");
-            assert_eq!(
-                Path::new(&environment["MIMOCODE_CONFIG_DIR"]),
-                home.join("config")
-            );
-        }
         if kind == HarnessKind::Kimi {
             assert_eq!(environment["KIMI_CODE_SESSION_LOCK"], "0");
         }
@@ -953,7 +946,6 @@ fn harness_mapping_and_permission_modes_are_fixed() {
     assert_eq!(HarnessKind::Claude.home_env(), "CLAUDE_CONFIG_DIR");
     assert_eq!(HarnessKind::Kimi.home_env(), "KIMI_CODE_HOME");
     assert_eq!(HarnessKind::Grok.home_env(), "GROK_HOME");
-    assert_eq!(HarnessKind::Mimo.home_env(), "MIMOCODE_HOME");
     let codex = HarnessKind::Codex
         .execution_enforcement(ExecutionPolicy::Unconstrained)
         .unwrap();
@@ -1022,15 +1014,6 @@ fn unconstrained_enforcement_splits_acp_modes_from_launch_controls() {
         muse.staged_setting().map(|setting| setting.value),
         Some(":ask-me")
     );
-    let mimo = HarnessKind::Mimo
-        .execution_enforcement(ExecutionPolicy::Unconstrained)
-        .unwrap();
-    assert_eq!(mimo.label(), "dangerously-skip-permissions");
-    assert_eq!(
-        mimo.launch_environment(),
-        Some(("MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS", "1"))
-    );
-    assert_eq!(mimo.staged_setting(), None);
 }
 
 #[test]
@@ -1248,7 +1231,6 @@ fn bridge_args_carry_the_acp_subcommand_per_harness() {
         assert!(HarnessKind::Codex.bridge_args(policy).is_empty());
         assert!(HarnessKind::Claude.bridge_args(policy).is_empty());
         assert_eq!(HarnessKind::Kimi.bridge_args(policy), ["acp"]);
-        assert_eq!(HarnessKind::Mimo.bridge_args(policy), ["acp"]);
         assert_eq!(
             HarnessKind::Grok.bridge_args(policy),
             if policy.is_unconstrained() {
@@ -2513,6 +2495,34 @@ fn removed_profile_overrides_have_an_actionable_error() {
     let error = Config::load_from(&path).unwrap_err().to_string();
     assert!(error.contains("`model` is no longer supported"));
     assert!(error.contains("/config"));
+}
+
+/// A config an earlier release wrote can hold a MiMo Code profile, possibly
+/// chosen as the reviewer. The file must still load with every other
+/// profile, review falls back to Auto, and the next save drops the profile.
+#[test]
+fn a_profile_for_a_removed_harness_is_dropped_without_failing_the_config() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n\
+             [review]\ntrigger = \"turn\"\nprofile = \"mimo\"\nmodel = \"mimo-v2\"\n\
+             [profiles.mimo]\nkind = \"mimo\"\nhome = \"/tmp/mimocode\"\n\
+             [profiles.codex]\nkind = \"codex\"\nhome = \"/tmp/codex\"\n"
+        ),
+    )
+    .unwrap();
+
+    let loaded = Config::load_from(&path).expect("the config must still load");
+    assert_eq!(loaded.profiles.keys().collect::<Vec<_>>(), ["codex"]);
+    assert_eq!(loaded.review.trigger, ReviewTrigger::Turn);
+    assert_eq!(loaded.review.profile, None);
+    assert_eq!(loaded.review.model, None);
+
+    loaded.save_to(&path).unwrap();
+    assert!(!fs::read_to_string(&path).unwrap().contains("mimo"));
 }
 
 #[test]

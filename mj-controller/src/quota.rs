@@ -820,9 +820,6 @@ async fn refresh_profile_with_cache_root(
         // OpenCode reads no allowance from any provider: rate-limit headers
         // reach it only on failed requests.
         HarnessKind::OpenCode => Ok(not_reported()),
-        // MiMo Code reads no allowance from Xiaomi or any other provider;
-        // Xiaomi's Token Plan usage is only on its web console.
-        HarnessKind::Mimo => Ok(not_reported()),
         // dsh-acp talks to DeepSeek's API, which bills by usage.
         HarnessKind::Dsh => Ok(usage_priced()),
     };

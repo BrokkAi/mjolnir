@@ -124,7 +124,6 @@ pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
 pub const MUSE_ACP_VERSION: &str = "0.21.0";
 pub const MUSE_VERSION: &str = "1.4.14-R7309.1";
 pub const OPENCODE_VERSION: &str = "2.2.1";
-pub const MIMO_VERSION: &str = "0.1.16";
 pub const DSH_ACP_VERSION: &str = "0.5.0";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
 
@@ -330,13 +329,6 @@ pub fn fallback_launch(
                 ),
             ],
         ),
-        HarnessKind::Mimo => (
-            "sh".into(),
-            vec![
-                "-c".into(),
-                "if command -v mimo >/dev/null 2>&1; then exec mimo acp; else echo 'Mjolnir needs compatible MiMo Code on PATH or a Mjolnir-managed installation' >&2; exit 127; fi".into(),
-            ],
-        ),
         HarnessKind::Dsh => (
             "sh".into(),
             vec!["-c".into(), dsh_acp_launch_script()],
@@ -389,7 +381,7 @@ pub const fn npm_bridge(kind: HarnessKind) -> Option<NpmBridge> {
 
 /// Whether preparing this harness may need Node.js, npm, and npx.
 ///
-/// Kimi, Grok, OpenCode, and MiMo install and launch native executables.
+/// Kimi, Grok, and OpenCode install and launch native executables.
 /// Codex, Claude, and Muse install npm packages or adapters. DSH itself is not
 /// managed, but its fallback fetches the pinned package through npx.
 pub const fn harness_uses_node_runtime(kind: HarnessKind) -> bool {
@@ -501,12 +493,6 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             display_version: "OpenCode 2.2.1",
             entrypoint: "opencode",
             cli_entrypoint: "opencode",
-        },
-        HarnessKind::Mimo => HarnessPin {
-            install_id: "mimo-0.1.16",
-            display_version: "MiMo Code 0.1.16",
-            entrypoint: "bin/mimo",
-            cli_entrypoint: "bin/mimo",
         },
         HarnessKind::Dsh => HarnessPin {
             install_id: "dsh-acp-0.5.0",
