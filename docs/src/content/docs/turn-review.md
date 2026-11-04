@@ -79,7 +79,7 @@ By default, two separate reviewer sessions inspect the same captured change in p
 The initial prompt includes the user's messages and a per-file diffstat, not the full diff. For each repository it gives the reviewer the root, the baseline tree, the captured tree, and the command:
 
 ```text
-git -C <root> diff --no-ext-diff <baseline_tree> <capture_tree>
+git -C <root> diff --no-ext-diff --ignore-submodules=none <baseline_tree> <capture_tree>
 ```
 
 The reviewer runs that command itself with its harness's shell or read tools. The tree IDs keep the review scoped to the captured changes, even if files change later. Repository contents and tool output are treated as untrusted data, not instructions.
@@ -96,7 +96,9 @@ An open review holds new prompts for that session from preparation through a cle
 
 With `trigger = "push"`, Claude Code, Codex, and DSH sessions get the `request_review` tool. The agent is instructed to commit its work and call this tool before `git push` or `gh pr create`. The tool answers when a review starts. The reviewer checks committed changes; tracked working-tree changes must be committed or stashed first. Untracked files are ignored.
 
-The review starts from the last cleanly reviewed commit when that commit is still in the current history and is not older than the merge base with the default branch. Otherwise, it starts from that merge base. Mjolnir uses `origin/HEAD` to find the default branch, then tries `main`, then `master`. If the session is on the default branch, or no default branch is available, it uses the commit that was checked out when the session started.
+The review starts from the last cleanly reviewed commit when that commit is still in the current history and is not older than the merge base with the default branch. Otherwise, it starts from that merge base. Mjolnir looks for the default branch in this order: `origin/HEAD`, `origin/main`, `origin/master`, local `main`, then local `master`. If the session is on the default branch, or no default branch is available, it uses the commit that was checked out when the session started. If the agent merges newer default-branch commits into reviewed work, the review starts from Git's merge of the last reviewed commit with those commits. The reviewer then sees only conflict resolutions and later edits. Where a merge conflicted, the base contains conflict markers. A binary, modify/delete or submodule conflict cannot hold markers; if it was resolved to the version Git's merge chose, the file is left out of the base so the reviewer sees all of it. If the committed tree is the same Git tree as its base, Mjolnir records a clean review without starting a reviewer.
+
+Reviewing merged work requires Git 2.39.5 or newer. With older Git, Mjolnir records that push without review and shows a warning in the session conversation. Upgrade Git to review merged work.
 
 The verdict arrives later as a message in the agent's conversation. The group is clean only when every reviewer finishes cleanly; a failed or missing reviewer keeps the gate blocked. A clean verdict records the reviewed tree in the Git ref `refs/mj/reviewed/<tree>`. A move keeps every ref under `refs/mj/`: these records, the session's start commit and the turn-review baseline. A managed checkout's checkpoint carries them with their objects. A raw session's checkpoint records their names and object IDs, and restoring it recreates each ref whose object the repository still has. A findings verdict tells the agent to fix the findings, commit the changes, and call `request_review` again. Push review does not hold prompts or send findings as a corrective prompt.
 

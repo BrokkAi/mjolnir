@@ -1056,6 +1056,37 @@ pub fn read_head_reflog(
     Ok(entries)
 }
 
+/// `tree` with `paths` removed, written as a new tree object through a scratch
+/// index. Paths `tree` does not hold are ignored.
+pub fn tree_without_paths(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    tree: &str,
+    paths: &[PathBuf],
+) -> Result<String> {
+    let scratch = ScratchIndex::create(runner, repository)?;
+    scratch.run(
+        runner,
+        repository,
+        ["read-tree", tree],
+        Vec::new(),
+        "read the tree into a scratch index",
+    )?;
+    let mut stdin = Vec::new();
+    for path in paths {
+        stdin.extend_from_slice(path.as_os_str().as_encoded_bytes());
+        stdin.push(0);
+    }
+    scratch.run(
+        runner,
+        repository,
+        ["update-index", "--force-remove", "-z", "--stdin"],
+        stdin,
+        "remove paths from the scratch index",
+    )?;
+    scratch.write_tree(runner, repository)
+}
+
 /// What [`merge_trees`] records where both sides changed the same lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeConflicts {
@@ -1494,7 +1525,8 @@ pub fn empty_tree_id(runner: &dyn GitCommandRunner, repository: &Path) -> Result
 
 /// Unified diff between two captured trees. `base` of `None` diffs against the
 /// empty tree, which renders the whole capture as additions -- what a review
-/// wants the first time it runs in a repository.
+/// wants the first time it runs in a repository. Submodule changes are shown
+/// whatever `diff.ignoreSubmodules` says, so a review cannot miss one.
 pub fn diff_between_trees(
     runner: &dyn GitCommandRunner,
     repository: &Path,
@@ -1508,7 +1540,14 @@ pub fn diff_between_trees(
     let patch = git_bytes(
         runner,
         repository,
-        ["diff", "--binary", "--no-ext-diff", &base, current],
+        [
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--ignore-submodules=none",
+            &base,
+            current,
+        ],
         &[],
         "diff the captured review trees",
     )?;
@@ -1534,6 +1573,7 @@ pub fn numstat_between_trees(
             "-z",
             "-M",
             "--no-ext-diff",
+            "--ignore-submodules=none",
             base,
             current,
         ],

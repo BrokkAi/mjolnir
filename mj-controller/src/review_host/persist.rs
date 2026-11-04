@@ -68,7 +68,13 @@ impl HostState {
             TurnReviewDriver::start(seed, review_id.clone(), prepared.count)
         };
         if let Some(deltas) = prepared.captured.clone() {
-            requests = driver.delta_captured(deltas);
+            requests = if prepared.scope == mj_core::relay::CaptureScope::PushableCommits
+                && mj_review::delta::trees_unchanged(&deltas)
+            {
+                driver.empty_push_delta_captured(deltas)
+            } else {
+                driver.delta_captured(deltas)
+            };
         }
         if prepared.resume_forward.is_none() {
             let mut registrations = Vec::new();
@@ -221,6 +227,12 @@ impl HostState {
                         queued_outcomes: Vec::new(),
                     },
                 );
+                if let Some(slot) = self.reviews.get_mut(&session_id)
+                    && slot.push.is_some()
+                    && slot.driver.last_verdict() == Some(&ReviewVerdict::Clean)
+                {
+                    answer(slot.start_reply.take(), Ok(()));
+                }
                 self.run(&session_id, pending.requests);
             }
             PersistenceCompletion::Forward => {
@@ -250,10 +262,29 @@ impl HostState {
                 let notice = self.reviews.get(&session_id).and_then(|slot| {
                     resolution_notice(slot.driver.phase(), slot.driver.last_verdict())
                 });
+                let warnings = self
+                    .reviews
+                    .get(&session_id)
+                    .map(|slot| {
+                        if slot.push.is_some()
+                            && slot.driver.last_verdict() == Some(&ReviewVerdict::Clean)
+                        {
+                            slot.driver
+                                .push_review_warnings()
+                                .map(str::to_owned)
+                                .collect::<Vec<_>>()
+                        } else {
+                            Vec::new()
+                        }
+                    })
+                    .unwrap_or_default();
                 self.reviews.remove(&session_id);
                 release_prompts(&session_id);
                 if let Some(notice) = notice {
                     self.record_notice(&session_id, notice);
+                }
+                for warning in warnings {
+                    self.record_notice(&session_id, warning);
                 }
                 self.publish(&session_id);
             }

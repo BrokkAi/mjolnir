@@ -452,6 +452,22 @@ impl TurnReviewDriver {
         self.emit(requests)
     }
 
+    /// A push whose tree matches its reviewed base needs no reviewer. The
+    /// controller has already refused a capture with base == HEAD.
+    pub fn empty_push_delta_captured(&mut self, deltas: Vec<RepoDelta>) -> Vec<ReviewRequest> {
+        if !matches!(self.phase, TurnReviewPhase::CapturingDelta) {
+            return Vec::new();
+        }
+        self.deltas = deltas;
+        self.reach_verdict(ReviewVerdict::Clean)
+    }
+
+    pub fn push_review_warnings(&self) -> impl Iterator<Item = &str> {
+        self.deltas
+            .iter()
+            .filter_map(|delta| delta.push_review_warning.as_deref())
+    }
+
     /// A role finished its turn.
     pub fn role_turn_completed(
         &mut self,

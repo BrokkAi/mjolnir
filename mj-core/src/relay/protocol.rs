@@ -331,6 +331,10 @@ pub struct RepoDelta {
     /// `None` when it could, and from a worker that predates it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unattributed: Option<String>,
+    /// Reason a push was recorded without review because Git cannot construct
+    /// the merged review point. Older workers omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_review_warning: Option<String>,
 }
 
 /// One changed file's line counts in a review capture.

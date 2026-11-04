@@ -12,7 +12,7 @@ pub struct RepositoryCapture {
     pub root: PathBuf,
     pub baseline_tree: String,
     pub capture_tree: String,
-    /// Commits of other history the turn merged, pulled or switched to, whose
+    /// Commits of other history the reviewed work merged, pulled or switched to, whose
     /// changes the baseline already holds.
     pub merged_in: Vec<String>,
     /// Why the diff may hold changes the turn did not write.
@@ -95,7 +95,7 @@ pub fn review_prompt(job: &ReviewJob) -> String {
                 String::new()
             } else {
                 format!(
-                    "\nThe base already includes the changes of other history this turn merged, pulled or switched to ({}), so the diff shows only the turn's own commits, merge resolutions and edits. Where the turn resolved a merge conflict, the base holds the conflict markers and the diff shows the resolution.",
+                    "\nThe base already includes the changes of other history merged, pulled or switched to ({}), so the diff shows only the reviewed work's own commits, merge resolutions and edits. Where a merge conflict was resolved, the base holds the conflict markers and the diff shows the resolution; a conflicted file that the merge could not mark and that was resolved to the base's version is left out of the base, so the diff shows it in full.",
                     repository.merged_in.join(", ")
                 )
             };
@@ -110,7 +110,7 @@ pub fn review_prompt(job: &ReviewJob) -> String {
                 })
                 .unwrap_or_default();
             format!(
-                "Repository root: {root}\nRun this exact command: `git -C {} diff --no-ext-diff {} {}`{merged}{unattributed}",
+                "Repository root: {root}\nRun this exact command: `git -C {} diff --no-ext-diff --ignore-submodules=none {} {}`{merged}{unattributed}",
                 shell_quote(&root),
                 repository.baseline_tree,
                 repository.capture_tree
@@ -193,7 +193,7 @@ mod tests {
         let prompt = review_prompt(&job());
         assert!(prompt.starts_with(CODEX_REVIEW_RUBRIC));
         assert!(prompt.contains("You are acting as a reviewer for a proposed code change"));
-        assert!(prompt.contains("git -C /workspace/app diff --no-ext-diff baseline123 capture456"));
+        assert!(prompt.contains("git -C /workspace/app diff --no-ext-diff --ignore-submodules=none baseline123 capture456"));
         assert!(prompt.contains("Repository: /workspace/app -- 1 file changed"));
         assert!(prompt.contains("Keep the public API stable"));
         assert!(prompt.contains("Fix the retry behavior"));
@@ -205,7 +205,7 @@ mod tests {
         merged.repositories[0].merged_in = vec!["upstream1".into(), "upstream2".into()];
         let prompt = review_prompt(&merged);
         assert!(prompt.contains(
-            "diff --no-ext-diff baseline123 capture456`\nThe base already includes the changes of other history this turn merged, pulled or switched to (upstream1, upstream2)"
+            "diff --no-ext-diff --ignore-submodules=none baseline123 capture456`\nThe base already includes the changes of other history merged, pulled or switched to (upstream1, upstream2)"
         ));
 
         let mut unattributed = job();

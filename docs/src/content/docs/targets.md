@@ -136,6 +136,10 @@ review page says so before you create it, `mj new` prints the same notice, and
 `/review status` in the session gives the reason. `/review` reports that it has
 no Git changes to capture.
 
+Git 2.39.5 or later is required on the controller and on SSH bare targets.
+`mj doctor` checks both locations. Before-push review cannot review merged
+work when Git is older.
+
 ### Bare on this machine
 
 ```toml

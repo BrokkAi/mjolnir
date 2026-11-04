@@ -30,6 +30,7 @@ fn changed_delta() -> Vec<RepoDelta> {
         }],
         merged_in: Vec::new(),
         unattributed: None,
+        push_review_warning: None,
     }]
 }
 
@@ -47,6 +48,7 @@ fn empty_delta() -> Vec<RepoDelta> {
         files: Vec::new(),
         merged_in: Vec::new(),
         unattributed: None,
+        push_review_warning: None,
     }]
 }
 
@@ -96,7 +98,11 @@ fn running() -> (TurnReviewDriver, String) {
     let requests = driver.delta_captured(changed_delta());
     let command_id = prompted(&requests, "reviewer-1");
     let prompt = prompt_text(&requests, "reviewer-1");
-    assert!(prompt.contains("git -C /w/app diff --no-ext-diff base-tree new-tree"));
+    assert!(
+        prompt.contains(
+            "git -C /w/app diff --no-ext-diff --ignore-submodules=none base-tree new-tree"
+        )
+    );
     assert!(
         !prompt.contains("+retry"),
         "the prompt does not embed the diff"
@@ -153,6 +159,7 @@ fn a_workspace_with_no_baseline_starts_coverage_rather_than_reviewing_nothing() 
         files: Vec::new(),
         merged_in: Vec::new(),
         unattributed: None,
+        push_review_warning: None,
     }]);
     assert_eq!(
         driver.phase(),

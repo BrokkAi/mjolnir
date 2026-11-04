@@ -170,6 +170,11 @@ pub enum PushBase {
         default_branch: String,
         commit: String,
     },
+    MergedReviewPoint {
+        commit: String,
+        merge_base: String,
+        default_branch: String,
+    },
     SessionStart {
         commit: String,
     },
@@ -183,6 +188,7 @@ impl PushBase {
         match self {
             Self::ReviewPoint { commit }
             | Self::MergeBase { commit, .. }
+            | Self::MergedReviewPoint { commit, .. }
             | Self::SessionStart { commit } => Some(commit),
             Self::Root => None,
         }
@@ -295,34 +301,76 @@ pub fn capture_pushable_commits(
             break;
         }
     }
-    let baseline = match base.commit() {
-        Some(commit) => checked_git_text(
-            runner,
-            root,
-            &["rev-parse", "--verify", &format!("{commit}^{{tree}}")],
-        )?,
-        None => mj_checkpoint::archive::empty_tree_id(runner, root)?,
+    // Reviewed work merged with newer default-branch history: diff from Git's
+    // merge of the two, so the reviewer sees only resolutions and later edits.
+    let mut merged = None;
+    let mut push_review_warning = None;
+    if let PushBase::MergeBase {
+        default_branch,
+        commit: mb,
+    } = &base
+    {
+        for reviewed in refs.lines() {
+            if is_ancestor(runner, root, reviewed, &head)?
+                && !is_ancestor(runner, root, reviewed, mb)?
+            {
+                let version = checked_git_text(runner, root, &["version"])?;
+                let found = mj_core::local_git::parse_git_version(&version);
+                let floor = mj_core::local_git::MINIMUM_GIT_VERSION;
+                if found.is_some_and(|found| found >= floor) {
+                    merged = Some(merged_review_tree(runner, root, reviewed, mb, &head)?);
+                } else {
+                    push_review_warning = Some(format!(
+                        "Pushed without review: Git {} in {} is older than {}.{}.{} or its version could not be read, so Mjolnir could not separate this merge's new changes from reviewed work. Upgrade Git to review merged work.",
+                        version
+                            .trim()
+                            .strip_prefix("git version ")
+                            .unwrap_or(version.trim()),
+                        root.display(),
+                        floor.0,
+                        floor.1,
+                        floor.2
+                    ));
+                }
+                base = PushBase::MergedReviewPoint {
+                    commit: reviewed.to_owned(),
+                    merge_base: mb.clone(),
+                    default_branch: default_branch.clone(),
+                };
+                break;
+            }
+        }
+    }
+    let merged_in = match &base {
+        PushBase::MergedReviewPoint { merge_base, .. } => vec![merge_base.clone()],
+        _ => Vec::new(),
     };
     let current = checked_git_text(
         runner,
         root,
         &["rev-parse", "--verify", &format!("{head}^{{tree}}")],
     )?;
+    let baseline = match (merged, base.commit()) {
+        (Some(tree), _) => tree,
+        (None, _) if push_review_warning.is_some() => current.clone(),
+        (None, Some(commit)) => checked_git_text(
+            runner,
+            root,
+            &["rev-parse", "--verify", &format!("{commit}^{{tree}}")],
+        )?,
+        (None, None) => mj_checkpoint::archive::empty_tree_id(runner, root)?,
+    };
     let (patch, files) = capture_diff(runner, root, &baseline, &current)?;
-    let mut delta = build_delta(
-        root,
-        Some(baseline),
-        current,
-        patch,
-        files,
-        Vec::new(),
-        None,
-    );
+    let mut delta = build_delta(root, Some(baseline), current, patch, files, merged_in, None);
     delta.base_commit = base.commit().map(str::to_owned);
+    delta.push_review_warning = push_review_warning;
     delta.head_commit = Some(head.clone());
     delta.base_kind = Some(match &base {
         PushBase::ReviewPoint { .. } => "review point".into(),
         PushBase::MergeBase { default_branch, .. } => format!("merge base with {default_branch}"),
+        PushBase::MergedReviewPoint { default_branch, .. } => {
+            format!("review point merged with {default_branch}")
+        }
         PushBase::SessionStart { .. } => "session start".into(),
         PushBase::Root => "no shared history".into(),
     });
@@ -331,6 +379,106 @@ pub fn capture_pushable_commits(
         base,
         head_commit: head,
     })
+}
+
+/// The tree Git makes by merging the reviewed point with default-branch work,
+/// as the base for reviewing `head`.
+///
+/// A text conflict leaves markers in that tree, so the diff to `head` shows its
+/// resolution. A binary, modify/delete or submodule conflict leaves one side's
+/// version instead; when `head` resolved it to that same version, the diff
+/// would show nothing. Such paths are removed from the base, so the reviewer
+/// sees each in full.
+fn merged_review_tree(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    reviewed: &str,
+    merge_base_commit: &str,
+    head: &str,
+) -> Result<String> {
+    let output = run(
+        runner,
+        root,
+        &[
+            "merge-tree",
+            "--write-tree",
+            "--allow-unrelated-histories",
+            "--no-messages",
+            "--name-only",
+            "-z",
+            reviewed,
+            merge_base_commit,
+        ],
+    )?;
+    // Status 1 means conflicts; the tree is still written.
+    if !matches!(output.status, 0 | 1) {
+        anyhow::bail!(
+            "git merge-tree failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // Paths are raw bytes: a file name need not be UTF-8.
+    let mut fields = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    let tree = std::str::from_utf8(fields.next().context("git merge-tree printed no tree id")?)?
+        .to_owned();
+    let conflicted = fields
+        .map(mj_core::path_input::from_git_bytes)
+        .collect::<Result<BTreeSet<_>>>()?;
+    if conflicted.is_empty() {
+        return Ok(tree);
+    }
+    let merged = tree_entries(runner, root, &tree, &conflicted)?;
+    let resolved = tree_entries(runner, root, head, &conflicted)?;
+    let hidden: Vec<PathBuf> = conflicted
+        .into_iter()
+        .filter(|path| merged.get(path) == resolved.get(path))
+        .collect();
+    if hidden.is_empty() {
+        return Ok(tree);
+    }
+    mj_checkpoint::archive::tree_without_paths(runner, root, &tree, &hidden)
+}
+
+/// The mode and object of each of `paths` that `tree_ish` holds.
+fn tree_entries(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    tree_ish: &str,
+    paths: &BTreeSet<PathBuf>,
+) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+    let mut arguments: Vec<std::ffi::OsString> =
+        ["--literal-pathspecs", "ls-tree", "-r", "-z", tree_ish, "--"]
+            .map(Into::into)
+            .to_vec();
+    arguments.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
+    let output = runner.run(
+        root,
+        &GitCommand {
+            arguments,
+            stdin: Vec::new(),
+            env: Vec::new(),
+        },
+    )?;
+    anyhow::ensure!(
+        output.status == 0,
+        "git ls-tree failed with status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut entries = BTreeMap::new();
+    for record in output.stdout.split(|byte| *byte == 0) {
+        if let Some(tab) = record.iter().position(|byte| *byte == b'\t') {
+            entries.insert(
+                mj_core::path_input::from_git_bytes(&record[tab + 1..])?,
+                record[..tab].to_vec(),
+            );
+        }
+    }
+    Ok(entries)
 }
 
 fn default_branch(runner: &dyn GitCommandRunner, root: &Path) -> Result<Option<String>> {
@@ -347,7 +495,12 @@ fn default_branch(runner: &dyn GitCommandRunner, root: &Path) -> Result<Option<S
             String::from_utf8_lossy(&remote.stderr)
         ),
     }
-    for branch in ["refs/heads/main", "refs/heads/master"] {
+    for branch in [
+        "refs/remotes/origin/main",
+        "refs/remotes/origin/master",
+        "refs/heads/main",
+        "refs/heads/master",
+    ] {
         if resolve_commit(runner, root, branch)?.is_some() {
             return Ok(Some(branch.to_owned()));
         }
@@ -447,6 +600,7 @@ fn build_delta(
         files,
         merged_in,
         unattributed,
+        push_review_warning: None,
     }
 }
 
@@ -2353,6 +2507,21 @@ pub(super) mod push_tests {
     use crate::test_support::git;
     use mj_checkpoint::archive::{SystemGit, record_reviewed_tree};
 
+    struct VersionGit(&'static str);
+
+    impl GitCommandRunner for VersionGit {
+        fn run(&self, root: &Path, command: &GitCommand) -> Result<GitOutput> {
+            if command.arguments.len() == 1 && command.arguments[0] == "version" {
+                return Ok(GitOutput {
+                    status: 0,
+                    stdout: format!("git version {}\n", self.0).into_bytes(),
+                    stderr: Vec::new(),
+                });
+            }
+            SystemGit.run(root, command)
+        }
+    }
+
     pub(in crate::review) fn repository() -> tempfile::TempDir {
         let temp = tempfile::tempdir().unwrap();
         let origin = temp.path().join("origin.git");
@@ -2516,6 +2685,320 @@ pub(super) mod push_tests {
     }
 
     #[test]
+    fn push_capture_uses_reviewed_merge_tree_for_renames() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        std::fs::write(root.join("tracked.txt"), "reviewed edit\n").unwrap();
+        git(&root, &["add", "tracked.txt"]);
+        git(&root, &["commit", "-qm", "reviewed edit"]);
+        let reviewed = git(&root, &["rev-parse", "HEAD"]);
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &reviewed).unwrap();
+
+        git(&root, &["checkout", "-q", "main"]);
+        git(&root, &["mv", "tracked.txt", "renamed.txt"]);
+        git(&root, &["commit", "-qm", "rename upstream file"]);
+        let mb = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["checkout", "-q", "feature"]);
+        git(&root, &["merge", "-q", "main"]);
+
+        let captured = capture(&root, &start);
+        assert_eq!(captured.base.commit(), Some(reviewed.as_str()));
+        assert_eq!(captured.delta.merged_in, vec![mb]);
+        assert!(captured.delta.patch.is_empty(), "{}", captured.delta.patch);
+        assert!(captured.delta.files.is_empty());
+    }
+
+    #[test]
+    fn push_capture_old_git_records_merged_work_without_review() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        let reviewed = commit(&root, "reviewed");
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &reviewed).unwrap();
+        git(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("upstream-only"), "upstream\n").unwrap();
+        git(&root, &["add", "upstream-only"]);
+        git(&root, &["commit", "-qm", "upstream change"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["checkout", "-q", "feature"]);
+        git(&root, &["merge", "-q", "main"]);
+
+        let captured = capture_pushable_commits(&VersionGit("2.34.1"), &root, &start).unwrap();
+        assert_eq!(
+            captured.delta.baseline_tree.as_deref(),
+            Some(captured.delta.current_tree.as_str())
+        );
+        assert!(captured.delta.patch.is_empty());
+        assert!(
+            captured
+                .delta
+                .push_review_warning
+                .as_deref()
+                .unwrap()
+                .contains("Git 2.34.1")
+        );
+        let new_git = capture_pushable_commits(&VersionGit("2.39.5"), &root, &start).unwrap();
+        let expected = git(
+            &root,
+            &[
+                "merge-tree",
+                "--write-tree",
+                "--allow-unrelated-histories",
+                &reviewed,
+                &git(&root, &["rev-parse", "main"]),
+            ],
+        );
+        assert_eq!(
+            new_git.delta.baseline_tree.as_deref(),
+            Some(expected.as_str())
+        );
+        assert!(new_git.delta.push_review_warning.is_none());
+    }
+
+    #[test]
+    fn push_capture_merges_unrelated_reviewed_and_default_histories() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        let reviewed = commit(&root, "reviewed");
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &reviewed).unwrap();
+        git(&root, &["checkout", "--orphan", "new-main"]);
+        git(&root, &["rm", "-qrf", "."]);
+        std::fs::write(root.join("upstream-only"), "upstream\n").unwrap();
+        git(&root, &["add", "upstream-only"]);
+        git(&root, &["commit", "-qm", "new upstream root"]);
+        git(&root, &["branch", "-f", "main"]);
+        git(&root, &["push", "-qf", "origin", "main"]);
+        git(&root, &["checkout", "-q", "feature"]);
+        git(
+            &root,
+            &["merge", "-q", "--allow-unrelated-histories", "main"],
+        );
+        let captured = capture(&root, &start);
+        assert!(matches!(captured.base, PushBase::MergedReviewPoint { .. }));
+        assert!(captured.delta.patch.is_empty());
+        assert!(captured.delta.push_review_warning.is_none());
+    }
+
+    #[test]
+    fn push_capture_uses_merged_review_baseline_and_keeps_later_edits() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        let reviewed = commit(&root, "reviewed");
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &reviewed).unwrap();
+
+        git(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("upstream-only"), "upstream\n").unwrap();
+        git(&root, &["add", "upstream-only"]);
+        git(&root, &["commit", "-qm", "upstream change"]);
+        let mb = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["checkout", "-q", "feature"]);
+        git(&root, &["merge", "-q", "main"]);
+
+        let merged = capture(&root, &start);
+        assert_eq!(merged.base.commit(), Some(reviewed.as_str()));
+        assert_eq!(merged.delta.merged_in, vec![mb.clone()]);
+        assert!(merged.delta.patch.is_empty());
+        assert!(merged.delta.files.is_empty());
+
+        commit(&root, "post-merge edit");
+        let later = capture(&root, &start);
+        assert_eq!(later.delta.merged_in, vec![mb]);
+        assert!(later.delta.patch.contains("+post-merge edit"));
+    }
+
+    #[test]
+    fn push_capture_marks_conflicts_in_merged_review_baseline() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        std::fs::write(root.join("tracked.txt"), "branch resolution\n").unwrap();
+        std::fs::write(root.join("branch-only"), "reviewed elsewhere\n").unwrap();
+        git(&root, &["add", "tracked.txt", "branch-only"]);
+        git(&root, &["commit", "-qm", "reviewed branch change"]);
+        let reviewed = git(&root, &["rev-parse", "HEAD"]);
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &reviewed).unwrap();
+
+        git(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("tracked.txt"), "upstream resolution\n").unwrap();
+        std::fs::write(root.join("upstream-only"), "upstream\n").unwrap();
+        git(&root, &["add", "tracked.txt", "upstream-only"]);
+        git(&root, &["commit", "-qm", "upstream conflict change"]);
+        let mb = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["checkout", "-q", "feature"]);
+        assert!(
+            SystemGit
+                .run(
+                    &root,
+                    &GitCommand {
+                        arguments: ["merge", "main"].map(Into::into).to_vec(),
+                        stdin: Vec::new(),
+                        env: Vec::new(),
+                    }
+                )
+                .unwrap()
+                .status
+                != 0
+        );
+        std::fs::write(root.join("tracked.txt"), "hand resolved\n").unwrap();
+        git(&root, &["add", "tracked.txt"]);
+        git(&root, &["commit", "-qm", "resolve merge"]);
+
+        let captured = capture(&root, &start);
+        assert_eq!(captured.base.commit(), Some(reviewed.as_str()));
+        assert_eq!(captured.delta.merged_in, vec![mb]);
+        assert!(captured.delta.patch.contains("hand resolved"));
+        // Only the hand resolution is new: the base holds both sides inside
+        // conflict markers, and neither side's other files.
+        let files: Vec<_> = captured.delta.files.iter().map(|file| &file.path).collect();
+        assert_eq!(files, ["tracked.txt"]);
+        assert!(
+            captured.delta.patch.contains("-<<<<<<<"),
+            "{}",
+            captured.delta.patch
+        );
+    }
+
+    #[test]
+    fn push_capture_shows_non_text_conflicts_resolved_to_the_merge_tree_side() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        std::fs::write(root.join("image.bin"), b"\0base").unwrap();
+        std::fs::write(root.join("kept.txt"), "base\n").unwrap();
+        git(&root, &["add", "image.bin", "kept.txt"]);
+        git(&root, &["commit", "-qm", "shared files"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        std::fs::write(root.join("image.bin"), b"\0branch").unwrap();
+        std::fs::write(root.join("kept.txt"), "branch edit\n").unwrap();
+        git(&root, &["add", "image.bin", "kept.txt"]);
+        git(&root, &["commit", "-qm", "reviewed branch change"]);
+        let reviewed = git(&root, &["rev-parse", "HEAD"]);
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &reviewed).unwrap();
+
+        git(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("image.bin"), b"\0upstream").unwrap();
+        std::fs::write(root.join("upstream-only"), "upstream\n").unwrap();
+        git(&root, &["add", "image.bin", "upstream-only"]);
+        git(&root, &["rm", "-q", "kept.txt"]);
+        git(&root, &["commit", "-qm", "upstream conflicting change"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["checkout", "-q", "feature"]);
+        assert_ne!(
+            SystemGit
+                .run(
+                    &root,
+                    &GitCommand {
+                        arguments: ["merge", "main"].map(Into::into).to_vec(),
+                        stdin: Vec::new(),
+                        env: Vec::new(),
+                    }
+                )
+                .unwrap()
+                .status,
+            0
+        );
+        // Keep the branch's side of both conflicts: the version merge-tree
+        // itself writes for a binary and a modify/delete conflict.
+        git(&root, &["checkout", "--ours", "--", "image.bin"]);
+        git(&root, &["add", "image.bin", "kept.txt"]);
+        git(&root, &["commit", "-qm", "resolve merge"]);
+
+        let captured = capture(&root, &start);
+        assert_eq!(captured.base.commit(), Some(reviewed.as_str()));
+        let files: Vec<_> = captured.delta.files.iter().map(|file| &file.path).collect();
+        assert_eq!(files, ["image.bin", "kept.txt"], "{}", captured.delta.patch);
+    }
+
+    // Windows file names are always Unicode, so only Unix can make this case.
+    #[cfg(unix)]
+    #[test]
+    fn push_capture_shows_conflicted_paths_that_are_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::OsStr::from_bytes(b"image-\xff.bin");
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        std::fs::write(root.join(name), b"\0base").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "shared file"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        std::fs::write(root.join(name), b"\0branch").unwrap();
+        git(&root, &["commit", "-qam", "reviewed branch change"]);
+        let reviewed = git(&root, &["rev-parse", "HEAD"]);
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &reviewed).unwrap();
+        git(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join(name), b"\0upstream").unwrap();
+        git(&root, &["commit", "-qam", "upstream conflicting change"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["checkout", "-q", "feature"]);
+        assert_ne!(
+            SystemGit
+                .run(
+                    &root,
+                    &GitCommand {
+                        arguments: ["merge", "main"].map(Into::into).to_vec(),
+                        stdin: Vec::new(),
+                        env: Vec::new(),
+                    }
+                )
+                .unwrap()
+                .status,
+            0
+        );
+        std::fs::write(root.join(name), b"\0branch").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "resolve merge"]);
+
+        let captured = capture(&root, &start);
+        assert_eq!(captured.base.commit(), Some(reviewed.as_str()));
+        assert_eq!(captured.delta.files.len(), 1, "{}", captured.delta.patch);
+    }
+
+    #[test]
+    fn push_capture_shows_submodule_changes_that_diff_settings_ignore() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["config", "diff.ignoreSubmodules", "all"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        git(
+            &root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{start},vendored"),
+            ],
+        );
+        git(&root, &["commit", "-qm", "point at a submodule commit"]);
+
+        let captured = capture(&root, &start);
+        let files: Vec<_> = captured.delta.files.iter().map(|file| &file.path).collect();
+        assert_eq!(files, ["vendored"], "{}", captured.delta.patch);
+        assert!(captured.delta.patch.contains("Subproject commit"));
+    }
+
+    #[test]
     fn push_capture_on_default_branch_uses_session_start() {
         let temp = repository();
         let root = temp.path().join("checkout");
@@ -2543,7 +3026,7 @@ pub(super) mod push_tests {
     }
 
     #[test]
-    fn push_capture_without_origin_head_uses_local_main() {
+    fn push_capture_without_origin_head_prefers_remote_main_from_local_master() {
         let temp = repository();
         let root = temp.path().join("checkout");
         let start = git(&root, &["rev-parse", "HEAD"]);
@@ -2551,15 +3034,31 @@ pub(super) mod push_tests {
             &root,
             &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
         );
-        git(&root, &["checkout", "-qb", "feature"]);
-        let head = commit(&root, "later");
+        git(&root, &["branch", "master", &start]);
+        git(&root, &["checkout", "-q", "master"]);
+        let reviewed = commit(&root, "reviewed on master");
+        let reviewed_tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &reviewed_tree, &reviewed).unwrap();
+        git(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("upstream-only"), "upstream\n").unwrap();
+        git(&root, &["add", "upstream-only"]);
+        git(&root, &["commit", "-qm", "advance upstream"]);
+        let mb = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["checkout", "-q", "master"]);
+        git(&root, &["merge", "-q", "origin/main"]);
+
+        let captured = capture(&root, &start);
         assert_eq!(
-            capture(&root, &head).base,
-            PushBase::MergeBase {
-                default_branch: "refs/heads/main".into(),
-                commit: start
+            captured.base,
+            PushBase::MergedReviewPoint {
+                commit: reviewed,
+                merge_base: mb.clone(),
+                default_branch: "refs/remotes/origin/main".into()
             }
         );
+        assert_eq!(captured.delta.merged_in, vec![mb]);
+        assert!(captured.delta.patch.is_empty());
     }
 
     #[test]

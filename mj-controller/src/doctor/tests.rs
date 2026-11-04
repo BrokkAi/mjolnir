@@ -191,8 +191,8 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     // complete report, including failures, rather than just the parser.
     for response in [
         Ok(output("git version 2.25.1\n")),
-        Ok(output("git version 2.30.9\n")),
-        Ok(output("git version 2.31.0\n")),
+        Ok(output("git version 2.39.4\n")),
+        Ok(output("git version 2.39.5\n")),
         Ok(output("git version 2.39.5 (Apple Git-154)\n")),
         Ok(output("git version 2.47.1.windows.1\n")),
         Ok(output("unexpected version output\n")),
@@ -224,7 +224,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     assert_eq!(git_checks[1].id, "git.ssh-bare.builder");
     let json = serde_json::to_value(&git_checks).unwrap();
     assert_eq!(json[1]["status"], "fixable");
-    assert!(json[1]["remediation"].as_str().unwrap().contains("2.31"));
+    assert!(json[1]["remediation"].as_str().unwrap().contains("2.39.5"));
     let commands = executor.commands.borrow();
     assert_eq!(commands[1].program, "ssh");
     assert_eq!(&commands[1].args[..2], ["-o", "StrictHostKeyChecking=yes"]);

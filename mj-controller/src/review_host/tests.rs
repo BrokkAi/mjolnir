@@ -722,6 +722,7 @@ async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
             files: Vec::new(),
             merged_in: Vec::new(),
             unattributed: None,
+            push_review_warning: None,
         }],
     }));
 
@@ -780,6 +781,7 @@ async fn a_review_refused_for_another_reason_does_not_wait() {
             files: Vec::new(),
             merged_in: Vec::new(),
             unattributed: None,
+            push_review_warning: None,
         }],
     }));
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -1053,6 +1055,7 @@ async fn resolving_a_review_that_has_no_verdict_is_refused() {
             files: Vec::new(),
             merged_in: Vec::new(),
             unattributed: None,
+            push_review_warning: None,
         }],
     }));
 
@@ -1140,6 +1143,7 @@ async fn a_turn_that_changed_nothing_resolves_without_choosing_a_reviewer() {
             files: Vec::new(),
             merged_in: Vec::new(),
             unattributed: None,
+            push_review_warning: None,
         }],
     }));
     let (_, _, reply) = manager
@@ -1215,6 +1219,7 @@ async fn a_capture_the_recovery_copy_refused_is_retried_before_choosing_a_review
             files: Vec::new(),
             merged_in: Vec::new(),
             unattributed: None,
+            push_review_warning: None,
         }],
     }));
     let (_, _, reply) = manager
@@ -1355,6 +1360,7 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
             files: Vec::new(),
             merged_in: Vec::new(),
             unattributed: None,
+            push_review_warning: None,
         }],
     }));
     starting
@@ -1401,6 +1407,7 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
             files: Vec::new(),
             merged_in: Vec::new(),
             unattributed: None,
+            push_review_warning: None,
         }],
     }));
     tokio::time::timeout(Duration::from_secs(5), open_gate.entered())
@@ -1512,6 +1519,7 @@ async fn a_review_open_at_a_restart_keeps_its_child_and_baseline() {
             files: Vec::new(),
             merged_in: Vec::new(),
             unattributed: None,
+            push_review_warning: None,
         }],
     }));
     let child = wait_for_child(&environment, &old, session).await;
@@ -1821,6 +1829,7 @@ async fn a_failed_review_clears_durable_active_state_and_the_prompt_hold() {
             files: Vec::new(),
             merged_in: Vec::new(),
             unattributed: None,
+            push_review_warning: None,
         }],
     }));
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -1886,7 +1895,7 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     assert!(
         children[0]
             .2
-            .contains("git -C /workspace/app diff --no-ext-diff base new")
+            .contains("git -C /workspace/app diff --no-ext-diff --ignore-submodules=none base new")
     );
     assert!(children[0].2.contains("1 file changed, 1 insertion(+)"));
     assert!(!children[0].2.contains("+one"));
@@ -3018,6 +3027,171 @@ async fn review_starts_report_child_registration_refusal_to_their_callers() {
 }
 
 // Hard-won: #1448: push verdict delivery discarded registrations before closing their workers.
+#[tokio::test]
+async fn empty_push_delta_records_clean_tree_without_a_reviewer() {
+    let session = session_id("emptypush000");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    environment
+        .resolve_hangs
+        .store(true, std::sync::atomic::Ordering::Release);
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let mut running = view(
+        &session,
+        MaterializedExecutionState::Running { started_at_ms: 1 },
+    );
+    running
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(43);
+    manager
+        .publisher
+        .publish(session.clone(), running)
+        .await
+        .unwrap();
+    let request = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move { host.begin_push(&session, None).await })
+    };
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    reply
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![mj_core::relay::RepoDelta {
+                baseline_tree: Some("newtree".into()),
+                ..push_delta("/workspace/app", "newtree")
+            }],
+        }))
+        .unwrap();
+    assert_eq!(request.await.unwrap().unwrap()["accepted"], true);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.view(&session).is_some() {
+            match manager.requests.recv().await.unwrap() {
+                RemoteSessionRequest::Reviewer { action, reply, .. } => {
+                    match &action {
+                        ReviewerAction::RecordReviewed { trees } => assert_eq!(
+                            trees[&PathBuf::from("/workspace/app")],
+                            ("newtree".into(), "bbbbbbb456".into())
+                        ),
+                        ReviewerAction::AdvanceBaseline { .. } => {}
+                        _ => panic!("unexpected reviewer action {action:?}"),
+                    }
+                    reply.send(answer_for(&action)).unwrap();
+                }
+                RemoteSessionRequest::Submit { command, reply, .. } => {
+                    assert!(matches!(command, RelayCommand::RecordNotice { .. }));
+                    reply.send(Ok(1)).unwrap();
+                }
+                _ => panic!("unexpected request"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(environment.children.lock().unwrap().is_empty());
+    let mailbox = environment.mailbox.lock().unwrap().clone();
+    assert_eq!(mailbox.len(), 1);
+    assert!(
+        mj_core::mailbox::render_mailbox_event(&mailbox[0]).starts_with("Review clean for commits")
+    );
+    assert_eq!(
+        environment.state().baselines[&PathBuf::from("/workspace/app")],
+        "newtree"
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn old_git_push_delta_records_warning_and_clean_tree_without_reviewer() {
+    let session = session_id("oldgitpush00");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    environment
+        .resolve_hangs
+        .store(true, std::sync::atomic::Ordering::Release);
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let mut running = view(
+        &session,
+        MaterializedExecutionState::Running { started_at_ms: 1 },
+    );
+    running
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(43);
+    manager
+        .publisher
+        .publish(session.clone(), running)
+        .await
+        .unwrap();
+    let request = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move { host.begin_push(&session, None).await })
+    };
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    reply
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![mj_core::relay::RepoDelta {
+                baseline_tree: Some("newtree".into()),
+                push_review_warning: Some("Pushed without review: Git 2.34.1 in /workspace/app is older than 2.39.5. Upgrade Git to review merged work.".into()),
+                ..push_delta("/workspace/app", "newtree")
+            }],
+        }))
+        .unwrap();
+    assert_eq!(request.await.unwrap().unwrap()["accepted"], true);
+    let mut notices = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.view(&session).is_some() || notices.len() < 2 {
+            match manager.requests.recv().await.unwrap() {
+                RemoteSessionRequest::Reviewer { action, reply, .. } => {
+                    match &action {
+                        ReviewerAction::RecordReviewed { trees } => assert_eq!(
+                            trees[&PathBuf::from("/workspace/app")],
+                            ("newtree".into(), "bbbbbbb456".into())
+                        ),
+                        ReviewerAction::AdvanceBaseline { .. } => {}
+                        _ => panic!("unexpected reviewer action {action:?}"),
+                    }
+                    reply.send(answer_for(&action)).unwrap();
+                }
+                RemoteSessionRequest::Submit { command, reply, .. } => {
+                    if let RelayCommand::RecordNotice { text } = command {
+                        notices.push(text);
+                    } else {
+                        panic!("unexpected command");
+                    }
+                    reply.send(Ok(1)).unwrap();
+                }
+                _ => panic!("unexpected request"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(environment.children.lock().unwrap().is_empty());
+    let mailbox = environment.mailbox.lock().unwrap().clone();
+    assert_eq!(mailbox.len(), 1);
+    assert!(
+        mj_core::mailbox::render_mailbox_event(&mailbox[0]).starts_with("Review clean for commits")
+    );
+    assert_eq!(
+        environment.state().baselines[&PathBuf::from("/workspace/app")],
+        "newtree"
+    );
+    assert!(notices.iter().any(|notice| notice.contains("Git 2.34.1")));
+    host.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_primary() {
     for (name, report, expected) in [

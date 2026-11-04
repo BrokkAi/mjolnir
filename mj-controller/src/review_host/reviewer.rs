@@ -220,10 +220,13 @@ pub(super) async fn prepare_scoped(
     if cancelled.load(std::sync::atomic::Ordering::Acquire) {
         return Err(StartRefusal("review preparation cancelled".into()));
     }
-    if captured
-        .as_deref()
-        .is_some_and(|deltas| !mj_review::delta::has_changes(deltas))
-    {
+    if captured.as_deref().is_some_and(|deltas| {
+        if push {
+            mj_review::delta::trees_unchanged(deltas)
+        } else {
+            !mj_review::delta::has_changes(deltas)
+        }
+    }) {
         return Ok(Prepared {
             scope,
             state,

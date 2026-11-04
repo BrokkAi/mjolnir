@@ -818,6 +818,24 @@ fn remote_urls(
     Ok(urls)
 }
 
+/// The oldest Git Mjolnir supports: Debian 12's. It has
+/// `git merge-tree --write-tree` (Git 2.38), which before-push review needs to
+/// start a merged branch's review from the merge of its reviewed work.
+pub const MINIMUM_GIT_VERSION: (u32, u32, u32) = (2, 39, 5);
+
+/// The version in `git version` output, such as
+/// `git version 2.39.5 (Apple Git-154)` or `git version 2.53.0.windows.1`.
+/// A missing patch number reads as 0.
+#[must_use]
+pub fn parse_git_version(output: &str) -> Option<(u32, u32, u32)> {
+    let version = output.trim().strip_prefix("git version ")?;
+    let mut parts = version.split(|c: char| !c.is_ascii_digit());
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+    Some((major, minor, patch))
+}
+
 #[cfg(test)]
 mod tests {
     // Hard-won: 71b0e8d1: Git 2.25 echoed unsupported options with success and could persist a false repository path
@@ -1410,5 +1428,22 @@ mod tests {
         assert_eq!(clean.row_text(), "⎇ main");
         let none = parse_git_status(PathBuf::from("/work"), "not a git checkout", None, "", "");
         assert_eq!(none.row_text(), "");
+    }
+
+    #[test]
+    fn parses_git_versions() {
+        assert_eq!(parse_git_version("git version 2.53.0\n"), Some((2, 53, 0)));
+        assert_eq!(
+            parse_git_version("git version 2.39.5 (Apple Git-154)"),
+            Some((2, 39, 5))
+        );
+        assert_eq!(
+            parse_git_version("git version 2.53.0.windows.1"),
+            Some((2, 53, 0))
+        );
+        assert_eq!(parse_git_version("git version 2.40"), Some((2, 40, 0)));
+        assert_eq!(parse_git_version("not git"), None);
+        assert!(parse_git_version("git version 2.34.1").unwrap() < MINIMUM_GIT_VERSION);
+        assert!(parse_git_version("git version 2.39.5").unwrap() >= MINIMUM_GIT_VERSION);
     }
 }
