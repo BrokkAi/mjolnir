@@ -57,10 +57,10 @@ An older configuration with `enabled = true` still loads as `trigger = "turn"`; 
 `mj new` and `mj import <harness>` can override these settings for one session:
 
 - `--review off|turn|push` selects that session's trigger, overriding `[review]`.
-- `--review-count <count>` selects the number of independent reviewers. Used alone, it selects turn review; an explicit `--review off` keeps review off.
-- `--review-model <model>` pins the reviewer model for that session. With Auto, any enabled profile offering it can qualify; Auto still tries subscriptions before API billing and always uses High effort. `--review-effort <effort>` overrides effort for a named reviewer profile; Auto keeps High. If you omit `--review`, either option selects `turn`.
+- `--review-count <count>` overrides the number of independent reviewers while keeping the configured trigger.
+- `--review-model <model>` pins the reviewer model for that session. With Auto, any enabled profile offering it can qualify; Auto still tries subscriptions before API billing and always uses High effort. `--review-effort <effort>` overrides effort for a named reviewer profile; Auto keeps High. These reviewer options keep the configured trigger; use `--review turn` or `--review push` to select a trigger explicitly.
 - `--review-tier quick|extended` is deprecated. It still accepts either value
-  and selects `turn` when you omit `--review`, but the value has no effect.
+  but has no effect and does not change the configured trigger.
 
 The choice is stored with the session and kept when it resumes. A session created without these flags follows `[review]`.
 

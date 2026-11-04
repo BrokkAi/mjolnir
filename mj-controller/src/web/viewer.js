@@ -972,6 +972,11 @@ const sessionCards = new Map();
 const sessionItems = new Map();
 const sessionList = el('div', 'session-grid');
 sessionList.setAttribute('role', 'list');
+const SUBAGENT_IDLE_PREFERENCE = 'mj.viewer.subagents.show-idle';
+let showIdleSubagents = (() => {
+  try { return localStorage.getItem(SUBAGENT_IDLE_PREFERENCE) === 'true'; }
+  catch { return false; }
+})();
 let openSessionMenuId = null;
 let openSessionMenuTrigger = null;
 let suppressedSessionClickId = null;
@@ -1076,11 +1081,16 @@ function liveSessions() {
 }
 
 function renderSessions() {
-  const ordered = orderedSessions(liveSessions());
+  const allSessions = liveSessions();
+  const parent = sessionById(route.subagentParentId);
+  const subagentView = Boolean(route.subagentParentId);
+  const hiddenSessions = subagentView && !showIdleSubagents
+    ? allSessions.filter(isIdleSubagentSession)
+    : [];
+  const ordered = orderedSessions(subagentView ? allSessions.filter(session => !hiddenSessions.includes(session)) : allSessions);
   if (openSessionMenuId && !ordered.some(session => session.id === openSessionMenuId)) {
     closeSessionMenu();
   }
-  const parent = sessionById(route.subagentParentId);
   let nativeGroups;
   if (route.subagentParentId && parent?.detail === false) {
     const group = el('section', 'project');
@@ -1113,16 +1123,38 @@ function renderSessions() {
     }
     nativeGroups = [group];
   } else {
-    nativeGroups = renderNativeSubagents(parent);
+    nativeGroups = renderNativeSubagents(parent, showIdleSubagents);
+  }
+  const hiddenNativeCount = subagentView && !showIdleSubagents
+    ? (parent?.native_subagents || []).filter(isIdleNativeSubagent).length
+    : 0;
+  const controls = [];
+  if (subagentView) {
+    const control = el('div', 'subagent-list-controls');
+    const toggle = button(showIdleSubagents ? 'Hide idle' : 'Show idle');
+    toggle.setAttribute('aria-pressed', String(showIdleSubagents));
+    toggle.onclick = () => {
+      showIdleSubagents = !showIdleSubagents;
+      try { localStorage.setItem(SUBAGENT_IDLE_PREFERENCE, String(showIdleSubagents)); } catch { /* preference remains available for this page */ }
+      renderSessions();
+    };
+    control.append(toggle);
+    if (hiddenSessions.length + hiddenNativeCount) {
+      control.append(el('span', 'dim', `${hiddenSessions.length + hiddenNativeCount} idle sub-agent${hiddenSessions.length + hiddenNativeCount === 1 ? '' : 's'} hidden`));
+    }
+    controls.push(control);
   }
   if (!ordered.length && !nativeGroups.length) {
     sessions.replaceChildren(el(
       'p',
       'dim',
       route.subagentParentId
-        ? 'No sub-agents have been started for this session.'
+        ? hiddenSessions.length + hiddenNativeCount
+          ? `All ${hiddenSessions.length + hiddenNativeCount} sub-agents are idle. Show idle to view them.`
+          : 'No sub-agents have been started for this session.'
         : 'No live sessions or operations in this workspace.',
     ));
+    if (controls.length) sessions.prepend(...controls);
     return;
   }
   const items = ordered.map(session => {
@@ -1173,10 +1205,30 @@ function renderSessions() {
     return item;
   });
   reconcileChildren(sessionList, items);
-  reconcileChildren(sessions, [...(items.length ? [sessionList] : []), ...nativeGroups]);
+  reconcileChildren(sessions, [...controls, ...(items.length ? [sessionList] : []), ...nativeGroups]);
 }
 
-function renderNativeSubagents(parent) {
+function isIdleSubagentSession(session) {
+  if (!session
+    || session.operation
+    || session.has_error
+    || session.launch_error
+    || session.storage_problem
+    || session.configuration_issue
+    || session.quota_recovery
+    || session.capacity_retry
+    || session.retry_assessment_pending
+    || session.turn_review
+    || ['starting', 'suspending', 'failed'].includes(session.lifecycle)
+    || attentionParts(session).length) return false;
+  return session.state === 'parked' || session.is_idle === true;
+}
+
+function isIdleNativeSubagent(agent) {
+  return ['completed', 'cancelled'].includes(agent.state) && agent.availability === 'available';
+}
+
+function renderNativeSubagents(parent, includeIdle) {
   if (!parent || parent.detail === false) return [];
   const agents = parent.native_subagents || [];
   return [
@@ -1184,7 +1236,7 @@ function renderNativeSubagents(parent) {
     ['Idle and reusable', a => a.state !== 'running' && a.availability === 'available'],
     ['History and availability unknown', a => a.state !== 'running' && a.availability !== 'available'],
   ].flatMap(([label, matches]) => {
-    const entries = agents.filter(matches);
+    const entries = agents.filter(agent => matches(agent) && (includeIdle || !isIdleNativeSubagent(agent)));
     if (!entries.length) return [];
     const section = el('section', 'project'); section.append(el('h2', '', label));
     for (const agent of entries) {

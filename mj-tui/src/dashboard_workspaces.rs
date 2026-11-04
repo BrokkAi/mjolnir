@@ -19,7 +19,7 @@ pub(crate) struct SubagentStoppedBySuspend {
     shown: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ChildWorkspace {
     pub parent_id: String,
     pub kind: mj_core::subagent::SubagentKind,
@@ -68,27 +68,27 @@ impl DashboardState {
         if !self.state.sessions.contains_key(&parent_id) {
             return;
         }
-        *self.child_workspace = Some(ChildWorkspace {
+        self.switch_child_scope(Some(ChildWorkspace {
             parent_id: parent_id.clone(),
             kind,
-        });
+        }));
         // The pane now lists a different set of rows; the parent list's
         // scroll position means nothing here.
         self.sessions_scroll.set(0);
-        let child = self
-            .managed_child_ids_of_kind(&parent_id, kind)
-            .into_iter()
-            .next()
-            .or_else(|| {
-                if kind == mj_core::subagent::SubagentKind::Worker {
-                    self.native_by_parent
-                        .get(&parent_id)
-                        .and_then(|ids| ids.first().cloned())
-                } else {
-                    None
-                }
-            });
         self.set_current_session(None);
+        // Compact relationships still need a selection to load their details;
+        // only rows with known activity can be excluded by the idle filter.
+        let child = self
+            .derive_ordered_sessions()
+            .0
+            .into_iter()
+            .map(|session| session.id.clone())
+            .chain(
+                self.managed_child_ids_of_kind(&parent_id, kind)
+                    .into_iter()
+                    .filter(|id| !self.state.sessions.contains_key(id)),
+            )
+            .next();
         if let Some(child) = child {
             self.select_active_session(&child);
         }
@@ -97,14 +97,34 @@ impl DashboardState {
     }
 
     pub fn close_subagent_workspace(&mut self) {
-        let Some(workspace) = self.child_workspace.take() else {
+        let Some(workspace) = self.child_workspace.as_ref().cloned() else {
             return;
         };
         let parent_id = workspace.parent_id;
-        *self.child_workspace = self.child_workspace_for(&parent_id);
+        let next = self.child_workspace_for(&parent_id);
+        self.switch_child_scope(next);
         self.sessions_scroll.set(0);
         self.select_active_session(&parent_id);
         self.clamp_selections();
+    }
+
+    pub(crate) fn switch_child_scope(&mut self, next: Option<ChildWorkspace>) {
+        if *self.child_workspace == next {
+            return;
+        }
+        let previous = std::mem::replace(&mut *self.child_workspace, next.clone());
+        self.sessions_filters_by_scope
+            .insert(previous, self.sessions_filter.take());
+        *self.sessions_filter = self
+            .sessions_filters_by_scope
+            .remove(&next)
+            .unwrap_or_else(|| {
+                next.filter(|workspace| workspace.kind == mj_core::subagent::SubagentKind::Worker)
+                    .map(|_| SessionsFilter {
+                        state: Some(SessionStateFilter::NotIdle),
+                        ..Default::default()
+                    })
+            });
     }
 
     /// The active sub-agents that `next` no longer has because their parent's
@@ -195,7 +215,8 @@ impl DashboardState {
             if !in_view {
                 continue;
             }
-            *self.child_workspace = self.child_workspace_for(&parent_id);
+            let next = self.child_workspace_for(&parent_id);
+            self.switch_child_scope(next);
             self.select_active_session(&parent_id);
             self.clamp_selections();
             let titles = children

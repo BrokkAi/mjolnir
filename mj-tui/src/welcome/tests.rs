@@ -45,6 +45,26 @@ fn first_run_does_not_replace_an_open_settings_draft() {
     assert!(text.contains("Agents: Codex."));
 }
 
+// Hard-won: 5238411cd: a no-setup result left an automatic Welcome open or pending.
+#[test]
+fn existing_setup_completion_retires_welcome_without_closing_another_dialog() {
+    for settings_open in [false, true] {
+        let mut dashboard = dashboard();
+        if settings_open {
+            dashboard.begin_setup();
+        }
+        dashboard.begin_welcome();
+        dashboard.welcome_not_needed();
+        if settings_open {
+            assert!(matches!(dashboard.mode, Mode::Setup(_)));
+            dashboard.cancel_modal();
+        }
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
+        let text = drawn(&mut dashboard, 100, 30).join("\n");
+        assert!(!text.contains("Welcome to Mjolnir"), "{text}");
+    }
+}
+
 #[test]
 fn welcome_offers_managed_setup_when_no_agent_was_found() {
     let mut dashboard = dashboard();

@@ -81,11 +81,10 @@ pub(crate) struct NativeImportArgs {
     /// Proceed after acknowledging edited non-Git or scratch directories will be omitted.
     #[arg(long)]
     allow_omitted_non_git: bool,
-    /// Review every turn of the imported session with this model, as
-    /// `mj new --review-model` does.
+    /// Override the reviewer model while keeping the configured review trigger.
     #[arg(long)]
     review_model: Option<String>,
-    /// Review every turn of the imported session at this reasoning effort.
+    /// Override reviewer effort while keeping the configured review trigger.
     #[arg(long)]
     review_effort: Option<String>,
     /// Independent reviewers per review. 1–3 is reasonable; more has diminishing returns.
@@ -1114,10 +1113,13 @@ mod tests {
         );
     }
 
-    /// An imported session can choose its own turn review, with the flags
+    /// An imported session can choose its own review settings, with the flags
     /// `mj new` takes, and they build the same stored choice.
+    // Hard-won: 06cfc1cfe: reviewer-only flags replaced before-push review with end-of-turn.
     #[test]
     fn an_import_can_choose_the_sessions_review() {
+        use mj_core::config::{ReviewConfig, ReviewTrigger, SessionReview};
+
         let (_, args) = parse_import(&[
             "mj",
             "import",
@@ -1133,21 +1135,33 @@ mod tests {
             "--review-tier",
             "extended",
         ]);
+        let inherited = crate::api_commands::session_review(
+            args.review.as_deref(),
+            args.review_model.as_deref(),
+            args.review_effort.as_deref(),
+            args.review_tier.as_deref(),
+            args.review_count,
+        );
         assert_eq!(
-            crate::api_commands::session_review(
-                args.review.as_deref(),
-                args.review_model.as_deref(),
-                args.review_effort.as_deref(),
-                args.review_tier.as_deref(),
-                args.review_count,
-            ),
-            Some(mj_core::config::SessionReview::Turn {
+            inherited,
+            Some(SessionReview::Inherit {
                 count: std::num::NonZeroUsize::new(4),
                 model: Some("gpt-6-luna".into()),
                 effort: Some("max".into()),
                 tier: None,
             })
         );
+        for trigger in [ReviewTrigger::Off, ReviewTrigger::Turn, ReviewTrigger::Push] {
+            let global = ReviewConfig {
+                trigger,
+                ..Default::default()
+            };
+            let effective = global.for_session(inherited.as_ref());
+            assert_eq!(effective.trigger, trigger);
+            assert_eq!(effective.count.get(), 4);
+            assert_eq!(effective.model.as_deref(), Some("gpt-6-luna"));
+            assert_eq!(effective.effort.as_deref(), Some("max"));
+        }
         for trigger in ["off", "turn", "push"] {
             let (_, args) = parse_import(&[
                 "mj",
@@ -1166,7 +1180,7 @@ mod tests {
                 args.review_count,
             )
             .unwrap();
-            assert_eq!(choice.trigger().to_string(), trigger);
+            assert_eq!(choice.trigger().unwrap().to_string(), trigger);
         }
         let (_, plain) = parse_import(&["mj", "import", "codex", "--session", "native-1"]);
         assert_eq!(
@@ -1197,13 +1211,13 @@ mod tests {
                 tier_only.review_tier.as_deref(),
                 tier_only.review_count,
             ),
-            Some(mj_core::config::SessionReview::Turn {
+            Some(mj_core::config::SessionReview::Inherit {
                 count: None,
                 model: None,
                 effort: None,
                 tier: None,
             }),
-            "the deprecated tier still turns on turn review"
+            "the deprecated tier does not change the configured trigger"
         );
         assert!(
             crate::Cli::try_parse_from([
