@@ -191,14 +191,12 @@ fn query_workspaces(
     let connection = open_reader(path)?;
     let mut statement = connection.prepare(&format!(
         "SELECT w.workspace_id, w.name, w.created_at, w.last_opened_at,
-                count(s.session_id) FILTER (
-                    WHERE s.state NOT IN ('stopped', 'lost', 'destroyed-with-data-loss')
-                )
+                s.harness_kind, s.state, count(s.session_id)
           FROM workspaces w
            LEFT JOIN session_contexts c USING(workspace_id)
            LEFT JOIN sessions s USING(session_id)
           {filter}
-          GROUP BY w.workspace_id
+          GROUP BY w.workspace_id, s.harness_kind, s.state
          HAVING w.workspace_id != 'default' OR count(s.session_id) > 0
           ORDER BY w.last_opened_at DESC, w.created_at DESC, w.workspace_id"
     ))?;
@@ -208,10 +206,50 @@ fn query_workspaces(
             name: row.get(1)?,
             created_at: row.get(2)?,
             last_opened_at: row.get(3)?,
-            session_count: row.get(4)?,
+            session_count: active_session_group_count(row, 4)?,
         })
     })?;
-    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+    let mut workspaces: Vec<WorkspaceRecord> = Vec::new();
+    for row in rows {
+        let workspace = row?;
+        if let Some(previous) = workspaces.last_mut()
+            && previous.id == workspace.id
+        {
+            previous.session_count += workspace.session_count;
+        } else {
+            workspaces.push(workspace);
+        }
+    }
+    Ok(workspaces)
+}
+
+/// Match session loading: retired harness records are retained history, but
+/// cannot be listed or suspended and must not block workspace removal.
+fn active_session_group_count(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<u64> {
+    let harness: Option<String> = row.get(offset)?;
+    let state: Option<String> = row.get(offset + 1)?;
+    let Some((harness, state)) = harness.zip(state) else {
+        return Ok(0);
+    };
+    if harness.parse::<mj_core::config::HarnessKind>().is_ok()
+        && stored_session_state(&state).is_active()
+    {
+        row.get(offset + 2)
+    } else {
+        Ok(0)
+    }
+}
+
+fn active_workspace_session_count(connection: &Connection, workspace_id: &str) -> Result<u64> {
+    let mut statement = connection.prepare(
+        "SELECT s.harness_kind, s.state, count(*)
+           FROM session_contexts c
+           JOIN sessions s USING(session_id)
+          WHERE c.workspace_id = ?1
+          GROUP BY s.harness_kind, s.state",
+    )?;
+    let counts = statement.query_map([workspace_id], |row| active_session_group_count(row, 0))?;
+    counts.sum::<rusqlite::Result<u64>>().map_err(Into::into)
 }
 
 pub fn create_workspace(name: &str) -> Result<WorkspaceRecord> {
@@ -349,20 +387,7 @@ pub fn delete_workspace(workspace_id: &str) -> Result<()> {
 pub fn delete_workspace_at(path: &Path, workspace_id: &str) -> Result<()> {
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let active_count = {
-        let mut statement = tx.prepare(
-            "SELECT s.state
-               FROM session_contexts c
-               JOIN sessions s USING(session_id)
-              WHERE c.workspace_id = ?1",
-        )?;
-        let states = statement.query_map([workspace_id], |row| row.get::<_, String>(0))?;
-        states
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .into_iter()
-            .filter(|state| stored_session_state(state).is_active())
-            .count()
-    };
+    let active_count = active_workspace_session_count(&tx, workspace_id)?;
     let draft_count: u64 = tx.query_row(
         "SELECT count(*) FROM detached_drafts WHERE workspace_id = ?1",
         [workspace_id],
@@ -400,20 +425,7 @@ fn remove_inactive_workspace_at(
 ) -> Result<()> {
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let active_count = {
-        let mut statement = tx.prepare(
-            "SELECT s.state
-               FROM session_contexts c
-               JOIN sessions s USING(session_id)
-              WHERE c.workspace_id = ?1",
-        )?;
-        let states = statement.query_map([workspace_id], |row| row.get::<_, String>(0))?;
-        states
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .into_iter()
-            .filter(|state| stored_session_state(state).is_active())
-            .count()
-    };
+    let active_count = active_workspace_session_count(&tx, workspace_id)?;
     ensure!(
         active_count == 0,
         "workspace is not empty ({active_count} active sessions remain)"

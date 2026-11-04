@@ -1919,6 +1919,69 @@ fn a_session_for_a_removed_harness_is_skipped_without_hiding_the_others() {
     );
 }
 
+// Hard-won: c2617cceee: removed harness records blocked workspace removal but could never be suspended.
+#[test]
+fn workspace_removal_ignores_removed_harnesses_and_preserves_their_history() {
+    for discard_drafts in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("mj.sqlite3");
+        let workspace = create_workspace_at(&database, "BB26").unwrap();
+        for (id, harness) in [
+            ("supported", "codex"),
+            ("legacy-zcode", "zcode"),
+            ("legacy-deepseek", "deepseek"),
+        ] {
+            let mut record = session(id, "project");
+            record.workspace_id = workspace.id.clone();
+            record.state = SessionState::Running;
+            save_session_to(&database, &record).unwrap();
+            open(&database)
+                .unwrap()
+                .execute(
+                    "UPDATE sessions SET harness_kind=?2 WHERE session_id=?1",
+                    [id, harness],
+                )
+                .unwrap();
+        }
+        let materialized = materialized_session("legacy-zcode");
+        save_materialized_session_to(&database, &materialized).unwrap();
+        assert_eq!(load_state_from(&database).unwrap().sessions.len(), 1);
+        assert_eq!(list_workspaces_from(&database).unwrap()[0].session_count, 1);
+        let remove = |workspace_id: &str| {
+            if discard_drafts {
+                close_workspace_at(&database, workspace_id)
+            } else {
+                delete_workspace_at(&database, workspace_id)
+            }
+        };
+        assert!(remove(&workspace.id).is_err());
+        let mut supported = load_state_from(&database).unwrap().sessions["supported"].clone();
+        supported.state = SessionState::Stopped;
+        save_session_to(&database, &supported).unwrap();
+        assert_eq!(list_workspaces_from(&database).unwrap()[0].session_count, 0);
+        remove(&workspace.id).unwrap();
+        assert!(list_workspaces_from(&database).unwrap().is_empty());
+        let connection = open_reader(&database).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM sessions WHERE session_id IN ('legacy-zcode', 'legacy-deepseek') AND state='running'",
+                    [],
+                    |row| row.get::<_, usize>(0),
+                )
+                .unwrap(),
+            2,
+            "removing the workspace must retain the original legacy records"
+        );
+        assert_eq!(
+            load_materialized_session_from(&database, "legacy-zcode")
+                .unwrap()
+                .unwrap(),
+            materialized
+        );
+    }
+}
+
 #[test]
 fn queue_entry_kinds_round_trip_and_default_to_prompt() {
     let directory = tempfile::tempdir().unwrap();
