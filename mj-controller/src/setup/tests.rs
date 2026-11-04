@@ -208,6 +208,7 @@ fn an_installed_mimo_is_offered_before_its_first_login() {
         [DiscoveredHome {
             kind: HarnessKind::Mimo,
             path: directory.path().join(".mimocode"),
+            conventional: true,
             codex_profile: None,
             authenticated: false,
         }]
@@ -247,6 +248,7 @@ fn an_installed_dsh_is_offered_before_its_first_login() {
         [DiscoveredHome {
             kind: HarnessKind::Dsh,
             path: directory.path().join(".dsh"),
+            conventional: true,
             codex_profile: None,
             authenticated: false,
         }]
@@ -285,6 +287,7 @@ fn a_deepseek_api_key_offers_dsh_without_a_cli_or_home() {
         [DiscoveredHome {
             kind: HarnessKind::Dsh,
             path: directory.path().join(".dsh"),
+            conventional: true,
             codex_profile: None,
             authenticated: true,
         }]
@@ -332,6 +335,7 @@ fn claude_keychain_marks_the_default_home_authenticated_without_a_marker() {
         vec![DiscoveredHome {
             kind: HarnessKind::Claude,
             path: claude.clone(),
+            conventional: true,
             codex_profile: None,
             authenticated: true,
         }]
@@ -378,6 +382,7 @@ fn claude_status_checks_a_custom_home_without_a_marker() {
         vec![DiscoveredHome {
             kind: HarnessKind::Claude,
             path: claude.clone(),
+            conventional: false,
             codex_profile: None,
             authenticated: true,
         }]

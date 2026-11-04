@@ -108,11 +108,14 @@ fn run_setup_with_discovery(
     atomic_write(&marker, b"pending\n")?;
     let (homes, repository) = discover()?;
     ensure!(!cancelled(), "setup cancelled");
-    let mut discovered = build_config(&homes, repository.as_ref());
-    reference_secret_api_keys(&mut discovered, config_path);
     Config::update_to(config_path, |latest| {
         // Choose identifiers against the latest file under its transaction lock.
         // This preserves simultaneous Settings edits and makes reruns additive.
+        let mut discovered = build_config(
+            &super::without_conventional_duplicates(latest, &homes),
+            repository.as_ref(),
+        );
+        reference_secret_api_keys(&mut discovered, config_path);
         let additions = latest.setup_additions(&discovered);
         latest.profiles.extend(additions.profiles);
         latest.bundles.extend(additions.bundles);
@@ -132,12 +135,13 @@ fn run_setup_with_discovery(
 }
 
 /// Adds a profile for every agent installed since the configuration was last
-/// written, the same additive merge as Settings' Detect profiles. Each launch
-/// of an existing installation runs this, so a newly installed agent appears
-/// without a trip to Settings. This runs on every launch by the user's
-/// decision; a removed profile for an installed agent returns, exactly as it
-/// does from Settings' Detect profiles, and disabling the profile is how a
-/// user stops using an agent. Returns the identifiers it added.
+/// written. Each launch of an existing installation runs this, so a newly
+/// installed agent appears without a trip to Settings. A harness that already
+/// has a profile does not also gain one from its conventional home, because a
+/// managed launch creates that home itself; a home named by the harness's own
+/// variable still adds its distinct installation. Settings' Detect profiles
+/// imports every installation, including a conventional home. Returns the
+/// identifiers it added.
 pub fn add_detected_profiles(
     config_path: &Path,
     executor: &impl CommandExecutor,
@@ -151,20 +155,19 @@ fn add_profiles_for(
     homes: &[DiscoveredHome],
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<String>> {
-    let mut discovered = super::profiles_config(homes);
-    reference_secret_api_keys(&mut discovered, config_path);
     ensure!(!cancelled(), "profile detection cancelled");
     // Leave the file untouched on the common launch that finds nothing new.
-    if Config::load_from(config_path)?
-        .setup_additions(&discovered)
-        .profiles
-        .is_empty()
-    {
+    let existing = Config::load_from(config_path)?;
+    let mut discovered = super::automatic_profiles_config(&existing, homes);
+    reference_secret_api_keys(&mut discovered, config_path);
+    if existing.setup_additions(&discovered).profiles.is_empty() {
         return Ok(Vec::new());
     }
     let (_, added) = Config::update_to(config_path, |latest| {
         // Choose identifiers against the latest file under its lock, so a
         // concurrent Settings save is preserved.
+        let mut discovered = super::automatic_profiles_config(latest, homes);
+        reference_secret_api_keys(&mut discovered, config_path);
         let additions = latest.setup_additions(&discovered).profiles;
         let added = additions.keys().cloned().collect();
         latest.profiles.extend(additions);
