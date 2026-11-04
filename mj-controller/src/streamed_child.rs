@@ -1,43 +1,47 @@
-//! The relay proxy process: a child of this process, or a stream on the node.
+//! A child process that streams: a local child, or a stream on the node.
 //!
 //! `mj_core::targets::command_host` decides which, the same way every other
 //! command the daemon starts is decided: the `mj daemon-run` process runs its
-//! proxies on its node, and daemons that tests run inside their own process
-//! spawn them here. Either way the relay sees a writer, two readers and an
-//! exit it can wait for, try, or force.
+//! children on its node, and daemons that tests run inside their own process
+//! spawn them here. Either way the caller sees a writer, two readers and an
+//! exit it can wait for, try, or force. The relay proxy uses it, and so do
+//! the quota and capacity probes that need a live stdin/stdout exchange.
 
-use super::*;
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use mj_core::node::NodeFrame;
+use mj_core::targets::CommandSpec;
+use std::process::Stdio;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::process::Command;
 
-pub(super) type ProxyWriter = Box<dyn AsyncWrite + Unpin + Send>;
-pub(super) type ProxyReader = Box<dyn AsyncRead + Unpin + Send>;
+pub(crate) type ProxyWriter = Box<dyn AsyncWrite + Unpin + Send>;
+pub(crate) type ProxyReader = Box<dyn AsyncRead + Unpin + Send>;
 
 /// How far the relay may fall behind a node proxy's output before the node is
 /// asked to wait. The node's own stream window bounds it as well.
 const NODE_PROXY_BUFFER: usize = 256 * 1024;
 
-pub(super) struct ProxyStdio {
-    pub(super) child: ProxyChild,
-    pub(super) stdin: ProxyWriter,
-    pub(super) stdout: ProxyReader,
-    pub(super) stderr: ProxyReader,
+pub(crate) struct ProxyStdio {
+    pub(crate) child: ProxyChild,
+    pub(crate) stdin: ProxyWriter,
+    pub(crate) stdout: ProxyReader,
+    pub(crate) stderr: ProxyReader,
 }
 
 /// How a proxy ended: its exit code, or `None` when it was killed or its
 /// node stream broke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ProxyExit {
+pub(crate) struct ProxyExit {
     code: Option<i32>,
 }
 
 impl ProxyExit {
-    pub(super) fn code(self) -> Option<i32> {
+    pub(crate) fn code(self) -> Option<i32> {
         self.code
     }
 
-    pub(super) fn success(self) -> bool {
+    pub(crate) fn success(self) -> bool {
         self.code == Some(0)
     }
 }
@@ -51,14 +55,14 @@ impl std::fmt::Display for ProxyExit {
     }
 }
 
-pub(super) enum ProxyChild {
+pub(crate) enum ProxyChild {
     // Boxed: `tokio::process::Child` is over 200 bytes larger on Windows than
     // the node variant, which trips `large_enum_variant` there.
     Local(Box<tokio::process::Child>),
     Node(NodeProxy),
 }
 
-pub(super) struct NodeProxy {
+pub(crate) struct NodeProxy {
     exit: tokio::sync::watch::Receiver<Option<ProxyExit>>,
     /// Records an exit when the proxy is killed before it reported one.
     exit_tx: tokio::sync::watch::Sender<Option<ProxyExit>>,
@@ -68,7 +72,7 @@ pub(super) struct NodeProxy {
 }
 
 impl ProxyChild {
-    pub(super) async fn wait(&mut self) -> std::io::Result<ProxyExit> {
+    pub(crate) async fn wait(&mut self) -> std::io::Result<ProxyExit> {
         match self {
             Self::Local(child) => child.wait().await.map(|status| ProxyExit {
                 code: status.code(),
@@ -85,7 +89,7 @@ impl ProxyChild {
     }
 
     /// Synchronous, because the relay's drop reaper runs without a runtime.
-    pub(super) fn try_wait(&mut self) -> std::io::Result<Option<ProxyExit>> {
+    pub(crate) fn try_wait(&mut self) -> std::io::Result<Option<ProxyExit>> {
         match self {
             Self::Local(child) => child.try_wait().map(|status| {
                 status.map(|status| ProxyExit {
@@ -96,7 +100,7 @@ impl ProxyChild {
         }
     }
 
-    pub(super) fn start_kill(&mut self) -> std::io::Result<()> {
+    pub(crate) fn start_kill(&mut self) -> std::io::Result<()> {
         match self {
             Self::Local(child) => child.start_kill(),
             Self::Node(node) => {
@@ -117,7 +121,27 @@ impl ProxyChild {
 }
 
 /// Start the relay proxy `spec` describes.
-pub(super) async fn spawn_proxy(spec: &CommandSpec) -> Result<ProxyStdio> {
+/// Read a child's output to end, keeping at most `limit` bytes.
+///
+/// The reader always drains to EOF so a child never blocks on a full pipe
+/// after the retained output reaches the limit.
+pub(crate) async fn collect_bounded(
+    mut reader: ProxyReader,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut collected = Vec::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(collected);
+        }
+        let room = limit.saturating_sub(collected.len());
+        collected.extend_from_slice(&buffer[..read.min(room)]);
+    }
+}
+
+pub(crate) async fn spawn_proxy(spec: &CommandSpec) -> Result<ProxyStdio> {
     if let Some(host) = mj_core::targets::command_host(spec) {
         return spawn_on_node(host.as_ref(), spec).await;
     }

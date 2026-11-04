@@ -396,16 +396,32 @@ async fn run_resource_command(
         (command.clone(), None)
     };
     let command = &command;
-    let mut process = tokio::process::Command::new(&command.program);
-    process.args(&command.args).envs(&command.env);
-    let output =
-        mj_core::subprocess::run_bounded(&mut process, 8 * 1024 * 1024, RESOURCE_POLL_TIMEOUT)
-            .await
-            .with_context(|| format!("wait for {}", command.purpose))?;
+    let crate::streamed_child::ProxyStdio {
+        mut child,
+        stdin,
+        stdout,
+        stderr,
+    } = crate::streamed_child::spawn_proxy(command)
+        .await
+        .with_context(|| format!("start {}", command.purpose))?;
+    // Resource probes do not read input; closing the writer gives a child
+    // that waits for EOF the signal it expects.
+    drop(stdin);
+    let output = tokio::time::timeout(RESOURCE_POLL_TIMEOUT, async {
+        let (stdout, stderr) = tokio::try_join!(
+            crate::streamed_child::collect_bounded(stdout, 8 * 1024 * 1024),
+            crate::streamed_child::collect_bounded(stderr, 8 * 1024 * 1024),
+        )?;
+        let exit = child.wait().await?;
+        Ok::<_, std::io::Error>((stdout, stderr, exit))
+    })
+    .await
+    .with_context(|| format!("wait for {}", command.purpose))?
+    .with_context(|| format!("read {}", command.purpose))?;
     let command_output = CommandOutput {
-        status: output.status.code().unwrap_or(-1),
-        stdout: output.stdout,
-        stderr: output.stderr,
+        status: output.2.code().unwrap_or(-1),
+        stdout: output.0,
+        stderr: output.1,
     };
     Ok((command_output, ssh_session))
 }
