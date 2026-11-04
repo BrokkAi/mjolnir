@@ -95,6 +95,25 @@ pub(super) async fn handle_action(
             .await?;
             Ok(DaemonReply::RemoteRepairs(repairs))
         }
+        DaemonAction::RepairRepositoryRemotes { bundle_id, repairs } => {
+            let controller = state
+                .with_config(|config| crate::controller::config_only_controller(config.clone()));
+            blocking(move || {
+                let bundle = controller
+                    .config
+                    .bundles
+                    .get(&bundle_id)
+                    .context("unknown bundle")?;
+                let executor = crate::targets::CancellableProcessExecutor::new(
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                )
+                .with_deadline(Duration::from_secs(30));
+                mj_core::local_git::apply_repository_remote_repairs(bundle, &repairs, &executor)
+            })
+            .await?;
+            refresh_runtime_controller(state).await;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::Status => {
             state.prune_dead_clients();
             Ok(DaemonReply::Status(DaemonStatus {

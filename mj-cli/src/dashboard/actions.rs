@@ -1277,17 +1277,17 @@ pub(crate) async fn apply_dashboard_action(
                 context.cancel_session_preflight();
                 context.dashboard.begin_remote_session_preflight(generation);
             }
-            // The daemon's config is the one the session was planned against.
-            let config = context.controller.config.clone();
             let (cancelled, _) = spawn_cancellable_io_with_token(
                 context.critical_operations.clone(),
                 "repairing Git tracking",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let bundle = config.bundles.get(&bundle_id).context("unknown bundle")?;
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(30));
-                    mj_core::local_git::apply_repository_remote_repairs(bundle, &repairs, &executor)
+                move |_cancelled| {
+                    mj_core::runtime::block_on(async {
+                        daemon::connect_or_start()
+                            .await?
+                            .repair_repository_remotes(bundle_id, repairs)
+                            .await
+                    })?
                 },
                 move |result| DashboardIoUpdate::RepositoryRemotesRepaired {
                     generation,

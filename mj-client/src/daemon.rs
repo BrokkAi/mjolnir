@@ -639,6 +639,12 @@ pub enum DaemonAction {
         bundle_id: String,
         target_id: String,
     },
+    /// Apply the remote-tracking repairs a preflight proposed, in the
+    /// environment that owns the project checkout.
+    RepairRepositoryRemotes {
+        bundle_id: String,
+        repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
+    },
     Status,
     WebViewerAccess,
     /// The daemon host's Git commit author, which its sessions inherit.
@@ -1709,6 +1715,20 @@ impl DaemonClient {
         {
             DaemonReply::RemoteRepairs(repairs) => Ok(repairs),
             reply => bail!("unexpected new-session preflight reply {reply:?}"),
+        }
+    }
+
+    pub async fn repair_repository_remotes(
+        &mut self,
+        bundle_id: String,
+        repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::RepairRepositoryRemotes { bundle_id, repairs })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected remote-repair reply {reply:?}"),
         }
     }
 
@@ -2955,7 +2975,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // The daemon reports its per-start identity, build and placement instead of
 // clients reading its PID and `/proc`, and it serves the configuration that
 // owns the store instead of clients opening `config.toml`.
-pub const PROTOCOL_VERSION: u32 = 79;
+pub const PROTOCOL_VERSION: u32 = 80;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
