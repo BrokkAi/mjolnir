@@ -33,6 +33,20 @@ use super::{
     RELAY_STATE_FILE, RestoredRelaySeed, restored_relay_seed_path,
 };
 
+/// Journal segments hold the full session transcript; create them owner-only
+/// the way credentials and checkpoint archives are created.
+fn owner_only_create_options() -> OpenOptions {
+    let options = OpenOptions::new();
+    #[cfg(unix)]
+    let options = {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = options;
+        options.mode(0o600);
+        options
+    };
+    options
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RelayJournalSpan {
     pub(crate) path: PathBuf,
@@ -310,7 +324,7 @@ fn seal_active_relay_segment(journal: &Path, metadata: &mut RelayJournalSpan) ->
     );
     let temporary = journal.join(format!("{sealed_name}.new"));
     let destination = journal.join(sealed_name);
-    let file = OpenOptions::new()
+    let file = owner_only_create_options()
         .create(true)
         .truncate(true)
         .write(true)
@@ -328,7 +342,7 @@ fn seal_active_relay_segment(journal: &Path, metadata: &mut RelayJournalSpan) ->
     sync_directory(journal)?;
 
     let replacement = journal.join("active.jsonl.new");
-    let file = OpenOptions::new()
+    let file = owner_only_create_options()
         .create(true)
         .truncate(true)
         .write(true)
@@ -630,7 +644,7 @@ fn archive_stale_active_relay_journal(
     sync_directory(journal)?;
 
     let replacement = journal.join("active.jsonl.new");
-    let file = OpenOptions::new()
+    let file = owner_only_create_options()
         .create(true)
         .truncate(true)
         .write(true)
@@ -721,7 +735,7 @@ impl DurableRelay {
         let journal = self.root.join(RELAY_JOURNAL_DIR);
         let path = journal.join(RELAY_ACTIVE_SEGMENT);
         let created_active_segment = !path.exists();
-        let mut file = OpenOptions::new()
+        let mut file = owner_only_create_options()
             .create(true)
             .append(true)
             .open(&path)
@@ -744,7 +758,7 @@ impl DurableRelay {
             let prompt_text = prompt
                 .iter()
                 .filter_map(|block| match block {
-                    agent_client_protocol::schema::v1::ContentBlock::Text(text) => {
+                    agent_client_protocol::v1::schema::ContentBlock::Text(text) => {
                         Some(text.text.as_str())
                     }
                     _ => None,
@@ -780,7 +794,7 @@ impl DurableRelay {
             ),
             RelayObservation::SessionUpdate { update } => matches!(
                 update.as_ref(),
-                agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(_)
+                agent_client_protocol::v1::schema::SessionUpdate::AgentMessageChunk(_)
             ),
             RelayObservation::HarnessTurnSettled {
                 prompt_in_flight: false,
@@ -817,7 +831,7 @@ impl DurableRelay {
         // bounded growth is checked above, but streaming still checkpoints at
         // the existing byte cadence rather than rewriting a snapshot per token.
         let evidence_chunk = matches!(&self.hot_events.back().expect("just appended").observation,
-            RelayObservation::SessionUpdate { update } if matches!(update.as_ref(), agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(_)));
+            RelayObservation::SessionUpdate { update } if matches!(update.as_ref(), agent_client_protocol::v1::schema::SessionUpdate::AgentMessageChunk(_)));
         if (stage_snapshot && !evidence_chunk)
             || idle_changed
             || self.unpersisted_journal_bytes >= RELAY_SNAPSHOT_LAG_BYTE_LIMIT
@@ -910,9 +924,9 @@ impl DurableRelay {
         // Rewriting replaces the active segment and deletes every sealed one.
         self.invalidate_replay_plans();
         let journal = self.root.join(RELAY_JOURNAL_DIR);
-        fs::create_dir_all(&journal)?;
+        mj_core::config::create_owner_only_directory(&journal)?;
         let replacement = journal.join("active.jsonl.new");
-        let mut file = OpenOptions::new()
+        let mut file = owner_only_create_options()
             .create(true)
             .truncate(true)
             .write(true)

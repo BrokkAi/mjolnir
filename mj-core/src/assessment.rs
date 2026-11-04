@@ -258,6 +258,13 @@ pub enum Status {
     Failed,
 }
 
+/// Identity of the completed turn whose inferred question a person can dismiss.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferredQuestion {
+    pub turn_id: String,
+    pub completed_ordinal: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnAssessment {
     pub turn_id: String,
@@ -292,6 +299,22 @@ impl TurnAssessment {
     }
     pub fn current(&self) -> bool {
         !matches!(self.status, Status::Consumed | Status::Superseded)
+    }
+    pub fn inferred_question(&self) -> Option<InferredQuestion> {
+        (self.current() && self.action == Some(Action::AwaitInput)).then(|| InferredQuestion {
+            turn_id: self.turn_id.clone(),
+            completed_ordinal: self.completed_ordinal,
+        })
+    }
+    pub fn question_dismissed(&self) -> bool {
+        self.status == Status::Superseded && self.reason == "question_dismissed"
+    }
+    pub fn matches_completion(&self, outcome: &crate::state::MaterializedTurnOutcome) -> bool {
+        self.turn_id == outcome.command_id && self.completed_ordinal == outcome.completed_ordinal
+    }
+    /// Only the assessment of this exact completion may interpret its reply.
+    pub fn applies_to(&self, outcome: &crate::state::MaterializedTurnOutcome) -> bool {
+        self.matches_completion(outcome) && self.current()
     }
     pub fn needs_classification(&self, now: i64) -> bool {
         matches!(self.status, Status::Pending | Status::Failed)
@@ -432,8 +455,8 @@ impl ContextHistory {
         true
     }
 
-    pub fn user(&mut self, id: &str, prompt: &[agent_client_protocol::schema::v1::ContentBlock]) {
-        use agent_client_protocol::schema::v1::ContentBlock;
+    pub fn user(&mut self, id: &str, prompt: &[agent_client_protocol::v1::schema::ContentBlock]) {
+        use agent_client_protocol::v1::schema::ContentBlock;
         self.open_assistant_id = None;
         if crate::continuation::is_generated_prompt(id) {
             return;
@@ -824,7 +847,7 @@ mod tests {
 
     #[test]
     fn generated_subagent_wait_prompt_does_not_enter_authorization_history() {
-        use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+        use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 
         let mut context = ContextHistory::default();
         let prompt = [ContentBlock::Text(TextContent::new(
@@ -838,7 +861,7 @@ mod tests {
 
     #[test]
     fn authorization_survives_assistant_eviction_without_clipping_user_consent() {
-        use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+        use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
         let mut context = ContextHistory::default();
         let prompt = vec![ContentBlock::Text(TextContent::new(
             "Implement, test, and commit.",
@@ -886,7 +909,7 @@ mod tests {
     // Hard-won: a893e12: recorded Codex goal fixtures failed after the previous total-entry cap rejected long sessions.
     #[test]
     fn long_sessions_evict_assistant_entries_before_user_messages() {
-        use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+        use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
         let mut context = ContextHistory::default();
         // Two hundred exchanges with ten assistant messages each: far past
         // the old 256-entry refusal, still complete.
@@ -939,7 +962,7 @@ mod tests {
     // Hard-won: a893e12: oversized assessment history was dropped instead of evicting old assistant entries to preserve the reply.
     #[test]
     fn shrinking_to_a_wire_limit_drops_old_assistant_entries_but_keeps_the_reply() {
-        use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+        use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
         let mut context = ContextHistory::default();
         context.user("u", &[ContentBlock::Text(TextContent::new("do the thing"))]);
         for i in 0..12 {
@@ -959,7 +982,7 @@ mod tests {
 
     #[test]
     fn a_long_final_reply_is_trimmed_rather_than_omitted() {
-        use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+        use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
         let mut context = ContextHistory::default();
         context.user(
             "u",

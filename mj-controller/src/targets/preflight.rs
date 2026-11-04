@@ -215,6 +215,13 @@ pub fn verify_ssh_docker(
     })
 }
 
+/// The remote commands the Apple container check runs on an SSH host, in
+/// order. The machine probe sends the same command lines in its one batch.
+pub(crate) const PLATFORM_PROBE: [&str; 2] = ["uname", "-sm"];
+pub(crate) const APPLE_CONTAINER_MACOS_PROBE: [&str; 2] = ["sw_vers", "-productVersion"];
+pub(crate) const APPLE_CONTAINER_VERSION_PROBE: [&str; 2] = ["container", "--version"];
+pub(crate) const APPLE_CONTAINER_STATUS_PROBE: [&str; 3] = ["container", "system", "status"];
+
 /// What a reachable Apple container host reported about itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppleContainerPreflight {
@@ -261,7 +268,7 @@ pub fn verify_ssh_apple_container(
     };
 
     let uname = reported(&probe(
-        ["uname", "-sm"],
+        PLATFORM_PROBE,
         "detect the Apple container host platform",
     ))?;
     let platform = TargetPlatform::parse(&uname).with_context(|| {
@@ -278,7 +285,7 @@ pub fn verify_ssh_apple_container(
     );
 
     let macos_version = reported(&probe(
-        ["sw_vers", "-productVersion"],
+        APPLE_CONTAINER_MACOS_PROBE,
         "detect the remote macOS release",
     ))?;
     let major: u32 = macos_version
@@ -296,18 +303,14 @@ pub fn verify_ssh_apple_container(
     );
 
     let version = reported(&probe(
-        ["container", "--version"],
+        APPLE_CONTAINER_VERSION_PROBE,
         "check the remote Apple container installation",
     ))?;
     // `container system status` exits nonzero while the daemon is stopped, so
     // it is checked for its status rather than its words.
     let status = ssh_validation_command(
         ssh,
-        vec![
-            "container".to_owned(),
-            "system".to_owned(),
-            "status".to_owned(),
-        ],
+        APPLE_CONTAINER_STATUS_PROBE.map(str::to_owned).to_vec(),
         "check the remote Apple container daemon",
     )
     .stage(ProvisionStage::Provisioning);
@@ -510,13 +513,21 @@ fn is_missing_program(error: &anyhow::Error) -> bool {
     })
 }
 
+/// The command the Docker check runs: it answers only when a daemon does.
+pub(crate) const DOCKER_SERVER_VERSION: [&str; 4] = [
+    "docker",
+    "version",
+    "--format",
+    "{{.Server.Version}} {{.Server.Os}}",
+];
+
 pub(super) fn verify_docker(
     ssh: Option<&SshTarget>,
     executor: &impl CommandExecutor,
 ) -> Result<DockerPreflight> {
     let command = CommandSpec::new(
-        "docker",
-        ["version", "--format", "{{.Server.Version}} {{.Server.Os}}"],
+        DOCKER_SERVER_VERSION[0],
+        DOCKER_SERVER_VERSION[1..].iter().copied(),
     )
     .purpose("check Docker daemon")
     .stage(ProvisionStage::Provisioning);
@@ -588,7 +599,10 @@ pub fn verify_ssh_podman(
     // One SSH round trip carries every probe; a remote shell runs them in
     // sequence and frames each result so the checks below stay unchanged.
     let probes = run_ssh_podman_probes(host, executor)?;
-    let mut preflight = verify_podman_probes(host, |probe| {
+    let macos_host = probes
+        .get(PLATFORM_PROBE_KEY)
+        .is_some_and(|output| output.status == 0 && output.stdout.trim_ascii() == b"Darwin");
+    let mut preflight = verify_podman_probes(host, macos_host, |probe| {
         let output = probes.get(probe.key()).cloned().ok_or_else(|| {
             anyhow::anyhow!(
                 "{}",
@@ -604,7 +618,11 @@ pub fn verify_ssh_podman(
         })?;
         check_podman_probe_status(host, probe, output)
     })?;
-    if let Some(warning) = ssh_podman_linger_warning(ssh, probes.get(LINGER_PROBE_KEY)) {
+    // Lingering is systemd's: a Mac has no `loginctl`, and its engine is the
+    // Podman machine rather than a user service.
+    if !macos_host
+        && let Some(warning) = ssh_podman_linger_warning(ssh, probes.get(LINGER_PROBE_KEY))
+    {
         preflight.warnings.push(warning);
     }
     Ok(preflight)
@@ -762,13 +780,19 @@ pub(super) fn verify_podman(
     host: PodmanHost<'_>,
     executor: &impl CommandExecutor,
 ) -> Result<PodmanPreflight> {
-    verify_podman_probes(host, |probe| execute_podman_probe(executor, host, probe))
+    verify_podman_probes(host, cfg!(target_os = "macos"), |probe| {
+        execute_podman_probe(executor, host, probe)
+    })
 }
 
 /// Apply the rootless Podman postconditions to probe results, however they
 /// were obtained: one command each locally, one batched command over SSH.
+///
+/// `macos_host` says the host running `podman` is a Mac, whose engine is
+/// always its Podman machine.
 pub(super) fn verify_podman_probes(
     host: PodmanHost<'_>,
+    macos_host: bool,
     probe_output: impl Fn(PodmanProbe) -> Result<CommandOutput>,
 ) -> Result<PodmanPreflight> {
     let version = probe_output(PodmanProbe::Version)?;
@@ -789,12 +813,12 @@ pub(super) fn verify_podman_probes(
         ));
     }
 
-    // A remote client is expected only for a local macOS controller using a
-    // Podman machine. On Linux, `serviceIsRemote` means CONTAINER_HOST or a
-    // selected connection points this target at another host's engine, whose
-    // paths and containers are not the local ones Mjolnir records.
-    let macos_machine = matches!(host, PodmanHost::Local) && cfg!(target_os = "macos");
-    if info.service_is_remote && !macos_machine {
+    // A remote client is expected only on a Mac, whose Podman machine is
+    // that host's engine whether Mjolnir runs there or reaches it over SSH.
+    // On Linux, `serviceIsRemote` means CONTAINER_HOST or a selected
+    // connection points this target at another host's engine, whose paths and
+    // containers are not the ones Mjolnir records.
+    if info.service_is_remote && !macos_host {
         return Err(probe_failure(
             host,
             PodmanPostcondition::Remote,
@@ -821,10 +845,120 @@ pub(super) fn verify_podman_probes(
         }
     }
 
-    Ok(PodmanPreflight {
-        version,
-        warnings: Vec::new(),
-    })
+    let mut warnings = Vec::new();
+    if !info.unenforceable_limits.is_empty() {
+        warnings.push(PodmanPreflightWarning {
+            detail: unenforceable_limits_detail(&info.unenforceable_limits),
+            remediation: format!(
+                "{}{}",
+                host.remediation_scope(),
+                CGROUP_DELEGATION_REMEDIATION
+            ),
+        });
+    }
+    Ok(PodmanPreflight { version, warnings })
+}
+
+/// A session container limit that rootless Podman applies through a cgroup v2
+/// controller, which systemd must delegate to the user's session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CgroupLimit {
+    Cpu,
+    Memory,
+}
+
+impl CgroupLimit {
+    pub const ALL: [Self; 2] = [Self::Cpu, Self::Memory];
+
+    fn controller(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Memory => "memory",
+        }
+    }
+
+    /// The `podman run` flag, as `backend_container` writes it, `--cpus=4`.
+    pub fn run_flag_prefix(self) -> &'static str {
+        match self {
+            Self::Cpu => "--cpus=",
+            Self::Memory => "--memory=",
+        }
+    }
+}
+
+/// openSUSE and SLE ship `Delegate=` for `user@.service`, so their rootless
+/// Podman runs with only the pids controller. runc then fails every container
+/// that sets `--cpus` or `--memory`, naming a missing `cpu.max` or
+/// `memory.swap.max`.
+pub const CGROUP_DELEGATION_REMEDIATION: &str = "To enforce them, have systemd delegate the controllers to user sessions: create `/etc/systemd/system/user@.service.d/80-delegate.conf` containing `[Service]` and `Delegate=pids memory cpu`, run `sudo systemctl daemon-reload`, then log in again.";
+
+pub fn unenforceable_limits_detail(limits: &[CgroupLimit]) -> String {
+    let controllers = limits
+        .iter()
+        .map(|limit| limit.controller())
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let noun = if limits.len() == 1 {
+        "controller"
+    } else {
+        "controllers"
+    };
+    format!(
+        "Rootless Podman cannot enforce session {controllers} limits because systemd does not delegate the {controllers} cgroup {noun} to this user, so sessions start without them."
+    )
+}
+
+/// The limits Podman cannot enforce, read from the `host` object of
+/// `podman info`. Only cgroup v2 is judged: rootless Podman on v1 already
+/// ignores resource limits itself, and an absent controller list is unknown,
+/// not empty.
+fn unenforceable_limits(host: &serde_json::Value) -> Vec<CgroupLimit> {
+    if host
+        .get("cgroupVersion")
+        .and_then(serde_json::Value::as_str)
+        != Some("v2")
+    {
+        return Vec::new();
+    }
+    let Some(controllers) = host
+        .get("cgroupControllers")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    CgroupLimit::ALL
+        .into_iter()
+        .filter(|limit| {
+            !controllers
+                .iter()
+                .any(|controller| controller.as_str() == Some(limit.controller()))
+        })
+        .collect()
+}
+
+/// Ask the Podman that will run a container which limits it cannot enforce.
+pub fn probe_podman_unenforceable_limits(
+    ssh: Option<&SshTarget>,
+    executor: &impl CommandExecutor,
+) -> Result<Vec<CgroupLimit>> {
+    let host = match ssh {
+        Some(ssh) => PodmanHost::Ssh(ssh),
+        None => PodmanHost::Local,
+    };
+    let output = executor.execute(&host.command(
+        &["podman", "info", "--format", "{{json .Host}}"],
+        "check Podman cgroup controllers",
+    ))?;
+    if output.status != 0 {
+        bail!(
+            "`podman info` failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let host: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .context("`podman info --format '{{json .Host}}'` returned unparsable output")?;
+    Ok(unenforceable_limits(&host))
 }
 
 /// The parts of `podman info` the preflight checks.
@@ -834,6 +968,7 @@ struct PodmanInfo {
     service_is_remote: bool,
     /// `(container_id, host_id, size)` triples from `host.idMappings.uidmap`.
     uid_map: Vec<(u64, u64, u64)>,
+    unenforceable_limits: Vec<CgroupLimit>,
 }
 
 impl PodmanInfo {
@@ -901,6 +1036,10 @@ fn parse_podman_info(host: PodmanHost<'_>, stdout: &[u8]) -> Result<PodmanInfo> 
         rootless,
         service_is_remote,
         uid_map,
+        unenforceable_limits: value
+            .get("host")
+            .map(unenforceable_limits)
+            .unwrap_or_default(),
     })
 }
 
@@ -1062,9 +1201,26 @@ pub(super) fn check_podman_probe_status(
 }
 
 pub(super) const LINGER_PROBE_KEY: &str = "linger";
+pub(super) const PLATFORM_PROBE_KEY: &str = "platform";
 pub(super) const PROBE_BLOCK_BEGIN: &str = "__mj_probe_begin__";
 pub(super) const PROBE_BLOCK_END: &str = "__mj_probe_end__";
 pub(super) const PROBE_STATUS_PREFIX: &str = "__mj_probe_status__";
+
+/// The markers a batched probe script frames each result with. A script that
+/// runs another batched script as one of its probes uses different markers,
+/// so the inner script's frames stay opaque inside the outer one's.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProbeFrames {
+    pub begin: &'static str,
+    pub end: &'static str,
+    pub status: &'static str,
+}
+
+const PODMAN_PROBE_FRAMES: ProbeFrames = ProbeFrames {
+    begin: PROBE_BLOCK_BEGIN,
+    end: PROBE_BLOCK_END,
+    status: PROBE_STATUS_PREFIX,
+};
 
 /// Run every remote Podman probe in one SSH round trip.
 ///
@@ -1073,7 +1229,7 @@ pub(super) const PROBE_STATUS_PREFIX: &str = "__mj_probe_status__";
 /// inside its own frame, so multi-line and arbitrary output survives intact.
 /// The version probe short-circuits the rest: without Podman the later probes
 /// can only repeat its failure.
-pub(super) const SSH_PODMAN_PREFLIGHT_SCRIPT: &str = r#"
+pub(crate) const SSH_PODMAN_PREFLIGHT_SCRIPT: &str = r#"
 exec 3>&1
 probe() {
     name=$1
@@ -1087,6 +1243,7 @@ probe() {
     return "$status"
 }
 probe version podman --version || exit 0
+probe platform uname -s
 probe info podman info --format json
 probe linger sh -c 'loginctl show-user "$(id -u)" --property=Linger --value'
 exit 0
@@ -1155,12 +1312,21 @@ pub(crate) fn ssh_podman_probe_fixture(probes: &[(&str, i32, &str, &str)]) -> Ve
 /// A probe appears only once its status line has been read, so output truncated
 /// mid-probe is reported as a missing probe rather than a partial result.
 pub(super) fn parse_podman_probe_output(stdout: &[u8]) -> BTreeMap<String, CommandOutput> {
+    parse_framed_probes(stdout, PODMAN_PROBE_FRAMES)
+}
+
+/// Split framed output into one result per probe, as
+/// [`parse_podman_probe_output`] does for `frames`.
+pub(crate) fn parse_framed_probes(
+    stdout: &[u8],
+    frames: ProbeFrames,
+) -> BTreeMap<String, CommandOutput> {
     let text = String::from_utf8_lossy(stdout);
     let mut blocks: BTreeMap<String, String> = BTreeMap::new();
     let mut probes = BTreeMap::new();
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
-        if let Some(name) = line.strip_prefix(PROBE_BLOCK_BEGIN).and_then(|rest| {
+        if let Some(name) = line.strip_prefix(frames.begin).and_then(|rest| {
             rest.strip_prefix(' ')
                 .filter(|name| !name.is_empty())
                 .map(str::to_owned)
@@ -1168,7 +1334,7 @@ pub(super) fn parse_podman_probe_output(stdout: &[u8]) -> BTreeMap<String, Comma
             let mut body = Vec::new();
             let mut closed = false;
             for line in lines.by_ref() {
-                if line == PROBE_BLOCK_END {
+                if line == frames.end {
                     closed = true;
                     break;
                 }
@@ -1179,7 +1345,7 @@ pub(super) fn parse_podman_probe_output(stdout: &[u8]) -> BTreeMap<String, Comma
             }
             continue;
         }
-        let Some(rest) = line.strip_prefix(PROBE_STATUS_PREFIX) else {
+        let Some(rest) = line.strip_prefix(frames.status) else {
             continue;
         };
         let mut fields = rest.split_whitespace();

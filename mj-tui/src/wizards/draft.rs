@@ -323,6 +323,9 @@ impl WizardDraft for NewWizard {
     /// attachment editor and editing an unrelated field do not, because none of
     /// them changes the sources the preflight resolved.
     fn note_draft_change(&mut self, dashboard: &mut DashboardState, change: DraftChange) {
+        if change == DraftChange::BundleSelected {
+            self.bundle_removal_outcome = None;
+        }
         if matches!(
             change,
             DraftChange::BundleSelected
@@ -428,6 +431,7 @@ impl WizardDraft for NewWizard {
                     &mut self.project_picker.query
                 };
                 if PathField::apply(input, edit) == EditOutcome::Changed {
+                    self.project_picker.github_query_changed();
                     self.project_picker.focus_results = false;
                     dashboard.record_event_handled();
                 }
@@ -532,11 +536,12 @@ impl WizardDraft for NewWizard {
     fn handle_extra_shortcut(&mut self, _dashboard: &DashboardState, _key: KeyEvent) {}
 
     fn profile_count(&self, dashboard: &DashboardState) -> usize {
-        dashboard.config.enabled_profiles().count()
+        dashboard.offered_profiles().count()
     }
 
+    /// A new session can start on any offered target.
     fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String> {
-        dashboard.target_readiness_rejection(target_id)
+        dashboard.target_unavailable(target_id)
     }
 
     /// A new session can start on any target.

@@ -16,13 +16,13 @@
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> saved before opening                                                                            │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 draft: "saved before opening"
 
 === fresh chat without saved draft (100x24) ===
@@ -43,13 +43,13 @@ draft: "saved before opening"
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 draft empty: true
 
 === standby composer readline and normalized paste (100x24) ===
@@ -70,13 +70,13 @@ draft empty: true
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> alpha beta…                                                                                     │
 │  second                                                                                          │
+│                                                                                                  │
 ╰────────────────────────────────────────────────────────────────────────── Enter  keeps the draft ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 draft: "alpha beta…\nsecond"
 cursor: 20
 
@@ -98,13 +98,13 @@ cursor: 20
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Commands open when the session is live; the draft is kept.
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> /help                                                                                           │
+│                                                                                                  │
 ╰────────────────────────────────────────────────────────────────────────── Enter  keeps the draft ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
 draft: "/help"
 queued prompts: 0
@@ -133,7 +133,7 @@ queued prompts: 0
 │                                                                                                  │
 │> Type a draft · sending opens when the session is live                                           │
 ╰ 1 queued───────────────────────────────────────────────────────────────── Enter  keeps the draft ╯
-Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
+Up/Ctrl-P edit last queued · Enter send/queue │ ctrl+b then q detach · : / ? palette
 action: Prompt("alpha beta…\nsecond")
 draft empty: true
 queued prompts: ["alpha beta…\nsecond"]
@@ -156,11 +156,39 @@ queued prompts: ["alpha beta…\nsecond"]
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> /mod                                                                                            │
 │                                                                                                  │
+│                                                                                                  │
 ╰────────────────────────────────────────────────────────────────────────── Enter  keeps the draft ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 autocomplete active: false
+
+=== image staged before capability discovery survives live handoff and queues with its marker (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│  queued image 1: describe [image 1]                                                              │
+│                                                                                                  │
+│> Type a draft · sending opens when the session is live                                           │
+╰ 1 queued───────────────────────────────────────────────────────────────── Enter  keeps the draft ╯
+Up/Ctrl-P edit last queued · Enter send/queue │ ctrl+b then q detach · : / ? palette
+action: Prompt("describe [image 1]")
+queued images: 1

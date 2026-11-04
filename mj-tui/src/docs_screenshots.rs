@@ -119,6 +119,7 @@ fn documentation_dashboard() -> DashboardState {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            muse_auto_review: None,
             codex_profile: None,
         },
     );
@@ -207,7 +208,8 @@ fn documentation_dashboard() -> DashboardState {
     let mut dashboard = DashboardState::new(
         config,
         State {
-            last_subagent_policy: Default::default(),
+            operator_presence: Default::default(),
+            last_subagent_policies: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
@@ -356,6 +358,8 @@ fn profile_quota(
             QuotaWindow {
                 label: "Weekly".into(),
                 remaining_percent: Some(weekly_remaining),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: Some("4d".into()),
@@ -364,6 +368,8 @@ fn profile_quota(
             QuotaWindow {
                 label: "5h".into(),
                 remaining_percent: Some(five_hour_remaining),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: Some("2h 14m".into()),

@@ -4,8 +4,8 @@ use mj_core::subagent::{SubagentCompletion, SubagentToolRequest};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Observation {
-    requests: Vec<SubagentToolRequest>,
-    completions: Vec<SubagentCompletion>,
+    requests: mj_core::snapshot_map::SharedSnapshot<Vec<SubagentToolRequest>>,
+    completions: mj_core::snapshot_map::SharedSnapshot<Vec<SubagentCompletion>>,
     error: Option<String>,
 }
 
@@ -24,8 +24,8 @@ impl Drop for SubagentQueueObserver {
 impl SubagentQueueObserver {
     pub fn spawn(target: &RelaySessionTarget) -> Self {
         let (tx, view) = watch::channel(Observation {
-            requests: Vec::new(),
-            completions: Vec::new(),
+            requests: Default::default(),
+            completions: Default::default(),
             error: Some("delegation queue is connecting".into()),
         });
         let (active, activity) = watch::channel(true);
@@ -97,8 +97,8 @@ impl SubagentQueueObserver {
         &self,
         active: bool,
     ) -> (
-        Vec<SubagentToolRequest>,
-        Vec<SubagentCompletion>,
+        mj_core::snapshot_map::SharedSnapshot<Vec<SubagentToolRequest>>,
+        mj_core::snapshot_map::SharedSnapshot<Vec<SubagentCompletion>>,
         Option<String>,
     ) {
         self.active.send_if_modified(|previous| {

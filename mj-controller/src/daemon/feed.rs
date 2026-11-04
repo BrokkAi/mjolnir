@@ -7,22 +7,18 @@ use mj_core::native_agent::NativeAgentSummary;
 use mj_core::snapshot_map::SnapshotMap;
 
 type NativeOwners = SnapshotMap<String, SnapshotMap<String, NativeAgentSummary>>;
-type Children = SnapshotMap<String, SnapshotMap<String, ()>>;
 
-/// The terminal feed's history holds live projections: only the sessions
-/// [`mj_core::state::session_is_live`] keeps. `full` is the newest projection
-/// of every session from the same capture, for the in-process web server.
+/// Bounded immutable source snapshots. Each terminal projects its opened
+/// families from these same roots, so scope changes can include old history.
 #[derive(Default)]
 pub(super) struct RuntimeHistory {
+    capacity: super::capacity::ContainerCapacityProjection,
     incarnation: String,
     sequence: u64,
     snapshots: VecDeque<(u64, RuntimeProjection, usize)>,
     bytes: usize,
     native_owners: NativeOwners,
     full: RuntimeProjection,
-    /// Sessions with a visible lifecycle operation or an active move in the
-    /// newest capture. A stopped session stays live while it has one.
-    operations: BTreeSet<String>,
 }
 
 impl RuntimeHistory {
@@ -30,6 +26,7 @@ impl RuntimeHistory {
         RuntimeCursor {
             incarnation: self.incarnation.clone(),
             sequence: self.sequence,
+            subagent_parents: Default::default(),
         }
     }
 
@@ -65,106 +62,6 @@ impl RuntimeHistory {
         Ok(())
     }
 
-    /// The live projection for `full`, derived from the previous one by what
-    /// changed since the previous capture, so a publication costs what
-    /// changed rather than every session ever created, and unchanged
-    /// branches stay shared with history.
-    fn live_projection(
-        &self,
-        full: &RuntimeProjection,
-        native_owners: &NativeOwners,
-        children: &Children,
-        operations: &BTreeSet<String>,
-    ) -> RuntimeProjection {
-        let before = &self.full;
-        let mut live = self
-            .snapshots
-            .back()
-            .map(|(_, projection, _)| projection.clone())
-            .unwrap_or_default();
-        live.revision = full.revision;
-        live.sessions = full.sessions.clone();
-        live.transcripts = full.transcripts.clone();
-        live.metadata = full.metadata.clone();
-        let mut pending = before
-            .records
-            .changes(&full.records)
-            .map(|(id, _)| id.clone())
-            .chain(
-                before
-                    .subagents
-                    .changes(&full.subagents)
-                    .map(|(id, _)| id.clone()),
-            )
-            .chain(before.moves.changes(&full.moves).map(|(id, _)| id.clone()))
-            .chain(self.operations.symmetric_difference(operations).cloned())
-            .collect::<Vec<_>>();
-        while let Some(id) = pending.pop() {
-            let was = live.records.contains_key(&id);
-            let record = full.records.get(&id);
-            let now = record.is_some_and(|record| {
-                let parent_live = full
-                    .subagents
-                    .get(&id)
-                    .is_some_and(|relation| live.records.contains_key(&relation.parent_session_id));
-                mj_core::state::session_is_live(record, operations.contains(&id), parent_live)
-            });
-            sync_key(&mut live.records, &id, record.filter(|_| now));
-            sync_key(
-                &mut live.subagents,
-                &id,
-                full.subagents.get(&id).filter(|_| now),
-            );
-            sync_key(&mut live.moves, &id, full.moves.get(&id).filter(|_| now));
-            sync_key(
-                &mut live.session_cpu,
-                &id,
-                full.session_cpu.get(&id).filter(|_| now),
-            );
-            if was == now {
-                continue;
-            }
-            // Membership moved, so the session's native agents follow it,
-            // and so do its stopped sub-agents.
-            for summary in native_owners
-                .get(&id)
-                .into_iter()
-                .flat_map(SnapshotMap::values)
-            {
-                let view_id = summary.agent.view_id();
-                sync_key(&mut live.native_agents, &view_id, now.then_some(summary));
-            }
-            pending.extend(
-                children
-                    .get(&id)
-                    .into_iter()
-                    .flat_map(SnapshotMap::keys)
-                    .cloned(),
-            );
-        }
-        for (view_id, summary) in before.native_agents.changes(&full.native_agents) {
-            let owner = summary
-                .or_else(|| before.native_agents.get(view_id))
-                .map(|summary| summary.agent.owner_session_id.as_str());
-            if owner.is_some_and(|owner| live.records.contains_key(owner)) {
-                sync_key(&mut live.native_agents, view_id, summary);
-            }
-        }
-        for (id, value) in before.session_cpu.changes(&full.session_cpu) {
-            sync_key(
-                &mut live.session_cpu,
-                id,
-                value.filter(|_| live.records.contains_key(id)),
-            );
-        }
-        debug_assert_eq!(
-            live.records.keys().cloned().collect::<BTreeSet<_>>(),
-            mj_core::state::live_session_ids(&full.records, &full.subagents, operations),
-            "the incremental live set must equal a full evaluation"
-        );
-        live
-    }
-
     /// A session's tail as it was at `cursor`. Answering from the retained
     /// version rather than the newest one is what makes every delta after
     /// `cursor` apply to it.
@@ -185,12 +82,25 @@ impl RuntimeHistory {
             .map_or(SessionTailReply::NoTail, SessionTailReply::of)
     }
 
+    #[cfg(test)]
     fn frame(&self, requested: Option<&RuntimeCursor>) -> RuntimeFrame {
+        self.frame_for_subagent_parents(requested, &BTreeSet::new())
+    }
+
+    fn frame_for_subagent_parents(
+        &self,
+        requested: Option<&RuntimeCursor>,
+        parents: &BTreeSet<String>,
+    ) -> RuntimeFrame {
+        let mut cursor = self.cursor();
+        cursor.subagent_parents = parents.clone();
         let (_, current, _) = self.snapshots.back().expect("captured projection");
+        let current = current.for_subagent_parents(parents);
+        let requested = requested.filter(|requested| requested.subagent_parents == *parents);
         let Some(requested) = requested else {
             return RuntimeFrame::Snapshot {
-                cursor: self.cursor(),
-                projection: Box::new(current.clone()),
+                cursor,
+                projection: Box::new(current),
             };
         };
         if requested.incarnation == self.incarnation
@@ -201,8 +111,11 @@ impl RuntimeHistory {
         {
             return RuntimeFrame::Delta {
                 from: requested.clone(),
-                cursor: self.cursor(),
-                changes: Box::new(RuntimeDelta::between(before, current)),
+                cursor,
+                changes: Box::new(RuntimeDelta::between(
+                    &before.for_subagent_parents(parents),
+                    &current,
+                )),
             };
         }
         RuntimeFrame::ResetRequired
@@ -227,23 +140,10 @@ fn launch_inputs_changed(before: &RuntimeProjection, after: &RuntimeProjection) 
         .any(|(id, record)| before.records.get(id).map(inputs) != record.map(inputs))
 }
 
-/// Make `map[id]` equal `value`, leaving an equal entry and its sharing alone.
-fn sync_key<V: Clone + PartialEq>(map: &mut SnapshotMap<String, V>, id: &str, value: Option<&V>) {
-    match value {
-        Some(value) if map.get(id) != Some(value) => {
-            map.insert(id.to_owned(), value.clone());
-        }
-        Some(_) => {}
-        None => {
-            map.remove(id);
-        }
-    }
-}
-
 impl RuntimeState {
     /// Every session, stopped ones included, for the in-process web server.
-    /// Terminal clients receive the live projection through
-    /// [`Self::runtime_changes`].
+    /// Terminal clients receive a scoped projection through
+    /// [`Self::runtime_changes_for_subagent_parents`].
     pub(crate) fn runtime_publication(&self) -> Result<RuntimeProjection> {
         self.capture_runtime()?;
         Ok(self
@@ -258,7 +158,7 @@ impl RuntimeState {
         // History serialization never holds the operational owner. Only immutable
         // roots and the bounded active-operation projection cross that lock.
         let mut history = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
-        let (mut full, native_owners, children, operations) = {
+        let (mut full, native_owners) = {
             let owner = self.owner();
             owner.ensure_available()?;
             let controller = owner.controller();
@@ -267,16 +167,6 @@ impl RuntimeState {
                 .map(|state| state.moves.clone())
                 .unwrap_or_default();
             let lifecycles = Self::active_lifecycles_with(&owner);
-            let operations = lifecycles
-                .iter()
-                .map(|lifecycle| lifecycle.session_id.clone())
-                .chain(
-                    moves
-                        .iter()
-                        .filter(|(_, operation)| operation.is_active())
-                        .map(|(id, _)| id.clone()),
-                )
-                .collect::<BTreeSet<_>>();
             (
                 RuntimeProjection {
                     revision: self.revisions.current(),
@@ -287,11 +177,14 @@ impl RuntimeState {
                     session_cpu: self.session_manager.session_cpu.borrow().clone(),
                     moves,
                     metadata: RuntimeMetadata {
-                        config: controller.config.clone(),
+                        operator_presence: controller.state.operator_presence,
+                        config: owner.config_snapshot.clone(),
                         default_targets: controller.config.default_targets.clone(),
-                        last_subagent_policy: controller.state.last_subagent_policy.clone(),
+                        last_subagent_policies: controller.state.last_subagent_policies.clone(),
                         lifecycles,
-                        container_capacities: self.container_capacity_projection(&controller.state),
+                        container_capacities: history
+                            .capacity
+                            .project(self, &controller.state.sessions),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -300,8 +193,6 @@ impl RuntimeState {
                     .committed()
                     .map(|state| state.native_agents.clone())
                     .unwrap_or_default(),
-                owner.indexes.children.clone(),
-                operations,
             )
         };
         full.metadata.container_upgrade_sessions =
@@ -347,7 +238,7 @@ impl RuntimeState {
             .unwrap_or_else(PoisonError::into_inner)
             .snapshot
             .clone();
-        full.metadata.storage = crate::target_storage::views();
+        full.metadata.storage = crate::target_storage::views_snapshot();
         full.metadata.profile_capabilities = self
             .profile_catalog
             .get()
@@ -355,15 +246,13 @@ impl RuntimeState {
             .unwrap_or_default();
         full.metadata.recent_launch = self.recent_launch.borrow().clone();
         full.metadata.launch_recency = if launch_inputs_changed(&history.full, &full) {
-            mj_client::runtime_feed::launch_recency(&full.records)
+            mj_client::runtime_feed::launch_recency(&full.records).into()
         } else {
             history.full.metadata.launch_recency.clone()
         };
-        let live = history.live_projection(&full, &native_owners, &children, &operations);
-        history.publish(live)?;
+        history.publish(full.clone())?;
         history.native_owners = native_owners;
         history.full = full;
-        history.operations = operations;
         Ok(history.cursor())
     }
 
@@ -378,16 +267,28 @@ impl RuntimeState {
             .session_tail(cursor, session_id)
     }
 
+    #[cfg(test)]
     pub(super) async fn runtime_changes(
         &self,
         cursor: Option<RuntimeCursor>,
         wait: bool,
     ) -> Result<RuntimeFrame> {
+        self.runtime_changes_for_subagent_parents(cursor, wait, BTreeSet::new())
+            .await
+    }
+
+    pub(super) async fn runtime_changes_for_subagent_parents(
+        &self,
+        cursor: Option<RuntimeCursor>,
+        wait: bool,
+        subagent_parents: BTreeSet<String>,
+    ) -> Result<RuntimeFrame> {
         // Subscribe and mark the observed notification BEFORE capture. A change
         // during capture remains pending, so attachment cannot lose its wakeup.
         let mut revisions = self.revisions.subscribe();
         revisions.borrow_and_update();
-        let current = self.capture_runtime()?;
+        let mut current = self.capture_runtime()?;
+        current.subagent_parents = subagent_parents.clone();
         if wait && cursor.as_ref() == Some(&current) {
             let _ = tokio::time::timeout(Duration::from_secs(30), revisions.changed()).await;
             self.capture_runtime()?;
@@ -396,7 +297,7 @@ impl RuntimeState {
             .feed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .frame(cursor.as_ref()))
+            .frame_for_subagent_parents(cursor.as_ref(), &subagent_parents))
     }
 }
 
@@ -422,6 +323,7 @@ mod tests {
         let wrong = RuntimeCursor {
             incarnation: "previous-daemon".into(),
             sequence: 1,
+            subagent_parents: Default::default(),
         };
         assert!(matches!(
             history.frame(Some(&wrong)),
@@ -490,6 +392,7 @@ mod tests {
         let replaced = RuntimeCursor {
             incarnation: "previous-daemon".into(),
             sequence: held.sequence,
+            subagent_parents: Default::default(),
         };
         assert_eq!(
             history.session_tail(&replaced, "s"),
@@ -576,7 +479,7 @@ mod tests {
             CapabilityState::Ready(_)
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(replica.projection.metadata.config, Config::default());
+        assert_eq!(*replica.projection.metadata.config, Config::default());
     }
 
     #[tokio::test]
@@ -604,6 +507,88 @@ mod tests {
         assert_eq!(changes.records.len(), 1);
         replica.apply(frame).unwrap();
         assert!(replica.projection.records.contains_key("new"));
+    }
+
+    // Hard-won: 8c88175f7: captures copied and compared unchanged metadata on every update.
+    #[tokio::test]
+    async fn unrelated_captures_share_metadata_and_replacements_preserve_held_snapshots() {
+        const CHILD: &str = "MJ_TEST_SHARED_RUNTIME_PUBLICATION";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(
+                    module_path!(),
+                    "unrelated_captures_share_metadata_and_replacements_preserve_held_snapshots",
+                ),
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "cpu-publication-regression")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let state = super::super::tests::test_runtime_state();
+        let catalog = crate::server_runtime::profile_catalog::ProfileCatalog::with_probe(
+            crate::server_runtime::profile_catalog::counting_probe(Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            )),
+        );
+        assert!(state.profile_catalog.set(catalog).is_ok());
+        state.owner().edit_sessions(|sessions| {
+            for index in 0..6_000 {
+                let id = format!("history-{index:06}");
+                sessions.insert(id.clone(), record(&id, SessionState::Stopped));
+            }
+        });
+        let before = state.runtime_publication().unwrap();
+        for _ in 0..20 {
+            state.publish_revision();
+            let after = state.runtime_publication().unwrap();
+            assert!(before.metadata.config.ptr_eq(&after.metadata.config));
+            assert!(before.metadata.quotas.ptr_eq(&after.metadata.quotas));
+            assert!(before.metadata.storage.ptr_eq(&after.metadata.storage));
+            assert!(
+                before
+                    .metadata
+                    .profile_capabilities
+                    .ptr_eq(&after.metadata.profile_capabilities)
+            );
+            assert!(
+                before
+                    .metadata
+                    .container_capacities
+                    .ptr_eq(&after.metadata.container_capacities)
+            );
+        }
+        let mut config = (*before.metadata.config).clone();
+        config.advanced.auto_afk_minutes += 1;
+        state.owner().install_config(config.clone());
+        state.publish_quotas(mj_client::quota::QuotaSnapshot {
+            cycles: 1,
+            ..Default::default()
+        });
+        let after = state.runtime_publication().unwrap();
+        assert_eq!(after.metadata.quotas.cycles, 1);
+        assert_eq!(before.metadata.quotas.cycles, 0);
+        assert_eq!(*after.metadata.config, config);
+        assert_ne!(*before.metadata.config, config);
+        crate::target_storage::record_samples(
+            &[crate::target_storage::tests::sample(
+                "runtime-sharing",
+                20 << 30,
+                30 << 30,
+            )],
+            100,
+        );
+        let measured = state.runtime_publication().unwrap();
+        assert!(!measured.metadata.storage.ptr_eq(&before.metadata.storage));
+        assert!(before.metadata.storage.is_empty());
+        assert!(!measured.metadata.storage.is_empty());
+        let wire = serde_json::to_value(&after.metadata).unwrap();
+        assert!(wire["config"].is_object());
+        assert!(wire["storage"].is_array());
+        let received: RuntimeMetadata = serde_json::from_value(wire).unwrap();
+        assert_eq!(received, after.metadata);
     }
 
     #[test]
@@ -641,49 +626,152 @@ mod tests {
         assert_eq!(replica.projection.session_cpu.get("live"), Some(&value));
     }
 
+    #[test]
+    fn historical_family_scope_bounds_bootstrap_and_replays_from_the_same_snapshot() {
+        let mut full = RuntimeProjection::default();
+        full.records
+            .insert("parent".into(), record("parent", SessionState::Running));
+        full.records
+            .insert("other".into(), record("other", SessionState::Running));
+        let mut durable_launch_bytes = 0;
+        for i in 0..1200 {
+            let id = format!("child-{i:04}");
+            let mut session = record(
+                &id,
+                if i % 2 == 0 {
+                    SessionState::Stopped
+                } else {
+                    SessionState::Parked
+                },
+            );
+            session.draft_input = "historical draft 🙂".repeat(100);
+            let mut launch = super::super::tests::runtime_test_subagent(
+                &id,
+                if i == 1199 { "other" } else { "parent" },
+            );
+            launch.initial_prompt = "private durable launch 🙂".repeat(1000);
+            durable_launch_bytes += serde_json::to_vec(&launch).unwrap().len();
+            full.records.insert(id.clone(), session);
+            full.subagents.insert(id, launch.into());
+        }
+        full.records.get_mut("child-0000").unwrap().archived = true;
+        let mut history = RuntimeHistory::default();
+        history.publish(full.clone()).unwrap();
+        let RuntimeFrame::Snapshot { cursor, projection } = history.frame(None) else {
+            panic!("snapshot");
+        };
+        let bootstrap = mj_client::runtime_feed::RuntimeBootstrap {
+            cursor,
+            projection: *projection,
+        };
+        let bootstrap_bytes = serde_json::to_vec(&bootstrap).unwrap().len();
+        assert!(
+            bootstrap_bytes < durable_launch_bytes / 10,
+            "compact bootstrap {bootstrap_bytes} must exclude durable launch history {durable_launch_bytes}"
+        );
+        eprintln!(
+            "1200-child fixture: {durable_launch_bytes} launch JSON bytes, {bootstrap_bytes} bootstrap JSON bytes"
+        );
+        assert_eq!(
+            bootstrap
+                .projection
+                .records
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["other", "parent"])
+        );
+        assert_eq!(
+            bootstrap.projection.subagents.len(),
+            1199,
+            "counts retain unarchived relationships"
+        );
+        let wire = serde_json::to_value(&bootstrap).unwrap();
+        assert!(
+            wire["projection"]["subagents"]["child-0001"]
+                .get("initial_prompt")
+                .is_none()
+        );
+        let mut replica = bootstrap.into_replica();
+        assert!(
+            matches!(history.frame(replica.cursor.as_ref()), RuntimeFrame::Delta { ref changes, .. } if changes.is_empty()),
+            "bootstrap continues with a delta, not another snapshot"
+        );
+
+        let parents = BTreeSet::from(["parent".to_owned()]);
+        let frame = history.frame_for_subagent_parents(replica.cursor.as_ref(), &parents);
+        assert!(
+            matches!(frame, RuntimeFrame::Snapshot { .. }),
+            "a scope change must replace the base"
+        );
+        replica.apply(frame).unwrap();
+        assert_eq!(replica.projection.records.len(), 1200);
+        assert!(!replica.projection.records.contains_key("child-0000"));
+        assert!(!replica.projection.records.contains_key("child-1199"));
+        full.records.get_mut("child-0001").unwrap().draft_input = "updated historical row".into();
+        // Even a stopped parent remains readable in an opened family.
+        full.records.get_mut("parent").unwrap().state = SessionState::Stopped;
+        history.publish(full).unwrap();
+        let frame = history.frame_for_subagent_parents(replica.cursor.as_ref(), &parents);
+        assert!(matches!(frame, RuntimeFrame::Delta { .. }));
+        replica.apply(frame).unwrap();
+        assert_eq!(
+            replica.projection.records["child-0001"].draft_input,
+            "updated historical row"
+        );
+        assert!(replica.projection.records.contains_key("parent"));
+        replica
+            .apply(history.frame(replica.cursor.as_ref()))
+            .unwrap();
+        assert_eq!(
+            replica
+                .projection
+                .records
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["other"]
+        );
+        assert_eq!(replica.projection.subagents.len(), 1199);
+    }
+
     fn record(id: &str, state: SessionState) -> SessionRecord {
         super::super::tests::runtime_test_session(id, "workspace", state)
     }
 
-    /// One capture as `capture_runtime` makes it: derive the live projection,
-    /// publish it, and remember its inputs. Returns the live session ids.
+    /// One capture as `capture_runtime` makes it, followed by the default view.
     fn capture(
         history: &mut RuntimeHistory,
         full: &RuntimeProjection,
         native_owners: &NativeOwners,
         operations: &[&str],
     ) -> Vec<String> {
-        let mut children = Children::new();
-        for (child, relation) in &full.subagents {
-            let mut members = children
-                .get(&relation.parent_session_id)
-                .cloned()
-                .unwrap_or_default();
-            members.insert(child.clone(), ());
-            children.insert(relation.parent_session_id.clone(), members);
-        }
-        let operations = operations.iter().map(|id| (*id).to_owned()).collect();
-        let live = history.live_projection(full, native_owners, &children, &operations);
-        history.publish(live).unwrap();
-        history.full = full.clone();
+        let mut full = full.clone();
+        full.metadata.lifecycles = operations
+            .iter()
+            .map(|id| RuntimeLifecycleView {
+                operation_id: format!("resume-{id}"),
+                move_operation_id: None,
+                cancellable: true,
+                session_id: (*id).to_owned(),
+                kind: RuntimeLifecycleKind::Resume,
+                started_at_epoch_seconds: 0,
+                active_stages: vec![],
+                resume_destination: None,
+                notice: None,
+            })
+            .collect();
+        history.publish(full.clone()).unwrap();
+        history.full = full;
         history.native_owners = native_owners.clone();
-        history.operations = operations;
-        history
-            .snapshots
-            .back()
-            .unwrap()
-            .1
-            .records
-            .keys()
-            .cloned()
-            .collect()
+        let RuntimeFrame::Snapshot { projection, .. } = history.frame(None) else {
+            panic!("snapshot");
+        };
+        projection.records.keys().cloned().collect()
     }
 
-    /// Terminal clients follow live sessions only. A stopped session stays
-    /// while an operation holds it, a stopped sub-agent follows its live
-    /// parent, a native agent follows its owner, and a session that stops
-    /// leaves by a delta. Each capture also checks the incremental set
-    /// against a full evaluation (the `debug_assert` in `live_projection`).
+    /// Closed family history stays on the daemon; lifecycle ownership and
+    /// native agent membership still reach clients together.
     #[test]
     fn the_terminal_feed_follows_live_sessions_and_drops_stopped_ones() {
         let mut full = RuntimeProjection::default();
@@ -697,7 +785,7 @@ mod tests {
         }
         full.subagents.insert(
             "child".into(),
-            super::super::tests::runtime_test_subagent("child", "parent"),
+            super::super::tests::runtime_test_subagent("child", "parent").into(),
         );
         let agent = mj_core::native_agent::NativeAgent {
             owner_session_id: "stopped".into(),
@@ -728,17 +816,22 @@ mod tests {
 
         assert_eq!(
             capture(&mut history, &full, &native_owners, &[]),
-            ["child", "lost", "parent"]
+            ["lost", "parent"]
         );
         let first = history.cursor();
-        let current = &history.snapshots.back().unwrap().1;
+        let current = history
+            .snapshots
+            .back()
+            .unwrap()
+            .1
+            .for_subagent_parents(&BTreeSet::new());
         assert!(current.native_agents.is_empty());
         assert!(current.subagents.contains_key("child"));
 
         // A resume runs on a stopped record until it provisions.
         assert_eq!(
             capture(&mut history, &full, &native_owners, &["stopped"]),
-            ["child", "lost", "parent", "stopped"]
+            ["lost", "parent", "stopped"]
         );
         assert!(
             history
@@ -746,6 +839,7 @@ mod tests {
                 .back()
                 .unwrap()
                 .1
+                .for_subagent_parents(&BTreeSet::new())
                 .native_agents
                 .contains_key(&view_id)
         );
@@ -758,9 +852,14 @@ mod tests {
             ["lost", "stopped"]
         );
         assert_eq!(capture(&mut history, &full, &native_owners, &[]), ["lost"]);
-        let current = &history.snapshots.back().unwrap().1;
+        let current = history
+            .snapshots
+            .back()
+            .unwrap()
+            .1
+            .for_subagent_parents(&BTreeSet::new());
         assert!(current.native_agents.is_empty());
-        assert!(current.subagents.is_empty());
+        assert!(current.subagents.contains_key("child"));
 
         let RuntimeFrame::Delta { changes, .. } = history.frame(Some(&first)) else {
             panic!("expected a delta from the first capture");
@@ -771,7 +870,7 @@ mod tests {
             .filter(|(_, record)| record.is_none())
             .map(|(id, _)| id.as_str())
             .collect::<BTreeSet<_>>();
-        assert_eq!(removed, BTreeSet::from(["child", "parent"]));
+        assert_eq!(removed, BTreeSet::from(["parent"]));
         assert_eq!(
             history.full.records.len(),
             4,

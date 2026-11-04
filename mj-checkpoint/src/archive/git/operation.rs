@@ -280,17 +280,16 @@ fn entry_exists(path: &Path) -> Result<bool> {
 }
 
 /// Where Git keeps each named Git-directory entry in this checkout.
-///
-/// Git 2.25 has no `--path-format=absolute`: it prints the option back and
-/// exits successfully. `--git-path` answers relative to the directory Git ran
-/// in, so a relative answer is joined to it.
 pub(super) fn git_paths<'a>(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     names: impl Iterator<Item = &'a str>,
 ) -> Result<Vec<(&'a str, PathBuf)>> {
     let names = names.collect::<Vec<_>>();
-    let mut arguments = vec![OsString::from("rev-parse")];
+    let mut arguments = vec![
+        OsString::from("rev-parse"),
+        OsString::from("--path-format=absolute"),
+    ];
     for name in &names {
         arguments.extend([OsString::from("--git-path"), OsString::from(name)]);
     }
@@ -319,7 +318,7 @@ pub(super) fn git_paths<'a>(
         .into_iter()
         .zip(lines)
         .map(|(name, line)| {
-            let path = repository.join(mj_core::path_input::from_git_bytes(line)?);
+            let path = mj_core::path_input::from_git_bytes(line)?;
             ensure!(
                 path.is_absolute(),
                 "Git reported a relative location {} for {name}",

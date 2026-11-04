@@ -3,6 +3,7 @@ use super::*;
 #[cfg(test)]
 thread_local! {
     static VIEWER_ROW_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static VIEWER_SESSION_SCAN_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -10,16 +11,29 @@ pub(crate) fn take_viewer_row_visits() -> usize {
     VIEWER_ROW_VISITS.with(|visits| visits.replace(0))
 }
 
+#[cfg(test)]
+pub(crate) fn take_viewer_session_scan_visits() -> usize {
+    VIEWER_SESSION_SCAN_VISITS.with(|visits| visits.replace(0))
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSnapshot {
     #[serde(default)]
-    pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    pub operator_away: bool,
+    #[serde(default)]
+    pub auto_afk_minutes: u32,
+    #[serde(default)]
+    pub profile_capabilities: mj_core::snapshot_map::SharedSnapshot<
+        mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    >,
     #[serde(
         default,
-        deserialize_with = "mj_core::subagent::deserialize_launch_policy"
+        alias = "last_subagent_policy",
+        deserialize_with = "mj_core::subagent::deserialize_policy_map"
     )]
-    pub last_subagent_policy: mj_core::subagent::SubagentPolicy,
+    pub last_subagent_policies:
+        std::collections::BTreeMap<String, mj_core::subagent::SubagentPolicy>,
     #[serde(default)]
     pub subagents_configured: bool,
     pub revision: u64,
@@ -58,8 +72,19 @@ pub struct ViewerSnapshot {
 pub struct ViewerSessions(pub(crate) mj_core::snapshot_map::SnapshotMap<String, ViewerSession>);
 
 impl ViewerSessions {
+    pub fn get(&self, id: &str) -> Option<&ViewerSession> {
+        self.0.get(id)
+    }
+
+    pub(super) fn get_shared(&self, id: &str) -> Option<Arc<ViewerSession>> {
+        self.0.get_shared(id)
+    }
+
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &ViewerSession> + ExactSizeIterator {
-        self.0.values()
+        self.0.values().inspect(|_| {
+            #[cfg(test)]
+            VIEWER_SESSION_SCAN_VISITS.with(|visits| visits.set(visits.get() + 1));
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -188,6 +213,7 @@ impl ViewerSnapshot {
                     .map(|children| children.keys().cloned().collect())
                     .unwrap_or_default();
                 let start = session.start_selection();
+                let review = config.review.for_session(session.review.as_ref());
                 ViewerSession {
                     subagents: session.subagents.clone().unwrap_or_default(),
                     at: start.at,
@@ -235,14 +261,14 @@ impl ViewerSnapshot {
                     // the local diagnostic to learn why. A failed resume rolls
                     // the record back to stopped and leaves its reason in the
                     // same field, so that state reports it too; every
-                    // successful transition clears `last_error`, so this never
-                    // reports a failure the session has since recovered from.
+                    // successful transition clears `last_error`. A new turn
+                    // also retires a live session's public lifecycle failure.
                     //
                     // A live session's `last_error` is not published here: it
                     // can hold a raw provisioning chain naming profile homes
-                    // and SSH hosts. A failed close leaves the session alive
-                    // and still owes the person a reason, so the sentence the
-                    // controller composed for them is published whatever state
+                    // and SSH hosts. A failed lifecycle operation can leave the
+                    // session alive and still owes the person a reason, so the
+                    // controller's safe sentence is published whatever state
                     // the session is in (#1081).
                     launch_error: matches!(
                         session.state,
@@ -251,7 +277,9 @@ impl ViewerSnapshot {
                     .then(|| session.last_error.clone())
                     .flatten()
                     .or_else(|| session.public_error().map(str::to_owned)),
-                    review_trigger: config.review.for_session(session.review.as_ref()).trigger,
+                    review_trigger: review.trigger,
+                    review_count: review.count,
+                    review_unavailable: session.review_unavailable().map(str::to_owned),
                     storage_problem: None,
                     preview: Vec::new(),
                     queued_prompts: Vec::new(),
@@ -330,10 +358,9 @@ impl ViewerSnapshot {
             })
             .collect();
         let targets = config
-            .targets
-            .iter()
+            .enabled_targets()
             .map(|(id, target)| ViewerTarget {
-                id: id.clone(),
+                id: id.to_owned(),
                 kind: target.kind_name().into(),
                 resource_allocation_kind: target.into(),
                 requires_project_directory: matches!(
@@ -345,6 +372,9 @@ impl ViewerSnapshot {
                     .copied(),
                 container_host_limits: None,
                 container_capacity: None,
+                container_memory_hard_limit: mj_core::config::container_memory_is_hard_limit(
+                    target,
+                ),
                 default_resource_allocation: if mj_core::config::is_container_target(target) {
                     let size = mj_core::state::default_container_size(
                         mj_core::config::container_size_host(target)
@@ -393,7 +423,9 @@ impl ViewerSnapshot {
             .collect();
         Self {
             profile_capabilities: Default::default(),
-            last_subagent_policy: state.last_subagent_policy.clone(),
+            last_subagent_policies: state.last_subagent_policies.clone(),
+            operator_away: state.operator_presence.away,
+            auto_afk_minutes: config.advanced.auto_afk_minutes,
             subagents_configured: config.subagents.is_configured(),
             revision,
             generated_at: now_unix().to_string(),
@@ -407,6 +439,7 @@ impl ViewerSnapshot {
             review_config: ViewerReviewConfig {
                 trigger: config.review.trigger,
                 profile: config.review.profile.clone(),
+                count: config.review.count,
             },
             capacity: Vec::new(),
             launch_failures: Vec::new(),
@@ -444,6 +477,11 @@ impl ViewerSession {
 pub struct ViewerSession {
     #[serde(default)]
     pub review_trigger: mj_core::config::ReviewTrigger,
+    #[serde(default = "mj_core::config::default_review_count")]
+    pub review_count: std::num::NonZeroUsize,
+    /// Why review cannot run for this session, when it cannot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_unavailable: Option<String>,
     /// The daemon's creation-settings comparison, also used by Restart itself.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub container_upgrade_supported: bool,
@@ -783,12 +821,24 @@ pub enum ViewerCommandSource {
 }
 
 /// Public review configuration: exactly what `/review status` needs.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerReviewConfig {
     pub trigger: mj_core::config::ReviewTrigger,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    #[serde(default = "mj_core::config::default_review_count")]
+    pub count: std::num::NonZeroUsize,
+}
+
+impl Default for ViewerReviewConfig {
+    fn default() -> Self {
+        Self {
+            trigger: mj_core::config::ReviewTrigger::default(),
+            profile: None,
+            count: mj_core::config::default_review_count(),
+        }
+    }
 }
 
 /// A turn review as a phone renders it.
@@ -813,6 +863,8 @@ pub struct ViewerReviewRole {
     pub label: String,
     /// `pending`, `running`, `done`, `findings`, or `failed`.
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -842,6 +894,7 @@ impl ViewerTurnReview {
                 .map(|role| ViewerReviewRole {
                     label: role.label.clone(),
                     state: role.state.label().to_owned(),
+                    child_session_id: role.child_session_id.clone(),
                 })
                 .collect(),
             verdict: review.verdict.as_ref().map(|verdict| ViewerReviewVerdict {
@@ -954,6 +1007,10 @@ pub struct ViewerQuotaWindow {
     pub banked_resets: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent_used: Option<u8>,
+    /// Claude's remaining Fable allowance, attached only to the master weekly
+    /// window so surfaces can show both readings without another meter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fable_remaining_percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<String>,
     /// Whether this window is on course to run out before it resets. The
@@ -1088,6 +1145,10 @@ pub struct ViewerTarget {
     /// showing the RAM left. `container_host_limits` remains for older clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_capacity: Option<mj_core::state::HostContainerCapacity>,
+    /// Whether RAM beyond `container_capacity.remaining` is refused rather
+    /// than warned about; see `mj_core::config::container_memory_is_hard_limit`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub container_memory_hard_limit: bool,
     /// Shared default selected for this container target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_resource_allocation: Option<SessionResourceAllocation>,
@@ -1219,7 +1280,7 @@ fn public_title(session: &mj_core::state::SessionRecord) -> String {
 }
 
 impl ViewerLifecycleCategory {
-    pub(super) const fn of(state: SessionState) -> Self {
+    pub const fn of(state: SessionState) -> Self {
         match state {
             SessionState::Provisioning => Self::Starting,
             // A parked sub-agent stays on the dashboard with its parent.

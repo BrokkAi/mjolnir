@@ -715,6 +715,8 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
     });
     let connection = rusqlite::Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&connection);
+    schema::restore_pre101_subagent_preference(&connection);
+    schema::restore_review_state_schema(&connection, 65);
     connection
         .execute_batch(
             "ALTER TABLE sessions ADD COLUMN expected_runtime_identity TEXT;
@@ -785,6 +787,8 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
     save_session_to(&path, &record).unwrap();
     let connection = rusqlite::Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&connection);
+    schema::restore_pre101_subagent_preference(&connection);
+    schema::restore_review_state_schema(&connection, 53);
     connection
         .execute_batch(
         "ALTER TABLE sessions DROP COLUMN checkout_json;
@@ -882,6 +886,8 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
 
     let connection = rusqlite::Connection::open(&database).unwrap();
     schema::restore_github_v84_schema(&connection);
+    schema::restore_pre101_subagent_preference(&connection);
+    schema::restore_review_state_schema(&connection, 46);
     connection
         .execute_batch(
             "ALTER TABLE sessions DROP COLUMN publication_json;
@@ -1276,6 +1282,7 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
     record.review = Some(mj_core::config::SessionReview::Turn {
+        count: None,
         model: Some("gpt-6-astra".into()),
         effort: Some("high".into()),
         tier: Some("extended".into()),
@@ -1288,6 +1295,7 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     assert_eq!(
         loaded.sessions["session-1"].review,
         Some(mj_core::config::SessionReview::Turn {
+            count: None,
             model: Some("gpt-6-astra".into()),
             effort: Some("high".into()),
             tier: None,
@@ -1344,6 +1352,7 @@ fn provisioning_persists_the_build_cache_it_resolved() {
     );
 }
 
+// Hard-won: #1444: repeated missing-target reports rewrote a recoverable error and announced it again.
 #[test]
 fn missing_target_keeps_a_checkpointed_session_recoverable_and_loses_one_without_checkpoint() {
     let directory = tempfile::tempdir().unwrap();
@@ -1378,7 +1387,7 @@ fn missing_target_keeps_a_checkpointed_session_recoverable_and_loses_one_without
             "2026-08-25T16:01:00Z",
         )
         .unwrap(),
-        Some(SessionState::Error)
+        None
     );
 
     let mut unrecoverable = session("session-2", "project-1");
@@ -1399,7 +1408,11 @@ fn missing_target_keeps_a_checkpointed_session_recoverable_and_loses_one_without
     let loaded = load_state_from(&database).unwrap();
     assert_eq!(
         loaded.sessions["session-1"].last_error.as_deref(),
-        Some("late duplicate")
+        Some("managed container is missing")
+    );
+    assert_eq!(
+        loaded.sessions["session-1"].updated_at,
+        "2026-08-25T16:00:00Z"
     );
     assert_eq!(loaded.sessions["session-2"].state, SessionState::Lost);
 
@@ -1442,6 +1455,27 @@ fn a_late_missing_workspace_report_cannot_invalidate_a_newer_session() {
         load_state_from(&database).unwrap().sessions[&live.id].state,
         SessionState::Running
     );
+    // A resume may enter Provisioning within the same timestamp second as
+    // the old Running observation. State must guard that transition too.
+    live.state = SessionState::Provisioning;
+    save_session_to(&database, &live).unwrap();
+    assert_eq!(
+        mark_session_target_missing_if_current_to(
+            &database,
+            &live.id,
+            "old working directory is missing",
+            "2026-09-08T00:02:00Z",
+            Some(&live.updated_at),
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&live.id].state,
+        SessionState::Provisioning
+    );
+    live.state = SessionState::Running;
+    save_session_to(&database, &live).unwrap();
     assert_eq!(
         mark_session_target_missing_if_current_to(
             &database,
@@ -2075,7 +2109,7 @@ fn queued_prompt_loader_does_not_deserialize_transcript_history() {
 }
 
 fn tool_item(position: u64, path: &str, old_text: &str, new_text: &str) -> Arc<TranscriptItem> {
-    let mut diff = agent_client_protocol::schema::v1::Diff::new(path, new_text);
+    let mut diff = agent_client_protocol::v1::schema::Diff::new(path, new_text);
     diff.old_text = Some(old_text.to_owned());
     mj_core::diff::compact_diff(&mut diff);
     Arc::new(TranscriptItem {
@@ -2093,7 +2127,7 @@ fn tool_item(position: u64, path: &str, old_text: &str, new_text: &str) -> Arc<T
                 "locations": [{"path": path}],
                 "content": [
                     serde_json::to_value(
-                        agent_client_protocol::schema::v1::ToolCallContent::Diff(diff),
+                        agent_client_protocol::v1::schema::ToolCallContent::Diff(diff),
                     )
                     .unwrap(),
                     serde_json::json!({
@@ -4297,6 +4331,8 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
             // the same "unverified" note after a restart.
             provenance: mj_core::review::driver::FindingsProvenance::SingleReviewer,
         }),
+        push_findings: None,
+        active_group: None,
     };
     save_turn_review_state_in(&database, "session-1", &state).unwrap();
     assert_eq!(turn_review_state_in(&database, "session-1").unwrap(), state);
@@ -4313,6 +4349,38 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
     assert_eq!(restored.baselines, state.baselines);
     assert_eq!(restored.reviewed_through_ordinal, 42);
     assert_eq!(restored.pending_forward, state.pending_forward);
+}
+
+#[test]
+fn old_review_rows_load_without_findings_and_recovery_keeps_new_findings() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    open(&database).unwrap().execute(
+        "INSERT INTO turn_review_state(session_id, baselines, reviewed_through_ordinal) VALUES (?1, ?2, 0)",
+        rusqlite::params!["session-1", "{}"],
+    ).unwrap();
+    let mut state = turn_review_state_in(&database, "session-1").unwrap();
+    assert!(state.push_findings.is_none());
+    assert!(state.active_group.is_none());
+    state.push_findings = Some(mj_core::storage::PushFindingsRecord {
+        review_id: "review-1".into(),
+        trees: [(
+            std::path::PathBuf::from("/workspace/app"),
+            ("tree-1".into(), "head-1".into()),
+        )]
+        .into(),
+        synthesis: "fix the regression".into(),
+    });
+    state.active = Some("interrupted".into());
+    save_turn_review_state_in(&database, "session-1", &state).unwrap();
+    assert_eq!(
+        clear_interrupted_turn_reviews_in(&database).unwrap(),
+        vec!["session-1"]
+    );
+    let restored = turn_review_state_in(&database, "session-1").unwrap();
+    assert_eq!(restored.push_findings, state.push_findings);
+    assert!(restored.active.is_none());
 }
 
 /// A review interrupted by a daemon restart is cancelled, not resumed, and the
@@ -4346,6 +4414,8 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
                 reviewed_through_ordinal: 42,
                 provenance: Default::default(),
             }),
+            push_findings: None,
+            active_group: None,
         },
     )
     .unwrap();
@@ -4359,6 +4429,8 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
             prior_review: None,
             active: None,
             pending_forward: None,
+            push_findings: None,
+            active_group: None,
         },
     )
     .unwrap();
@@ -4378,6 +4450,61 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
         clear_interrupted_turn_reviews_in(&database).unwrap(),
         vec!["session-1".to_string()],
         "a pending handoff remains recoverable until its command is accepted"
+    );
+}
+
+#[test]
+fn active_review_group_survives_interrupted_sweep_with_registered_children() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-group", "project-1")).unwrap();
+    let seed = mj_core::review::driver::TurnReviewSeed {
+        task: "inspect the parser".into(),
+        user_messages: Vec::new(),
+        baselines: Default::default(),
+        through_ordinal: 17,
+        prior_review: None,
+    };
+    let (driver, _) = mj_review::driver::TurnReviewDriver::start(
+        seed,
+        "group-1".into(),
+        std::num::NonZeroUsize::new(2).unwrap(),
+    );
+    let group = mj_core::storage::ActiveReviewGroup {
+        driver: driver.snapshot(),
+        reviewer: Default::default(),
+        scope: mj_core::relay::CaptureScope::TurnDelta,
+        registrations: vec![
+            mj_core::storage::ReviewerRegistration {
+                role: "reviewer-1".into(),
+                request_key: "key-1".into(),
+                child_session_id: Some("child-1".into()),
+            },
+            mj_core::storage::ReviewerRegistration {
+                role: "reviewer-2".into(),
+                request_key: "key-2".into(),
+                child_session_id: None,
+            },
+        ],
+    };
+    let state = TurnReviewState {
+        active: Some("group-1".into()),
+        active_group: Some(group),
+        ..Default::default()
+    };
+    save_turn_review_state_in(&database, "session-group", &state).unwrap();
+    assert_eq!(
+        active_review_groups_in(&database).unwrap(),
+        vec![("session-group".into(), state.clone())]
+    );
+    assert!(
+        clear_interrupted_turn_reviews_in(&database)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        turn_review_state_in(&database, "session-group").unwrap(),
+        state
     );
 }
 
@@ -5120,6 +5247,23 @@ fn finished_transcript_cursor_advances_across_non_agent_rows() {
 
 /// A parent, a child, and the relation between them, written the way the
 /// controller writes them.
+pub(super) fn register_test_subagent(
+    path: &Path,
+    session: &SessionRecord,
+    relation: &mj_core::subagent::SubagentRecord,
+) -> Result<()> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction()?;
+    insert_session(&tx, session)?;
+    super::usage::record_child_accounting(&tx, relation)?;
+    tx.execute(
+        "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES (?1,?2,?3,?4)",
+        params![relation.child_session_id, relation.parent_session_id, relation.kind.request_key(&relation.request_key), serde_json::to_string(relation)?],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     let parent = session("11111111111111111111111111111111", "bundle-1");
     let mut child = session("22222222222222222222222222222222", "bundle-1");
@@ -5127,28 +5271,90 @@ fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     let mut state = State::default();
     state.sessions.insert(parent.id.clone(), parent.clone());
     state.sessions.insert(child.id.clone(), child.clone());
-    state.subagents.insert(
-        child.id.clone(),
-        mj_core::subagent::SubagentRecord {
-            kind: mj_core::subagent::SubagentKind::Worker,
-            reviewer_launch: None,
-            child_session_id: child.id.clone(),
-            parent_session_id: parent.id.clone(),
-            task_name: "probe".into(),
-            profile_id: "codex".into(),
-            model: None,
-            effort: None,
-            working_directory: PathBuf::new(),
-            initial_prompt: "say ready".into(),
-            request_key: "probe-1".into(),
-            created_at: "2026-09-18T00:00:00Z".into(),
-            noticed_turn: None,
-            reported_finish: None,
-            handback_tool: false,
-        },
-    );
+    let relation = mj_core::subagent::SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
+        child_session_id: child.id.clone(),
+        parent_session_id: parent.id.clone(),
+        task_name: "probe".into(),
+        profile_id: "codex".into(),
+        model: None,
+        effort: None,
+        working_directory: PathBuf::new(),
+        initial_prompt: "say ready".into(),
+        request_key: "probe-1".into(),
+        created_at: "2026-09-18T00:00:00Z".into(),
+        noticed_turn: None,
+        reported_finish: None,
+        handback_tool: false,
+    };
+    save_state_to(path, &state).unwrap();
+    register_test_subagent(path, &child, &relation).unwrap();
+    state.subagents.insert(child.id.clone(), relation.into());
     save_state_to(path, &state).unwrap();
     (parent, child)
+}
+
+#[test]
+fn metadata_state_saves_preserve_complete_subagent_launch_intent() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("metadata-launch.sqlite3");
+    let (_, child) = subagent_pair(&path);
+    let connection = open(&path).unwrap();
+    let json: String = connection
+        .query_row(
+            "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+            [&child.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut launch: mj_core::subagent::SubagentRecord = serde_json::from_str(&json).unwrap();
+    launch.kind = mj_core::subagent::SubagentKind::Reviewer;
+    launch.initial_prompt = "private durable launch 🙂\n".repeat(10_000);
+    launch.reviewer_launch = Some(mj_core::worker_launch::ReviewerLaunchConfig {
+        profile_id: "reviewer".into(),
+        harness: mj_core::config::HarnessKind::Codex,
+        bridge_command: "review-bridge".into(),
+        bridge_args: vec!["--private-launch".into()],
+        environment: BTreeMap::from([("PRIVATE_LAUNCH".into(), "retain in the daemon".into())]),
+        excluded_environment: vec![],
+        execution_policy: mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+        model: Some("review-model".into()),
+        effort: None,
+        fast_mode: None,
+        generation: 0,
+        mcp_servers: vec![],
+    });
+    connection
+        .execute(
+            "UPDATE subagent_sessions SET record_json=?2 WHERE child_session_id=?1",
+            params![child.id, serde_json::to_string(&launch).unwrap()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut state = load_state_from(&path).unwrap();
+    let published = serde_json::to_value(&state).unwrap();
+    let metadata = &published["subagents"][&child.id];
+    assert!(metadata.get("initial_prompt").is_none());
+    assert!(metadata.get("reviewer_launch").is_none());
+    state.subagents.get_mut(&child.id).unwrap().noticed_turn = Some(42);
+    save_state_to(&path, &state).unwrap();
+
+    let connection = open_reader(&path).unwrap();
+    let json: String = connection
+        .query_row(
+            "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+            [&child.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let reloaded: mj_core::subagent::SubagentRecord = serde_json::from_str(&json).unwrap();
+    launch.noticed_turn = Some(42);
+    assert_eq!(
+        reloaded, launch,
+        "metadata edits must retain every durable launch field"
+    );
 }
 
 thread_local! {
@@ -5168,6 +5374,15 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.sqlite3");
         let (_parent, child) = subagent_pair(&path);
+        let launch_json: String = open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+                [&child.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let launch: mj_core::subagent::SubagentRecord = serde_json::from_str(&launch_json).unwrap();
         let mut with_child = load_state_from(&path).unwrap();
         with_child
             .mount_history
@@ -5190,6 +5405,9 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
             *hook.borrow_mut() = Some(Box::new(move || {
                 // Commit a real creation/deletion between the reader's queries.
                 // WAL permits this while a read transaction remains open.
+                if creating_child {
+                    register_test_subagent(&writer_path, &child, &launch).unwrap();
+                }
                 save_state_to(&writer_path, &committed).unwrap();
                 let writer = open(&writer_path).unwrap();
                 let violations: i64 = writer
@@ -5538,6 +5756,8 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
     forget_verified_schema(&path);
     let raw = Connection::open(&path).unwrap();
     schema::restore_github_v84_schema(&raw);
+    schema::restore_pre101_subagent_preference(&raw);
+    schema::restore_review_state_schema(&raw, 43);
     raw.execute_batch(
         "DROP TABLE quota_reset_cache;
         DELETE FROM schema_migrations WHERE version >= 44;
@@ -5914,7 +6134,7 @@ fn history_window_deduplicates_deliveries_after_their_row_leaves_the_live_tail()
 
 #[test]
 fn history_window_rehydrates_late_tool_updates_before_durable_projection() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         SessionUpdate, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
     };
     use mj_core::relay::{RELAY_EVENT_FORMAT_V1, RelayEvent, RelayObservation};
@@ -6216,6 +6436,8 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     // Put the store back at revision 52, whose constraint has no `parked`.
     let raw = Connection::open(&database).unwrap();
     schema::restore_github_v84_schema(&raw);
+    schema::restore_pre101_subagent_preference(&raw);
+    schema::restore_review_state_schema(&raw, 52);
     raw.execute_batch(
         "PRAGMA writable_schema = ON;
          UPDATE sqlite_schema
@@ -6301,6 +6523,13 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     use mj_core::subagent::SubagentPolicy;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("mj.sqlite3");
+    open(&path)
+        .unwrap()
+        .execute(
+            "INSERT INTO subagent_preference(profile_id, policy) VALUES('', ?1)",
+            [serde_json::to_string(&SubagentPolicy::Native).unwrap()],
+        )
+        .unwrap();
     let mut parent = session("fixed-parent", "project");
     let fixed = SubagentPolicy::Mjolnir {
         straightforward: Some(Box::new(mj_core::config::SubagentChoice {
@@ -6312,14 +6541,38 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     parent.subagents = Some(fixed.clone());
     save_new_session_to(&path, &parent, None, true, true).unwrap();
     let state = load_state_from(&path).unwrap();
-    assert_eq!(state.last_subagent_policy, fixed);
+    assert_eq!(state.last_subagent_policies.get("codex"), Some(&fixed));
+    assert_eq!(
+        state.last_subagent_policies.get(""),
+        Some(&SubagentPolicy::Native)
+    );
+    assert_eq!(
+        state.last_subagent_policy_for("unseen-profile"),
+        SubagentPolicy::Native
+    );
     assert_eq!(state.sessions[&parent.id].subagents, Some(fixed.clone()));
+    let mut other_profile = session("other-profile", "project");
+    other_profile.last_profile = "codex-alt".into();
+    other_profile.subagents = Some(SubagentPolicy::Native);
+    save_new_session_to(&path, &other_profile, None, true, true).unwrap();
+    let state = load_state_from(&path).unwrap();
+    assert_eq!(state.last_subagent_policies.get("codex"), Some(&fixed));
+    assert_eq!(
+        state.last_subagent_policies.get("codex-alt"),
+        Some(&SubagentPolicy::Native)
+    );
     let mut child = session("child", "project");
     child.subagents = Some(SubagentPolicy::None);
     save_session_to(&path, &child).unwrap();
     parent.title = "resumed parent".into();
     save_session_to(&path, &parent).unwrap();
-    assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, fixed);
+    assert_eq!(
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("codex"),
+        Some(&fixed)
+    );
     // An explicit unattended create keeps the accepted session policy but
     // cannot replace the interactive choice or host-size preselection.
     let mut unattended = session("unattended", "project");
@@ -6339,7 +6592,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     )
     .unwrap();
     let state = load_state_from(&path).unwrap();
-    assert_eq!(state.last_subagent_policy, fixed);
+    assert_eq!(state.last_subagent_policies.get("codex"), Some(&fixed));
     assert_eq!(
         state.sessions["unattended"].subagents,
         Some(SubagentPolicy::Native)
@@ -6349,6 +6602,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     // Checking the broader launch-choice flag does not opt into saving size.
     let mut interactive_without_size = session("interactive-without-size", "project");
     interactive_without_size.harness_kind = HarnessKind::Dsh;
+    interactive_without_size.last_profile = "dsh".into();
     interactive_without_size.subagents = Some(SubagentPolicy::Native);
     save_new_session_to(
         &path,
@@ -6364,6 +6618,13 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         false,
     )
     .unwrap();
+    assert_eq!(
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("dsh"),
+        Some(&SubagentPolicy::Native)
+    );
     assert!(
         !load_state_from(&path)
             .unwrap()
@@ -6372,6 +6633,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     );
     let mut interactive_with_size = session("interactive-with-size", "project");
     interactive_with_size.harness_kind = HarnessKind::Dsh;
+    interactive_with_size.last_profile = "dsh".into();
     interactive_with_size.subagents = Some(SubagentPolicy::Native);
     save_new_session_to(
         &path,
@@ -6394,28 +6656,51 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
             memory_bytes: 64,
         }
     );
-    // DSH has no sub-agents of its own: its None must not become what the
-    // next Claude or Codex session starts with, but its Mjolnir does.
+    // Each profile remembers its own accepted policy, including DSH choices.
     let mut dsh = session("dsh-none", "project");
     dsh.harness_kind = HarnessKind::Dsh;
+    dsh.last_profile = "dsh".into();
     dsh.subagents = Some(SubagentPolicy::None);
     save_new_session_to(&path, &dsh, None, true, true).unwrap();
-    assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, fixed);
+    assert_eq!(
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("dsh"),
+        Some(&SubagentPolicy::None)
+    );
+    assert_eq!(
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("codex"),
+        Some(&fixed)
+    );
     let plain = SubagentPolicy::Mjolnir {
         straightforward: None,
         subtle: None,
     };
     let mut dsh = session("dsh-mjolnir", "project");
     dsh.harness_kind = HarnessKind::Dsh;
+    dsh.last_profile = "dsh".into();
     dsh.subagents = Some(plain.clone());
     save_new_session_to(&path, &dsh, None, true, true).unwrap();
-    assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, plain);
+    assert_eq!(
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("dsh"),
+        Some(&plain)
+    );
     let mut next = session("next", "project");
     next.subagents = Some(SubagentPolicy::None);
     save_new_session_to(&path, &next, None, true, true).unwrap();
     assert_eq!(
-        load_state_from(&path).unwrap().last_subagent_policy,
-        SubagentPolicy::None
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("codex"),
+        Some(&SubagentPolicy::None)
     );
     assert_eq!(
         load_state_from(&path).unwrap().sessions[&parent.id].subagents,
@@ -6461,14 +6746,175 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
             .unwrap();
         connection
             .execute(
-                "UPDATE subagent_preference SET policy=?1 WHERE singleton=1",
+                "UPDATE subagent_preference SET policy=?1 WHERE profile_id='codex'",
                 [json],
             )
             .unwrap();
         let state = load_state_from(&path).unwrap();
         assert_eq!(state.sessions[&parent.id].subagents, Some(expected.clone()));
-        assert_eq!(state.last_subagent_policy, expected);
+        assert_eq!(state.last_subagent_policies.get("codex"), Some(&expected));
     }
+}
+
+#[test]
+fn profile_rename_moves_remembered_choice_atomically_and_idempotently() {
+    use mj_core::subagent::SubagentPolicy;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rename-profile.sqlite3");
+    let mut old = session("old-profile-session", "project");
+    old.last_profile = "old-profile".into();
+    old.subagents = Some(SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    save_new_session_to(&path, &old, None, true, true).unwrap();
+    let mut destination = session("new-profile-session", "project");
+    destination.last_profile = "new-profile".into();
+    destination.subagents = Some(SubagentPolicy::None);
+    save_new_session_to(&path, &destination, None, true, true).unwrap();
+
+    assert_eq!(
+        rename_profile_references_at(&path, "old-profile", "new-profile").unwrap(),
+        1
+    );
+    let state = load_state_from(&path).unwrap();
+    assert_eq!(state.sessions[&old.id].last_profile, "new-profile");
+    assert_eq!(
+        state.last_subagent_policies.get("new-profile"),
+        old.subagents.as_ref()
+    );
+    assert!(!state.last_subagent_policies.contains_key("old-profile"));
+    assert_eq!(
+        rename_profile_references_at(&path, "old-profile", "new-profile").unwrap(),
+        0
+    );
+    assert_eq!(
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("new-profile"),
+        old.subagents.as_ref()
+    );
+    assert_eq!(
+        rename_profile_references_at(&path, "new-profile", "new-profile").unwrap(),
+        0
+    );
+    assert_eq!(
+        load_state_from(&path)
+            .unwrap()
+            .last_subagent_policies
+            .get("new-profile"),
+        old.subagents.as_ref()
+    );
+}
+
+#[test]
+fn committed_profile_preferences_track_insert_overwrite_rename_rollback_and_delete() {
+    const CHILD: &str = "MJ_COMMITTED_PROFILE_PREFERENCE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "committed_profile_preferences_track_insert_overwrite_rename_rollback_and_delete",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+
+    use mj_core::subagent::SubagentPolicy;
+    let _writer = install_isolated_test_writer();
+    let committed = || committed_state().unwrap().unwrap();
+    submit_database_write("seed_legacy_profile_preference", |connection| {
+        connection.execute(
+            "INSERT INTO subagent_preference(profile_id, policy) VALUES('', ?1)",
+            [serde_json::to_string(&SubagentPolicy::Native)?],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        committed().state.last_subagent_policies.get(""),
+        Some(&SubagentPolicy::Native)
+    );
+
+    let mut first = session("profile-choice-one", "project");
+    first.subagents = Some(SubagentPolicy::None);
+    save_new_session(&first, None, true, false).unwrap();
+    assert_eq!(
+        committed().state.last_subagent_policies.get("codex"),
+        Some(&SubagentPolicy::None)
+    );
+    let mut second = session("profile-choice-two", "project");
+    second.subagents = Some(SubagentPolicy::Native);
+    save_new_session(&second, None, true, false).unwrap();
+    assert_eq!(
+        committed().state.last_subagent_policies.get("codex"),
+        Some(&SubagentPolicy::Native)
+    );
+    assert_eq!(
+        committed().state.last_subagent_policies.get(""),
+        Some(&SubagentPolicy::Native)
+    );
+
+    rename_profile_references("codex", "codex-renamed").unwrap();
+    assert_eq!(
+        committed()
+            .state
+            .last_subagent_policies
+            .get("codex-renamed"),
+        Some(&SubagentPolicy::Native)
+    );
+    assert!(
+        !committed()
+            .state
+            .last_subagent_policies
+            .contains_key("codex")
+    );
+    assert_eq!(
+        committed().state.last_subagent_policies.get(""),
+        Some(&SubagentPolicy::Native)
+    );
+
+    submit_database_write("rollback_profile_preference", |connection| {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE subagent_preference SET policy='true' WHERE profile_id='codex-renamed';
+             ROLLBACK;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        committed()
+            .state
+            .last_subagent_policies
+            .get("codex-renamed"),
+        Some(&SubagentPolicy::Native)
+    );
+
+    submit_database_write("delete_profile_preference", |connection| {
+        connection.execute(
+            "DELETE FROM subagent_preference WHERE profile_id='codex-renamed'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        !committed()
+            .state
+            .last_subagent_policies
+            .contains_key("codex-renamed")
+    );
+    assert_eq!(
+        committed().state.last_subagent_policy_for("codex-renamed"),
+        SubagentPolicy::Native
+    );
 }
 
 /// A converted session's bundle may already be an alias of another project in

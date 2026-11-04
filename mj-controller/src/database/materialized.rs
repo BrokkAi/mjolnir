@@ -1563,6 +1563,7 @@ pub struct ProjectionPage<'a> {
     pub(super) applied_digest: String,
     /// Survives a projection reset so historical forms never become new mail.
     input_required_event_frontier: u64,
+    operator_away_event_frontier: u64,
     pub(super) dirty: bool,
     pub(super) pending: MaterializedSessionMutation,
     pub(super) pending_transcript: BTreeMap<String, PendingTranscriptMutation>,
@@ -1725,8 +1726,10 @@ impl ProjectionPage<'_> {
                 .api_events
                 .iter()
                 .filter(|event| {
-                    !matches!(event, ApiEventData::InputRequired { .. })
-                        || event_ordinal > self.input_required_event_frontier
+                    (!matches!(event, ApiEventData::InputRequired { .. })
+                        || event_ordinal > self.input_required_event_frontier)
+                        && (!matches!(event, ApiEventData::InputResolved { .. })
+                            || event_ordinal > self.operator_away_event_frontier)
                 })
                 .cloned()
                 .map(|event| (mutation.last_activity_at_ms.unwrap_or(0), event)),
@@ -1847,7 +1850,8 @@ impl ProjectionPage<'_> {
                  END,
                  applied_event_ordinal = ?3,
                  applied_event_digest = ?4,
-                 input_required_event_frontier = max(input_required_event_frontier, ?3)
+                 input_required_event_frontier = max(input_required_event_frontier, ?3),
+                 operator_away_event_frontier = max(operator_away_event_frontier, ?3)
              WHERE session_id = ?1",
             params![
                 session_id,
@@ -1894,9 +1898,9 @@ pub(super) fn apply_projection_page_with<T>(
 ) -> Result<T> {
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let (applied_ordinal, applied_digest, input_required_event_frontier) = transaction
+    let (applied_ordinal, applied_digest, input_required_event_frontier, operator_away_event_frontier) = transaction
         .query_row(
-            "SELECT applied_event_ordinal, applied_event_digest, input_required_event_frontier
+            "SELECT applied_event_ordinal, applied_event_digest, input_required_event_frontier, operator_away_event_frontier
              FROM materialized_sessions WHERE session_id = ?1",
             [session_id],
             |row| {
@@ -1904,6 +1908,7 @@ pub(super) fn apply_projection_page_with<T>(
                     row.get::<_, u64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, u64>(2)?,
+                    row.get::<_, u64>(3)?,
                 ))
             },
         )
@@ -1923,6 +1928,7 @@ pub(super) fn apply_projection_page_with<T>(
         applied_ordinal,
         applied_digest,
         input_required_event_frontier,
+        operator_away_event_frontier,
         dirty: false,
         pending: MaterializedSessionMutation::default(),
         pending_transcript: BTreeMap::new(),
@@ -1940,7 +1946,7 @@ pub(super) fn apply_projection_page_with<T>(
             ApiEventData::InputRequired {
                 request: Some(_),
                 ..
-            }
+            } | ApiEventData::InputResolved { .. }
         )
     });
     page.transaction.commit()?;

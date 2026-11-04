@@ -1,6 +1,5 @@
 //! Durable controller-side state for Hel-managed sessions.
 
-#[cfg(test)]
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
@@ -15,7 +14,7 @@ use crate::relay::{
     RELAY_EVENT_GENESIS_DIGEST, RelayOperationalState, SequencedEvent, WorkerEvent,
 };
 use crate::snapshot_map::SnapshotMap;
-use crate::subagent::SubagentRecord;
+use crate::subagent::SubagentMetadata;
 use crate::targets::{AdditionalMount, validate_additional_mounts};
 
 pub const STATE_VERSION: u32 = 1;
@@ -370,7 +369,8 @@ pub struct MaterializedSession {
 
 /// The small portion of a durable projection needed to populate dashboard
 /// rows before the live session delivers its full transcript snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaterializedSessionSummary {
     pub session_id: String,
     pub applied_event_ordinal: u64,
@@ -1693,15 +1693,95 @@ pub fn host_container_capacity<'a>(
     }
 }
 
+/// Which resources one more owning container would commit beyond what is
+/// left on its host. Launch surfaces show this as a warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContainerOvercommit {
+    pub cpus: bool,
+    pub memory: bool,
+}
+
+impl ContainerOvercommit {
+    pub fn any(self) -> bool {
+        self.cpus || self.memory
+    }
+
+    /// The warning a launch surface shows, or `None` when nothing is
+    /// overcommitted. `capacity` is the budget this was computed from.
+    pub fn warning(self, capacity: &HostContainerCapacity) -> Option<String> {
+        if !self.any() {
+            return None;
+        }
+        if !capacity.complete {
+            return Some(
+                "A live container on this host has no recorded size, so Mjolnir cannot tell how much CPU and RAM is left. The session will still start."
+                    .into(),
+            );
+        }
+        let mut parts = Vec::new();
+        if self.cpus {
+            parts.push(format!(
+                "more CPUs than the {} left, so busy sessions may run slower",
+                capacity.remaining.cpus
+            ));
+        }
+        if self.memory {
+            parts.push(format!(
+                "more RAM than the {} GiB left, so the host may stop processes if sessions use all their RAM",
+                floor_gib_tenths(capacity.remaining.memory_bytes)
+            ));
+        }
+        Some(format!(
+            "This session asks for {}. It will still start.",
+            parts.join(", and ")
+        ))
+    }
+}
+
 impl HostContainerCapacity {
-    /// Whether a new owning container can commit this allocation.
-    pub fn fits(&self, allocation: &SessionResourceAllocation) -> bool {
-        let SessionResourceAllocation::Container { cpus, memory_bytes } = allocation else {
-            return false;
+    /// Whether admission must refuse this allocation. CPU is always allowed
+    /// to overcommit. RAM refuses only where `memory_is_hard_limit` (see
+    /// [`crate::config::container_memory_is_hard_limit`]); there an
+    /// incomplete budget also refuses, because unknown usage must not count
+    /// as zero.
+    pub fn refuses(
+        &self,
+        allocation: &SessionResourceAllocation,
+        memory_is_hard_limit: bool,
+    ) -> bool {
+        let SessionResourceAllocation::Container { memory_bytes, .. } = allocation else {
+            return true;
         };
-        self.complete
-            && self.remaining.cpus >= *cpus
-            && self.remaining.memory_bytes >= *memory_bytes
+        memory_is_hard_limit && (!self.complete || self.remaining.memory_bytes < *memory_bytes)
+    }
+
+    /// Why [`Self::refuses`] refused, for the person.
+    pub fn refusal_message(&self, allocation: &SessionResourceAllocation) -> String {
+        if !self.complete {
+            return "a live container on this Mac has no recorded RAM size, so Mjolnir cannot work out the RAM left safely".into();
+        }
+        let requested = match allocation {
+            SessionResourceAllocation::Container { memory_bytes, .. } => *memory_bytes,
+            _ => 0,
+        };
+        format!(
+            "this session asks for {} GiB of RAM, but this Mac has {} GiB left after the macOS reserve and live containers. Apple containers do not give freed memory back to macOS, so Mjolnir does not overcommit RAM on a Mac. Suspend or stop a session on this Mac, or choose less RAM. Mjolnir does not stop sessions automatically",
+            floor_gib_tenths(requested),
+            floor_gib_tenths(self.remaining.memory_bytes),
+        )
+    }
+
+    /// Which resources this allocation would overcommit. An incomplete budget
+    /// has nothing left, so it reports both; surfaces should say the usage is
+    /// unknown when `complete` is false.
+    pub fn overcommit(&self, allocation: &SessionResourceAllocation) -> ContainerOvercommit {
+        let SessionResourceAllocation::Container { cpus, memory_bytes } = allocation else {
+            return ContainerOvercommit::default();
+        };
+        ContainerOvercommit {
+            cpus: self.remaining.cpus < *cpus,
+            memory: self.remaining.memory_bytes < *memory_bytes,
+        }
     }
 }
 
@@ -1827,6 +1907,22 @@ pub struct StartSelection {
 }
 
 impl SessionRecord {
+    /// A completed close has no failure left to report. A stopped record
+    /// retaining an error is a failed resume and still needs reconciliation.
+    pub fn is_cleanly_stopped(&self) -> bool {
+        self.state == SessionState::Stopped && self.last_error.is_none()
+    }
+
+    /// Why review cannot run for this session, when it cannot: its folder
+    /// has no Git commits for review to find changes in.
+    #[must_use]
+    pub fn review_unavailable(&self) -> Option<&'static str> {
+        self.project
+            .as_ref()
+            .is_some_and(crate::repository::ProjectBundleSnapshot::primary_is_plain_directory)
+            .then_some(crate::review::settings::PLAIN_DIRECTORY_REVIEW_OFF)
+    }
+
     /// Checkout shape recorded by this session, before State applies any
     /// sub-agent borrowing relationship. Call [`State::checkout`] whenever
     /// State is available so a child resolves to its parent's owner.
@@ -2271,21 +2367,32 @@ fn created_at_seconds(timestamp: &str) -> Option<i64> {
         .map(|timestamp| timestamp.timestamp())
 }
 
+/// Durable operator availability. Revisions order control writes across connections.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorPresence {
+    pub away: bool,
+    pub revision: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
+    #[serde(default)]
+    pub operator_presence: OperatorPresence,
     #[serde(
         default,
-        deserialize_with = "crate::subagent::deserialize_launch_policy"
+        alias = "last_subagent_policy",
+        deserialize_with = "crate::subagent::deserialize_policy_map"
     )]
-    pub last_subagent_policy: crate::subagent::SubagentPolicy,
+    pub last_subagent_policies: BTreeMap<String, crate::subagent::SubagentPolicy>,
     pub version: u32,
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
     pub sessions: SnapshotMap<String, SessionRecord>,
     /// Child sessions keyed by their session id. The relationship lives in
     /// controller state so every control surface sees the same session family.
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
-    pub subagents: SnapshotMap<String, SubagentRecord>,
+    pub subagents: SnapshotMap<String, SubagentMetadata>,
     /// Recently used source directories, keyed by `local` or SSH host name.
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
     pub mount_history: SnapshotMap<String, Vec<PathBuf>>,
@@ -2298,12 +2405,25 @@ impl Default for State {
     fn default() -> Self {
         Self {
             version: STATE_VERSION,
-            last_subagent_policy: Default::default(),
+            operator_presence: OperatorPresence::default(),
+            last_subagent_policies: Default::default(),
             sessions: SnapshotMap::new(),
             subagents: SnapshotMap::new(),
             mount_history: SnapshotMap::new(),
             container_sizes: SnapshotMap::new(),
         }
+    }
+}
+
+impl State {
+    /// The remembered choice for a profile, falling back to the legacy global
+    /// choice and then the default when that profile has no saved choice.
+    pub fn last_subagent_policy_for(&self, profile_id: &str) -> crate::subagent::SubagentPolicy {
+        self.last_subagent_policies
+            .get(profile_id)
+            .or_else(|| self.last_subagent_policies.get(""))
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -2404,7 +2524,7 @@ pub fn session_is_live(record: &SessionRecord, in_operation: bool, parent_live: 
 /// membership settles parent before child.
 pub fn live_session_ids(
     sessions: &SnapshotMap<String, SessionRecord>,
-    subagents: &SnapshotMap<String, SubagentRecord>,
+    subagents: &SnapshotMap<String, SubagentMetadata>,
     operations: &BTreeSet<String>,
 ) -> BTreeSet<String> {
     let mut live = sessions
@@ -2925,6 +3045,32 @@ pub struct RecoveryScan {
     /// them and the scan was not widened to all instances.
     #[serde(default)]
     pub hidden_other_instances: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ResumeRepositorySourceMismatch {
+    pub session_id: String,
+    pub bundle_id: String,
+    pub repository_id: String,
+    pub missing_commit: String,
+    pub archived_origin: String,
+    pub configured_origin: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResumeRepositorySourcePreflight {
+    Ready(ResumeRepositorySourceReceipt),
+    RepositoryMoved(ResumeRepositorySourceMismatch),
+    /// The resume converts a local checkout into an isolated workspace. The
+    /// receipt is already valid; the preview is what a person has to confirm
+    /// before the checkout is snapshotted and the session moves off this
+    /// machine.
+    ConvertingRawCheckout {
+        receipt: ResumeRepositorySourceReceipt,
+        preview: Box<RawConversionPreview>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

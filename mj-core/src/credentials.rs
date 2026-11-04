@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate};
+use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
@@ -70,7 +70,11 @@ impl GithubTokenSnapshot {
 
 /// One reading of an opaque single-line secret, shared by every token file Hel
 /// stores so the limits and the rejections cannot drift apart.
-fn validate_opaque_token<'a>(label: &str, limit: usize, bytes: &'a [u8]) -> Result<&'a str> {
+pub(crate) fn validate_opaque_token<'a>(
+    label: &str,
+    limit: usize,
+    bytes: &'a [u8],
+) -> Result<&'a str> {
     if bytes.is_empty() {
         bail!("{label} is empty");
     }
@@ -88,7 +92,7 @@ fn validate_opaque_token<'a>(label: &str, limit: usize, bytes: &'a [u8]) -> Resu
 
 /// A token file must be a real file. Following a symbolic link would let
 /// whatever created it choose where the secret is read from or written to.
-fn refuse_symlinked_token(label: &str, path: &Path) -> Result<()> {
+pub(crate) fn refuse_symlinked_token(label: &str, path: &Path) -> Result<()> {
     if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         bail!("{label} destination {} is a symbolic link", path.display());
     }
@@ -173,24 +177,10 @@ pub fn write_claude_oauth_token(path: &Path, bytes: &[u8]) -> Result<()> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .context("Claude setup token path has no directory")?;
-    create_owner_only_directory(directory)?;
+    crate::config::create_owner_only_directory(directory)?;
     let mut body = token.as_bytes().to_vec();
     body.push(b'\n');
     crate::config::atomic_write_existing(path, &body)
-}
-
-/// Create `directory` and any missing parent reachable only by its owner.
-fn create_owner_only_directory(directory: &Path) -> Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder
-        .create(directory)
-        .with_context(|| format!("create {}", directory.display()))
 }
 
 /// Epoch milliseconds describing how current a credential copy is. Higher wins
@@ -224,12 +214,21 @@ pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
 /// This is not [`credential_freshness`]. Freshness orders two copies of the
 /// same grant; expiry says when the grant runs out. Claude states the same
 /// number for both, but Codex orders copies by `last_refresh` and expires by
-/// the `exp` claim of the access token in `tokens.access_token`. Grok and Muse
-/// have no proactive-refresh path, so they report nothing here.
+/// the `exp` claim of the access token in `tokens.access_token`. Grok has no
+/// proactive-refresh path, so it reports nothing here.
 ///
 /// Anything unparseable is `None` rather than a guess.
 pub fn credential_expiry(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
     kind.credential_expiry_ms(&serde_json::from_slice(bytes).ok()?)
+}
+
+/// Muse's Meta login records its access-token expiry in epoch seconds. A
+/// refresh moves it forward, so it both orders copies and says when the login
+/// runs out. A stored API key has none.
+fn muse_login_expiry_ms(json: &serde_json::Value) -> Option<i64> {
+    json.pointer("/providers/meta/expires_at")?
+        .as_i64()?
+        .checked_mul(1000)
 }
 
 impl HarnessKind {
@@ -247,6 +246,7 @@ impl HarnessKind {
                 .get("expires_at")?
                 .as_i64()
                 .and_then(|seconds| seconds.checked_mul(1000)),
+            Self::Muse => muse_login_expiry_ms(json),
             Self::Grok => json
                 .as_object()?
                 .values()
@@ -265,10 +265,9 @@ impl HarnessKind {
                 .filter_map(|grant| grant.get("expires")?.as_i64())
                 .filter(|expires| *expires > 0)
                 .max(),
-            // Muse stores no timestamp Hel can order two copies by,
             // OpenCode's logins live in its database, which no copy orders,
             // and DSH has no login.
-            Self::Muse | Self::OpenCode | Self::Dsh => None,
+            Self::OpenCode | Self::Dsh => None,
         }
     }
 
@@ -281,9 +280,10 @@ impl HarnessKind {
                 .get("expires_at")?
                 .as_i64()
                 .and_then(|seconds| seconds.checked_mul(1000)),
+            Self::Muse => muse_login_expiry_ms(json),
             // None of these has a proactive-refresh path, so none reports an
             // expiry Hel would act on: each refreshes its own tokens on demand.
-            Self::Grok | Self::Muse | Self::OpenCode | Self::Mimo | Self::Dsh => None,
+            Self::Grok | Self::OpenCode | Self::Mimo | Self::Dsh => None,
         }
     }
 
@@ -678,11 +678,13 @@ pub struct CredentialSyncTarget {
     /// profile has no credential file to exchange with the session, so only
     /// skills and the GitHub token are reconciled.
     pub skips_login_file_sync: bool,
-    /// GitHub CLI credentials are pushed to every target except raw localhost.
+    /// Host AWS chain provisioned into this isolated session, when selected.
+    pub aws_credentials: Option<crate::aws_credentials::AwsCredentialSource>,
+    /// Local sessions use their host login unless a session credential is configured.
     pub sync_github_token: bool,
-    /// The controller has GitHub App configuration and should resolve a
-    /// session-scoped installation token for this target.
-    pub github_app_configured: bool,
+    /// Controller-owned source for this session's GitHub credential. Included
+    /// in target identity so a reload invalidates obsolete reconciliation.
+    pub github: crate::config::GithubConfig,
     /// Target-derived availability of the host CLI skill.
     pub skills_scope: crate::skills::SkillsScope,
     /// Reconnect command for the session's worker proxy.
@@ -702,6 +704,10 @@ pub enum CredentialSyncAction {
     GithubTokenPushed,
     /// A stale session token was removed because the controller has none.
     GithubTokenRemoved,
+    /// The host's slopcop login replaced the session copy.
+    SlopcopLoginPushed,
+    /// The session copy was removed because the host is signed out.
+    SlopcopLoginRemoved,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -779,6 +785,14 @@ impl CredentialSyncResult {
 
     pub fn github_token_removed_sessions(&self) -> usize {
         self.count_actions(|action| action == CredentialSyncAction::GithubTokenRemoved)
+    }
+
+    pub fn slopcop_login_pushed_sessions(&self) -> usize {
+        self.count_actions(|action| action == CredentialSyncAction::SlopcopLoginPushed)
+    }
+
+    pub fn slopcop_login_removed_sessions(&self) -> usize {
+        self.count_actions(|action| action == CredentialSyncAction::SlopcopLoginRemoved)
     }
 
     fn count_actions(&self, wanted: impl Fn(CredentialSyncAction) -> bool) -> usize {

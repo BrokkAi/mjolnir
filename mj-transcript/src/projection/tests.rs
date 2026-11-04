@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     ContentBlock, TextContent, ToolCallUpdate, ToolCallUpdateFields,
 };
 
@@ -29,6 +29,120 @@ fn apply(session: &mut MaterializedSession, event: RelayEvent) {
 fn apply_observation(session: &mut MaterializedSession, observation: RelayObservation) {
     let next = event(session, observation);
     apply(session, next);
+}
+
+#[test]
+fn hidden_handoff_state_survives_prompt_delivery_and_canonical_export() {
+    use crate::handoff::{
+        HANDOFF_STATE_KEY, MODEL_HANDOFF_OPENING, encode_handoff, reusable_handoff,
+    };
+
+    let mut session = MaterializedSession::empty("handoff-projection");
+    let source = canonical_session_from_materialized(&session).unwrap();
+    let text = format!(
+        "{MODEL_HANDOFF_OPENING}verified state\n\n<retained_recent_context>\nrecent work</retained_recent_context>"
+    );
+    let marked = encode_handoff(&source, &text).unwrap();
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "install-context".into(),
+            command: RelayCommand::InstallPromptContext {
+                text: marked.clone(),
+            },
+            created_at_ms: 100,
+        },
+    );
+    assert!(session.transcript.is_empty());
+    assert!(session.configuration.values.contains_key(HANDOFF_STATE_KEY));
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "first-prompt".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::Text(TextContent::new("continue work"))],
+            },
+            created_at_ms: 200,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandStarted {
+            command_id: "first-prompt".into(),
+            started_at_ms: 300,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        },
+    );
+    let canonical = canonical_session_from_materialized(&session).unwrap();
+    assert_eq!(
+        reusable_handoff(&canonical).unwrap().summary,
+        "verified state\n\n<retained_recent_context>\nrecent work</retained_recent_context>"
+    );
+    assert!(canonical.transcript.iter().all(|item| !matches!(
+        &item.body,
+        CanonicalTranscriptBody::User { content }
+            if crate::transcript::materialized_content_text(content).contains("verified state")
+    )));
+
+    let mut pasted = MaterializedSession::empty("pasted-handoff");
+    apply_observation(
+        &mut pasted,
+        RelayObservation::CommandQueued {
+            command_id: "pasted".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::Text(TextContent::new(marked))],
+            },
+            created_at_ms: 100,
+        },
+    );
+    assert!(!pasted.configuration.values.contains_key(HANDOFF_STATE_KEY));
+}
+
+#[test]
+fn handoff_provenance_rejects_a_later_update_to_an_old_tool_and_clear() {
+    let session = MaterializedSession::empty("handoff-freshness");
+    let mut source = canonical_session_from_materialized(&session).unwrap();
+    source.event_frontier = 1;
+    source.transcript.push(CanonicalTranscriptItem {
+        stable_id: "tool:old".into(),
+        position: 1,
+        latest_content_event_ordinal: None,
+        created_at_ms: 0,
+        last_changed_at_ms: 0,
+        body: CanonicalTranscriptBody::Tool {
+            call: json!({"toolCallId":"old", "status":"in_progress"}),
+            terminal_outputs: Vec::new(),
+            terminal_refs: Vec::new(),
+            presentation: None,
+        },
+    });
+    let state = crate::handoff::HandoffState::capture(&source, "old state".into()).unwrap();
+    assert!(state.validate(&source).unwrap());
+    let mut updated = source.clone();
+    if let CanonicalTranscriptBody::Tool { call, .. } = &mut updated.transcript[0].body {
+        *call = json!({"toolCallId":"old", "status":"completed"});
+    }
+    updated.event_frontier = 3;
+    assert!(!state.validate(&updated).unwrap());
+
+    let mut cleared = source;
+    cleared.event_frontier = 2;
+    cleared.transcript.push(CanonicalTranscriptItem {
+        stable_id: "context-cleared:reset".into(),
+        position: 2,
+        latest_content_event_ordinal: None,
+        created_at_ms: 0,
+        last_changed_at_ms: 0,
+        body: CanonicalTranscriptBody::System {
+            text: "clear".into(),
+        },
+    });
+    assert!(!state.validate(&cleared).unwrap());
 }
 
 fn rendered_materialized_transcript(session: &MaterializedSession) -> String {
@@ -312,7 +426,7 @@ fn golden_session_title_projection() {
         &mut titled,
         RelayObservation::SessionUpdate {
             update: Box::new(SessionUpdate::SessionInfoUpdate(
-                agent_client_protocol::schema::v1::SessionInfoUpdate::new()
+                agent_client_protocol::v1::schema::SessionInfoUpdate::new()
                     .title("Agent-generated title"),
             )),
         },
@@ -777,6 +891,61 @@ fn golden_mailbox_delivery_transcript() {
     apply_observation(
         &mut session,
         untagged_agent_chunk("Responding after delivery."),
+    );
+
+    let question = mj_core::elicitation::ElicitationRequest::from_acp_params(
+        "away-question",
+        json!({
+            "mode":"form", "sessionId":"session", "message":"Claude Code requests permission:\ntouch afk-created.txt",
+            "requestedSchema":{"type":"object","properties":{"answer":{"type":"string"}}}
+        }),
+    )
+    .unwrap();
+    apply_observation(
+        &mut session,
+        RelayObservation::ElicitationRequested {
+            request: question.clone(),
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::ElicitationResolved {
+            elicitation_id: question.id,
+            action: mj_core::elicitation::OPERATOR_AWAY_ACTION.into(),
+            reply: None,
+        },
+    );
+    let notices = vec![
+        mailbox_event(
+            "operator-away",
+            "operator_away",
+            true,
+            1000,
+            MailboxEventBody::OperatorAway {
+                request: "Claude Code requests permission:\ntouch afk-created.txt".into(),
+            },
+        ),
+        mailbox_event(
+            "operator-back",
+            "operator_away",
+            true,
+            1001,
+            MailboxEventBody::OperatorBack {
+                requests: vec!["Claude Code requests permission:\ntouch afk-created.txt".into()],
+            },
+        ),
+    ];
+    apply_observation(
+        &mut session,
+        RelayObservation::MailboxEventsDelivered {
+            event_keys: notices.iter().map(|event| event.key.clone()).collect(),
+            path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+            prompt_command_id: None,
+            hook_event: Some("PostToolUse".into()),
+            events: notices,
+            lease_id: Some("operator-notices".into()),
+            steering: None,
+        },
     );
 
     mj_core::golden::assert_golden(
@@ -1248,7 +1417,7 @@ fn a_rejected_queued_prompt_records_its_acceptance_ordinal_without_a_turn_start(
         RelayObservation::CommandQueued {
             command_id: "prompt-1".into(),
             command: RelayCommand::Prompt {
-                prompt: vec![agent_client_protocol::schema::v1::ContentBlock::from("go")],
+                prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from("go")],
             },
             created_at_ms: 10,
         },
@@ -1292,7 +1461,7 @@ fn queued_prompts_keep_their_own_acceptance_ordinals_through_their_turns() {
             RelayObservation::CommandQueued {
                 command_id: command_id.into(),
                 command: RelayCommand::Prompt {
-                    prompt: vec![agent_client_protocol::schema::v1::ContentBlock::from("go")],
+                    prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from("go")],
                 },
                 created_at_ms: 10,
             },
@@ -1402,6 +1571,41 @@ fn a_harness_turn_runs_the_session_and_marks_where_it_began() {
     );
 }
 
+#[test]
+fn a_harness_turn_without_output_keeps_its_divider_and_stops_its_clock() {
+    let mut session = MaterializedSession::empty("session");
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted {
+            started_at_ms: 4200,
+        },
+    );
+    assert!(matches!(
+        session.execution,
+        MaterializedExecutionState::Running {
+            started_at_ms: 4200
+        }
+    ));
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            origin: Some("autonomous_task_ended".into()),
+            prompt_in_flight: false,
+        },
+    );
+    assert_eq!(session.execution, MaterializedExecutionState::Idle);
+    assert_eq!(session.transcript.len(), 1);
+    let marker = &session.transcript[0];
+    assert_eq!(marker.stable_id, "harness-turn:1");
+    assert!(
+        matches!(&marker.body, TranscriptBody::System { text } if text == crate::transcript::HARNESS_TURN_TEXT)
+    );
+    assert_eq!(
+        mj_core::state::latest_completed_turn_ordinal(&session),
+        Some(1)
+    );
+}
+
 // Hard-won: db2e99a5: a native turn settling beneath an accepted prompt incorrectly made the session idle.
 #[test]
 fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
@@ -1419,7 +1623,7 @@ fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
         RelayObservation::CommandQueued {
             command_id: "prompt-1".into(),
             command: RelayCommand::Prompt {
-                prompt: vec![agent_client_protocol::schema::v1::ContentBlock::from("go")],
+                prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from("go")],
             },
             created_at_ms: 10,
         },
@@ -1557,11 +1761,11 @@ fn a_restart_during_a_harness_turn_leaves_an_idle_session_with_no_open_streams()
 fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
     let plan = |content: &str| RelayObservation::SessionUpdate {
         update: Box::new(SessionUpdate::Plan(
-            agent_client_protocol::schema::v1::Plan::new(vec![
-                agent_client_protocol::schema::v1::PlanEntry::new(
+            agent_client_protocol::v1::schema::Plan::new(vec![
+                agent_client_protocol::v1::schema::PlanEntry::new(
                     content,
-                    agent_client_protocol::schema::v1::PlanEntryPriority::High,
-                    agent_client_protocol::schema::v1::PlanEntryStatus::InProgress,
+                    agent_client_protocol::v1::schema::PlanEntryPriority::High,
+                    agent_client_protocol::v1::schema::PlanEntryStatus::InProgress,
                 ),
             ]),
         )),
@@ -1572,7 +1776,7 @@ fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
         RelayObservation::CommandQueued {
             command_id: "prompt-1".into(),
             command: RelayCommand::Prompt {
-                prompt: vec![agent_client_protocol::schema::v1::ContentBlock::from("go")],
+                prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from("go")],
             },
             created_at_ms: 10,
         },
@@ -1803,7 +2007,7 @@ fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
 fn untagged_agent_chunk(text: &str) -> RelayObservation {
     RelayObservation::SessionUpdate {
         update: Box::new(SessionUpdate::AgentMessageChunk(
-            agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
+            agent_client_protocol::v1::schema::ContentChunk::new(ContentBlock::Text(
                 TextContent::new(text),
             )),
         )),
@@ -1814,7 +2018,7 @@ fn untagged_agent_chunk(text: &str) -> RelayObservation {
 fn untagged_thought_chunk(text: &str) -> RelayObservation {
     RelayObservation::SessionUpdate {
         update: Box::new(SessionUpdate::AgentThoughtChunk(
-            agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
+            agent_client_protocol::v1::schema::ContentChunk::new(ContentBlock::Text(
                 TextContent::new(text),
             )),
         )),
@@ -1828,7 +2032,7 @@ fn streamed_chunks_are_one_unread_logical_agent_message() {
         &mut session,
         RelayObservation::SessionUpdate {
             update: Box::new(SessionUpdate::AgentMessageChunk(
-                agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
+                agent_client_protocol::v1::schema::ContentChunk::new(ContentBlock::Text(
                     TextContent::new("hel"),
                 ))
                 .message_id("answer-1"),
@@ -1843,7 +2047,7 @@ fn streamed_chunks_are_one_unread_logical_agent_message() {
         &mut session,
         RelayObservation::SessionUpdate {
             update: Box::new(SessionUpdate::AgentMessageChunk(
-                agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
+                agent_client_protocol::v1::schema::ContentChunk::new(ContentBlock::Text(
                     TextContent::new("lo"),
                 ))
                 .message_id("answer-1"),
@@ -1886,7 +2090,7 @@ fn agent_chunk_while_idle_is_recorded_closed() {
         &mut session,
         RelayObservation::SessionUpdate {
             update: Box::new(SessionUpdate::AgentMessageChunk(
-                agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
+                agent_client_protocol::v1::schema::ContentChunk::new(ContentBlock::Text(
                     TextContent::new("trailing"),
                 ))
                 .message_id("msg-1"),
@@ -1915,7 +2119,7 @@ fn thought_chunk_while_idle_is_recorded_closed() {
         &mut session,
         RelayObservation::SessionUpdate {
             update: Box::new(SessionUpdate::AgentThoughtChunk(
-                agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
+                agent_client_protocol::v1::schema::ContentChunk::new(ContentBlock::Text(
                     TextContent::new("late thought"),
                 ))
                 .message_id("msg-1"),
@@ -1978,7 +2182,7 @@ fn backward_relay_clock_never_regresses_transcript_change_times() {
         &session,
         RelayObservation::SessionUpdate {
             update: Box::new(SessionUpdate::AgentMessageChunk(
-                agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
+                agent_client_protocol::v1::schema::ContentChunk::new(ContentBlock::Text(
                     TextContent::new("first"),
                 ))
                 .message_id("answer-1"),
@@ -1993,7 +2197,7 @@ fn backward_relay_clock_never_regresses_transcript_change_times() {
         &session,
         RelayObservation::SessionUpdate {
             update: Box::new(SessionUpdate::AgentMessageChunk(
-                agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
+                agent_client_protocol::v1::schema::ContentChunk::new(ContentBlock::Text(
                     TextContent::new(" second"),
                 ))
                 .message_id("answer-1"),
@@ -2075,6 +2279,64 @@ fn metadata_only_tool_update_without_an_initial_call_is_ignored() {
     assert_eq!(session.applied_event_ordinal, 1);
 }
 
+// Hard-won: c823ba502: ACP terminal metadata vanished instead of reaching persisted tool details.
+#[test]
+fn terminal_metadata_retains_bounded_unicode_output_across_restore_and_late_exit() {
+    let mut session = MaterializedSession::empty("terminal-metadata");
+    apply_observation(&mut session, terminal_tool_call("call-1", "term-1"));
+    let update = |session: &mut MaterializedSession, meta: Value| {
+        let update = json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "call-1", "_meta": meta
+        });
+        apply_observation(
+            session,
+            RelayObservation::SessionUpdate {
+                update: Box::new(serde_json::from_value(update).unwrap()),
+            },
+        );
+    };
+    // More than a pipe buffer and the retained-output budget, ending partway
+    // through a multibyte character if the byte cap ignores UTF-8 boundaries.
+    let output = format!("{}\nfirst failure\n", "🦀".repeat(1_048_577));
+    update(
+        &mut session,
+        json!({"terminal_output_delta": {"terminal_id": "term-1", "data": output}}),
+    );
+    let record = &attached_terminal_outputs(&session.transcript[0])[0];
+    assert!(record.truncated);
+    assert!(record.output.len() <= 4 * 1024 * 1024);
+    assert!(output.ends_with(&record.output));
+
+    // A daemon rebuilds projection ownership solely from the serialized session.
+    session = serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
+    update(
+        &mut session,
+        json!({"terminal_output_delta": {"terminal_id": "term-1", "data": "late failure\n"}}),
+    );
+    update(
+        &mut session,
+        json!({"terminal_exit": {"terminal_id": "term-1", "exit_code": 128, "signal": null}}),
+    );
+    let record = &attached_terminal_outputs(&session.transcript[0])[0];
+    assert!(record.output.ends_with("first failure\nlate failure\n"));
+    assert_eq!(record.exit_code, Some(128));
+    assert!(record.truncated);
+
+    // A final snapshot replaces earlier chunks rather than repeating them.
+    update(
+        &mut session,
+        json!({
+            "terminal_output": {"terminal_id": "term-1", "data": "complete failure\n"},
+            "terminal_exit": {"terminal_id": "term-1", "exit_code": null, "signal": "SIGTERM"}
+        }),
+    );
+    let record = &attached_terminal_outputs(&session.transcript[0])[0];
+    assert_eq!(record.output, "complete failure\n");
+    assert_eq!(record.exit_code, None);
+    assert_eq!(record.signal.as_deref(), Some("SIGTERM"));
+    assert!(!record.truncated);
+}
+
 // Hard-won: 111f6dcd: Codex resent a revised tool call as a new item, changing identity and failing every recovery retry.
 #[test]
 fn resent_tool_call_keeps_identity_and_replaces_the_call_payload() {
@@ -2097,7 +2359,7 @@ fn resent_tool_call_keeps_identity_and_replaces_the_call_payload() {
         RelayObservation::SessionUpdate {
             update: Box::new(SessionUpdate::ToolCall(
                 ToolCall::new("call-1", "read file again")
-                    .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed),
+                    .status(agent_client_protocol::v1::schema::ToolCallStatus::Completed),
             )),
         },
     );
@@ -2148,7 +2410,7 @@ fn tool_call_update_then_resent_tool_call_survives_the_projection() {
             update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 "call-1",
                 ToolCallUpdateFields::new()
-                    .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed),
+                    .status(agent_client_protocol::v1::schema::ToolCallStatus::Completed),
             ))),
         },
     );
@@ -2179,7 +2441,7 @@ fn terminal_tool_call(call_id: &'static str, terminal_id: &'static str) -> Relay
     RelayObservation::SessionUpdate {
         update: Box::new(SessionUpdate::ToolCall(
             ToolCall::new(call_id, "shell").content(vec![ToolCallContent::Terminal(
-                agent_client_protocol::schema::v1::Terminal::new(terminal_id),
+                agent_client_protocol::v1::schema::Terminal::new(terminal_id),
             )]),
         )),
     }
@@ -2403,7 +2665,7 @@ fn mismatched_raw_result_does_not_hide_a_genuine_orphan_failure() {
             update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 "call-1",
                 ToolCallUpdateFields::new()
-                    .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed)
+                    .status(agent_client_protocol::v1::schema::ToolCallStatus::Completed)
                     .raw_output(json!({
                         "output": b"different output",
                         "exit_code": 1
@@ -2448,7 +2710,7 @@ fn identical_orphan_results_are_not_assigned_arbitrarily() {
             update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 "call-1",
                 ToolCallUpdateFields::new()
-                    .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed)
+                    .status(agent_client_protocol::v1::schema::ToolCallStatus::Completed)
                     .raw_output(json!({
                         "output": OUTPUT.as_bytes(),
                         "exit_code": 1
@@ -2482,9 +2744,9 @@ fn wholesale_tool_call_update_keeps_the_attached_terminal_output() {
             update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 "call-1",
                 ToolCallUpdateFields::new()
-                    .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed)
+                    .status(agent_client_protocol::v1::schema::ToolCallStatus::Completed)
                     .content(vec![ToolCallContent::Terminal(
-                        agent_client_protocol::schema::v1::Terminal::new("term-1"),
+                        agent_client_protocol::v1::schema::Terminal::new("term-1"),
                     )]),
             ))),
         },
@@ -2514,7 +2776,7 @@ fn a_tool_call_that_dropped_its_terminal_reference_still_attaches_the_output() {
             update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 "call-1",
                 ToolCallUpdateFields::new()
-                    .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed)
+                    .status(agent_client_protocol::v1::schema::ToolCallStatus::Completed)
                     .content(vec![ToolCallContent::from(ContentBlock::Text(
                         TextContent::new("ran the build"),
                     ))]),
@@ -2556,7 +2818,7 @@ fn session_info_update_caps_large_titles_in_the_published_projection() {
         &mut session,
         RelayObservation::SessionUpdate {
             update: Box::new(SessionUpdate::SessionInfoUpdate(
-                agent_client_protocol::schema::v1::SessionInfoUpdate::new()
+                agent_client_protocol::v1::schema::SessionInfoUpdate::new()
                     .title("word ".repeat(20_000)),
             )),
         },
@@ -2586,7 +2848,7 @@ fn session_info_update_without_title_preserves_the_provisional_title() {
         &mut session,
         RelayObservation::SessionUpdate {
             update: Box::new(SessionUpdate::SessionInfoUpdate(
-                agent_client_protocol::schema::v1::SessionInfoUpdate::new()
+                agent_client_protocol::v1::schema::SessionInfoUpdate::new()
                     .updated_at("2026-08-31T12:00:00Z"),
             )),
         },
@@ -2613,7 +2875,7 @@ fn explicit_session_title_clear_restores_the_prompt_fallback() {
         &mut session,
         RelayObservation::SessionUpdate {
             update: Box::new(SessionUpdate::SessionInfoUpdate(
-                agent_client_protocol::schema::v1::SessionInfoUpdate::new().title(None),
+                agent_client_protocol::v1::schema::SessionInfoUpdate::new().title(None),
             )),
         },
     );
@@ -2819,7 +3081,7 @@ fn control_command_outcomes_do_not_end_an_active_prompt() {
 fn agent_chunk(text: &str, message_id: &str) -> RelayObservation {
     RelayObservation::SessionUpdate {
         update: Box::new(SessionUpdate::AgentMessageChunk(
-            agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
+            agent_client_protocol::v1::schema::ContentChunk::new(ContentBlock::Text(
                 TextContent::new(text),
             ))
             .message_id(message_id),
@@ -2837,7 +3099,7 @@ fn streamed_text_for_one_message_id_becomes_a_single_chunk() {
             &mut session,
             RelayObservation::SessionUpdate {
                 update: Box::new(SessionUpdate::AgentThoughtChunk(
-                    agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
+                    agent_client_protocol::v1::schema::ContentChunk::new(ContentBlock::Text(
                         TextContent::new(token),
                     ))
                     .message_id("msg-1"),
@@ -2850,7 +3112,7 @@ fn streamed_text_for_one_message_id_becomes_a_single_chunk() {
             &mut session,
             RelayObservation::SessionUpdate {
                 update: Box::new(SessionUpdate::AgentMessageChunk(
-                    agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
+                    agent_client_protocol::v1::schema::ContentChunk::new(ContentBlock::Text(
                         TextContent::new(token),
                     ))
                     .message_id("msg-1"),
@@ -2949,7 +3211,7 @@ fn clear_preserves_history_and_adds_one_durable_context_boundary() {
 
 #[test]
 fn windowed_current_turn_keeps_streaming_and_tool_updates_identical_to_full_history() {
-    use agent_client_protocol::schema::v1::ToolCallStatus;
+    use agent_client_protocol::v1::schema::ToolCallStatus;
     let mut full = MaterializedSession::empty("window-stream");
     // Multiple settled turns, with enough text to exceed a pipe buffer too.
     for turn in 0..12 {
@@ -3187,7 +3449,7 @@ fn canonical_round_trip_preserves_cursor_and_logical_positions() {
                 summary: "Read".into(),
                 source: "Read file".into(),
                 source_kind: crate::transcript::ToolSummarySourceKind::Title,
-                tool_kind: agent_client_protocol::schema::v1::ToolKind::Read,
+                tool_kind: agent_client_protocol::v1::schema::ToolKind::Read,
                 summary_version: crate::transcript::TOOL_SUMMARY_VERSION,
             })),
         },

@@ -16,7 +16,9 @@
 //! * `loading` -- instance names, directories, and atomic file writes.
 //! * `secrets` -- environment entries that name a secret held elsewhere.
 
+mod daemon;
 mod document;
+mod dsh_credentials;
 mod github;
 mod harness;
 mod keys;
@@ -26,6 +28,7 @@ mod secrets;
 mod targets;
 mod ui;
 
+pub use daemon::*;
 pub use github::*;
 pub use harness::*;
 pub use keys::*;
@@ -37,7 +40,7 @@ pub use ui::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 
 use std::path::{Path, PathBuf};
 
@@ -137,11 +140,14 @@ impl PhoneConfig {
 /// what they set. `profile` names a harness profile defined in this same file
 /// -- or Auto when absent. A reviewer always has its own conversation, even
 /// when it uses the primary session's profile.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "ReviewConfigInput")]
 pub struct ReviewConfig {
     #[serde(default)]
     pub trigger: ReviewTrigger,
+    /// Number of independent reviewers to launch for each review.
+    #[serde(default = "default_review_count")]
+    pub count: std::num::NonZeroUsize,
     /// Deprecated review tier. Accepted for old configurations and ignored.
     #[serde(default, skip_serializing)]
     pub tier: Option<String>,
@@ -153,6 +159,24 @@ pub struct ReviewConfig {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+}
+
+/// Independent review sessions assigned when a configuration omits the count.
+pub fn default_review_count() -> std::num::NonZeroUsize {
+    std::num::NonZeroUsize::new(2).expect("two is nonzero")
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            trigger: ReviewTrigger::Off,
+            count: default_review_count(),
+            tier: None,
+            profile: None,
+            model: None,
+            effort: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +203,8 @@ impl std::fmt::Display for ReviewTrigger {
 struct ReviewConfigInput {
     #[serde(default)]
     trigger: Option<ReviewTrigger>,
+    #[serde(default = "default_review_count")]
+    count: std::num::NonZeroUsize,
     #[serde(default)]
     enabled: Option<bool>,
     #[serde(default)]
@@ -199,6 +225,7 @@ impl From<ReviewConfigInput> for ReviewConfig {
             } else {
                 ReviewTrigger::Off
             }),
+            count: input.count,
             tier: input.tier,
             profile: input.profile,
             model: input.model,
@@ -221,6 +248,8 @@ pub enum SessionReview {
     #[serde(alias = "on")]
     Turn {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<std::num::NonZeroUsize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
@@ -230,6 +259,8 @@ pub enum SessionReview {
         tier: Option<String>,
     },
     Push {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<std::num::NonZeroUsize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -268,8 +299,18 @@ impl ReviewConfig {
             None => {}
             Some(SessionReview::Off) => config.trigger = ReviewTrigger::Off,
             Some(
-                choice @ (SessionReview::Turn { model, effort, .. }
-                | SessionReview::Push { model, effort, .. }),
+                choice @ (SessionReview::Turn {
+                    model,
+                    effort,
+                    count,
+                    ..
+                }
+                | SessionReview::Push {
+                    model,
+                    effort,
+                    count,
+                    ..
+                }),
             ) => {
                 config.trigger = choice.trigger();
                 if model.is_some() {
@@ -277,6 +318,9 @@ impl ReviewConfig {
                 }
                 if effort.is_some() {
                     config.effort.clone_from(effort);
+                }
+                if let Some(count) = count {
+                    config.count = *count;
                 }
             }
         }
@@ -513,6 +557,43 @@ impl JevConfig {
     }
 }
 
+/// Where the daemon runs the quota checks that start a harness program: the
+/// Codex app-server, Grok's agent, and Claude Code's login refresh.
+/// `[quota] runtime = "auto"`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QuotaConfig {
+    #[serde(skip_serializing_if = "QuotaRuntimeChoice::is_default")]
+    pub runtime: QuotaRuntimeChoice,
+}
+
+impl QuotaConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// `Auto` runs the checks in the image of an enabled local Podman runtime,
+/// else an enabled local Docker runtime, when its engine is installed, and
+/// otherwise on the host. `Podman` and `Docker` insist on that engine (with
+/// its runtime's image, or the release's agent-dev image without one); `Host`
+/// never uses a container.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QuotaRuntimeChoice {
+    #[default]
+    Auto,
+    Podman,
+    Docker,
+    Host,
+}
+
+impl QuotaRuntimeChoice {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Legacy GitHub event source switch, read but never written.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -538,6 +619,40 @@ impl Config {
             .collect();
         crate::hex::lower_hex(Sha256::digest(
             serde_json::to_vec(&inputs).expect("profile identities serialize"),
+        ))
+    }
+
+    /// The models this configuration selects on profile `id`, whose efforts
+    /// its settings offer: the sub-agent choices, which any enabled profile
+    /// may serve, and the reviewer's model on the review profile. Only these
+    /// and each profile's current model have their efforts discovered ahead
+    /// of a request; aggregating harnesses advertise hundreds of models.
+    pub fn selected_models(&self, id: &str) -> BTreeSet<String> {
+        let mut models = [&self.subagents.straightforward, &self.subagents.subtle]
+            .into_iter()
+            .flatten()
+            .map(|choice| choice.model.clone())
+            .collect::<BTreeSet<_>>();
+        if self.review.profile.as_deref() == Some(id)
+            && let Some(model) = &self.review.model
+        {
+            models.insert(model.clone());
+        }
+        models
+    }
+
+    /// Identity of what capability hydration covers for this configuration:
+    /// its profile definitions and the models each enabled profile is
+    /// selected for.
+    pub fn capability_demand_key(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let selected: BTreeMap<_, _> = self
+            .enabled_profiles()
+            .map(|(id, _)| (id, self.selected_models(id)))
+            .collect();
+        crate::hex::lower_hex(Sha256::digest(
+            serde_json::to_vec(&(self.profiles_discovery_key(), selected))
+                .expect("capability demand serializes"),
         ))
     }
 
@@ -574,8 +689,9 @@ impl Config {
     }
 }
 
-// Breaking: older writers cannot preserve the GitHub watcher switch in its new section.
-pub const CONFIG_VERSION: u32 = 18;
+// Version 20 adds daemon placement; 21 adds review counts. Older strict
+// configuration readers reject the new fields instead of dropping them.
+pub const CONFIG_VERSION: u32 = 21;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
@@ -657,12 +773,15 @@ pub struct Config {
     pub spinner: SpinnerStyle,
     pub theme: ThemeChoice,
     pub phone: PhoneConfig,
+    /// Where the daemon runs: on this computer or in a container.
+    pub daemon: DaemonConfig,
     pub github: GithubConfig,
     pub review: ReviewConfig,
     pub continuation: crate::continuation::ContinuationConfig,
     pub sessionwiki: SessionWikiConfig,
     pub subagents: SubagentConfig,
     pub jev: JevConfig,
+    pub quota: QuotaConfig,
     pub keys: KeysConfig,
     pub legacy_startup: (),
     pub profiles: BTreeMap<String, HarnessProfile>,
@@ -675,6 +794,10 @@ pub struct Config {
     /// the user made, and they are never written to the file. The file is
     /// the only source of an origin: this set is not serialized.
     pub default_targets: BTreeSet<String>,
+    /// Ids in `targets` the user switched off with `enabled = false`. A
+    /// disabled runtime stays configured, so detection never adds its kind
+    /// again, but nothing new is launched on it.
+    pub disabled_targets: BTreeSet<String>,
 }
 
 /// The configuration file's own shape: hosts under `[machines.<id>]` and
@@ -700,6 +823,8 @@ struct StoredConfig {
     theme: ThemeChoice,
     #[serde(default, skip_serializing_if = "PhoneConfig::is_default")]
     phone: PhoneConfig,
+    #[serde(default, skip_serializing_if = "DaemonConfig::is_default")]
+    daemon: DaemonConfig,
     #[serde(default, skip_serializing_if = "GithubConfig::is_default")]
     github: GithubConfig,
     #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
@@ -719,6 +844,8 @@ struct StoredConfig {
     build_cache: LegacyBuildCacheConfig,
     #[serde(default, skip_serializing_if = "JevConfig::is_default")]
     jev: JevConfig,
+    #[serde(default, skip_serializing_if = "QuotaConfig::is_default")]
+    quota: QuotaConfig,
     #[serde(default, skip_serializing_if = "KeysConfig::is_default")]
     keys: KeysConfig,
     #[serde(
@@ -745,7 +872,30 @@ struct StoredConfig {
 #[serde(untagged)]
 enum TargetEntry {
     Stored(Box<StoredTarget>),
+    Disabled(DisabledTarget),
     Raw(serde_json::Value),
+}
+
+/// A runtime written with `enabled = false`. Only a disabled runtime carries
+/// the key; an enabled one omits it, as profiles do.
+#[derive(Debug, Clone, Serialize)]
+struct DisabledTarget {
+    #[serde(flatten)]
+    target: Box<StoredTarget>,
+    enabled: bool,
+}
+
+/// Take `enabled` out of a raw `[targets.<id>]` table, so the runtime's own
+/// keys are interpreted without it. Absent means enabled.
+fn take_target_enabled(id: &str, value: &mut serde_json::Value) -> Result<bool> {
+    let Some(table) = value.as_object_mut() else {
+        return Ok(true);
+    };
+    match table.remove("enabled") {
+        None => Ok(true),
+        Some(serde_json::Value::Bool(enabled)) => Ok(enabled),
+        Some(other) => bail!("target {id:?} has enabled = {other}; write true or false"),
+    }
 }
 
 impl<'de> Deserialize<'de> for TargetEntry {
@@ -867,6 +1017,7 @@ impl TryFrom<StoredConfig> for Config {
             spinner,
             theme,
             phone,
+            daemon,
             mut github,
             review,
             continuation,
@@ -875,6 +1026,7 @@ impl TryFrom<StoredConfig> for Config {
             subagents,
             build_cache,
             jev,
+            quota,
             keys,
             legacy_startup,
             mut profiles,
@@ -883,22 +1035,34 @@ impl TryFrom<StoredConfig> for Config {
             targets,
         } = stored;
         github.watch.enabled &= mailbox.enabled;
-        if let Some(app) = &github.app {
-            app.validate()?;
-        }
+        github.validate()?;
         for profile in profiles.values_mut() {
             profile.inherit_provider_key();
         }
         let mut runtimes: BTreeMap<String, StoredTarget> = BTreeMap::new();
+        let mut disabled_targets = BTreeSet::new();
         for (id, entry) in targets {
             let runtime = match entry {
                 TargetEntry::Stored(target) => *target,
-                TargetEntry::Raw(value) => match interpret_target(&id, &value, version)? {
-                    InterpretedTarget::Stored(target) => target,
-                    // Migration and saving are the same operation, so an old
-                    // file becomes exactly what the next save would write.
-                    InterpretedTarget::Legacy(target) => stored_target(&id, &target, &mut machines),
-                },
+                TargetEntry::Disabled(DisabledTarget { target, enabled }) => {
+                    if !enabled {
+                        disabled_targets.insert(id.clone());
+                    }
+                    *target
+                }
+                TargetEntry::Raw(mut value) => {
+                    if !take_target_enabled(&id, &mut value)? {
+                        disabled_targets.insert(id.clone());
+                    }
+                    match interpret_target(&id, &value, version)? {
+                        InterpretedTarget::Stored(target) => target,
+                        // Migration and saving are the same operation, so an
+                        // old file becomes exactly what the next save would write.
+                        InterpretedTarget::Legacy(target) => {
+                            stored_target(&id, &target, &mut machines)
+                        }
+                    }
+                }
             };
             runtimes.insert(id, runtime);
         }
@@ -934,15 +1098,16 @@ impl TryFrom<StoredConfig> for Config {
             sessions_side,
             advanced,
             notify,
-            // Versions 1 through 17 acquire this build's defaults in memory
+            // Versions 1 through 19 acquire this build's defaults in memory
             // and upgrade on the next ordinary save. Version 12 splits
             // machines from runtimes; version 13 adds automatic continuation;
             // version 14 moves the global cache opt-out onto machines; version
             // 15 stops writing the default image into a container target;
             // 16 adds native tool cache storage; 17 replaces per-profile
             // delegation selectors with global task choices, without migrating them;
-            // 18 moves the GitHub event switch to github.watch.enabled.
-            version: if matches!(version, 1..=17) {
+            // 18 moves the GitHub event switch to github.watch.enabled; 19 adds
+            // `enabled` to runtimes; 20 adds `[daemon]`; 21 adds review counts.
+            version: if matches!(version, 1..=20) {
                 CONFIG_VERSION
             } else {
                 version
@@ -950,12 +1115,14 @@ impl TryFrom<StoredConfig> for Config {
             spinner,
             theme,
             phone,
+            daemon,
             github,
             review,
             continuation,
             sessionwiki,
             subagents,
             jev,
+            quota,
             keys,
             legacy_startup,
             profiles,
@@ -963,6 +1130,7 @@ impl TryFrom<StoredConfig> for Config {
             machines,
             targets: resolved,
             default_targets: BTreeSet::new(),
+            disabled_targets,
         })
     }
 }
@@ -972,8 +1140,16 @@ impl From<Config> for StoredConfig {
         let mut machines = config.machines;
         let mut targets = BTreeMap::new();
         for (id, target) in &config.targets {
-            let runtime = stored_target(id, target, &mut machines);
-            targets.insert(id.clone(), TargetEntry::Stored(Box::new(runtime)));
+            let runtime = Box::new(stored_target(id, target, &mut machines));
+            let entry = if config.disabled_targets.contains(id) {
+                TargetEntry::Disabled(DisabledTarget {
+                    target: runtime,
+                    enabled: false,
+                })
+            } else {
+                TargetEntry::Stored(runtime)
+            };
+            targets.insert(id.clone(), entry);
         }
         // This machine is implied, so a file only names it when it carries
         // settings of its own.
@@ -989,6 +1165,7 @@ impl From<Config> for StoredConfig {
             spinner: config.spinner,
             theme: config.theme,
             phone: config.phone,
+            daemon: config.daemon,
             github: config.github,
             review: config.review,
             continuation: config.continuation,
@@ -997,6 +1174,7 @@ impl From<Config> for StoredConfig {
             subagents: config.subagents,
             build_cache: LegacyBuildCacheConfig::default(),
             jev: config.jev,
+            quota: config.quota,
             keys: config.keys,
             legacy_startup: config.legacy_startup,
             profiles: config.profiles,
@@ -1017,12 +1195,14 @@ impl Default for Config {
             spinner: SpinnerStyle::default(),
             theme: Default::default(),
             phone: PhoneConfig::default(),
+            daemon: DaemonConfig::default(),
             github: GithubConfig::default(),
             review: ReviewConfig::default(),
             continuation: crate::continuation::ContinuationConfig::enabled(),
             sessionwiki: SessionWikiConfig::default(),
             subagents: SubagentConfig::default(),
             jev: JevConfig::default(),
+            quota: QuotaConfig::default(),
             keys: KeysConfig::default(),
             legacy_startup: (),
             profiles: BTreeMap::new(),
@@ -1030,6 +1210,7 @@ impl Default for Config {
             machines: BTreeMap::new(),
             targets: BTreeMap::new(),
             default_targets: BTreeSet::new(),
+            disabled_targets: BTreeSet::new(),
         }
     }
 }
@@ -1160,6 +1341,37 @@ impl Config {
     /// One profile when it exists and is available for new work.
     pub fn enabled_profile(&self, id: &str) -> Option<&HarnessProfile> {
         self.profiles.get(id).filter(|profile| profile.enabled)
+    }
+
+    /// Runtimes available for new work: every one not switched off.
+    pub fn enabled_targets(&self) -> impl Iterator<Item = (&str, &TargetTemplate)> {
+        self.targets
+            .iter()
+            .filter(|(id, _)| !self.disabled_targets.contains(*id))
+            .map(|(id, target)| (id.as_str(), target))
+    }
+
+    /// One runtime when it exists and is available for new work.
+    pub fn enabled_target(&self, id: &str) -> Option<&TargetTemplate> {
+        self.targets
+            .get(id)
+            .filter(|_| !self.disabled_targets.contains(id))
+    }
+
+    /// Refuse new work on runtime `id` when it is not configured or is
+    /// switched off. Every launch, resume and move asks this.
+    pub fn ensure_target_enabled(&self, id: &str) -> Result<&TargetTemplate> {
+        let target = self
+            .targets
+            .get(id)
+            .with_context(|| format!("unknown target template {id:?}"))?;
+        if self.disabled_targets.contains(id) {
+            return Err(crate::refusal::Refusal::precondition(format!(
+                "runtime {id:?} is turned off; turn it on in Settings › Runtimes or choose another"
+            ))
+            .into());
+        }
+        Ok(target)
     }
 
     /// Whether a session recorded under `source_profile_id`, running
@@ -1379,7 +1591,15 @@ impl Config {
     where
         F: FnOnce(&mut Self) -> Result<T>,
     {
-        Self::update_to(&config_path(), |config| {
+        Self::update_with_local_targets_at(&config_path(), edit)
+    }
+
+    /// As [`Self::update`], using an explicit config path.
+    pub fn update_with_local_targets_at<T, F>(path: &Path, edit: F) -> Result<(Self, T)>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
+        Self::update_to(path, |config| {
             // Edits see the same local candidates as reads, but unrelated
             // changes must not write implicit defaults into the user's file.
             let mut runtime = config.clone().with_local_targets();
@@ -1391,7 +1611,11 @@ impl Config {
                 .collect();
             let value = edit(&mut runtime)?;
             for (id, target) in implicit {
-                if runtime.targets.get(&id) == Some(&target) {
+                // A standard runtime switched off is the user's choice and
+                // is written with it.
+                if runtime.targets.get(&id) == Some(&target)
+                    && !runtime.disabled_targets.contains(&id)
+                {
                     runtime.targets.remove(&id);
                 }
             }
@@ -1478,7 +1702,7 @@ impl Config {
 /// the config because the config itself is replaced atomically after the lock
 /// is acquired.
 pub(crate) struct ConfigLock {
-    _file: File,
+    _file: crate::file_lock::FileLock,
 }
 
 impl ConfigLock {
@@ -1503,7 +1727,9 @@ impl ConfigLock {
             .with_context(|| format!("open config lock {}", lock_path.display()))?;
         file.lock()
             .with_context(|| format!("lock config {}", config_path.display()))?;
-        Ok(Self { _file: file })
+        Ok(Self {
+            _file: crate::file_lock::FileLock::new(file),
+        })
     }
 }
 

@@ -25,16 +25,6 @@ fn decode_stored_result(body: &str) -> Result<StoredDelegationResult> {
     }
 }
 
-pub(crate) fn list_subagent_parent_ids() -> Result<Vec<String>> {
-    let connection = open_reader(&database_path())?;
-    let mut statement = connection.prepare(
-        "SELECT DISTINCT parent_session_id FROM subagent_sessions ORDER BY parent_session_id",
-    )?;
-    Ok(statement
-        .query_map([], |row| row.get(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?)
-}
-
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PreparedDelegation {
     pub request: SubagentToolRequest,

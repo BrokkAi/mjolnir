@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  # nightly.yml starts its release this way, because a tag it pushes with
+  # GITHUB_TOKEN does not trigger the push event. Dispatch only on a tag.
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -589,7 +592,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [ci, package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-x86_64-apple-darwin, package-aarch64-apple-darwin, package-x86_64-pc-windows-msvc, publish-agent-dev-image]
+    needs: [ci, verify-version, package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-x86_64-apple-darwin, package-aarch64-apple-darwin, package-x86_64-pc-windows-msvc, publish-agent-dev-image]
     runs-on: ubuntu-latest
     permissions:
       actions: write

@@ -1,10 +1,6 @@
 use super::*;
 use crate::controller::BranchDisposition;
 
-pub(super) fn phone_action_capacity_available(active_actions: usize) -> bool {
-    active_actions < MAX_CONCURRENT_PHONE_ACTIONS
-}
-
 /// Point the quota refresher at the profiles the configuration currently
 /// defines, alongside the worker-poll and credential-sync targets that are
 /// rebuilt from the same reload. A profile added to `config.toml` while the
@@ -128,6 +124,13 @@ pub(super) async fn apply_phone_action(
     control: &PhoneActionControl,
 ) -> Result<()> {
     match action {
+        ControllerAction::RecordOperatorActivity => {
+            services.daemon_runtime.record_operator_activity().await;
+            Ok(())
+        }
+        ControllerAction::SetOperatorAway { away } => {
+            services.daemon_runtime.set_operator_away(away).await
+        }
         ControllerAction::New {
             remember_launch_choices,
             remember_container_size,
@@ -182,7 +185,7 @@ pub(super) async fn apply_phone_action(
             });
             let session_title_override = Some(title.clone());
             let (published, publication) = tokio::sync::oneshot::channel();
-            let registered = services
+            let (registered, review_turned_off, capacity_warning) = services
                 .daemon_runtime
                 .start_create_session_controlled(
                     CreateSessionRequest {
@@ -209,7 +212,7 @@ pub(super) async fn apply_phone_action(
                         session_title_override,
                     },
                     control
-                        .create
+                        .lifecycle
                         .clone()
                         .expect("New action has a daemon create control"),
                     publication,
@@ -220,6 +223,8 @@ pub(super) async fn apply_phone_action(
                 .send(PhoneActionStarted {
                     action_id,
                     session: registered.session,
+                    review_turned_off,
+                    capacity_warning,
                     published,
                 })
                 .map_err(|_| anyhow::anyhow!("phone server stopped before publishing session"))?;
@@ -374,11 +379,20 @@ pub(super) async fn apply_phone_action(
             elicitation_id,
             response,
         } => {
-            let (session_id, elicitation_id) = services
+            let target = services
                 .daemon_runtime
                 .review_host()
                 .question_target(&session_id, &elicitation_id)
-                .unwrap_or((session_id, elicitation_id));
+                .await;
+            let (session_id, elicitation_id) = match target {
+                Some(target) => target,
+                None if mj_client::review::parse_reviewer_question_id(&elicitation_id)
+                    .is_some() =>
+                {
+                    anyhow::bail!("that reviewer question is no longer active")
+                }
+                None => (session_id, elicitation_id),
+            };
             services
                 .sessions
                 .session(&session_id)
@@ -561,7 +575,7 @@ pub(super) async fn apply_phone_action(
                 .restart_session_controlled(
                     session_id,
                     acknowledge_container_recreation,
-                    control.create.clone(),
+                    control.lifecycle.clone(),
                 )
                 .await
                 .map(|_| ())

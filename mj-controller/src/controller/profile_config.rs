@@ -545,6 +545,13 @@ fn probe_profile(
     }
     profile.ensure_ready(profile_id)?;
     let root = tempfile::tempdir().context("create private profile discovery directory")?;
+    // The staged home and the probe spec carry the profile's logins and
+    // environment.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
+    }
     // Muse and OpenCode read `$XDG_CONFIG_HOME/<id>`, so their staged home
     // must carry that leaf name or the harness never sees the staged login.
     let home = profile
@@ -567,7 +574,15 @@ fn probe_profile(
         },
         &executor,
     )?;
+    // Harnesses leave files in their temporary directory: OpenCode's Bun
+    // runtime extracts native libraries there on every start and never
+    // removes them. One inside the probe's root goes away with the probe.
+    let temporary = root.path().join("tmp");
+    std::fs::create_dir(&temporary)?;
     let mut environment = environment;
+    for name in ["TMPDIR", "TMP", "TEMP"] {
+        environment.insert(name.into(), temporary.to_string_lossy().into_owned());
+    }
     let excluded_environment = profile.exclude_harness_environment(&mut environment);
     let spec = ProfileProbeSpec {
         harness: profile.kind,
@@ -684,6 +699,7 @@ mod tests {
             context_window_bytes: None,
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
             legacy_subagents: None,
         };
         let choices = probe_profile(
@@ -749,6 +765,7 @@ mod tests {
                 context_window_bytes: None,
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
                 legacy_subagents: None,
             };
             let choices = probe_profile(
@@ -799,6 +816,7 @@ mod tests {
             context_window_bytes: None,
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
             legacy_subagents: None,
         };
         let key = fingerprint(&profile);
@@ -914,6 +932,7 @@ mod tests {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let key = || fingerprint(&profile);
 
@@ -958,6 +977,7 @@ mod tests {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let original = fingerprint(&profile);
         for _ in 0..2 {
@@ -985,6 +1005,7 @@ mod tests {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let resolve = |environment: BTreeMap<String, String>| {
             let mut environment = environment;
@@ -1275,7 +1296,7 @@ mod tests {
             .run();
             return;
         }
-        use agent_client_protocol::schema::v1::{
+        use agent_client_protocol::v1::schema::{
             SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
             SessionConfigSelectOptions,
         };
@@ -1305,6 +1326,7 @@ mod tests {
             context_window_bytes: None,
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
             legacy_subagents: None,
         };
         let mut config = Config::default();
@@ -1458,6 +1480,7 @@ mod tests {
                     context_window_bytes: None,
                     guardian_review_model: None,
                     codex_profile: None,
+                    muse_auto_review: None,
                     legacy_subagents: None,
                 },
             );

@@ -144,6 +144,7 @@ mod tests {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                muse_auto_review: None,
                 codex_profile: None,
             },
         );
@@ -384,9 +385,8 @@ mod tests {
         child.title = "child".into();
         state.subagents.insert(
             child.id.clone(),
-            mj_core::subagent::SubagentRecord {
+            mj_core::subagent::SubagentMetadata {
                 kind: mj_core::subagent::SubagentKind::Worker,
-                reviewer_launch: None,
                 child_session_id: child.id.clone(),
                 parent_session_id: "session-1".into(),
                 task_name: "Inspect parser".into(),
@@ -394,7 +394,6 @@ mod tests {
                 model: None,
                 effort: None,
                 working_directory: Default::default(),
-                initial_prompt: "Inspect the parser".into(),
                 request_key: "request-1".into(),
                 created_at: child.created_at.clone(),
                 noticed_turn: None,

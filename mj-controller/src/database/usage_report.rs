@@ -5,8 +5,7 @@ use mj_core::usage::{
     UsageScope, add_cost, descending_cost,
 };
 
-mod model_catalog;
-mod pricing;
+use mj_core::usage::{model_catalog, pricing};
 
 /// `models` is each profile's newest advertised model list, used to price
 /// model aliases.
@@ -440,12 +439,7 @@ mod tests {
         assert_eq!(monthly.sessions[0].coverage.recorded_turns, 2);
 
         // Renaming a profile carries destroyed children's turns with it.
-        super::super::sessions::rename_session_reference_at(
-            &path,
-            "last_profile",
-            "codex2",
-            "codex-two",
-        )?;
+        super::super::sessions::rename_profile_references_at(&path, "codex2", "codex-two")?;
         assert_eq!(
             on("codex-two", UsagePeriod::Hourly)?.sessions,
             codex2.sessions

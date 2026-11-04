@@ -208,9 +208,21 @@ pub(crate) fn exclude_from_harness_environment(
 /// method on [`WorkerLaunchConfig`] in the crate that defines it.
 #[cfg(unix)]
 pub(crate) fn enforce_execution_policy(config: &mut WorkerLaunchConfig) -> Result<()> {
+    // The controller already resolved the Muse profile's `muse_auto_review`
+    // choice into `MUSE_APPROVAL_MODE`. Keep it: repeating kind-default
+    // enforcement here would clobber an opt-in to review, and would flip a
+    // launch written before the no-review default back to it. A launch
+    // without the variable still acquires the current default below.
+    let muse_approval = (config.harness == HarnessKind::Muse)
+        .then(|| config.environment.get("MUSE_APPROVAL_MODE").cloned())
+        .flatten();
     config
         .harness
-        .configure_execution_environment(config.execution_policy, &mut config.environment)
+        .configure_execution_environment(config.execution_policy, &mut config.environment)?;
+    if let Some(mode) = muse_approval {
+        config.environment.insert("MUSE_APPROVAL_MODE".into(), mode);
+    }
+    Ok(())
 }
 
 /// Environment variable codex-acp reads as its startup configuration.
@@ -314,7 +326,11 @@ pub(crate) use mj_core::harness_install as harness;
 pub use mj_core::harness_install::ManagedHarness;
 
 #[cfg(unix)]
+mod gh_rules;
+#[cfg(unix)]
 mod harness_launch;
+#[cfg(unix)]
+mod json_gh_rules;
 #[cfg(unix)]
 mod shell_environment;
 #[cfg(unix)]
@@ -399,6 +415,14 @@ fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
     }
     if config.harness_home.is_relative() && !config.harness_home.as_os_str().is_empty() {
         config.harness_home = base.join(&config.harness_home);
+    }
+    for key in ["AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"] {
+        if let Some(value) = config.environment.get_mut(key) {
+            let path = Path::new(value);
+            if path.is_relative() {
+                *value = base.join(path).to_string_lossy().into_owned();
+            }
+        }
     }
     if let Some(memory) = config.project_memory.as_mut() {
         if let Some(socket) = memory.history_socket.as_mut()

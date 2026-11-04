@@ -1,6 +1,26 @@
 use super::*;
 
 impl DashboardContext {
+    /// A family stays subscribed while its rows or a retained conversation need it.
+    pub(crate) fn update_subagent_scope(&self) -> bool {
+        let mut parents = BTreeSet::new();
+        if let Some(parent) = self.dashboard.subagent_parent_id() {
+            parents.insert(parent.to_owned());
+        }
+        for (_, session) in self.dashboard.pane_sessions() {
+            if let Some(child) = self.controller.state.subagents.get(&session) {
+                parents.insert(child.parent_session_id.clone());
+            }
+        }
+        self.runtime_subagent_parents.send_if_modified(|current| {
+            if *current == parents {
+                return false;
+            }
+            *current = parents;
+            true
+        })
+    }
+
     /// Keeps one projection per session in flight and remembers only the
     /// newest snapshot that arrived behind it. The shared permits bound work
     /// across different sessions as well.
@@ -17,28 +37,21 @@ impl DashboardContext {
         let session_id = session_id.to_owned();
         let updates = self.dashboard_io_tx.clone();
         tokio::spawn(async move {
-            let seeded = tokio::task::spawn_blocking({
-                let session_id = session_id.clone();
-                move || {
-                    mj_controller::database::load_materialized_projection_tail(
-                        &session_id,
-                        mj_chat::chat::TAIL_SEED_ITEMS,
-                    )
-                }
-            })
+            let seeded = async {
+                crate::daemon::connect_or_start()
+                    .await?
+                    .stored_projection_tail(session_id.clone(), mj_chat::chat::TAIL_SEED_ITEMS)
+                    .await
+            }
             .await;
             // A failed seed costs a blank conversation until the next poll,
             // which is where the full projection comes from anyway. It is not
             // worth failing a resume that otherwise succeeded.
             let materialized = match seeded {
-                Ok(Ok(Some((materialized, _)))) => materialized,
-                Ok(Ok(None)) => return,
-                Ok(Err(error)) => {
-                    tracing::debug!(%session_id, %error, "transcript tail seed failed");
-                    return;
-                }
+                Ok(Some(materialized)) => materialized,
+                Ok(None) => return,
                 Err(error) => {
-                    tracing::debug!(%session_id, %error, "transcript tail seed task failed");
+                    tracing::debug!(%session_id, error = %format!("{error:#}"), "transcript tail seed failed");
                     return;
                 }
             };
@@ -54,22 +67,22 @@ impl DashboardContext {
 
     pub(crate) fn request_materialized_projection(
         &mut self,
-        materialized: MaterializedSession,
+        projection: MaterializedProjection,
         viewed_through_event_ordinal: u64,
     ) {
-        let Some((materialized, viewed_through_event_ordinal)) = enqueue_materialized_projection(
+        let Some((projection, viewed_through_event_ordinal)) = enqueue_materialized_projection(
             &mut self.materialized_projections_in_flight,
             &mut self.pending_materialized_projections,
-            materialized,
+            projection,
             viewed_through_event_ordinal,
         ) else {
             return;
         };
 
-        let session_id = materialized.session_id.clone();
+        let session_id = projection.materialized.session_id.clone();
         let previous = self.dashboard.take_projection_cache(&session_id);
         spawn_materialized_session_projection(
-            materialized,
+            projection,
             viewed_through_event_ordinal,
             previous,
             self.dashboard_io_tx.clone(),
@@ -77,30 +90,44 @@ impl DashboardContext {
         );
     }
 
-    pub(crate) fn hydrate_stored_session_summaries(&mut self) {
-        let sessions = self
-            .controller
+    fn wanted_summary_sessions(&self) -> BTreeMap<String, u64> {
+        let panes = self
+            .dashboard
+            .pane_sessions()
+            .into_iter()
+            .map(|(_, session)| session)
+            .collect::<BTreeSet<_>>();
+        self.controller
             .state
             .sessions
             .values()
-            .filter(|session| session.state.is_active())
+            .filter(|session| {
+                panes.contains(&session.id)
+                    || (self.session_in_active_workspace(&session.id) && session.state.is_active())
+                    || self
+                        .controller
+                        .state
+                        .subagents
+                        .get(&session.id)
+                        .is_some_and(|child| {
+                            Some(child.parent_session_id.as_str())
+                                == self.dashboard.subagent_parent_id()
+                        })
+            })
             .map(|session| (session.id.clone(), session.viewed_through_event_ordinal))
-            .collect::<Vec<_>>();
-        // The startup pick compares recorded activity, which is exactly what
-        // these summaries carry, so it waits for them.
-        self.startup = StartupSession::begin(
-            sessions
-                .iter()
-                .filter(|(id, _)| self.session_in_active_workspace(id))
-                .map(|(id, _)| id.clone()),
-            std::time::Instant::now(),
-        );
-        for (session_id, viewed_through_event_ordinal) in sessions {
-            spawn_stored_session_summary(
-                session_id,
-                viewed_through_event_ordinal,
-                self.dashboard_io_tx.clone(),
-            );
+            .collect()
+    }
+
+    pub(crate) fn hydrate_stored_session_summaries(&mut self) {
+        let wanted = self.wanted_summary_sessions();
+        self.startup = StartupSession::begin(wanted.keys().cloned(), std::time::Instant::now());
+        self.reconcile_stored_session_summaries();
+    }
+
+    pub(crate) fn reconcile_stored_session_summaries(&mut self) {
+        let wanted = self.wanted_summary_sessions();
+        for removed in self.summary_reads.reconcile(wanted, &self.dashboard_io_tx) {
+            self.finish_startup_summary(&removed);
         }
     }
 
@@ -124,6 +151,11 @@ impl DashboardContext {
         // lifecycle release already emptied its pane. A historical session
         // selected deliberately has no worker and must not start an attach.
         for (pane, session) in self.dashboard.pane_sessions() {
+            if self.dashboard.session_record(&session).is_none()
+                && !self.dashboard.is_native_agent(&session)
+            {
+                continue;
+            }
             let assignment = self.dashboard.pane_assignment(pane);
             if self.attachments.entry(pane).or_default().bind(assignment) {
                 self.selection.clear();
@@ -206,10 +238,7 @@ impl DashboardContext {
         chats
             .get_mut(dashboard.current_session_id()?)
             .filter(|chat| {
-                // A launch standby stands in front of the conversation that was
-                // selected when the creation started, so typing meant for the new
-                // session cannot land in the old one.
-                !dashboard.launch_standby_capturing()
+                chat.has_live_composer()
                     && chat_is_visible(opening, chat.session_id())
                     && dashboard.transition_kind(chat.session_id()).is_none()
                     && dashboard
@@ -240,7 +269,9 @@ impl DashboardContext {
         {
             return None;
         }
-        chats.get_mut(session_id)
+        chats
+            .get_mut(session_id)
+            .filter(|chat| chat.has_live_composer())
     }
 
     /// The dashboard and the conversation on screen, borrowed together, so a
@@ -292,6 +323,7 @@ impl DashboardContext {
         self.go_context_in_flight = true;
         self.go_context_refresh = Some((session_id.clone(), std::time::Instant::now()));
         let report_id = session_id.clone();
+        let controller = self.live_controller_snapshot();
         io::spawn_io(
             "reading session working context",
             self.dashboard_io_tx.clone(),
@@ -299,7 +331,7 @@ impl DashboardContext {
                 let executor = mj_controller::targets::CancellableProcessExecutor::with_timeout(
                     Duration::from_secs(3),
                 );
-                Controller::load()?.session_working_context(&session_id, &executor)
+                controller.session_working_context(&session_id, &executor)
             },
             move |result| io::DashboardIoUpdate::GoContext {
                 session_id: report_id,
@@ -327,6 +359,7 @@ impl DashboardContext {
             return;
         }
         let report_id = session_id.clone();
+        let controller = self.live_controller_snapshot();
         io::spawn_io(
             "reading session git status",
             self.dashboard_io_tx.clone(),
@@ -334,13 +367,23 @@ impl DashboardContext {
                 let executor = mj_controller::targets::CancellableProcessExecutor::with_timeout(
                     Duration::from_secs(8),
                 );
-                Controller::load()?.session_git_status(&session_id, &executor)
+                controller.session_git_status(&session_id, &executor)
             },
             move |result| io::DashboardIoUpdate::GitStatus {
                 session_id: report_id,
                 result,
             },
         );
+    }
+
+    /// The sessions as the runtime feed last delivered them, for work that
+    /// runs off the event loop. The maps are persistent, so this is cheap, and
+    /// it never opens the store, which only the daemon may read.
+    fn live_controller_snapshot(&self) -> Controller {
+        Controller {
+            config: self.controller.config.clone(),
+            state: self.controller.state.clone(),
+        }
     }
 
     pub(crate) fn remember_go_selection(&mut self) {

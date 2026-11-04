@@ -82,6 +82,7 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                muse_auto_review: None,
                 codex_profile: None,
                 kind,
                 home: std::path::PathBuf::from("/profiles").join(id),
@@ -706,10 +707,13 @@ async fn the_dictation_chord_reports_why_it_cannot_run_in_the_shared_notices() {
 
 /// Launch finding R5-7: during a session's first turn the Sessions row showed
 /// the harness's title while the conversation header still said "project via
-/// fake", until the turn ended. The worker poll that gives the record its
-/// title now refreshes the open conversation too, so both read the record's
-/// listed title.
+/// fake", until the turn ended. The terminal used to title the record from
+/// its own copy of the worker poll, so the daemon's later record was
+/// identical and refreshed nothing. Now only the daemon titles the record:
+/// the poll leaves the name alone, and the daemon's record carries the new
+/// title to the row and the header together.
 // Hard-won: f2c36f6900: Harness title updates changed the session row but left the open conversation stale until the turn ended; the test checks the title reaches the header immediately.
+// Hard-won: e3e9d9fc21: the terminal titled sessions from its own copy of worker polls, so its names could disagree with the web viewer's.
 #[tokio::test]
 async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row() {
     let session_id = "title-lag";
@@ -766,22 +770,53 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
         },
     };
 
-    let retitled = crate::pollers::apply_worker_poll_update(
-        &mut controller,
-        &mut dashboard,
-        &mut chats,
-        update,
-        None,
-    )
-    .unwrap();
+    let projection = crate::pollers::apply_worker_poll_update(&mut dashboard, update);
 
-    assert!(retitled.is_some());
+    assert!(projection.is_some());
     assert_eq!(
         controller.state.sessions[session_id].listed_title(),
+        "project via fake",
+        "the poll does not name the session"
+    );
+
+    // The daemon's record arrives as `apply_runtime_records` installs it.
+    let mut titled = record;
+    titled.acp_session_title = Some("r5 suspend probe".into());
+    let mut sessions = controller.state.sessions.clone();
+    sessions.insert(session_id.to_owned(), titled);
+    assert_ne!(sessions, controller.state.sessions, "the record changed");
+    controller.state.sessions = sessions;
+    dashboard.set_state(controller.state.clone());
+    crate::dashboard::drains::refresh_open_chats(&mut chats, &controller, &dashboard);
+
+    assert_eq!(
+        dashboard.session_record(session_id).unwrap().listed_title(),
         "r5 suspend probe",
         "the Sessions row's title"
     );
     assert_eq!(chats[session_id].header_title(), "r5 suspend probe");
+}
+
+// Hard-won: #1444: the terminal overwrote the daemon's missing-target notice while duplicating its persistence write.
+#[test]
+fn missing_target_poll_preserves_the_daemon_notice() {
+    let mut dashboard = populated_dashboard();
+    dashboard.set_notice("The daemon found the target missing.");
+    let update = crate::pollers::WorkerPollUpdate {
+        session_id: "missing-target".into(),
+        view: mj_controller::session_manager::ManagedSessionView {
+            snapshot: None,
+            connected: false,
+            error: Some(mj_controller::session_manager::ViewError::TargetMissing(
+                "working directory is missing".into(),
+            )),
+        },
+    };
+    assert!(crate::pollers::apply_worker_poll_update(&mut dashboard, update).is_none());
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("The daemon found the target missing.")
+    );
 }
 
 fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
@@ -989,15 +1024,224 @@ fn materialized_projections_are_single_flight_and_coalesce_to_the_latest_snapsho
     let mut stale = MaterializedSession::empty("session-1");
     stale.applied_event_ordinal = 2;
 
-    assert!(enqueue_materialized_projection(&mut in_flight, &mut pending, first, 0).is_some());
-    assert!(enqueue_materialized_projection(&mut in_flight, &mut pending, superseded, 1).is_none());
-    assert!(enqueue_materialized_projection(&mut in_flight, &mut pending, latest, 2).is_none());
-    assert!(enqueue_materialized_projection(&mut in_flight, &mut pending, stale, 1).is_none());
+    assert!(
+        enqueue_materialized_projection(&mut in_flight, &mut pending, first.into(), 0).is_some()
+    );
+    assert!(
+        enqueue_materialized_projection(&mut in_flight, &mut pending, superseded.into(), 1)
+            .is_none()
+    );
+    assert!(
+        enqueue_materialized_projection(&mut in_flight, &mut pending, latest.into(), 2).is_none()
+    );
+    assert!(
+        enqueue_materialized_projection(&mut in_flight, &mut pending, stale.into(), 1).is_none()
+    );
 
     let (queued, receipt) = pending.remove("session-1").unwrap();
-    assert_eq!(queued.applied_event_ordinal, 3);
+    assert_eq!(queued.materialized.applied_event_ordinal, 3);
     assert_eq!(receipt, 2);
     assert_eq!(in_flight, BTreeSet::from(["session-1".to_owned()]));
+}
+
+// Hard-won: b54b2449a8: Jev detected prose questions but the terminal discarded its assessment.
+#[tokio::test]
+async fn a_prose_question_survives_worker_polling_and_background_projection() {
+    use mj_core::activity::verdict::CompletionEvidence;
+    use mj_core::assessment::{Action, Status, TurnAssessment};
+    use mj_core::state::{
+        MaterializedTurnOutcome, TranscriptBody, TranscriptItem, TurnOutcomeKind,
+    };
+
+    let mut materialized = MaterializedSession::empty("session-1");
+    materialized.applied_event_ordinal = 4;
+    materialized.last_turn_outcome = Some(MaterializedTurnOutcome {
+        command_id: "prompt-1".into(),
+        accepted_ordinal: Some(1),
+        turn_start_position: Some(2),
+        completed_ordinal: 3,
+        completed_at_ms: 1000,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: "EndTurn".into(),
+        },
+        diagnostic: None,
+        usage: None,
+    });
+    materialized.transcript.push(Arc::new(TranscriptItem {
+        stable_id: "reply-1".into(), position: 2, latest_content_event_ordinal: Some(2),
+        created_at_ms: 1000, last_changed_at_ms: 1000,
+        body: TranscriptBody::Agent {
+            chunks: vec![serde_json::json!({"content": {"type": "text", "text": "Waiting on you to choose the deployment target."}})],
+            streaming: false,
+        },
+    }));
+    let mut assessment = TurnAssessment::pending(
+        "prompt-1".into(),
+        3,
+        1000,
+        CompletionEvidence {
+            stop_reason: "EndTurn".into(),
+            diagnostic: None,
+        },
+    );
+    assessment.status = Status::Assessed;
+    assessment.action = Some(Action::AwaitInput);
+
+    let mut dashboard = populated_dashboard();
+    let mut relay = mj_core::relay::RelaySnapshot::new("session-1".into());
+    relay.assessment = Some(assessment.clone());
+    let snapshot = mj_core::state::ManagedSessionSnapshot {
+        window: mj_core::state::ProjectionWindow::of(&materialized),
+        materialized: materialized.clone(),
+        operational: relay.operational_state(),
+        latest_credential_sync_signal: None,
+        worker_build: None,
+        subagent_requests: Vec::new(),
+        subagent_completions: Vec::new(),
+        subagent_queue_error: None,
+    };
+    let projection = crate::pollers::apply_worker_poll_update(
+        &mut dashboard,
+        crate::pollers::WorkerPollUpdate {
+            session_id: "session-1".into(),
+            view: mj_controller::session_manager::ManagedSessionView {
+                snapshot: Some(snapshot),
+                connected: true,
+                error: None,
+            },
+        },
+    )
+    .expect("worker projection");
+    // Completion reaches the UI before Jev's answer. The later publication
+    // can queue behind that first projection without losing its assessment.
+    let mut before_assessment = materialized.clone();
+    before_assessment.applied_event_ordinal = 3;
+    dashboard.apply_materialized_session(&before_assessment);
+    assert_ne!(
+        dashboard.attention_level("session-1"),
+        mj_tui::AttentionLevel::Waiting
+    );
+    let mut in_flight = BTreeSet::new();
+    let mut pending = BTreeMap::new();
+    assert!(
+        enqueue_materialized_projection(&mut in_flight, &mut pending, before_assessment.into(), 0,)
+            .is_some()
+    );
+    assert!(enqueue_materialized_projection(&mut in_flight, &mut pending, projection, 0).is_none());
+    let (projection, _) = pending.remove("session-1").unwrap();
+    let (updates, mut received) = tokio::sync::mpsc::unbounded_channel();
+    spawn_materialized_session_projection(
+        projection,
+        0,
+        Default::default(),
+        updates,
+        Arc::new(tokio::sync::Semaphore::new(1)),
+    );
+    let update = tokio::time::timeout(Duration::from_secs(10), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let DashboardIoUpdate::MaterializedSessionProjection { result, .. } = update else {
+        panic!("expected a background projection");
+    };
+    let prepared = result.unwrap();
+    assert!(dashboard.apply_prepared_materialized_session(*prepared));
+    assert_eq!(
+        dashboard.attention_level("session-1"),
+        mj_tui::AttentionLevel::Waiting
+    );
+    let mut terminal = Terminal::new(TestBackend::new(140, 25)).unwrap();
+    terminal
+        .draw(|frame| {
+            render_combined(
+                frame,
+                &mut dashboard,
+                &mut BTreeMap::new(),
+                &BTreeMap::new(),
+                false,
+            );
+        })
+        .unwrap();
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| cell.symbol() == "?"),
+        "the rendered dashboard must show the question marker"
+    );
+
+    // A verdict for a different completion or one already superseded cannot
+    // revive a question, even if its old action was AwaitInput.
+    for status in [Status::Consumed, Status::Superseded] {
+        let mut stale = assessment.clone();
+        stale.status = status;
+        let prepared = PreparedMaterializedSessionDetail::from_assessed_materialized(
+            materialized.clone(),
+            Some(&stale),
+            0,
+            Default::default(),
+        );
+        dashboard.apply_prepared_materialized_session(prepared);
+        assert_ne!(
+            dashboard.attention_level("session-1"),
+            mj_tui::AttentionLevel::Waiting
+        );
+    }
+    for (id, ordinal) in [("another-turn", 3), ("prompt-1", 2)] {
+        let mut stale = assessment.clone();
+        stale.turn_id = id.into();
+        stale.completed_ordinal = ordinal;
+        let prepared = PreparedMaterializedSessionDetail::from_assessed_materialized(
+            materialized.clone(),
+            Some(&stale),
+            0,
+            Default::default(),
+        );
+        dashboard.apply_prepared_materialized_session(prepared);
+        assert_ne!(
+            dashboard.attention_level("session-1"),
+            mj_tui::AttentionLevel::Waiting
+        );
+    }
+    // Sending a response clears the question before the next turn starts.
+    materialized.applied_event_ordinal = 5;
+    materialized.transcript.push(Arc::new(TranscriptItem {
+        stable_id: "answer".into(),
+        position: 5,
+        latest_content_event_ordinal: None,
+        created_at_ms: 2000,
+        last_changed_at_ms: 2000,
+        body: TranscriptBody::User {
+            content: vec![serde_json::json!({"type": "text", "text": "Use staging."})],
+        },
+    }));
+    let prepared = PreparedMaterializedSessionDetail::from_assessed_materialized(
+        materialized.clone(),
+        Some(&assessment),
+        0,
+        Default::default(),
+    );
+    dashboard.apply_prepared_materialized_session(prepared);
+    assert_ne!(
+        dashboard.attention_level("session-1"),
+        mj_tui::AttentionLevel::Waiting
+    );
+    // An older projection arriving afterwards cannot restore the indicator.
+    materialized.applied_event_ordinal = 4;
+    materialized.transcript.pop();
+    let delayed = PreparedMaterializedSessionDetail::from_assessed_materialized(
+        materialized,
+        Some(&assessment),
+        0,
+        Default::default(),
+    );
+    assert!(!dashboard.apply_prepared_materialized_session(delayed));
+    assert_ne!(
+        dashboard.attention_level("session-1"),
+        mj_tui::AttentionLevel::Waiting
+    );
 }
 
 #[test]

@@ -1,5 +1,5 @@
 //! Harness-owned children share their owner's worker, but not its transcript.
-use agent_client_protocol::schema::v1::SessionUpdate;
+use agent_client_protocol::v1::schema::SessionUpdate;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

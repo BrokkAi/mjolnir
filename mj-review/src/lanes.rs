@@ -1,4 +1,4 @@
-//! Turn-review prompt construction for the sole reviewer.
+//! Turn-review prompt construction shared by each independent reviewer.
 
 use std::path::PathBuf;
 
@@ -34,7 +34,8 @@ pub struct ReviewJob {
     pub prior_review: Option<PriorReviewContext>,
 }
 
-// Vendored verbatim from Codex commit 1b1835f751, codex-rs/prompts/templates/review/rubric.md.
+// Adapted from Codex commit 1b1835f751, codex-rs/prompts/templates/review/rubric.md;
+// the output contract below is Mjolnir's plain-text handback format.
 const CODEX_REVIEW_RUBRIC: &str = include_str!("../templates/review_rubric.md");
 
 /// The prior findings the current reviewer should verify on a corrective pass.
@@ -82,7 +83,7 @@ pub fn user_messages_packet(messages: &[UserMessage], current_task: &str) -> Str
     bound_review_section(&rendered, USER_MESSAGES_LIMIT, "older user messages")
 }
 
-/// Build the sole reviewer's Codex-style rubric prompt without embedding a diff.
+/// Build the common plain-text rubric prompt without embedding a diff.
 #[must_use]
 pub fn review_prompt(job: &ReviewJob) -> String {
     let repositories = job

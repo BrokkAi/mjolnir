@@ -271,4 +271,12 @@ def create_through_dialog(lab, tmux, evidence):
     if len(added) != 1:
         raise ScenarioFailure(f"Create produced {len(added)} sessions")
     record(tmux, evidence, "new-create-dismissed", "wait after Create", "review dialog closes and exactly one session was created")
+    if not before:
+        tmux.wait_for("Select a session to open its conversation.")
+        record(tmux, evidence, "new-create-keeps-selection", "wait for background creation", "Create leaves the conversation empty until explicitly selected")
+        from tui_components_tmux import locate_text
+        title = added[0]["title"]
+        x, y = locate_text(tmux.wait_for(title), title)
+        tmux.mouse_click(x + 2, y)
+        tmux.send_key("Enter")
     return added[0]["id"]

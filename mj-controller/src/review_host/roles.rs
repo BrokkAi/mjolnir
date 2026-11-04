@@ -7,6 +7,7 @@ impl HostState {
                 self.review_step(
                     session_id,
                     ReviewerAction::CaptureDelta {
+                        repositories: None,
                         baselines,
                         scope: Default::default(),
                     },
@@ -18,23 +19,25 @@ impl HostState {
                     },
                 );
             }
-            ReviewRequest::StartReviewer { command_id, prompt } => {
-                self.register_reviewer_child(session_id, command_id, prompt)
-            }
+            ReviewRequest::StartReviewer {
+                role,
+                command_id: _,
+                prompt,
+            } => self.register_reviewer_child(session_id, role, prompt),
             ReviewRequest::PromptPrimary { command_id, prompt } => {
                 // The review's own corrective prompt must not be held by the
                 // review's own lock, and by this point the review has
                 // resolved, so the lock is already released below.
                 self.prompt_primary(session_id, command_id, prompt);
             }
-            ReviewRequest::CloseReviewer => {
+            ReviewRequest::CloseReviewer { role } => {
                 if self.reviews.get(session_id).is_some_and(|slot| {
                     matches!(
                         slot.driver.phase(),
                         TurnReviewPhase::Resolved(Resolution::Cancelled)
                     )
                 }) {
-                    self.close_reviewer_child(session_id);
+                    self.close_reviewer_role(session_id, &role);
                 }
             }
             ReviewRequest::AdvanceBaseline {
@@ -79,6 +82,11 @@ impl HostState {
                     slot.state.prior_review = Some(prior);
                 }
             }
+            ReviewRequest::ClearPendingForward => {
+                if let Some(slot) = self.reviews.get_mut(session_id) {
+                    slot.state.pending_forward = None;
+                }
+            }
             ReviewRequest::ClearPriorReview => {
                 if let Some(slot) = self.reviews.get_mut(session_id) {
                     slot.state.prior_review = None;
@@ -105,6 +113,7 @@ impl HostState {
                     };
                     answer(slot.start_reply.take(), outcome);
                     slot.state.active = None;
+                    slot.state.active_group = None;
                     if matches!(
                         slot.driver.phase(),
                         TurnReviewPhase::Resolved(Resolution::Cancelled)

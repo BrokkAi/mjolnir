@@ -535,36 +535,43 @@ test('a failed review resolution restores every action allowed by the snapshot',
 
 test('phone review status exactly mirrors the shared status sentences', () => {
   const statusSource = sourceBetween(
-    'function reviewStatusLine(review, open) {',
+    'function sessionReviewStatusConfig(snapshot, session) {',
     '\n/// Run a local command, or report that nothing here can.',
   );
   const context = vm.createContext({});
-  vm.runInContext(`${statusSource}\nglobalThis.reviewStatusLineForTest = reviewStatusLine;`, context);
+  vm.runInContext(`${statusSource}\nglobalThis.reviewStatusLineForTest = reviewStatusLine;\nglobalThis.sessionReviewStatusConfigForTest = sessionReviewStatusConfig;`, context);
   const status = context.reviewStatusLineForTest;
 
+  const snapshot = { review_config: { trigger: 'turn', profile: 'reviewer', count: 2 } };
+  const session = { review_trigger: 'turn', review_count: 1 };
   assert.equal(
-    status({ trigger: 'turn', profile: 'reviewer' }, false),
-    'Reviewing every completed turn with [review] profile "reviewer"',
+    status(context.sessionReviewStatusConfigForTest(snapshot, session), false),
+    'Reviewing every completed turn with [review] profile "reviewer"; 1 reviewer',
+  );
+
+  assert.equal(
+    status({ trigger: 'turn', profile: 'reviewer', count: 2 }, false),
+    'Reviewing every completed turn with [review] profile "reviewer"; 2 reviewers',
   );
   assert.equal(
-    status({ trigger: 'turn' }, false),
-    'Reviewing every completed turn with Auto',
+    status({ trigger: 'turn', count: 2 }, false),
+    'Reviewing every completed turn with Auto; 2 reviewers',
   );
   assert.equal(
-    status({ trigger: 'off', profile: 'reviewer' }, false),
-    'Automatic review is off; /review reviews one turn with "reviewer"',
+    status({ trigger: 'off', profile: 'reviewer', count: 2 }, false),
+    'Automatic review is off; /review reviews one turn with "reviewer"; 2 reviewers',
   );
   assert.equal(
-    status({ trigger: 'off', profile: null }, false),
-    'Automatic review is off; /review uses Auto',
+    status({ trigger: 'off', profile: null, count: 2 }, false),
+    'Automatic review is off; /review uses Auto; 2 reviewers',
   );
   assert.equal(
-    status({ trigger: 'push', profile: 'reviewer' }, false),
-    'Review trigger is before push',
+    status({ trigger: 'push', profile: 'reviewer', count: 2 }, false),
+    'Review trigger is before push; 2 reviewers',
   );
   assert.equal(
-    status({ trigger: 'off', profile: 'reviewer' }, true),
-    'Automatic review is off; /review reviews one turn with "reviewer". A review is open now.',
+    status({ trigger: 'off', profile: 'reviewer', count: 2 }, true),
+    'Automatic review is off; /review reviews one turn with "reviewer"; 2 reviewers. A review is open now.',
   );
 });
 
@@ -857,7 +864,7 @@ test('an index at another version is reported and never polled', async () => {
   await fire();
   assert.equal(
     vm.runInContext('wikiSearchPlaceholder()', context),
-    'SessionWiki index is at a different version',
+    'SessionWiki index is from a newer version',
   );
   assert.equal(timers.size, 0);
 });
@@ -1337,8 +1344,37 @@ function delegationContext(kind = 'codex', configured = true) {
   });
   vm.runInContext(sourceBetween('function subagentChoiceApplies(', '\nfunction targetIsBare('), context);
   vm.runInContext(sourceBetween('function moveSubagentChange(', '\nfunction moveStoppedChildren('), context);
+  vm.runInContext(sourceBetween('function rememberedDelegationPolicy(', '\n// Mirrors HarnessKind::supports_delegation_tools.'), context);
   return context;
 }
+
+test('Create remembers delegation per profile and restores Mjolnir after an unavailable profile', () => {
+  const context = delegationContext('codex', true);
+  context.snapshot.profiles.push({ id: 'claude-profile', harness_kind: 'claude' }, { id: 'grok-profile', harness_kind: 'grok' });
+  context.snapshot.last_subagent_policies = {
+    '': { mode: 'none' },
+    profile: { mode: 'mjolnir', straightforward: { model: 'codex-model' } },
+    'claude-profile': { mode: 'native' },
+    'grok-profile': { mode: 'mjolnir', straightforward: { model: 'grok-model' } },
+  };
+  vm.runInContext(sourceBetween('function rememberedDelegationPolicy(', '\n// Mirrors HarnessKind::supports_delegation_tools.'), context);
+  vm.runInContext(sourceBetween('function selectNewProfile(', '\n\n// Mirrors HarnessKind::supports_delegation_tools.'), context);
+  const result = vm.runInContext(`(() => {
+    const draft = { profileId: 'profile', subagents: rememberedDelegationPolicy('profile') };
+    selectNewProfile(draft, 'claude-profile');
+    const claude = draft.subagents;
+    selectNewProfile(draft, 'grok-profile');
+    const unavailable = draft.subagents;
+    selectNewProfile(draft, 'profile');
+    return JSON.stringify({ claude, unavailable, restored: draft.subagents });
+  })()`, context);
+  assert.deepEqual(JSON.parse(result), {
+    claude: { mode: 'native' },
+    unavailable: { mode: 'native' },
+    restored: { mode: 'mjolnir', straightforward: { model: 'codex-model' } },
+  });
+  assert.deepEqual(JSON.parse(vm.runInContext("JSON.stringify(rememberedDelegationPolicy('missing'))", context)), { mode: 'none' }, 'legacy empty key is the fallback');
+});
 
 test('Create sends the selected delegation policy across the browser action wire', async () => {
   for (const mode of ['native', 'mjolnir', 'none']) {

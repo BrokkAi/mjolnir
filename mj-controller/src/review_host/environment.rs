@@ -40,6 +40,7 @@ pub trait ReviewEnvironment: Send + Sync {
         reviewer: &ReviewerIdentity,
         prompt: String,
         request_key: String,
+        working_directory: Option<std::path::PathBuf>,
     ) -> Result<String, String>;
 
     fn start_child<'a>(
@@ -67,6 +68,11 @@ pub trait ReviewEnvironment: Send + Sync {
     /// same change and nothing is lost.
     fn clear_interrupted(&self) -> Result<Vec<String>, String>;
 
+    /// Durable groups are resumed rather than swept as interrupted reviews.
+    fn active_groups(&self) -> Result<Vec<(String, TurnReviewState)>, String> {
+        Ok(Vec::new())
+    }
+
     fn enqueue_verdict(
         &self,
         _session_id: &str,
@@ -75,7 +81,7 @@ pub trait ReviewEnvironment: Send + Sync {
         Err("review verdict mailbox is unavailable".into())
     }
 
-    fn orphaned_children(&self) -> Result<Vec<String>, String> {
+    fn reviewer_children(&self) -> Result<Vec<ReviewerChildRelation>, String> {
         Ok(Vec::new())
     }
 
@@ -98,6 +104,14 @@ pub trait ReviewEnvironment: Send + Sync {
     ) -> mj_client::session::BoxFuture<'a, Option<BackgroundHold>> {
         Box::pin(async { None })
     }
+}
+
+/// The durable sub-agent index owns a child before its ID reaches review state.
+#[derive(Clone)]
+pub struct ReviewerChildRelation {
+    pub parent_session_id: String,
+    pub request_key: String,
+    pub child_session_id: String,
 }
 
 /// Keeps background work off a session while a review needs its worker.
@@ -153,10 +167,7 @@ impl ReviewEnvironment for ControllerEnvironment {
             .sessions
             .get(session_id)
             .ok_or_else(|| format!("unknown session {session_id:?}"))?;
-        let recorded_plain = session
-            .project
-            .as_ref()
-            .is_some_and(mj_core::repository::ProjectBundleSnapshot::primary_is_plain_directory);
+        let recorded_plain = session.review_unavailable().is_some();
         // Sessions created before plain directories became an accepted project
         // shape have no snapshot to consult. Classify their current directory
         // when they still name a local bare target, so they cannot silently
@@ -196,7 +207,7 @@ impl ReviewEnvironment for ControllerEnvironment {
             .map_err(|error| format!("{error:#}"))
     }
 
-    fn orphaned_children(&self) -> Result<Vec<String>, String> {
+    fn reviewer_children(&self) -> Result<Vec<ReviewerChildRelation>, String> {
         let controller =
             crate::controller::Controller::load().map_err(|error| format!("{error:#}"))?;
         Ok(controller
@@ -211,7 +222,11 @@ impl ReviewEnvironment for ControllerEnvironment {
                     .get(&child.child_session_id)
                     .is_some_and(|session| session.state.is_active())
             })
-            .map(|child| child.child_session_id.clone())
+            .map(|child| ReviewerChildRelation {
+                parent_session_id: child.parent_session_id.clone(),
+                request_key: child.kind.request_key(&child.request_key),
+                child_session_id: child.child_session_id.clone(),
+            })
             .collect())
     }
     fn register_child(
@@ -220,6 +235,7 @@ impl ReviewEnvironment for ControllerEnvironment {
         reviewer: &ReviewerIdentity,
         prompt: String,
         request_key: String,
+        working_directory: Option<std::path::PathBuf>,
     ) -> Result<String, String> {
         let mut controller = crate::controller::Controller::load().map_err(|e| format!("{e:#}"))?;
         let mut launch = controller
@@ -237,7 +253,8 @@ impl ReviewEnvironment for ControllerEnvironment {
                 profile_id: reviewer.profile.clone(),
                 model: reviewer.main.model.clone(),
                 effort: reviewer.main.effort.clone(),
-                working_directory: Default::default(),
+                fast_mode: reviewer.main.fast_mode,
+                working_directory: working_directory.unwrap_or_default(),
                 initial_prompt: prompt,
                 request_key,
                 report_root: None,
@@ -328,6 +345,10 @@ impl ReviewEnvironment for ControllerEnvironment {
 
     fn clear_interrupted(&self) -> Result<Vec<String>, String> {
         crate::database::clear_interrupted_turn_reviews().map_err(|error| format!("{error:#}"))
+    }
+
+    fn active_groups(&self) -> Result<Vec<(String, TurnReviewState)>, String> {
+        crate::database::active_review_groups().map_err(|error| format!("{error:#}"))
     }
 
     fn hold_background_work<'a>(

@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 98;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 106;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1802,6 +1802,153 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older daemons cannot decode OperatorAway/OperatorBack mailbox bodies.
+    if version < 99 {
+        let add_frontier = if legacy_schema::table_has_column(
+            connection,
+            "materialized_sessions",
+            "operator_away_event_frontier",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE materialized_sessions ADD COLUMN operator_away_event_frontier INTEGER NOT NULL DEFAULT 0 CHECK(operator_away_event_frontier >= 0);"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS operator_away (singleton INTEGER PRIMARY KEY CHECK(singleton=1), away INTEGER NOT NULL CHECK(away IN (0,1)), revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0));
+             INSERT OR IGNORE INTO operator_away VALUES(1,0,0);
+             CREATE TABLE IF NOT EXISTS operator_away_workers (session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE, protocol INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS operator_away_requests (session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE, requested_seq INTEGER NOT NULL, elicitation_id TEXT NOT NULL, request TEXT NOT NULL, period INTEGER NOT NULL, resolved_seq INTEGER, action TEXT, PRIMARY KEY(session_id, requested_seq));
+             {add_frontier}
+             UPDATE schema_compatibility SET minimum_compatible_version = 99 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at) VALUES(99, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 99;
+             COMMIT;",
+        ))?;
+    }
+
+    // Breaking: old daemons ignore structured Prompt content and encoded drafts,
+    // sending marker text and losing images. Preserve legacy text rows unchanged.
+    if version < 100 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TRIGGER IF NOT EXISTS startup_steps_session_deleted AFTER DELETE ON sessions
+                 BEGIN DELETE FROM startup_steps WHERE session_id=OLD.session_id
+                     AND group_id IS NULL AND json_type(step_json, '$.Prompt.prompt')='array'; END;
+             UPDATE schema_compatibility SET minimum_compatible_version = 100 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at) VALUES(100, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 100;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: old writers address the singleton preference row and would
+    // silently lose profile-specific choices. Preserve its value as the
+    // empty-profile fallback while replacing the key with profile_id.
+    if version < 101 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE subagent_preference RENAME TO subagent_preference_legacy;
+             CREATE TABLE subagent_preference (
+                 profile_id TEXT PRIMARY KEY NOT NULL,
+                 policy TEXT NOT NULL CHECK(json_valid(policy))
+             ) STRICT;
+             INSERT INTO subagent_preference(profile_id, policy)
+                 SELECT '', policy FROM subagent_preference_legacy WHERE singleton=1;
+             DROP TABLE subagent_preference_legacy;
+             UPDATE schema_compatibility SET minimum_compatible_version = 101 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at) VALUES(101, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 101;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: older daemons cannot recover a Restart-owned session handoff
+    // and would sweep its archive or restore a stale full checkpoint instead.
+    if version < 102 {
+        let add_column = if super::legacy_schema::table_has_column(
+            connection,
+            "session_restart_intents",
+            "handoff_json",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE session_restart_intents ADD COLUMN handoff_json TEXT CHECK(handoff_json IS NULL OR json_valid(handoff_json));"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             UPDATE schema_compatibility SET minimum_compatible_version = 102 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at) VALUES(102, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 102;
+             COMMIT;",
+        ))?;
+    }
+
+    // Compatible: independent observations have no session/profile foreign
+    // keys. Older readers ignore them and older writers leave them intact,
+    // including when updating the reset cache or deleting sessions.
+    if version < 103 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS quota_history (
+                 id INTEGER PRIMARY KEY,
+                 identity TEXT NOT NULL,
+                 profile_id TEXT NOT NULL,
+                 harness TEXT NOT NULL,
+                 sampled_at_epoch_seconds INTEGER NOT NULL,
+                 body TEXT NOT NULL CHECK(json_valid(body))
+             ) STRICT;
+             CREATE INDEX IF NOT EXISTS quota_history_profile_time
+                 ON quota_history(profile_id, sampled_at_epoch_seconds, id);
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (103, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 103;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: older daemons do not maintain SQL-backed pending push
+    // findings when resolving reviews. Refuse their reads and writes.
+    if version < 104 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE turn_review_state ADD COLUMN push_findings TEXT;
+             UPDATE schema_compatibility SET minimum_compatible_version = 104 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (104, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 104;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: older daemons cannot decode durable OverrideReview actions.
+    // Refuse their reads and writes before the new action can be queued.
+    if version < 105 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 105 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (105, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 105;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: older daemons discard active reviewer groups, per-session
+    // reviewer count, and aggregate failure metadata in stored JSON updates.
+    if version < 106 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE turn_review_state ADD COLUMN active_group TEXT;
+             UPDATE schema_compatibility SET minimum_compatible_version = 106 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (106, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 106;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2255,6 +2402,44 @@ pub(super) fn restore_github_v84_schema(connection: &Connection) {
         ).unwrap();
 }
 
+/// Rewinds the preference table in a current-schema database so an ad-hoc
+/// historical fixture has the singleton shape that existed before revision 101.
+#[cfg(test)]
+pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
+    if !legacy_schema::table_has_column(connection, "subagent_preference", "profile_id").unwrap() {
+        return;
+    }
+    connection
+        .execute_batch(
+            "ALTER TABLE subagent_preference RENAME TO subagent_preference_profiled;
+             CREATE TABLE subagent_preference (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), policy TEXT NOT NULL CHECK(json_valid(policy)));
+             INSERT INTO subagent_preference(singleton, policy)
+                 SELECT 1, policy FROM subagent_preference_profiled WHERE profile_id='';
+             DROP TABLE subagent_preference_profiled;",
+        )
+        .unwrap();
+}
+
+/// Historical fixtures must remove review columns introduced afterward.
+#[cfg(test)]
+pub(super) fn restore_review_state_schema(connection: &Connection, version: i64) {
+    if version < 106
+        && legacy_schema::table_has_column(connection, "turn_review_state", "active_group").unwrap()
+    {
+        connection
+            .execute_batch("ALTER TABLE turn_review_state DROP COLUMN active_group;")
+            .unwrap();
+    }
+    if version < 104
+        && legacy_schema::table_has_column(connection, "turn_review_state", "push_findings")
+            .unwrap()
+    {
+        connection
+            .execute_batch("ALTER TABLE turn_review_state DROP COLUMN push_findings;")
+            .unwrap();
+    }
+}
+
 #[cfg(test)]
 mod reader_tests {
     use super::*;
@@ -2297,7 +2482,7 @@ mod reader_tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert_eq!(revisions, [93, 94, 95, 96, 97, 98]);
+        assert_eq!(revisions, (93..=SCHEMA_VERSION).collect::<Vec<_>>());
         let fresh = Connection::open_in_memory().unwrap();
         migrate_schema(&fresh).unwrap();
         let schema = |database: &Connection| {
@@ -2546,6 +2731,8 @@ mod reader_tests {
         let path = directory.path().join("move.sqlite");
         let connection = open_writer(&path).unwrap();
         restore_github_v84_schema(&connection);
+        restore_pre101_subagent_preference(&connection);
+        restore_review_state_schema(&connection, 63);
         connection.execute_batch("DROP TABLE retained_move_sources; DELETE FROM schema_migrations WHERE version>=64; UPDATE schema_compatibility SET minimum_compatible_version=63 WHERE singleton=1; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE session_restart_intents DROP COLUMN container_upgrade_json; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version=63;").unwrap();
         drop(connection);
         forget_verified_schema(&path);
@@ -2846,6 +3033,10 @@ mod reader_tests {
             connection
                 .execute_batch("DROP TRIGGER stop_at_revision")
                 .unwrap();
+            if revision >= 59 {
+                connection.execute("INSERT INTO startup_steps(session_id, command_id, step_json, phase) VALUES('old-session','legacy-startup',?1,'pending')",
+                    [r#"{"Prompt":{"text":"Keep my queued prompt","inherited_draft":null}}"#]).unwrap();
+            }
             drop(connection);
 
             let writer =
@@ -2877,6 +3068,20 @@ mod reader_tests {
                 .query_row("SELECT text FROM prompt_history", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(prompt, "Keep my prompt");
+            if revision >= 59 {
+                let pending: String = reader
+                    .query_row(
+                        "SELECT step_json FROM startup_steps WHERE command_id='legacy-startup'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(
+                    matches!(serde_json::from_str::<crate::daemon::StartupStep>(&pending).unwrap(),
+                    crate::daemon::StartupStep::Prompt { text, prompt: None, encoded_draft: None, .. }
+                        if text == "Keep my queued prompt")
+                );
+            }
             let state = load_state_from(&path).unwrap();
             assert_eq!(state.sessions["old-session"].title, "Keep my work");
             assert_eq!(
@@ -2912,6 +3117,8 @@ mod reader_tests {
             )
             .unwrap();
         restore_github_v84_schema(&connection);
+        restore_pre101_subagent_preference(&connection);
+        restore_review_state_schema(&connection, 76);
         // Restore the previous table definition and migration ledger, retaining
         // a real row so the forward migration proves it copies existing data.
         connection
@@ -3047,6 +3254,37 @@ mod reader_tests {
         if version < 85 {
             restore_github_v84_schema(&connection);
         }
+        if version < 99 {
+            connection.execute_batch("DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away;").unwrap();
+            if legacy_schema::table_has_column(
+                &connection,
+                "materialized_sessions",
+                "operator_away_event_frontier",
+            )
+            .unwrap()
+            {
+                connection.execute_batch("ALTER TABLE materialized_sessions DROP COLUMN operator_away_event_frontier;").unwrap();
+            }
+        }
+        if version < 100 {
+            connection
+                .execute_batch("DROP TRIGGER IF EXISTS startup_steps_session_deleted;")
+                .unwrap();
+        }
+        if version < 101 {
+            restore_pre101_subagent_preference(&connection);
+        }
+        if version < 102 {
+            connection
+                .execute_batch("ALTER TABLE session_restart_intents DROP COLUMN handoff_json;")
+                .unwrap();
+        }
+        if version < 103 {
+            connection
+                .execute_batch("DROP TABLE IF EXISTS quota_history;")
+                .unwrap();
+        }
+        restore_review_state_schema(&connection, version);
         // Historical fixtures must remove columns introduced by later revisions.
         if version < 94
             && legacy_schema::table_has_column(
@@ -3150,6 +3388,8 @@ mod reader_tests {
         }
         let connection = Connection::open(&path).unwrap();
         restore_github_v84_schema(&connection);
+        restore_pre101_subagent_preference(&connection);
+        restore_review_state_schema(&connection, 55);
         connection
             .execute_batch(
                 "UPDATE sessions SET mjolnir_subagents = 1 WHERE session_id = 'all';
@@ -3184,7 +3424,183 @@ mod reader_tests {
             Some(SubagentPolicy::Native)
         );
         assert_eq!(state.sessions["unset"].subagents, None);
-        assert_eq!(state.last_subagent_policy, SubagentPolicy::Native);
+        assert_eq!(
+            state.last_subagent_policy_for("codex"),
+            SubagentPolicy::Native
+        );
+    }
+
+    #[test]
+    fn quota_history_migration_is_atomic_and_preserves_compatibility_with_previous_writers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("quota-history.sqlite3");
+        drop(open_writer(&path).unwrap());
+        stamp_schema_version(&path, 102);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "INSERT INTO quota_reset_cache VALUES ('account', '{\"windows\":[]}');
+             CREATE TRIGGER fail_quota_history BEFORE INSERT ON schema_migrations WHEN NEW.version=103
+                 BEGIN SELECT RAISE(ABORT,'quota history migration'); END;"
+        ).unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection
+            .execute_batch("ROLLBACK; DROP TRIGGER fail_quota_history;")
+            .unwrap();
+        assert_eq!(read_schema_state(&connection).unwrap().revision, 102);
+        assert!(
+            !connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='quota_history')",
+                    [],
+                    |row| row.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+        migrate_schema(&connection).unwrap();
+        let schema = read_schema_state(&connection).unwrap();
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        schema
+            .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT body FROM quota_reset_cache WHERE identity='account'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "{\"windows\":[]}"
+        );
+
+        // Revision 102 writes this cache and session state, but never history.
+        // Observations have no foreign keys to operational records.
+        connection.execute_batch(
+            "INSERT INTO quota_history(identity,profile_id,harness,sampled_at_epoch_seconds,body)
+                 VALUES ('account','codex','codex',123,'{\"windows\":[]}');
+             UPDATE quota_reset_cache SET body='{}' WHERE identity='account';"
+        ).unwrap();
+        let mut record = super::super::test_session("kept", "project");
+        super::super::sessions::save_session_to(&path, &record).unwrap();
+        record.title = "Updated by the existing writer".into();
+        super::super::sessions::save_session_to(&path, &record).unwrap();
+        connection
+            .execute("DELETE FROM sessions WHERE session_id=?1", [&record.id])
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT body FROM quota_history", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "{\"windows\":[]}"
+        );
+    }
+
+    #[test]
+    fn restart_handoff_migration_preserves_legacy_intents_and_refuses_old_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("restart-handoff.sqlite3");
+        drop(open_writer(&path).unwrap());
+        stamp_schema_version(&path, 101);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('kept','project','now');
+             INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at)
+                 VALUES ('kept','Keep my work','codex','codex','podman','closing','now');
+             INSERT INTO session_restart_intents(session_id,operation_id,phase,updated_at,checkpoint_sha256,checkpoint_started)
+                 VALUES ('kept','restart-kept','stopping','now','sealed-sha',1);
+             CREATE TRIGGER fail_restart_handoff BEFORE INSERT ON schema_migrations WHEN NEW.version=102
+                 BEGIN SELECT RAISE(ABORT,'restart handoff migration'); END;"
+        ).unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection
+            .execute_batch("ROLLBACK; DROP TRIGGER fail_restart_handoff;")
+            .unwrap();
+        let schema = read_schema_state(&connection).unwrap();
+        assert_eq!(schema.revision, 101);
+        assert_eq!(schema.minimum_compatible, Some(101));
+        assert!(
+            !legacy_schema::table_has_column(
+                &connection,
+                "session_restart_intents",
+                "handoff_json"
+            )
+            .unwrap()
+        );
+        migrate_schema(&connection).unwrap();
+        let schema = read_schema_state(&connection).unwrap();
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        assert!(schema.ensure_supported_by(101).is_err());
+        let intent = super::super::session_restart::load_session_restart_with(&connection, "kept")
+            .unwrap()
+            .unwrap();
+        assert_eq!(intent.operation_id, "restart-kept");
+        assert_eq!(intent.checkpoint_sha256.as_deref(), Some("sealed-sha"));
+        assert!(intent.handoff.is_none());
+        assert!(intent.checkpoint_started);
+    }
+
+    #[test]
+    fn profile_subagent_preference_migration_preserves_fallback_and_refuses_old_writers() {
+        use mj_core::subagent::SubagentPolicy;
+
+        for (name, remembered, fail_first_attempt) in [
+            ("populated", Some(SubagentPolicy::Native), true),
+            ("empty", None, false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(format!("{name}.sqlite3"));
+            drop(open_writer(&path).unwrap());
+            stamp_schema_version(&path, 100);
+            let legacy = Connection::open(&path).unwrap();
+            if let Some(policy) = &remembered {
+                legacy
+                    .execute(
+                        "INSERT INTO subagent_preference(singleton, policy) VALUES(1, ?1)",
+                        [serde_json::to_string(policy).unwrap()],
+                    )
+                    .unwrap();
+            }
+            if fail_first_attempt {
+                legacy
+                    .execute_batch(
+                        "CREATE TRIGGER fail_profile_preference_migration
+                     BEFORE INSERT ON schema_migrations WHEN NEW.version=101
+                     BEGIN SELECT RAISE(ABORT,'profile preference migration'); END;",
+                    )
+                    .unwrap();
+                assert!(migrate_schema(&legacy).is_err());
+                legacy
+                    .execute_batch("ROLLBACK; DROP TRIGGER fail_profile_preference_migration;")
+                    .unwrap();
+                let interrupted = read_schema_state(&legacy).unwrap();
+                assert_eq!(interrupted.revision, 100);
+                assert_eq!(interrupted.minimum_compatible, Some(100));
+                assert!(
+                    !legacy_schema::table_has_column(&legacy, "subagent_preference", "profile_id")
+                        .unwrap()
+                );
+            }
+            migrate_schema(&legacy).unwrap();
+            let schema = read_schema_state(&legacy).unwrap();
+            assert_eq!(schema.revision, SCHEMA_VERSION);
+            assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+            assert!(schema.ensure_supported_by(100).is_err());
+            assert!(
+                legacy_schema::table_has_column(&legacy, "subagent_preference", "profile_id")
+                    .unwrap()
+            );
+            assert!(
+                !legacy_schema::table_has_column(&legacy, "subagent_preference", "singleton")
+                    .unwrap()
+            );
+            drop(legacy);
+
+            let state = load_state_from(&path).unwrap();
+            assert_eq!(state.last_subagent_policies.get(""), remembered.as_ref());
+        }
     }
 
     #[test]
@@ -3195,6 +3611,8 @@ mod reader_tests {
         save_session_to(&path, &record).unwrap();
         let connection = Connection::open(&path).unwrap();
         restore_github_v84_schema(&connection);
+        restore_pre101_subagent_preference(&connection);
+        restore_review_state_schema(&connection, 47);
         connection
             .execute_batch(
                 "DELETE FROM schema_migrations WHERE version >= 48;
@@ -3227,6 +3645,8 @@ mod reader_tests {
         save_session_to(&path, &record).unwrap();
         let connection = Connection::open(&path).unwrap();
         restore_github_v84_schema(&connection);
+        restore_pre101_subagent_preference(&connection);
+        restore_review_state_schema(&connection, 45);
         connection
             .execute_batch(
                 "ALTER TABLE sessions DROP COLUMN target_runtime_json;
@@ -3258,6 +3678,8 @@ mod reader_tests {
         let path = directory.path().join("mj.sqlite3");
         let connection = open_writer(&path).unwrap();
         restore_github_v84_schema(&connection);
+        restore_pre101_subagent_preference(&connection);
+        restore_review_state_schema(&connection, 38);
         connection
             .execute_batch(
                 "BEGIN IMMEDIATE;
@@ -3523,6 +3945,85 @@ mod reader_tests {
     /// A store ahead of this build cannot be fixed by starting a daemon of
     /// this build, so the reader must not say so. This is the message the
     /// incident in #24 printed twice a second for an hour.
+    #[test]
+    fn operator_away_migration_refuses_previous_readers_and_writers() {
+        const CHILD: &str = "MJ_OPERATOR_AWAY_MIGRATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(
+                    module_path!(),
+                    "operator_away_migration_refuses_previous_readers_and_writers",
+                ),
+            )
+            .env(CHILD, "1")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("away-migration.sqlite");
+        save_session_to(&path, &super::super::tests::session("session", "project")).unwrap();
+        stamp_schema_version(&path, 98);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_away_migration BEFORE INSERT ON schema_migrations WHEN NEW.version=99 BEGIN SELECT RAISE(ABORT,'away migration'); END;").unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection
+            .execute_batch("ROLLBACK; DROP TRIGGER fail_away_migration;")
+            .unwrap();
+        let before = read_schema_state(&connection).unwrap();
+        assert_eq!(before.revision, 98);
+        assert_eq!(before.minimum_compatible, Some(98));
+        assert!(
+            !legacy_schema::table_has_column(
+                &connection,
+                "materialized_sessions",
+                "operator_away_event_frontier"
+            )
+            .unwrap()
+        );
+        connection.execute_batch("CREATE TRIGGER stop_before_profile_preference BEFORE INSERT ON schema_migrations WHEN NEW.version=101 BEGIN SELECT RAISE(ABORT,'profile preference migration'); END;").unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection
+            .execute_batch("ROLLBACK; DROP TRIGGER stop_before_profile_preference;")
+            .unwrap();
+        let revision_100 = read_schema_state(&connection).unwrap();
+        assert_eq!(revision_100.revision, 100);
+        assert_eq!(revision_100.minimum_compatible, Some(100));
+        assert!(connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name='startup_steps_session_deleted')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap());
+        migrate_schema(&connection).unwrap();
+        let schema = read_schema_state(&connection).unwrap();
+        let error = schema.ensure_supported_by(98).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<StoreSchemaMismatch>().unwrap().reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
+            }
+        ));
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        connection
+            .execute("UPDATE operator_away SET away=1,revision=7", [])
+            .unwrap();
+        connection.execute("UPDATE materialized_sessions SET operator_away_event_frontier=20 WHERE session_id='session'",[]).unwrap();
+        // New writers preserve the durable flag and replay frontier across ordinary session updates.
+        connection.execute("UPDATE materialized_sessions SET applied_event_ordinal=2,pending_elicitations_json='[]' WHERE session_id='session'",[]).unwrap();
+        assert_eq!(connection.query_row("SELECT operator_away_event_frontier FROM materialized_sessions WHERE session_id='session'",[],|r|r.get::<_,u64>(0)).unwrap(),20);
+        assert!(load_state_from(&path).unwrap().operator_presence.away);
+        assert_eq!(
+            connection
+                .query_row("SELECT revision FROM operator_away", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            7
+        );
+    }
+
     #[test]
     fn question_frontier_migration_is_atomic_and_preserved_by_previous_writers() {
         let root = tempfile::tempdir().unwrap();

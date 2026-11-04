@@ -42,6 +42,10 @@ impl RelayClient {
         RelayRequest::ProjectMemorySnapshot.supported_at(self.protocol_version)
     }
 
+    pub fn supports_slopcop_login_sync(&self) -> bool {
+        RelayRequest::SlopcopLoginState.supported_at(self.protocol_version)
+    }
+
     /// The skills archive format this session's worker reads. A worker from
     /// before `RELAY_GZIP_SKILLS_PROTOCOL` reads only the uncompressed format.
     pub fn skills_archive_format(&self) -> mj_core::skills::SkillsArchiveFormat {
@@ -213,6 +217,22 @@ impl RelayClient {
         credential_snapshot(self.call(RelayRequest::CredentialState).await?)
     }
 
+    pub async fn aws_credentials_state(&mut self) -> Result<CredentialSnapshot> {
+        credential_snapshot(self.call(RelayRequest::AwsCredentialsState).await?)
+    }
+
+    pub async fn install_aws_credentials(
+        &mut self,
+        credentials: &mj_core::aws_credentials::AwsCredentials,
+    ) -> Result<CredentialSnapshot> {
+        credential_snapshot(
+            self.call(RelayRequest::InstallAwsCredentials {
+                data: BASE64.encode(credentials.encode()?),
+            })
+            .await?,
+        )
+    }
+
     /// Read this session's credential file. Callers must keep these bytes out
     /// of durable relay observations, logs, and archives.
     pub async fn read_credentials(&mut self) -> Result<Vec<u8>> {
@@ -233,6 +253,26 @@ impl RelayClient {
             })
             .await?,
         )
+    }
+
+    pub async fn slopcop_login_state(&mut self) -> Result<CredentialSnapshot> {
+        credential_snapshot(self.call(RelayRequest::SlopcopLoginState).await?)
+    }
+
+    pub async fn install_slopcop_login(
+        &mut self,
+        login: &mj_core::slopcop::SlopcopLogin,
+    ) -> Result<CredentialSnapshot> {
+        credential_snapshot(
+            self.call(RelayRequest::InstallSlopcopLogin {
+                data: BASE64.encode(login.encode()),
+            })
+            .await?,
+        )
+    }
+
+    pub async fn remove_slopcop_login(&mut self) -> Result<CredentialSnapshot> {
+        credential_snapshot(self.call(RelayRequest::RemoveSlopcopLogin).await?)
     }
 
     pub async fn github_token_state(
@@ -268,11 +308,12 @@ impl RelayClient {
     /// Install background text that only the target harness sees, prepended
     /// to the next real prompt without creating a synthetic transcript turn.
     pub async fn install_prompt_context(&mut self, text: String) -> Result<()> {
-        let request = RelayRequest::InstallPromptContext { text };
-        match self.call(request).await? {
-            RelayResponsePayload::PromptContextInstalled => Ok(()),
-            _ => bail!("relay returned an unexpected prompt-context response"),
-        }
+        self.submit(
+            crate::session_manager::new_command_id("prompt-context")?,
+            RelayCommand::InstallPromptContext { text },
+        )
+        .await
+        .map(|_| ())
     }
 
     pub async fn project_memory_snapshot(
@@ -284,7 +325,9 @@ impl RelayClient {
         let request = RelayRequest::ProjectMemorySnapshot;
         match self.call(request).await? {
             RelayResponsePayload::ProjectMemorySnapshot { baseline, replica } => {
-                Ok((baseline, replica))
+                tokio::task::spawn_blocking(move || Ok((baseline.decode()?, replica.decode()?)))
+                    .await
+                    .context("decode project memory task failed")?
             }
             _ => bail!("relay returned an unexpected project-memory response"),
         }
@@ -294,6 +337,12 @@ impl RelayClient {
         &mut self,
         snapshot: mj_core::project_memory::ProjectMemorySnapshot,
     ) -> Result<()> {
+        let protocol = self.protocol_version;
+        let snapshot = tokio::task::spawn_blocking(move || {
+            mj_core::relay::ProjectMemoryWireTree::encode(snapshot, protocol)
+        })
+        .await
+        .context("encode project memory task failed")??;
         let request = RelayRequest::InstallProjectMemorySnapshot { snapshot };
         match self.call(request).await? {
             RelayResponsePayload::ProjectMemorySnapshotInstalled => Ok(()),
@@ -314,6 +363,12 @@ impl RelayClient {
         expected_replica: mj_core::project_memory::TreeVersion,
         tree: mj_core::project_memory::ProjectMemorySnapshot,
     ) -> Result<mj_core::project_memory::ReplicaReplaceOutcome> {
+        let protocol = self.protocol_version;
+        let tree = tokio::task::spawn_blocking(move || {
+            mj_core::relay::ProjectMemoryWireTree::encode(tree, protocol)
+        })
+        .await
+        .context("encode project memory task failed")??;
         let request = RelayRequest::ReplaceProjectMemoryTree {
             expected_replica,
             tree,

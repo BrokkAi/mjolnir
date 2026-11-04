@@ -775,8 +775,8 @@ async fn poll_item_timeline(
     }
     for event in mapped.events {
         api.control.check_enabled()?;
-        // The session already knows what it posted. Delivering it, even
-        // without a wake, echoes the session's own words back into its context.
+        // The session already knows what it did. Delivering its own GitHub
+        // activity, even without a wake, echoes that activity into its context.
         if authored_during_session_turn(
             login.as_deref(),
             event.author.as_deref(),
@@ -985,7 +985,7 @@ fn map_timeline(
                 MAILBOX_COMMENT_BODY_LIMIT,
             )
             .to_owned();
-            let (suffix, body, authored) = match event_type {
+            let (suffix, body, filter_author) = match event_type {
                 "commented" => (
                     "comment",
                     MailboxEventBody::GithubComment {
@@ -996,7 +996,7 @@ fn map_timeline(
                         body,
                         repo: repo.clone(),
                     },
-                    true,
+                    Some(author.clone()),
                 ),
                 "reviewed" => (
                     "review",
@@ -1009,7 +1009,7 @@ fn map_timeline(
                         review_state: value["state"].as_str().map(str::to_owned),
                         repo: repo.clone(),
                     },
-                    true,
+                    Some(author.clone()),
                 ),
                 "line-commented" => (
                     "review-comment",
@@ -1021,12 +1021,16 @@ fn map_timeline(
                         body,
                         repo: repo.clone(),
                     },
-                    true,
+                    Some(author.clone()),
                 ),
                 "merged" | "closed" | "reopened" if watch.kind == "pull_request" => {
                     if event_type == "closed" && merged {
                         continue;
                     }
+                    let actor = value["actor"]["login"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
                     // Compare times so an earlier close, before a reopen and a
                     // later merge, still reads as a close.
                     let (suffix, change) = match event_type {
@@ -1043,13 +1047,10 @@ fn map_timeline(
                             change,
                             number: watch.number as u64,
                             title: watch.title.clone(),
-                            actor: value["actor"]["login"]
-                                .as_str()
-                                .unwrap_or_default()
-                                .to_owned(),
+                            actor: actor.clone(),
                             repo: repo.clone(),
                         },
-                        false,
+                        Some(actor),
                     )
                 }
                 _ => continue,
@@ -1060,7 +1061,7 @@ fn map_timeline(
                     watch.owner, watch.repo, watch.number
                 ),
                 timestamp: timestamp.to_owned(),
-                author: authored.then_some(author),
+                author: filter_author,
                 body,
             });
         }
@@ -1100,7 +1101,7 @@ async fn authored_during_session_turn(
                 tracing::warn!(
                     %session_id,
                     error = %format!("{error:#}"),
-                    "could not read transcript turn windows for GitHub comment or review; delivering it"
+                    "could not read transcript turn windows for GitHub activity; delivering it"
                 );
                 None
             }
@@ -2654,6 +2655,100 @@ mod tests {
         assert_eq!(watch.timeline_at, at(20));
         assert_eq!(watch.review_comments_at, at(30));
         assert_eq!(watch.processed_at, at(40));
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    // Hard-won: b4476dc76: lifecycle actors during the creator's turn bypassed the own-activity filter.
+    #[tokio::test]
+    async fn watcher_filters_lifecycle_activity_by_actor_and_creator_turn() {
+        if !run_isolated_child("watcher_filters_lifecycle_activity_by_actor_and_creator_turn") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        let start = DateTime::from_timestamp(
+            DateTime::parse_from_rfc3339(&cursor.updated_at)
+                .unwrap()
+                .timestamp()
+                + 1,
+            0,
+        )
+        .unwrap();
+        let at = |seconds| {
+            (start + chrono::Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true)
+        };
+        let mut creator = crate::database::test_session("creator", "project");
+        creator.created_at = cursor.watch_started_at.clone();
+        crate::database::save_session(&creator).unwrap();
+        crate::database::seed_github_test_turns(
+            "creator",
+            (start + chrono::Duration::seconds(2)).timestamp_millis(),
+            (start + chrono::Duration::seconds(3)).timestamp_millis(),
+            (start + chrono::Duration::seconds(20)).timestamp_millis(),
+        )
+        .unwrap();
+
+        let fake = FakeGithub::default();
+        {
+            let mut data = fake.data.lock().await;
+            data.observed_at = Some(at(50));
+            for number in 21..=26 {
+                crate::database::commit_github_item_classification(
+                    watch_classification(number, &at(1)),
+                    None,
+                )
+                .unwrap();
+                let mut item =
+                    github_item(number as u64, number as u64, "synthetic PR", at(1), true);
+                item["updated_at"] = json!(at(40));
+                data.items.push(item);
+            }
+            let lifecycle = |event: &str, id: i64, seconds: i64, actor: &str| json!({"event":event,"id":id,"created_at":at(seconds),"actor":{"login":actor}});
+            data.timelines
+                .insert(21, vec![lifecycle("closed", 2101, 25, "watcher-bot")]);
+            data.timelines
+                .insert(22, vec![lifecycle("merged", 2201, 25, "watcher-bot")]);
+            data.timelines
+                .insert(23, vec![lifecycle("reopened", 2301, 25, "watcher-bot")]);
+            data.timelines
+                .insert(24, vec![lifecycle("closed", 2401, 10, "watcher-bot")]);
+            data.timelines
+                .insert(25, vec![lifecycle("closed", 2501, 25, "another-user")]);
+            // Some GitHub installations expose a merge only as a close entry.
+            data.timelines
+                .insert(26, vec![lifecycle("closed", 2601, 25, "watcher-bot")]);
+            data.pulls.insert(21, json!({"merged_at": null}));
+            data.pulls.insert(24, json!({"merged_at": null}));
+            data.pulls.insert(25, json!({"merged_at": null}));
+            data.pulls.insert(26, json!({"merged_at": at(25)}));
+        }
+
+        let (api, server) = start_fake_github(fake).await;
+        poll_repository_with_context(
+            "acme",
+            "repo",
+            vec![creator],
+            fake_classifier(),
+            &api,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let mut keys = crate::database::pending_mailbox_events(100)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.event_key)
+            .collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "github:acme/repo#24:closed:2401",
+                "github:acme/repo#25:closed:2501",
+            ],
+            "same-account actions in the creator turn, including a close mapped as merged, are suppressed; outside-turn and other-account actions are delivered"
+        );
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
     }

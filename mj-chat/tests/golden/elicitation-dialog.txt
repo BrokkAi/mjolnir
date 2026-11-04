@@ -66,13 +66,13 @@
 submitted: Accept { content: {"question_01_note": String("Use a third AWS billing account"), "question_02": String("CI"), "question_03": String("BedrockCI")} }
 harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing account"), "question_02": String("CI"), "question_03": String("BedrockCI")} })
 
-=== Claude optional question starts with nothing picked (100x20) ===
+=== Claude question starts with its first option picked (100x20) ===
 ╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
 │Cache                                                                                             │
 │Which cache should the service use?                                                               │
 │                                                                                                  │
 │Please answer the following questions.                                                            │
-│○ Redis                                                                                           │
+│● Redis                                                                                           │
 │    In-memory store with persistence                                                              │
 │    maxmemory-policy allkeys-lru                                                                  │
 │○ Memcached                                                                                       │
@@ -156,7 +156,7 @@ harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing ac
 submitted: Accept { content: {"question_0": String("Redis"), "question_0_custom": String("Keep TTLs short"), "question_1": StringArray(["linux", "macos"]), "question_1_custom": String("freebsd")} }
 harness: Ok(Accept { content: {"question_0": String("Redis"), "question_0_custom": String("Keep TTLs short"), "question_1": StringArray(["linux", "macos"]), "question_1_custom": String("freebsd")} })
 
-=== Claude Other text reached with arrows picks nothing on the way (100x20) ===
+=== Claude default taken back, arrows to Other pick nothing on the way (100x20) ===
 ╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
 │Cache                                                                                             │
 │Which cache should the service use?                                                               │
@@ -200,6 +200,7 @@ submitted: Cancel
 │                                                                                                  │
 │Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Space takes back default Redis: Ok({})
 click Redis: Ok({"question_0": String("Redis")})
 click Memcached: Ok({"question_0": String("Memcached")})
 click Memcached again, later: Ok({})

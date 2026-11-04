@@ -66,9 +66,11 @@ Mjolnir budgets Apple containers against the Mac's physical CPU and RAM, not
 against each VM independently. It reserves one fifth of physical RAM for macOS
 and sums every owning container's configured limits. The UI reports the hard
 RAM left: memory compression and reclaimable pages do not count as additional
-capacity. A launch that would exceed either the logical CPU count or that RAM
-budget is refused, including a resume or a move onto that Mac. Mjolnir never
-stops a session automatically to make room.
+capacity. A launch that would exceed that RAM budget is refused, including a
+resume or a move onto an Apple container target. Apple's VMs do not return
+freed memory to macOS. CPU overcommit produces a warning and the launch
+proceeds. Docker and Podman on the same Mac allow RAM overcommit with a
+warning as well. Mjolnir never stops a session automatically to make room.
 
 Apple container takes part in the daemon's background image download like
 Podman and Docker: a configured image the host does not have is downloaded a
@@ -96,14 +98,14 @@ machine = "mac"
 Install the runtime on the remote Mac by following the [installation
 instructions](https://github.com/apple/container#initial-install), then start
 its service there. The remote Mac needs the same runtime and macOS release as a
-local one. The SSH account must find `container` on the noninteractive `PATH`
-used by `ssh <destination> <command>`. For zsh, add it in `.zshenv`; `.zprofile`
-is not read by these command sessions. Check the setup before adding the
+local one. Mjolnir runs `container` there with the Mac's system `PATH` from
+`/etc/paths`, which includes `/usr/local/bin` where the package installs it, so
+the SSH account needs no shell configuration. Check the setup before adding the
 machine:
 
 ```console
-ssh mac.example.com container --version
-ssh mac.example.com container system status
+ssh mac.example.com /usr/local/bin/container --version
+ssh mac.example.com /usr/local/bin/container system status
 ```
 
 When you save that machine, Mjolnir probes it over SSH — `uname -sm`,

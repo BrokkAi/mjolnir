@@ -150,7 +150,7 @@ fn activity_facts(fixture: &Fixture) -> ActivityFacts {
             .map(|(index, tool)| InFlightToolCall {
                 tool_call_id: format!("tool-{index}"),
                 title: Some(tool.title.clone()),
-                status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
+                status: agent_client_protocol::v1::schema::ToolCallStatus::InProgress,
                 started_at_ms: now - (tool.running_s as i64) * 1_000,
             })
             .collect(),

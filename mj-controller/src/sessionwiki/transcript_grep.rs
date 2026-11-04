@@ -52,8 +52,11 @@ pub(super) struct GrepResult {
 
 /// Return matching messages and their surrounding context from `session`.
 pub(super) fn grep_session(session: &Session, pattern: &str, opts: &GrepOpts) -> GrepResult {
-    let needle = sessionwiki::util::nfc(pattern.trim()).to_lowercase();
-    if needle.is_empty() || session.messages.is_empty() {
+    let needles: Vec<_> = super::search_query::terms(pattern)
+        .into_iter()
+        .map(|term| term.to_lowercase())
+        .collect();
+    if needles.is_empty() || session.messages.is_empty() {
         return GrepResult::default();
     }
     let texts: Vec<String> = session
@@ -68,7 +71,7 @@ pub(super) fn grep_session(session: &Session, pattern: &str, opts: &GrepOpts) ->
         .zip(&session.messages)
         .map(|(text, message)| {
             if opts.anchor_roles.contains(&message.role) {
-                matches_in(text, &needle)
+                matches_in(text, &needles)
             } else {
                 Vec::new()
             }
@@ -119,8 +122,8 @@ pub(super) fn grep_session(session: &Session, pattern: &str, opts: &GrepOpts) ->
     }
 }
 
-/// Byte ranges of non-overlapping case-insensitive occurrences of `needle`.
-fn matches_in(text: &str, needle: &str) -> Vec<(usize, usize)> {
+/// Ranges of every term, only when all terms occur in this message.
+fn matches_in(text: &str, needles: &[String]) -> Vec<(usize, usize)> {
     let mut lowered = String::with_capacity(text.len());
     let mut origin: Vec<usize> = Vec::with_capacity(text.len() + 1);
     for (index, character) in text.char_indices() {
@@ -131,21 +134,35 @@ fn matches_in(text: &str, needle: &str) -> Vec<(usize, usize)> {
     origin.push(text.len());
 
     let mut hits = Vec::new();
-    let mut from = 0;
-    while let Some(offset) = lowered[from..].find(needle) {
-        let start = from + offset;
-        from = start + needle.len();
-        let begin = origin[start];
-        let mut end = origin[from];
-        if end <= begin {
-            end = text[begin..]
-                .chars()
-                .next()
-                .map_or(begin, |character| begin + character.len_utf8());
+    for needle in needles {
+        let mut from = 0;
+        let before = hits.len();
+        while let Some(offset) = lowered[from..].find(needle) {
+            let start = from + offset;
+            from = start + needle.len();
+            let begin = origin[start];
+            let mut end = origin[from];
+            if end <= begin {
+                end = text[begin..]
+                    .chars()
+                    .next()
+                    .map_or(begin, |character| begin + character.len_utf8());
+            }
+            hits.push((begin, end));
         }
-        hits.push((begin, end));
+        if hits.len() == before {
+            return Vec::new();
+        }
     }
-    hits
+    hits.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in hits {
+        match merged.last_mut() {
+            Some(previous) if start <= previous.1 => previous.1 = previous.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
 }
 
 /// Cap one message around its first match and rebase the match ranges.

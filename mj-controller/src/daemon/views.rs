@@ -29,8 +29,8 @@ impl RuntimeState {
             ensure!(
                 !(active.control.is_committed()
                     && matches!(active.kind, LifecycleKind::Suspend | LifecycleKind::Restart)),
-                "stop of {session_id} has passed its verified checkpoint and is removing the target; \
-                 it cannot be cancelled"
+                "stop of {session_id} has begun closing and cannot be cancelled; \
+                 wait for it to finish"
             );
             bail!("lifecycle operation is no longer cancellable");
         }
@@ -260,6 +260,7 @@ impl RuntimeState {
             .filter(|(_, active)| active.is_visible())
             .map(|(session_id, active)| RuntimeLifecycleView {
                 operation_id: active.operation_id.clone(),
+                move_operation_id: active.move_operation_id.clone(),
                 cancellable: active
                     .cancellable_by_person(durable_session_state(controller, session_id)),
                 session_id: session_id.clone(),
@@ -613,10 +614,10 @@ impl RuntimeState {
     pub(crate) fn publish_quotas(&self, snapshot: mj_client::quota::QuotaSnapshot) {
         {
             let mut quota = self.quota.lock().unwrap_or_else(PoisonError::into_inner);
-            if quota.snapshot == snapshot {
+            if *quota.snapshot == snapshot {
                 return;
             }
-            quota.snapshot = snapshot;
+            quota.snapshot = snapshot.into();
         }
         self.publish_revision();
     }

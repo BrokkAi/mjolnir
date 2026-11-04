@@ -1,7 +1,7 @@
 use super::*;
 
 pub fn viewer_config_options(
-    config_options: &[agent_client_protocol::schema::v1::SessionConfigOption],
+    config_options: &[agent_client_protocol::v1::schema::SessionConfigOption],
     facts: &mj_core::acp::AcpSessionFacts,
 ) -> Vec<ViewerConfigOption> {
     // Keep canonical model/effort aliases, then publish the other selectors
@@ -24,13 +24,19 @@ pub fn viewer_config_options(
         .collect();
     keys.into_iter()
         .filter_map(|key| {
+            let option = mj_core::acp::find_session_config_option(config_options, &key)?;
             let choices = mj_core::acp::session_config_choices(config_options, &key);
             if choices.is_empty() {
                 return None;
             }
+            let name = option.name.trim();
             Some(ViewerConfigOption {
                 key: key.to_owned(),
-                label: key.to_owned(),
+                label: if name.is_empty() {
+                    key.to_owned()
+                } else {
+                    name.to_owned()
+                },
                 current: match key.as_str() {
                     "model" => facts.current_model(),
                     "effort" => facts.current_effort(),

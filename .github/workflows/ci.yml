@@ -52,6 +52,9 @@ jobs:
     - name: Test RunsOn launch-template helper
       run: bash scripts/test-update-runson-launch-template.sh
 
+    - name: Test the nightly tracking-issue script
+      run: bash scripts/test-nightly-issue.sh
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@1.99.1
       with:
@@ -69,6 +72,9 @@ jobs:
 
     - name: Test release archive assembly and parallel npm publishing
       run: node --test scripts/release-workflow.test.mjs
+
+    - name: Test agent-dev image build invariants
+      run: node --test scripts/agent-dev-image.test.mjs
 
     - uses: ./.github/actions/cache-rust
       with:
@@ -150,71 +156,17 @@ jobs:
     - name: Run tests
       run: cargo test
 
-  # Ordinary check-ins run Linux. macOS and Windows run here only for changes
-  # sensitive to that platform (the path lists in .github/macos-ci-paths.txt
-  # and .github/windows-ci-paths.txt, plus any file with that platform's cfg
-  # gate), nightly in nightly.yml, and for every release tag.
-  platform-changes:
-    name: Classify platform-sensitive changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    outputs:
-      macos: ${{ steps.classify.outputs.macos }}
-      windows: ${{ steps.classify.outputs.windows }}
-    steps:
-    - uses: actions/checkout@v6
-      with:
-        # A pull request checks out its merge commit; HEAD^1 is then the
-        # base branch tip, so HEAD^1..HEAD is exactly what the merge changes.
-        fetch-depth: 2
-    - name: Test platform CI scripts
-      run: |
-        bash scripts/test-ci-platform-paths.sh
-        bash scripts/test-nightly-issue.sh
-    - name: Classify changed paths
-      id: classify
-      env:
-        EVENT_NAME: ${{ github.event_name }}
-        PUSH_BEFORE: ${{ github.event.before }}
-        REF_TYPE: ${{ github.ref_type }}
-      run: |
-        set -euo pipefail
-        # release.yml publishes only after this CI passes on the tag, so a
-        # release runs every lane whatever the tag's push says it changed.
-        if [[ "$REF_TYPE" == tag ]]; then
-          printf '%s\n' 'release tag; running every platform lane' >&2
-          printf '%s\n' macos=true windows=true >>"$GITHUB_OUTPUT"
-          exit 0
-        fi
-        if [[ "$EVENT_NAME" == pull_request ]]; then
-          base=HEAD^1
-        else
-          base="$PUSH_BEFORE"
-          # The classifier runs the lane when it cannot resolve the base, which
-          # covers new branches (all-zero before) and a failed fetch here.
-          if [[ -n "$base" && ! "$base" =~ ^0+$ ]]; then
-            git fetch --no-tags --depth=1 origin "$base" || true
-          fi
-        fi
-        for platform in macos windows; do
-          decision="$(bash scripts/ci-platform-paths.sh "$platform" "$base" HEAD)"
-          printf '%s=%s\n' "$platform" "$decision" >>"$GITHUB_OUTPUT"
-        done
-
-  # Each lane runs unless classification positively said no. If the
-  # classifier job fails, CI is red and both lanes still run.
+  # Check-ins run Linux only. macOS and Windows run nightly in nightly.yml,
+  # and here only when release.yml calls this workflow for a tag, so a release
+  # still publishes only after every platform lane passes.
   macos:
     name: macOS
-    needs: platform-changes
-    if: ${{ !cancelled() && needs.platform-changes.outputs.macos != 'false' }}
+    if: ${{ github.ref_type == 'tag' }}
     uses: ./.github/workflows/macos.yml
 
   windows:
     name: Windows
-    needs: platform-changes
-    if: ${{ !cancelled() && needs.platform-changes.outputs.windows != 'false' }}
+    if: ${{ github.ref_type == 'tag' }}
     uses: ./.github/workflows/windows.yml
 
   portable-worker:

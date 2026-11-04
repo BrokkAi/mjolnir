@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AgentCapabilities, ContentBlock, ContentChunk, Implementation, SessionUpdate, TextContent,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -211,6 +211,7 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
 
 fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
+        initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
@@ -385,6 +386,65 @@ fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
     assert_eq!(invoke(Some("first-token")), "first-token|unset\n");
     assert_eq!(invoke(Some("rotated-token")), "rotated-token|unset\n");
     assert_eq!(invoke(None), "unset|unset\n");
+}
+
+#[test]
+fn slopcop_wrapper_exports_each_live_login() {
+    use mj_core::slopcop::SlopcopLogin;
+
+    let worker = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let real = tempfile::tempdir().unwrap();
+    let real_bin = real.path().join("bin");
+    std::fs::create_dir(&real_bin).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &real_bin,
+        "slopcop",
+        "#!/bin/sh\nprintf '%s|%s|%s\\n' \"${SLOPCOP_TOKEN-unset}\" \"${SLOPCOP_SERVICE-unset}\" \"$*\"\n",
+    );
+    let mut environment = BTreeMap::from([(
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", real_bin.display()),
+    )]);
+    unix::configure_github_cli(worker.path(), &mut environment, None, None).unwrap();
+    let login_path = home.path().join(mj_core::slopcop::LOGIN_FILE);
+    unix::configure_slopcop_cli(worker.path(), &login_path).unwrap();
+
+    let invoke = || {
+        let mut command = std::process::Command::new(worker.path().join("bin/slopcop"));
+        command
+            .args(["check", "--format", "json"])
+            .env_clear()
+            .env("PATH", environment.get("PATH").unwrap())
+            .env("SLOPCOP_TOKEN", "session-token");
+        let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    // With no synced login, the session's own environment applies.
+    assert_eq!(invoke(), "session-token|unset|check --format json\n");
+    // Credential sync replaces the file under a running session; every
+    // invocation reads the current one.
+    for (login, expected) in [
+        (
+            SlopcopLogin::new("first-token", Some("https://slopcop.example")).unwrap(),
+            "first-token|https://slopcop.example|check --format json\n",
+        ),
+        (
+            SlopcopLogin::new("rotated-token", None).unwrap(),
+            "rotated-token|unset|check --format json\n",
+        ),
+    ] {
+        mj_core::slopcop::write_login(&login_path, &login.encode()).unwrap();
+        assert_eq!(invoke(), expected);
+    }
+    mj_core::slopcop::remove_login(&login_path).unwrap();
+    assert_eq!(invoke(), "session-token|unset|check --format json\n");
 }
 
 // Hard-won: 50963cae: a harness scrubbed credential-shaped Git config names and broke every Git command.
@@ -616,6 +676,8 @@ fn install_skills_rejects_garbage_and_leaves_the_tree_untouched() {
     );
 }
 
+// Hard-won: #1385: isolated Bedrock workers never received the host AWS credentials.
+// Hard-won: #1390: worker upgrades synced credential JSON without its process-provider configuration.
 #[tokio::test]
 async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
     use base64::Engine as _;
@@ -692,6 +754,164 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
         bytes
     );
 
+    // Exercise the connection-only AWS route with enough data to cross a
+    // pipe buffer, then renew it without restarting the running worker.
+    for generation in ["initial", "renewed"] {
+        let credentials = mj_core::aws_credentials::AwsCredentials::from_export(
+            "bedrock",
+            &serde_json::to_vec(&serde_json::json!({
+                "Version": 1,
+                "AccessKeyId": format!("key-{generation}"),
+                "SecretAccessKey": format!("secret-{generation}"),
+                "SessionToken": "s".repeat(70_000),
+                "Expiration": "2099-01-01T00:00:00Z",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let aws_bytes = credentials.encode().unwrap();
+        for request in [
+            RelayRequest::InstallAwsCredentials {
+                data: base64::engine::general_purpose::STANDARD.encode(&aws_bytes),
+            },
+            RelayRequest::AwsCredentialsState,
+        ] {
+            let envelope = RelayRequestEnvelope {
+                request_id: format!("aws-{generation}"),
+                protocol_version: RELAY_PROTOCOL_VERSION,
+                request,
+            };
+            let mut frame = serde_json::to_vec(&envelope).unwrap();
+            frame.push(b'\n');
+            writer.write_all(&frame).await.unwrap();
+            let response: RelayResponseEnvelope =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            let RelayResponseBody::Ok {
+                payload:
+                    RelayResponsePayload::CredentialState {
+                        present,
+                        fingerprint,
+                        ..
+                    },
+            } = response.body
+            else {
+                panic!("AWS credential request failed: {:?}", response.body);
+            };
+            assert!(present);
+            assert_eq!(
+                fingerprint,
+                mj_core::credentials::credential_fingerprint(&aws_bytes)
+            );
+        }
+        let path = temp
+            .path()
+            .join(mj_core::aws_credentials::SHARED_CREDENTIALS_FILE);
+        assert_eq!(std::fs::read(&path).unwrap(), aws_bytes);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        // An upgraded worker can have the same credentials as the host but
+        // lack the files its new launch environment tells the SDK to read.
+        // Both missing and inconsistent provider files must trigger repair.
+        for (name, replacement) in [
+            ("aws-config", None),
+            ("aws-empty-credentials", None),
+            ("aws-config", Some("[profile wrong]\n")),
+            ("aws-empty-credentials", Some("[default]\n")),
+        ] {
+            let path = temp.path().join(name);
+            if let Some(bytes) = replacement {
+                std::fs::write(&path, bytes).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+            let state =
+                delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsState)
+                    .await;
+            assert!(matches!(
+                state,
+                RelayResponsePayload::CredentialState { present: false, .. }
+            ));
+            let installed = delegation_exchange(
+                &mut lines,
+                &mut writer,
+                RelayRequest::InstallAwsCredentials {
+                    data: base64::engine::general_purpose::STANDARD.encode(&aws_bytes),
+                },
+            )
+            .await;
+            let state =
+                delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsState)
+                    .await;
+            assert_eq!(installed, state);
+            assert!(matches!(
+                state,
+                RelayResponsePayload::CredentialState { present: true, .. }
+            ));
+            for name in ["aws-config", "aws-empty-credentials"] {
+                assert_eq!(
+                    std::fs::metadata(temp.path().join(name))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+            assert_eq!(
+                std::fs::read(temp.path().join("aws-config")).unwrap(),
+                credentials.configuration(temp.path()).unwrap()
+            );
+            assert!(
+                std::fs::read(temp.path().join("aws-empty-credentials"))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    // The host's slopcop login takes the same connection-only route.
+    let login =
+        mj_core::slopcop::SlopcopLogin::new("slopcop-secret", Some("https://slopcop.example"))
+            .unwrap();
+    let installed = delegation_exchange(
+        &mut lines,
+        &mut writer,
+        RelayRequest::InstallSlopcopLogin {
+            data: base64::engine::general_purpose::STANDARD.encode(login.encode()),
+        },
+    )
+    .await;
+    let state = delegation_exchange(&mut lines, &mut writer, RelayRequest::SlopcopLoginState).await;
+    assert_eq!(installed, state);
+    assert_eq!(
+        state,
+        RelayResponsePayload::CredentialState {
+            present: true,
+            fingerprint: login.snapshot().fingerprint,
+            freshness_epoch_ms: None,
+        }
+    );
+    let login_path = temp.path().join(mj_core::slopcop::LOGIN_FILE);
+    assert_eq!(std::fs::read(&login_path).unwrap(), login.encode());
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&login_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let removed =
+        delegation_exchange(&mut lines, &mut writer, RelayRequest::RemoveSlopcopLogin).await;
+    assert!(matches!(
+        removed,
+        RelayResponsePayload::CredentialState { present: false, .. }
+    ));
+    assert!(!login_path.exists());
+
     {
         let relay = relay.lock().unwrap();
         assert_eq!(relay.latest_ordinal(), 0);
@@ -703,6 +923,9 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
         );
         let persisted = std::fs::read_to_string(relay_root.join("relay-state.json")).unwrap();
         assert!(!persisted.contains(&request.request_id));
+        assert!(!persisted.contains("aws-initial"));
+        assert!(!persisted.contains("secret-renewed"));
+        assert!(!persisted.contains("slopcop-secret"));
     }
 
     drop(writer);
@@ -1158,7 +1381,7 @@ async fn kimi_diagnostic_is_enriched_before_durable_completion() {
     unix::prepare_kimi_runtime_event(&mut monitor, &relay, &mut event)
         .await
         .unwrap();
-    unix::record_runtime_event(&relay, &mut BTreeMap::new(), &no_prompt_loop(), event).unwrap();
+    unix::record_runtime_event(&relay, &mut BTreeMap::new(), event).unwrap();
     assert!(relay.lock().unwrap().capacity_retry_deadline().is_none());
     drop(relay);
     let reopened = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
@@ -1261,7 +1484,7 @@ async fn an_empty_kimi_turn_with_a_journalled_login_failure_reports_the_failure(
         unix::prepare_kimi_runtime_event(&mut monitor, &relay, &mut event)
             .await
             .unwrap();
-        unix::record_runtime_event(&relay, &mut BTreeMap::new(), &no_prompt_loop(), event).unwrap();
+        unix::record_runtime_event(&relay, &mut BTreeMap::new(), event).unwrap();
     }
     drop(relay);
 
@@ -1375,7 +1598,7 @@ async fn kimi_turn_usage_is_recorded_from_native_records() {
     unix::prepare_kimi_runtime_event(&mut monitor, &relay, &mut event)
         .await
         .unwrap();
-    unix::record_runtime_event(&relay, &mut BTreeMap::new(), &no_prompt_loop(), event).unwrap();
+    unix::record_runtime_event(&relay, &mut BTreeMap::new(), event).unwrap();
     drop(relay);
     let reopened = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
     let events = reopened
@@ -1445,7 +1668,7 @@ async fn kimi_native_task_level_blocks_replacement_until_termination() {
     monitor.attach(SESSION_ID.into(), &relay).await.unwrap();
 
     let task_query = || {
-        use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
+        use agent_client_protocol::v1::schema::{ToolCall, ToolCallStatus};
         let mut call = ToolCall::new("0:query-not-launcher", "TaskOutput");
         call.status = ToolCallStatus::Completed;
         call.raw_output = Some(serde_json::json!({"output": "task_id: agent-1\nstatus: running"}));
@@ -2870,7 +3093,6 @@ fn typed_acp_observations_are_journaled() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::Connected {
             agent_name: Some("test-agent".into()),
             agent_version: Some("1".into()),
@@ -2887,7 +3109,6 @@ fn typed_acp_observations_are_journaled() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::SessionUpdate {
             update: serde_json::to_value(update).unwrap(),
         },
@@ -2935,7 +3156,6 @@ fn advertised_steering_enables_automatic_steering() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::Connected {
             agent_name: Some("test-agent".into()),
             agent_version: Some("1".into()),
@@ -2974,7 +3194,6 @@ fn harness_restarting_interrupts_in_flight_commands() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::HarnessRestarting {
             message: "ACP bridge exited; reloading the native session".into(),
         },
@@ -3026,7 +3245,6 @@ fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::TerminalStarted {
             terminal_id: "term-1".into(),
             command: "cargo test".into(),
@@ -3070,7 +3288,6 @@ fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::TerminalClosed {
             terminal_id: "term-1".into(),
             output,
@@ -3145,7 +3362,6 @@ fn a_fast_terminal_cannot_be_resurrected_by_a_late_start_event() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::TerminalClosed {
             terminal_id: "term-1".into(),
             output: String::new(),
@@ -3158,7 +3374,6 @@ fn a_fast_terminal_cannot_be_resurrected_by_a_late_start_event() {
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::TerminalStarted {
             terminal_id: "term-1".into(),
             command: "true".into(),
@@ -3186,33 +3401,16 @@ fn agent_output(text: &str, message_id: &str) -> RuntimeEvent {
     }
 }
 
-/// The `usage_update` the Claude adapter sends when an SDK turn ends.
-fn settle_marker(origin: &str) -> RuntimeEvent {
-    let mut usage = agent_client_protocol::schema::v1::UsageUpdate::new(10, 200);
-    usage.meta = Some(
-        serde_json::from_value(serde_json::json!({
-            "_claude/origin": {"kind": origin},
-        }))
-        .unwrap(),
-    );
-    RuntimeEvent::SessionUpdate {
-        update: serde_json::to_value(SessionUpdate::UsageUpdate(usage)).unwrap(),
-    }
-}
-
-/// The SDK `result` the Claude adapter forwards when a model cycle ends, as
-/// the ACP runtime stamps it.
-fn claude_result(origin: &str, received: u64) -> mj_core::acp::ClaudeTurnResult {
-    let mut result = mj_core::acp::ClaudeTurnResult::from_sdk_message(&serde_json::json!({
+/// The raw SDK result forwarded by the Claude adapter at a model boundary.
+fn claude_result(origin: &str) -> mj_core::acp::ClaudeTurnResult {
+    mj_core::acp::ClaudeTurnResult::from_sdk_message(&serde_json::json!({
         "type": "result", "subtype": "success", "is_error": false, "num_turns": 2,
         "stop_reason": "end_turn", "result": "done",
         "usage": {"input_tokens": 100, "output_tokens": 7},
         "origin": {"kind": origin},
     }))
     .unwrap()
-    .unwrap();
-    result.received = received;
-    result
+    .unwrap()
 }
 
 fn harness_turn_open(relay: &Arc<Mutex<DurableRelay>>) -> bool {
@@ -3294,7 +3492,6 @@ async fn a_self_started_turn_holds_prompt_promotion_and_checkpoint_admission() {
     event_tx
         .send(RuntimeEvent::ClaudeTurnResult(claude_result(
             "task-notification",
-            1,
         )))
         .unwrap();
     assert_prompt(
@@ -3362,7 +3559,6 @@ async fn a_self_started_turn_holds_prompt_promotion_and_checkpoint_admission() {
     event_tx
         .send(RuntimeEvent::ClaudeTurnResult(claude_result(
             "task-notification",
-            1,
         )))
         .unwrap();
     wait_until(
@@ -3573,186 +3769,6 @@ async fn harness_exit_during_a_turn_releases_held_prompt_after_worker_recovery()
     coordinator.await.unwrap().unwrap();
 }
 
-/// A Claude prompt ends at the result of the cycle that answered it. The
-/// coordinator hands that result to the prompt loop, which reports the
-/// completion; the answer streamed before the result is already recorded, and
-/// the adapter's marker after it touches nothing.
-#[tokio::test]
-async fn a_claude_result_hands_the_running_prompt_to_the_prompt_loop() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
-    durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
-    let relay = Arc::new(Mutex::new(durable));
-    let (event_tx, event_rx) = runtime_event_channel();
-    let (wake_tx, wake_rx) = mpsc::channel(1);
-    let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(run_relay_coordinator(
-        relay.clone(),
-        event_rx,
-        wake_rx,
-        command_tx,
-    ));
-    event_tx
-        .send(RuntimeEvent::SessionConfigured {
-            config_options: Vec::new(),
-        })
-        .unwrap();
-    submit(
-        &mut relay.lock().unwrap(),
-        "prompt-claude-1",
-        prompt("start a background agent"),
-    );
-    wake_tx.try_send(()).unwrap();
-    assert_prompt(
-        next_command(&mut command_rx).await,
-        "prompt-claude-1",
-        "start a background agent",
-    );
-
-    event_tx
-        .send(agent_output("Started it; I will report back.", "answer-1"))
-        .unwrap();
-    // Neither a background cycle's result nor the report of an interrupted
-    // cycle ends the prompt.
-    event_tx
-        .send(RuntimeEvent::ClaudeTurnResult(claude_result(
-            "task-notification",
-            1,
-        )))
-        .unwrap();
-    let mut interrupted = claude_result("human", 2);
-    interrupted.is_error = true;
-    interrupted.diagnostic =
-        Some("[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null".into());
-    event_tx
-        .send(RuntimeEvent::ClaudeTurnResult(interrupted))
-        .unwrap();
-    event_tx
-        .send(RuntimeEvent::ClaudeTurnResult(claude_result("human", 3)))
-        .unwrap();
-    let CommandRequest::ReleasePrompt {
-        request_id,
-        received,
-        stop_reason,
-        usage,
-    } = next_command(&mut command_rx).await
-    else {
-        panic!("expected the prompt loop to be asked to end the prompt");
-    };
-    assert_eq!(request_id, "prompt-claude-1");
-    assert_eq!(received, 3, "only the user cycle's result ends the prompt");
-    assert_eq!(stop_reason, "EndTurn");
-    assert_eq!(usage.map(|usage| usage.output_tokens), Some(7));
-
-    // The prompt loop reports the completion, as it does for a reply.
-    event_tx
-        .send(RuntimeEvent::PromptFinished {
-            diagnostic: None,
-            request_id: request_id.clone(),
-            stop_reason,
-            usage: None,
-        })
-        .unwrap();
-    wait_until(
-        || {
-            relay
-                .lock()
-                .unwrap()
-                .operational_state()
-                .active_prompt
-                .is_none()
-        },
-        "the prompt did not complete",
-    )
-    .await;
-    let before_marker = relay.lock().unwrap().operational_state().latest_ordinal;
-    event_tx.send(settle_marker("human")).unwrap();
-    wait_until(
-        || relay.lock().unwrap().operational_state().latest_ordinal > before_marker,
-        "the marker was not recorded",
-    )
-    .await;
-    let state = relay.lock().unwrap().operational_state();
-    assert_eq!(state.execution, RelayExecutionState::Idle);
-    assert!(state.harness_turn.is_none(), "the marker opens no turn");
-    assert_eq!(
-        state.continuation.completed_command_id.as_deref(),
-        Some("prompt-claude-1"),
-        "the continuation and quota checks see a completed prompt"
-    );
-    let events = relay
-        .lock()
-        .unwrap()
-        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
-        .unwrap();
-    let answer = events
-        .iter()
-        .position(|event| matches!(&event.observation, RelayObservation::SessionUpdate { .. }))
-        .expect("the answer is recorded");
-    let completed = events
-        .iter()
-        .position(|event| {
-            matches!(&event.observation, RelayObservation::CommandCompleted { command_id, .. } if command_id == "prompt-claude-1")
-        })
-        .expect("the prompt completed");
-    assert!(
-        answer < completed,
-        "the answer belongs to the prompt's turn"
-    );
-
-    // The background agent's follow-up is a turn Claude Code started on its
-    // own. Its result ends that turn and is not sent to the prompt loop.
-    event_tx
-        .send(agent_output(
-            "The background agent found three files.",
-            "follow-up-1",
-        ))
-        .unwrap();
-    wait_until(
-        || harness_turn_open(&relay),
-        "the follow-up did not open a turn",
-    )
-    .await;
-    event_tx
-        .send(RuntimeEvent::ClaudeTurnResult(claude_result(
-            "task-notification",
-            4,
-        )))
-        .unwrap();
-    wait_until(
-        || !harness_turn_open(&relay),
-        "the follow-up's result did not settle its turn",
-    )
-    .await;
-    assert_eq!(
-        relay.lock().unwrap().operational_state().execution,
-        RelayExecutionState::Idle
-    );
-    assert!(matches!(
-        relay
-            .lock()
-            .unwrap()
-            .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
-            .unwrap()
-            .last()
-            .map(|event| event.observation.clone()),
-        Some(RelayObservation::HarnessTurnSettled {
-            prompt_in_flight: false,
-            ..
-        })
-    ));
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), command_rx.recv())
-            .await
-            .is_err(),
-        "nothing else was sent to the prompt loop"
-    );
-
-    drop(event_tx);
-    drop(wake_tx);
-    coordinator.await.unwrap().unwrap();
-}
-
 /// Esc's non-targeted cancellation interrupts a Claude cycle with no active
 /// prompt; the queued user prompt starts once that cycle reports its result.
 // Hard-won: #1225: adapter cancellation could discard a prompt Hel had already shown as active.
@@ -3831,7 +3847,7 @@ async fn cancel_turn_during_a_claude_harness_turn_dispatches_queued_prompt_once(
             request_id: request_id.clone(),
         })
         .unwrap();
-    let mut interrupted = claude_result("task-notification", 1);
+    let mut interrupted = claude_result("task-notification");
     interrupted.subtype = "error_during_execution".into();
     interrupted.is_error = true;
     event_tx
@@ -5415,7 +5431,7 @@ fn a_restored_never_prompted_session_may_replace_its_native_session() {
 /// mismatch. That pin belongs to the bridge's environment and nowhere else.
 #[tokio::test]
 async fn a_codex_resume_launches_its_bridge_on_the_accepted_model() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     };
 
@@ -5470,7 +5486,7 @@ async fn a_codex_resume_launches_its_bridge_on_the_accepted_model() {
 /// for, and a model the session accepted afterwards still wins.
 #[tokio::test]
 async fn a_new_codex_session_launches_its_bridge_on_its_creation_model() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     };
 
@@ -5614,6 +5630,7 @@ async fn acp_supervisor_notices_child_exit_while_a_descendant_holds_stdout_open(
     );
 }
 
+// Hard-won: 68ad78d60: an unrelated fork kept the supervisor lease locked until exec.
 #[tokio::test]
 async fn acp_supervisor_holds_the_managed_node_lease_for_the_process_tree() {
     let temp = tempfile::tempdir().unwrap();
@@ -5657,6 +5674,42 @@ async fn acp_supervisor_holds_the_managed_node_lease_for_the_process_tree() {
     );
     drop(contender);
 
+    // Keep an unrelated child between fork and exec. CLOEXEC cannot release
+    // its inherited copy of the supervisor's lease until we let it exec.
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let (parent, forked) = std::os::unix::net::UnixStream::pair().unwrap();
+    parent.set_nonblocking(true).unwrap();
+    let mut parent = tokio::net::UnixStream::from_std(parent).unwrap();
+    let parent_fd = parent.as_raw_fd();
+    let unrelated = tokio::task::spawn_blocking(move || {
+        // `/bin/true` does not exist on macOS; `/usr/bin/true` is on every
+        // Unix under test (Windows CI compiles tests without running them).
+        let mut command = std::process::Command::new("/usr/bin/true");
+        let fd = forked.as_raw_fd();
+        // SAFETY: only async-signal-safe close/read/write run in the child;
+        // forked stays alive until spawn completes, and EOF also unblocks it.
+        unsafe {
+            command.pre_exec(move || {
+                // The child must not hold the peer that sends its EOF.
+                libc::close(parent_fd);
+                let mut byte = 1_u8;
+                if libc::write(fd, (&byte as *const u8).cast(), 1) != 1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::read(fd, (&mut byte as *mut u8).cast(), 1) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        command.spawn().unwrap().wait().unwrap()
+    });
+    tokio::time::timeout(crate::test_support::IO_TIMEOUT, parent.read_u8())
+        .await
+        .expect("unrelated child did not fork")
+        .unwrap();
+
     drop(held_stdin);
     tokio::time::timeout(std::time::Duration::from_secs(2), task)
         .await
@@ -5669,9 +5722,12 @@ async fn acp_supervisor_holds_the_managed_node_lease_for_the_process_tree() {
         .write(true)
         .open(lease_path)
         .unwrap();
-    released
-        .try_lock()
-        .expect("the supervisor released the Node.js lease");
+    let released = released.try_lock();
+    // Probe while the inherited descriptor is still held, then release and
+    // reap the fixture even when the assertion is going to fail.
+    parent.write_all(&[1]).await.unwrap();
+    assert!(unrelated.await.unwrap().success());
+    released.expect("the supervisor released the Node.js lease");
 }
 
 #[tokio::test]
@@ -5970,7 +6026,6 @@ fn a_used_native_session_is_reported_as_used_after_a_worker_restart() {
     unix::record_runtime_event(
         &Arc::new(Mutex::new(relay)),
         &mut in_flight,
-        &no_prompt_loop(),
         RuntimeEvent::NativeSessionUsed,
     )
     .unwrap();
@@ -6391,7 +6446,7 @@ fn acp_workspace_roots_add_the_memory_replica_outside_controller_attachments() {
 #[test]
 fn project_memory_connection_requests_round_trip_replica_and_baseline() {
     let directory = tempfile::tempdir().unwrap();
-    let large_memory = "hourly CI check\n".repeat(16_384);
+    let large_memory = "hourly CI check\n".repeat(220_000);
     let memory = ProjectMemoryLaunchConfig {
         history_socket: None,
         project_key: "project".into(),
@@ -6428,15 +6483,31 @@ fn project_memory_connection_requests_round_trip_replica_and_baseline() {
     else {
         panic!("unexpected project-memory payload")
     };
-    assert_eq!(captured_baseline.files["/MEMORY.md"], "base");
-    assert_eq!(captured_replica.files["/MEMORY.md"], large_memory);
+    assert!(matches!(
+        &captured_baseline,
+        mj_core::relay::ProjectMemoryWireTree::Gzip { .. }
+    ));
+    assert!(matches!(
+        &captured_replica,
+        mj_core::relay::ProjectMemoryWireTree::Gzip { .. }
+    ));
+    assert_eq!(
+        captured_baseline.decode().unwrap().files["/MEMORY.md"],
+        "base"
+    );
+    assert_eq!(
+        captured_replica.decode().unwrap().files["/MEMORY.md"],
+        large_memory
+    );
 
     unix::apply_project_memory_request(
         &memory,
         &RelayRequest::InstallProjectMemorySnapshot {
-            snapshot: mj_core::project_memory::ProjectMemorySnapshot {
-                files: BTreeMap::from([("/MEMORY.md".into(), large_memory.clone())]),
-            },
+            snapshot: mj_core::relay::ProjectMemoryWireTree::Plain(
+                mj_core::project_memory::ProjectMemorySnapshot {
+                    files: BTreeMap::from([("/MEMORY.md".into(), large_memory.clone())]),
+                },
+            ),
         },
     )
     .unwrap();
@@ -6483,14 +6554,18 @@ fn project_memory_replace_deletes_files_omitted_from_tree_in_replica_and_baselin
         .unwrap();
     let expected_replica = replica.snapshot().unwrap().version();
     let tree = mj_core::project_memory::ProjectMemorySnapshot {
-        files: BTreeMap::from([("/MEMORY.md".into(), "reconciled\n".repeat(24_576))]),
+        files: BTreeMap::from([("/MEMORY.md".into(), "reconciled\n".repeat(320_000))]),
     };
 
     let payload = unix::apply_project_memory_request(
         &memory,
         &RelayRequest::ReplaceProjectMemoryTree {
             expected_replica,
-            tree: tree.clone(),
+            tree: mj_core::relay::ProjectMemoryWireTree::encode(
+                tree.clone(),
+                mj_core::relay::RELAY_PROTOCOL_VERSION,
+            )
+            .unwrap(),
         },
     )
     .unwrap();
@@ -6544,7 +6619,7 @@ fn project_memory_replace_refuses_a_changed_replica_without_writing_either_tree(
         &memory,
         &RelayRequest::ReplaceProjectMemoryTree {
             expected_replica,
-            tree,
+            tree: mj_core::relay::ProjectMemoryWireTree::Plain(tree),
         },
     )
     .unwrap();
@@ -6699,7 +6774,7 @@ async fn large_photo_transfer_is_verified_without_journaling_image_bytes() {
 async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
     let temp = tempfile::tempdir().unwrap();
     let mut state = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
-    state.set_background_work_policy(crate::relay::BackgroundWorkPolicy::CodexExecCards);
+    state.set_background_work_policy(crate::relay::BackgroundWorkPolicy::AirTasks);
     state.set_turn_verdict_harness(HarnessKind::Codex);
     state
         .record_observation(RelayObservation::SessionConfigured {
@@ -7030,11 +7105,11 @@ async fn checkpoint_only_start_refuses_missing_or_corrupt_state_without_starting
     assert!(format!("{error:#}").contains("existing relay state"));
     let state = root.join(mj_core::relay::RELAY_STATE_FILE);
     std::fs::write(&state, b"corrupt state").unwrap();
-    let owner = super::root_owner::acquire_after_fork_exec_window(&root).unwrap();
+    let owner = super::WorkerRootOwner::acquire(&root).unwrap();
     let child = super::root_owner::ForkedPreExecChild::start();
     drop(owner);
     let release = child.release_after(std::time::Duration::from_millis(30));
-    let owner = super::root_owner::acquire_after_fork_exec_window(&root).unwrap();
+    let owner = super::WorkerRootOwner::acquire(&root).unwrap();
     let error = unix::run_daemon_owned(&owner, config).await.unwrap_err();
     release.join().unwrap();
     assert!(format!("{error:#}").contains("parse"), "{error:#}");
@@ -7043,12 +7118,16 @@ async fn checkpoint_only_start_refuses_missing_or_corrupt_state_without_starting
     assert!(!root.join("acp-supervisor.json").exists());
 }
 
+// Hard-won: 630dee318: File polling imposed a five-second startup budget on a correct process tree.
 #[tokio::test]
 async fn acp_supervisor_terminates_descendants_when_parent_input_ends() {
     use std::time::Duration;
+    use tokio::io::AsyncReadExt;
     for broken_output in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("descendant-writes");
+        let ready_path = root.path().join("ready.sock");
+        let ready = tokio::net::UnixListener::bind(&ready_path).unwrap();
         struct GroupGuard(std::path::PathBuf);
         impl Drop for GroupGuard {
             fn drop(&mut self) {
@@ -7065,19 +7144,31 @@ async fn acp_supervisor_terminates_descendants_when_parent_input_ends() {
             args: vec![
                 "-c".into(),
                 r#"
-import os, signal, sys, time
+import os, signal, socket, sys, time
 with open(sys.argv[1] + '.pid', 'w') as f: f.write(str(os.getpid()))
+read_ready, write_ready = os.pipe()
 if os.fork() == 0:
+    os.close(read_ready)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    with open(sys.argv[1], 'a') as f: f.write('x')
+    with socket.socket(socket.AF_UNIX) as ready:
+        ready.connect(sys.argv[2])
+        ready.sendall(b'x')
+    os.write(write_ready, b'x')
+    os.close(write_ready)
     while True:
         with open(sys.argv[1], 'a') as f: f.write('x')
         time.sleep(.01)
-while not os.path.exists(sys.argv[1]): time.sleep(.01)
+# Do not trigger broken-output cleanup before the child has signalled readiness.
+os.close(write_ready)
+assert os.read(read_ready, 1) == b'x'
+os.close(read_ready)
 print('x' * 100000, flush=True)
 while True: time.sleep(1)
 "#
                 .into(),
                 marker.to_string_lossy().into_owned(),
+                ready_path.to_string_lossy().into_owned(),
             ],
             environment: BTreeMap::new(),
             excluded_environment: Vec::new(),
@@ -7094,18 +7185,16 @@ while True: time.sleep(1)
             Box::new(tokio::io::sink())
         };
         let task = tokio::spawn(unix::run_acp_supervisor_with_streams(spec, input, output));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !marker.exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+        crate::test_support::wait_for("descendant readiness", async {
+            let (mut child, _) = ready.accept().await.unwrap();
+            assert_eq!(child.read_u8().await.unwrap(), b'x');
         })
-        .await
-        .unwrap();
+        .await;
         let mut held = Some(held);
         if !broken_output {
             drop(held.take());
         }
-        let result = tokio::time::timeout(Duration::from_secs(5), task)
+        let result = tokio::time::timeout(crate::test_support::IO_TIMEOUT, task)
             .await
             .unwrap()
             .unwrap();
@@ -7478,12 +7567,6 @@ async fn a_reviewed_session_serves_its_relay_while_preparing_its_baseline() {
     );
     daemon.abort();
     assert!(daemon.await.unwrap_err().is_cancelled());
-}
-
-/// A command sender whose prompt loop is gone, for tests that record runtime
-/// events without one.
-fn no_prompt_loop() -> mpsc::Sender<CommandRequest> {
-    mpsc::channel(1).0
 }
 
 /// Start a coordinator whose session has a ready checkpoint barrier, fed by a

@@ -92,7 +92,7 @@ pub(super) fn viewer_capacity(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let storage = crate::target_storage::views();
+    let storage = crate::target_storage::views_snapshot();
     state
         .values()
         .map(|entry| {
@@ -286,8 +286,8 @@ pub(super) fn session_capabilities(
 pub(super) fn phone_prompt_blocks(
     text: String,
     images: Vec<crate::server::ViewerPromptImage>,
-) -> Vec<agent_client_protocol::schema::v1::ContentBlock> {
-    use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent};
+) -> Vec<agent_client_protocol::v1::schema::ContentBlock> {
+    use agent_client_protocol::v1::schema::{ContentBlock, ImageContent, TextContent};
 
     let mut prompt = Vec::with_capacity(images.len() + 1);
     if !text.is_empty() {
@@ -310,7 +310,7 @@ pub(super) fn phone_commands(
     operational: Option<&mj_core::relay::RelayOperationalState>,
 ) -> Vec<crate::server::ViewerMjCommand> {
     use crate::server::ViewerCommandSource;
-    use agent_client_protocol::schema::v1::AvailableCommandInput;
+    use agent_client_protocol::v1::schema::AvailableCommandInput;
 
     let command =
         |name: &str, description: &str, argument: Option<&str>| crate::server::ViewerMjCommand {
@@ -333,6 +333,13 @@ pub(super) fn phone_commands(
             .iter()
             .any(|option| option.key == key)
     };
+    if session.capabilities.set_config && !session.config_options.is_empty() {
+        commands.push(command(
+            "config",
+            "change any setting advertised by the active agent",
+            Some("key [value]"),
+        ));
+    }
     if option("model") {
         commands.push(command("model", "change the active model", Some("value")));
     }
@@ -382,6 +389,7 @@ pub(super) fn phone_commands(
         "clear",
         "help",
         "detach",
+        "config",
         "model",
         "fast",
         "effort",
@@ -586,11 +594,20 @@ pub(super) fn viewer_snapshot_selected(
         let Some(quota) = quotas.get(&profile.id) else {
             continue;
         };
+        let quota = crate::quota::surface_quota_report(quota);
+        let master_weekly = quota.weekly_window();
+        let fable_remaining = master_weekly.and_then(|master| {
+            master.remaining_percent?;
+            quota
+                .fable_weekly_window()
+                .and_then(|window| window.remaining_percent)
+        });
         profile.quota = Some(ViewerQuota {
             summary: quota.compact(),
             windows: quota
                 .windows
                 .iter()
+                .filter(|window| window.model_scope.is_none())
                 .map(|window| crate::server::ViewerQuotaWindow {
                     label: window.label.clone(),
                     resets_at_epoch_seconds: window.resets_at_epoch_seconds,
@@ -601,6 +618,9 @@ pub(super) fn viewer_snapshot_selected(
                     percent_used: window
                         .remaining_percent
                         .map(|left| 100_u8.saturating_sub(left)),
+                    fable_remaining_percent: master_weekly
+                        .filter(|weekly| std::ptr::eq(*weekly, window))
+                        .and(fable_remaining),
                     resets_at: window.resets.clone(),
                     projects_exhaustion_before_reset: crate::quota::projects_exhaustion(
                         window,

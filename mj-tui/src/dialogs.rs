@@ -64,7 +64,6 @@ pub(crate) enum DialogControl {
     TargetTest,
     TargetSettings,
     ConfirmButton(usize),
-    ImportIgnore,
     ImportManagedWorktree,
     ImportCancel,
     ImportContinue,
@@ -476,8 +475,6 @@ pub(crate) struct ImportBundleConfirmation {
     dirty_git_roots: Vec<String>,
     omitted_non_git_dirs: Vec<String>,
     scratch_git_roots: Vec<String>,
-    has_untracked_files: bool,
-    ignore_untracked: bool,
     pub(crate) form: RefCell<Dialog<DialogControl>>,
 }
 
@@ -493,9 +490,7 @@ fn dialog_form(
                 len: 0,
                 selected: 0,
             },
-            DialogControl::ImportIgnore | DialogControl::ImportManagedWorktree => {
-                ControlKind::Checkbox
-            }
+            DialogControl::ImportManagedWorktree => ControlKind::Checkbox,
             _ => ControlKind::Button,
         };
         form.declare(*id, kind);
@@ -574,6 +569,10 @@ fn clear_dialog_form_geometry(form: &mut Dialog<DialogControl>) {
     // clipped, but discard hitboxes and any in-flight mouse gesture.
     form.cancel_pointer();
     form.reset_geometry();
+}
+
+fn nested_repository_checkpoint_failure(error: &str) -> bool {
+    error.contains(mj_core::archive::NESTED_REPOSITORY_CHECKPOINT_ERROR)
 }
 
 impl Confirmation {
@@ -1175,24 +1174,12 @@ impl DashboardState {
         dirty_git_roots: Vec<String>,
         omitted_non_git_dirs: Vec<String>,
         scratch_git_roots: Vec<String>,
-        has_untracked_files: bool,
         managed_worktree: mj_core::state::ManagedWorktreeOptions,
     ) {
-        let mut form = if has_untracked_files {
-            dialog_form(
-                &[
-                    DialogControl::ImportIgnore,
-                    DialogControl::ImportCancel,
-                    DialogControl::ImportContinue,
-                ],
-                DialogControl::ImportContinue,
-            )
-        } else {
-            dialog_form(
-                &[DialogControl::ImportCancel, DialogControl::ImportContinue],
-                DialogControl::ImportContinue,
-            )
-        };
+        let mut form = dialog_form(
+            &[DialogControl::ImportCancel, DialogControl::ImportContinue],
+            DialogControl::ImportContinue,
+        );
         if managed_worktree.available {
             form.get_mut().declare_with_enabled(
                 DialogControl::ImportManagedWorktree,
@@ -1206,8 +1193,6 @@ impl DashboardState {
             dirty_git_roots,
             omitted_non_git_dirs,
             scratch_git_roots,
-            has_untracked_files,
-            ignore_untracked: has_untracked_files,
             form,
         });
     }
@@ -1565,17 +1550,12 @@ impl DashboardState {
                 return DashboardAction::ConfirmImportBundle {
                     create_managed_worktree: None,
                     accepted: false,
-                    include_untracked: false,
                 };
             }
             Some(Interaction::Toggle(DialogControl::ImportManagedWorktree)) => {
                 if confirmation.managed_worktree.available {
                     confirmation.create_managed_worktree = !confirmation.create_managed_worktree;
                 }
-                self.mode = Mode::ConfirmImportBundle(confirmation);
-            }
-            Some(Interaction::Toggle(DialogControl::ImportIgnore)) => {
-                confirmation.ignore_untracked = !confirmation.ignore_untracked;
                 self.mode = Mode::ConfirmImportBundle(confirmation);
             }
             Some(Interaction::Activate(DialogControl::ImportContinue)) => {
@@ -1585,7 +1565,6 @@ impl DashboardState {
                             && confirmation.create_managed_worktree,
                     ),
                     accepted: true,
-                    include_untracked: !confirmation.ignore_untracked,
                 };
             }
             _ => self.mode = Mode::ConfirmImportBundle(confirmation),
@@ -1870,19 +1849,29 @@ impl DashboardState {
                     checkpoint,
                 }
             }
-            (Confirmation::CloseFailed { session_id, .. }, 2)
+            (
+                Confirmation::CloseFailed {
+                    session_id, error, ..
+                },
+                2,
+            )
             | (
                 Confirmation::CloseFailed {
                     session_id,
+                    error,
                     can_discard: false,
                     ..
                 },
                 1,
             ) => {
                 self.cancel_modal();
-                DashboardAction::Suspend {
-                    session_id,
-                    acknowledge_unpublished_work: true,
+                if nested_repository_checkpoint_failure(&error) {
+                    DashboardAction::IgnoreNestedRepositoriesAndSuspend { session_id }
+                } else {
+                    DashboardAction::Suspend {
+                        session_id,
+                        acknowledge_unpublished_work: true,
+                    }
                 }
             }
             (Confirmation::SuspendSession { session_id, .. }, 1) => {

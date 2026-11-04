@@ -1,32 +1,5 @@
 use super::*;
-use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionId};
-
-pub(super) type PendingElicitations = Arc<Mutex<BTreeMap<String, PendingElicitation>>>;
-
-/// A question the worker published and is waiting to have answered. It keeps
-/// the question so an answer is checked against what was actually offered.
-pub(super) struct PendingElicitation {
-    pub(super) question: ElicitationRequest,
-    pub(super) answer: oneshot::Sender<ElicitationResponse>,
-}
-
-#[cfg(test)]
-impl PendingElicitation {
-    /// A pending question with no fields, for tests that only need it open.
-    pub(super) fn open(id: &str, answer: oneshot::Sender<ElicitationResponse>) -> Self {
-        Self {
-            question: ElicitationRequest {
-                id: id.to_owned(),
-                message: String::new(),
-                title: None,
-                description: None,
-                fields: Vec::new(),
-                tool_permission: None,
-            },
-            answer,
-        }
-    }
-}
+use agent_client_protocol::v1::schema::{PermissionOption, PermissionOptionId};
 
 /// A permission callback captures the current command's sender, so a late
 /// answer cannot attach an implementation to a subsequent prompt or bridge.
@@ -435,6 +408,132 @@ pub(super) fn allow_permission_response(
         })
 }
 
+/// Authorize only an execute tool with a single literal gh invocation. Titles
+/// and display summaries are never evidence of what will execute.
+pub(super) fn gh_permission_response(
+    request: &RequestPermissionRequest,
+    input: Option<&serde_json::Value>,
+) -> Option<RequestPermissionResponse> {
+    if request.tool_call.fields.kind != Some(agent_client_protocol::v1::schema::ToolKind::Execute) {
+        return None;
+    }
+    let input = input?.as_object()?;
+    // Conflicting command representations are ambiguous.
+    let command = match (input.get("command"), input.get("cmd")) {
+        (Some(command), None) | (None, Some(command)) => command,
+        _ => return None,
+    };
+    // DSH's run_command transports the executable separately from argv.
+    let normalized;
+    let command = if let Some(args) = input.get("args") {
+        let executable = command.as_str()?;
+        let args = args.as_array()?;
+        if args.len() > 1023 || executable.len() > 16 * 1024 {
+            return None;
+        }
+        let mut size = executable.len();
+        for arg in args {
+            size = size.checked_add(arg.as_str()?.len())?;
+            if size > 16 * 1024 {
+                return None;
+            }
+        }
+        normalized = serde_json::Value::Array(
+            std::iter::once(serde_json::Value::String(executable.to_owned()))
+                .chain(args.iter().cloned())
+                .collect(),
+        );
+        &normalized
+    } else {
+        command
+    };
+    let authorized = match command {
+        serde_json::Value::String(script) => gh_script(script),
+        serde_json::Value::Array(argv) if argv.len() <= 1024 => {
+            let argv = argv
+                .iter()
+                .map(serde_json::Value::as_str)
+                .collect::<Option<Vec<_>>>()?;
+            if argv.iter().map(|arg| arg.len()).sum::<usize>() > 16 * 1024 {
+                return None;
+            }
+            match argv.as_slice() {
+                ["gh", ..] => true,
+                [shell, "-c" | "-lc", script]
+                    if matches!(
+                        *shell,
+                        "bash" | "sh" | "/bin/bash" | "/bin/sh" | "/usr/bin/bash" | "/usr/bin/sh"
+                    ) =>
+                {
+                    gh_script(script)
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+    authorized
+        .then(|| allow_permission_response(request))
+        .flatten()
+}
+
+fn gh_script(script: &str) -> bool {
+    if script.len() > 16 * 1024 {
+        return false;
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
+        return false;
+    }
+    let Some(tree) = parser.parse(script, None) else {
+        return false;
+    };
+    let root = tree.root_node();
+    if root.has_error() || root.named_child_count() != 1 {
+        return false;
+    }
+    let Some(command) = root.named_child(0) else {
+        return false;
+    };
+    if command.kind() != "command" || command.named_child_count() < 1 {
+        return false;
+    }
+    // Reject terminators too: the complete script is exactly the command.
+    if script.trim() != &script[command.byte_range()] {
+        return false;
+    }
+    let Some(name) = command.child_by_field_name("name") else {
+        return false;
+    };
+    if &script[name.byte_range()] != "gh" {
+        return false;
+    }
+    fn literal(node: tree_sitter::Node<'_>, depth: usize) -> bool {
+        if depth > 16
+            || !matches!(
+                node.kind(),
+                "command"
+                    | "command_name"
+                    | "word"
+                    | "number"
+                    | "string"
+                    | "string_content"
+                    | "raw_string"
+                    | "concatenation"
+            )
+        {
+            return false;
+        }
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor)
+            .all(|child| literal(child, depth + 1))
+    }
+    literal(command, 0)
+}
+
 /// Calls to Mjolnir's own MCP servers, for a harness that cannot be told to
 /// trust them. Under configured approvals DSH asks before every MCP tool call
 /// and has no per-server rule, so the worker allows calls to the servers this
@@ -487,18 +586,18 @@ impl OwnedMcpApprovals {
 }
 
 /// Taking the pending entry decides whether answering or withdrawal wins.
-/// Once an answer was accepted, cancellation must still receive it so its
-/// reply is recorded, even if both notifications are ready at the same time.
+/// Once a human or AFK answer was accepted, cancellation still receives it
+/// so its resolution is recorded even when both notifications are ready.
 pub(super) async fn await_elicitation_response(
     pending: &PendingElicitations,
     id: &str,
-    mut answer: oneshot::Receiver<ElicitationResponse>,
+    mut answer: oneshot::Receiver<PendingAnswer>,
     cancellation: impl std::future::Future<Output = ()>,
-) -> Option<ElicitationResponse> {
+) -> Option<PendingAnswer> {
     tokio::select! {
         biased;
         () = cancellation => {
-            let withdrawn = pending.lock().expect("pending elicitation lock poisoned").remove(id);
+            let withdrawn = pending.remove(id);
             if withdrawn.is_some() {
                 None
             } else {
@@ -514,20 +613,5 @@ pub(super) fn resolve_pending_elicitation(
     elicitation_id: &str,
     response: ElicitationResponse,
 ) -> std::result::Result<(), String> {
-    let mut pending = pending.lock().expect("pending elicitation lock poisoned");
-    let Some(question) = pending.get(elicitation_id) else {
-        return Err(format!(
-            "elicitation {elicitation_id:?} is no longer pending"
-        ));
-    };
-    // The worker accepts only an answer to the question it published, and
-    // forwards it in the shape the harness reads. A refused answer leaves
-    // the question pending for a valid one.
-    let response = question.question.harness_response(response)?;
-    let PendingElicitation { answer, .. } = pending
-        .remove(elicitation_id)
-        .expect("the pending entry was just found");
-    answer
-        .send(response)
-        .map_err(|_| format!("elicitation {elicitation_id:?} was cancelled before it was answered"))
+    pending.resolve(elicitation_id, response)
 }

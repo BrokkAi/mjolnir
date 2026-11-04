@@ -29,6 +29,7 @@ fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     }
 }
 
@@ -43,7 +44,12 @@ fn an_inline_token_provider_credential_does_not_become_native_openai() {
     );
     std::fs::write(path, config).unwrap();
     profile.environment.clear();
-    let request = QuotaRefreshRequest::for_profile("custom", &profile, home.path().to_owned());
+    let request = QuotaRefreshRequest::for_profile(
+        "custom",
+        &profile,
+        home.path().to_owned(),
+        crate::quota::QuotaRuntimeConfig::host(),
+    );
     assert!(
         matches!(
             &request.codex_source,
@@ -70,7 +76,12 @@ async fn a_provider_without_a_readable_key_never_reads_the_chatgpt_quota() {
         ..keyless.clone()
     };
     for (id, profile) in [("keyless", keyless), ("ollama", ollama)] {
-        let request = QuotaRefreshRequest::for_profile(id, &profile, home.path().to_path_buf());
+        let request = QuotaRefreshRequest::for_profile(
+            id,
+            &profile,
+            home.path().to_path_buf(),
+            crate::quota::QuotaRuntimeConfig::host(),
+        );
         assert!(
             matches!(request.codex_source, CodexQuotaSource::UsagePriced { .. }),
             "{id}: {:?}",
@@ -101,12 +112,44 @@ async fn a_provider_without_a_quota_endpoint_reports_usage_pricing() {
         "other",
         &zai_profile(home.path(), "https://example.invalid/v1"),
         home.path().to_path_buf(),
+        crate::quota::QuotaRuntimeConfig::host(),
     );
     let (outcome, _) = refresh_profile_with_cache_root(request, None, None).await;
     assert_eq!(outcome.report.error, None);
     assert!(outcome.report.windows.is_empty());
     assert!(outcome.report.is_usage_priced());
     assert_eq!(outcome.report.compact(), API_LABEL);
+}
+
+// Hard-won: bd326e2b: Bedrock Claude probed subscription quota despite using AWS credentials.
+#[tokio::test]
+async fn bedrock_claude_reports_usage_pricing_without_an_oauth_login() {
+    let home = tempfile::tempdir().unwrap();
+    let profile: HarnessProfile = serde_json::from_value(serde_json::json!({
+        "kind": "claude",
+        "home": home.path(),
+        "environment": {
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "PATH": home.path(),
+        },
+    }))
+    .unwrap();
+    let request = QuotaRefreshRequest::for_profile(
+        "aws-model",
+        &profile,
+        home.path().to_path_buf(),
+        crate::quota::QuotaRuntimeConfig::host(),
+    );
+    let (outcome, client) = refresh_profile_with_cache_root(request, None, None).await;
+
+    assert_eq!(outcome.report.profile_id, "aws-model");
+    assert_eq!(outcome.report.harness, HarnessKind::Claude);
+    assert_eq!(outcome.report.error, None);
+    assert!(outcome.report.windows.is_empty());
+    assert!(outcome.report.is_usage_priced());
+    assert_eq!(outcome.report.compact(), API_LABEL);
+    assert!(!outcome.credentials_changed);
+    assert!(client.is_none());
 }
 
 #[test]
@@ -117,6 +160,8 @@ fn golden_quota_compact_row() {
         QuotaWindow {
             label: label.into(),
             remaining_percent: Some(remaining),
+            duration_seconds: None,
+            model_scope: None,
             used: None,
             limit: None,
             resets: resets.map(str::to_owned),
@@ -229,6 +274,8 @@ fn golden_quota_compact_row() {
             QuotaWindow {
                 label: "Week".into(),
                 remaining_percent: Some(94),
+                duration_seconds: None,
+                model_scope: None,
                 used: Some(6),
                 limit: Some(100),
                 resets: Some("12:22 Aug 18".into()),
@@ -237,6 +284,8 @@ fn golden_quota_compact_row() {
             QuotaWindow {
                 label: "5H".into(),
                 remaining_percent: Some(97),
+                duration_seconds: None,
+                model_scope: None,
                 used: Some(3),
                 limit: Some(100),
                 resets: Some("10:22 Aug 13".into()),
@@ -344,10 +393,12 @@ fn codex_quota_request(
     QuotaRefreshRequest {
         profile_id: "codex".into(),
         harness: HarnessKind::Codex,
+        auth_scheme: AuthScheme::NativeLogin,
         source_home: directory.to_path_buf(),
         environment,
         cwd: directory.to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        runtime: crate::quota::QuotaRuntimeConfig::host(),
     }
 }
 
@@ -700,6 +751,7 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
         QuotaRefreshRequest {
             profile_id: "grok".into(),
             harness: HarnessKind::Grok,
+            auth_scheme: AuthScheme::NativeLogin,
             source_home: directory.path().to_path_buf(),
             environment: BTreeMap::from([(
                 "PATH".to_owned(),
@@ -707,6 +759,7 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
             )]),
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
+            runtime: crate::quota::QuotaRuntimeConfig::host(),
         },
         None,
         None,
@@ -763,10 +816,12 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
     let request = QuotaRefreshRequest {
         profile_id: "muse".into(),
         harness: HarnessKind::Muse,
+        auth_scheme: AuthScheme::NativeLogin,
         source_home: directory.path().to_path_buf(),
         environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     let mut manager = QuotaManager::default();
     manager
@@ -838,6 +893,7 @@ fn a_profile_whose_quota_cannot_be_read_says_why_in_the_log_once() {
 }
 
 async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::CapturedLog) {
+    let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
         directory.path().join("auth.json"),
@@ -865,10 +921,12 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
     let request = QuotaRefreshRequest {
         profile_id: "muse".into(),
         harness: HarnessKind::Muse,
+        auth_scheme: AuthScheme::NativeLogin,
         source_home: directory.path().to_path_buf(),
         environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     // Lines logged at exactly info that contain `text`.
     let said = |text: &str| {
@@ -924,6 +982,31 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
     assert!(readable[0].contains("profile_id=muse"), "{readable:#?}");
     assert_eq!(said("could not read the profile's quota").len(), 1);
 
+    // Probe outcomes cross the HTTP reader and real writer lane. Repeated
+    // failures and unchanged readings are retained, rather than deduplicated.
+    let connection = rusqlite::Connection::open_with_flags(
+        crate::database::database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let reports = connection
+        .prepare("SELECT body FROM quota_history WHERE profile_id='muse' ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|body| serde_json::from_str::<ProfileQuota>(&body.unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(reports.len(), 4);
+    for report in &reports[..2] {
+        assert_eq!(report.error.as_deref(), Some(error.as_str()));
+        assert!(report.windows.is_empty());
+    }
+    for report in &reports[2..] {
+        assert!(report.error.is_none());
+        assert_eq!(report.windows[0].remaining_percent, Some(99));
+    }
+    assert_eq!(reports[2].windows, reports[3].windows);
+
     manager.shutdown().await;
     server.abort();
 }
@@ -972,6 +1055,8 @@ fn quota_report(refreshed_at: u64, remaining: Option<u8>) -> ProfileQuota {
             .map(|remaining| QuotaWindow {
                 label: "Week".into(),
                 remaining_percent: Some(remaining),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: None,
@@ -1033,10 +1118,12 @@ async fn expired_claude_credentials_report_login_expired() {
         QuotaRefreshRequest {
             profile_id: "claude2".into(),
             harness: HarnessKind::Claude,
+            auth_scheme: AuthScheme::NativeLogin,
             source_home: directory.path().to_path_buf(),
             environment: BTreeMap::new(),
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
+            runtime: crate::quota::QuotaRuntimeConfig::host(),
         },
         None,
         None,
@@ -1364,6 +1451,7 @@ while IFS= read -r line; do :; done
     let request = QuotaRefreshRequest {
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
+        auth_scheme: AuthScheme::NativeLogin,
         source_home: directory.path().to_path_buf(),
         environment: BTreeMap::from([
             (
@@ -1377,6 +1465,7 @@ while IFS= read -r line; do :; done
         ]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
 
     let mut quotas = QuotaManager {
@@ -1506,6 +1595,7 @@ fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
         "other",
         &zai_profile(home.path(), "https://example.invalid/v1"),
         home.path().to_path_buf(),
+        crate::quota::QuotaRuntimeConfig::host(),
     );
     let identity = request.cache_identity();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1526,7 +1616,8 @@ fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
     assert!(warnings.is_empty(), "no warning expected: {warnings:#?}");
     assert!(
         log.events().iter().any(|(level, text)| {
-            *level == tracing::Level::DEBUG && text.contains("leaving quota reset times")
+            *level == tracing::Level::DEBUG
+                && text.contains("leaving quota history and reset times")
         }),
         "the skipped write is still visible at debug level: {:#?}",
         log.events()
@@ -1542,5 +1633,17 @@ fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
     assert_eq!(
         crate::database::load_quota_cache(&identity).unwrap(),
         Some(outcome.report)
+    );
+    let connection = rusqlite::Connection::open_with_flags(
+        crate::database::database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM quota_history", [], |row| row
+                .get::<_, usize>(0))
+            .unwrap(),
+        1
     );
 }

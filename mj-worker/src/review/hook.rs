@@ -24,8 +24,8 @@ if [ "${MJ_REVIEW_GATE:-}" = "1" ]; then
     esac
     tree=$(git rev-parse --verify "$local_sha^{tree}") || exit 1
     if ! git show-ref --verify --quiet "refs/mj/reviewed/$tree"; then
-      echo "mj: $local_ref (tree ${tree%${tree#???????}}) has not been reviewed." >&2
-      echo "mj: call the mj-agents request_review tool, wait for the verdict message, then push again." >&2
+      echo "mj: $local_ref (tree $tree) has not been reviewed." >&2
+      echo "mj: call the mj-agents request_review tool with path \"$(git rev-parse --show-toplevel)\", wait for the verdict message, then push again." >&2
       exit 1
     fi
   done < "$tmp"
@@ -54,7 +54,11 @@ pub fn install_pre_push_hook(runner: &dyn GitCommandRunner, root: &Path) -> Resu
     )?;
     let directory = match configured.status {
         0 => configured.stdout,
-        1 => checked_git(runner, root, &["rev-parse", "--git-path", "hooks"])?,
+        1 => checked_git(
+            runner,
+            root,
+            &["rev-parse", "--path-format=absolute", "--git-path", "hooks"],
+        )?,
         _ => anyhow::bail!(
             "read core.hooksPath: {}",
             String::from_utf8_lossy(&configured.stderr)
@@ -210,7 +214,7 @@ mod tests {
         let stderr = String::from_utf8_lossy(&rejected.stderr);
         assert!(stderr.contains("mj: HEAD (tree "), "{stderr}");
         assert!(stderr.contains("has not been reviewed."), "{stderr}");
-        assert!(stderr.contains("call the mj-agents request_review tool, wait for the verdict message, then push again."), "{stderr}");
+        assert!(stderr.contains(&format!("call the mj-agents request_review tool with path \"{}\", wait for the verdict message, then push again.", root.display())), "{stderr}");
         reviewed(&root);
         assert_eq!(push(&root, true, &["HEAD:refs/heads/feature"]).status, 0);
         commit(&root, "gate off");

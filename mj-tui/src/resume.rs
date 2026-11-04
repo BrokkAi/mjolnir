@@ -369,7 +369,6 @@ impl WikiSearchState {
 fn resume_dialog(mode: &Mode) -> Option<&ResumeDialog> {
     match mode {
         Mode::ResumeDialog(dialog) => Some(dialog),
-        Mode::Help(overlay) => resume_dialog(&overlay.return_to),
         Mode::Confirm(ConfirmDialog {
             confirmation: Confirmation::DestroyStopped { reopen, .. },
             ..
@@ -381,7 +380,6 @@ fn resume_dialog(mode: &Mode) -> Option<&ResumeDialog> {
 fn resume_dialog_mut(mode: &mut Mode) -> Option<&mut ResumeDialog> {
     match mode {
         Mode::ResumeDialog(dialog) => Some(dialog),
-        Mode::Help(overlay) => resume_dialog_mut(&mut overlay.return_to),
         Mode::Confirm(ConfirmDialog {
             confirmation: Confirmation::DestroyStopped { reopen, .. },
             ..
@@ -475,7 +473,7 @@ impl ResumeDialog {
         }
         self.wiki_search.status().and_then(|status| {
             (status.state == WikiIndexState::VersionMismatch)
-                .then_some("SessionWiki index is at a different version")
+                .then_some("SessionWiki index is from a newer version")
         })
     }
 
@@ -1211,7 +1209,7 @@ impl DashboardState {
                         && dialog.live_search == LiveSearchState::Pending)
                     || dialog.history == HistoryLoad::Loading
             }
-            Mode::Setup(_) | Mode::Help(_) => self.review_settings_discovery_active(),
+            Mode::Setup(_) => self.review_settings_discovery_active(),
             _ => false,
         };
         dialog_animates
@@ -2663,7 +2661,7 @@ fn resume_list_title(
             if status.state == WikiIndexState::Indexing {
                 spans.push(Span::raw(" · index building, more may arrive"));
             } else if status.state == WikiIndexState::VersionMismatch {
-                spans.push(Span::raw(" · incompatible SessionWiki index"));
+                spans.push(Span::raw(" · index from a newer SessionWiki"));
             } else if status.topping_up {
                 spans.push(Span::raw(" · index syncing, more may arrive"));
             }

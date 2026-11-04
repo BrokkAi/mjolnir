@@ -247,7 +247,8 @@ fn sample_state() -> State {
         }),
     };
     State {
-        last_subagent_policy: Default::default(),
+        operator_presence: Default::default(),
+        last_subagent_policies: Default::default(),
         version: STATE_VERSION,
         sessions: [(session.id.clone(), session)].into_iter().collect(),
         subagents: Default::default(),
@@ -313,6 +314,26 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         }
     );
     assert!(capacity.complete);
+    let cpu_overcommit = SessionResourceAllocation::Container {
+        cpus: 8,
+        memory_bytes: 4 << 30,
+    };
+    assert!(!capacity.refuses(&cpu_overcommit, true));
+    assert!(capacity.overcommit(&cpu_overcommit).cpus);
+    assert!(!capacity.overcommit(&cpu_overcommit).memory);
+    let ram_overcommit = SessionResourceAllocation::Container {
+        cpus: 8,
+        memory_bytes: 8 << 30,
+    };
+    assert!(capacity.refuses(&ram_overcommit, true));
+    assert!(!capacity.refuses(&ram_overcommit, false));
+    let warning = capacity
+        .overcommit(&ram_overcommit)
+        .warning(&capacity)
+        .unwrap();
+    assert!(warning.contains("more CPUs"));
+    assert!(warning.contains("more RAM"));
+    assert!(warning.contains("still start"));
 }
 
 #[test]
@@ -330,6 +351,19 @@ fn an_unrecorded_owner_allocation_makes_remaining_capacity_unknown() {
     assert!(!capacity.complete);
     assert_eq!(capacity.remaining.cpus, 0);
     assert_eq!(capacity.remaining.memory_bytes, 0);
+    let allocation = SessionResourceAllocation::Container {
+        cpus: 2,
+        memory_bytes: 4 << 30,
+    };
+    assert!(capacity.refuses(&allocation, true));
+    assert!(!capacity.refuses(&allocation, false));
+    assert!(
+        capacity
+            .overcommit(&allocation)
+            .warning(&capacity)
+            .unwrap()
+            .contains("no recorded size")
+    );
 }
 
 #[test]
@@ -365,6 +399,7 @@ fn capacity_gib_text_never_rounds_a_limit_up() {
 fn sample_config() -> Config {
     Config {
         jev: Default::default(),
+        quota: Default::default(),
         keys: Default::default(),
         advanced: Default::default(),
         notify: Default::default(),
@@ -373,6 +408,7 @@ fn sample_config() -> Config {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        daemon: Default::default(),
         github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),
@@ -380,6 +416,7 @@ fn sample_config() -> Config {
         subagents: Default::default(),
         legacy_startup: (),
         default_targets: Default::default(),
+        disabled_targets: Default::default(),
         machines: BTreeMap::new(),
         profiles: BTreeMap::from([(
             "codex-1".into(),
@@ -391,6 +428,7 @@ fn sample_config() -> Config {
                 environment: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                muse_auto_review: None,
                 codex_profile: None,
             },
         )]),
@@ -484,9 +522,8 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
     state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(
         child.id.clone(),
-        crate::subagent::SubagentRecord {
+        crate::subagent::SubagentMetadata {
             kind: crate::subagent::SubagentKind::Worker,
-            reviewer_launch: None,
             child_session_id: child.id.clone(),
             parent_session_id: parent.id.clone(),
             task_name: "Inspect parser".into(),
@@ -494,7 +531,6 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
             model: None,
             effort: None,
             working_directory: PathBuf::new(),
-            initial_prompt: "Inspect the parser".into(),
             request_key: "request-1".into(),
             created_at: child.created_at.clone(),
             noticed_turn: None,
@@ -530,9 +566,8 @@ fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
     state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(
         child.id.clone(),
-        crate::subagent::SubagentRecord {
+        crate::subagent::SubagentMetadata {
             kind: crate::subagent::SubagentKind::Worker,
-            reviewer_launch: None,
             child_session_id: child.id.clone(),
             parent_session_id: parent.id.clone(),
             task_name: "Inspect parser".into(),
@@ -540,7 +575,6 @@ fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
             model: None,
             effort: None,
             working_directory: PathBuf::new(),
-            initial_prompt: "Inspect the parser".into(),
             request_key: "request-1".into(),
             created_at: child.created_at.clone(),
             noticed_turn: None,
@@ -707,9 +741,8 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
         state.sessions.insert(child.id.clone(), child.clone());
         state.subagents.insert(
             child.id.clone(),
-            crate::subagent::SubagentRecord {
+            crate::subagent::SubagentMetadata {
                 kind: crate::subagent::SubagentKind::Worker,
-                reviewer_launch: None,
                 child_session_id: child.id.clone(),
                 parent_session_id: parent.id.clone(),
                 task_name: "Borrow checkout".into(),
@@ -717,7 +750,6 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
                 model: None,
                 effort: None,
                 working_directory: PathBuf::new(),
-                initial_prompt: "Borrow checkout".into(),
                 request_key: format!("request-{id}"),
                 created_at: child.created_at.clone(),
                 noticed_turn: None,
@@ -1329,9 +1361,8 @@ fn a_stored_subagent_may_launch_outside_the_parent_workspace() {
     state.sessions.insert(child_id.clone(), child);
     state.subagents.insert(
         child_id.clone(),
-        SubagentRecord {
+        SubagentMetadata {
             kind: crate::subagent::SubagentKind::Worker,
-            reviewer_launch: None,
             child_session_id: child_id.clone(),
             parent_session_id: parent_id,
             task_name: "lane".into(),
@@ -1339,7 +1370,6 @@ fn a_stored_subagent_may_launch_outside_the_parent_workspace() {
             model: None,
             effort: None,
             working_directory: PathBuf::new(),
-            initial_prompt: "work in the lane".into(),
             request_key: "request-1".into(),
             created_at: "2026-09-16T00:00:00Z".into(),
             noticed_turn: None,
@@ -1719,6 +1749,8 @@ fn session_and_remembered_policy_read_legacy_selector_and_boolean_json() {
                 subtle: None,
             },
         ),
+        (serde_json::json!({"mode":"native"}), SubagentPolicy::Native),
+        (serde_json::json!({"mode":"none"}), SubagentPolicy::None),
         (
             serde_json::json!({"mode":"single_model", "model":"chosen", "effort":"high"}),
             SubagentPolicy::Mjolnir {
@@ -1751,12 +1783,65 @@ fn session_and_remembered_policy_read_legacy_selector_and_boolean_json() {
             Some(expected.clone())
         );
         let mut state = serde_json::to_value(sample_state()).unwrap();
+        state
+            .as_object_mut()
+            .unwrap()
+            .remove("last_subagent_policies");
         state["last_subagent_policy"] = policy;
         assert_eq!(
             serde_json::from_value::<State>(state)
                 .unwrap()
-                .last_subagent_policy,
+                .last_subagent_policy_for(""),
             expected
         );
     }
+    for policy in [None, Some(serde_json::Value::Null)] {
+        let mut value = serde_json::json!({"version": STATE_VERSION});
+        if let Some(policy) = policy {
+            value["last_subagent_policy"] = policy;
+        }
+        let state: State = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            state.last_subagent_policy_for("profile"),
+            Default::default()
+        );
+    }
+}
+
+#[test]
+fn remembered_subagent_policy_reads_legacy_policy_objects_and_profile_maps() {
+    let old = serde_json::json!({
+        "version": STATE_VERSION,
+        "last_subagent_policy": {
+            "mode": "mjolnir",
+            "straightforward": {"model": "fast", "effort": "low"}
+        }
+    });
+    let old: State = serde_json::from_value(old).unwrap();
+    assert_eq!(
+        old.last_subagent_policy_for("profile-a"),
+        old.last_subagent_policy_for("")
+    );
+    assert!(old.last_subagent_policies[""].uses_mjolnir());
+
+    let mapped = serde_json::json!({
+        "version": STATE_VERSION,
+        "last_subagent_policies": {
+            "mode": {"mode": "none"},
+            "profile-b": {"mode": "native"}
+        }
+    });
+    let mapped: State = serde_json::from_value(mapped).unwrap();
+    assert_eq!(
+        mapped.last_subagent_policy_for("mode"),
+        crate::subagent::SubagentPolicy::None
+    );
+    assert_eq!(
+        mapped.last_subagent_policy_for("profile-b"),
+        crate::subagent::SubagentPolicy::Native
+    );
+    assert_eq!(
+        mapped.last_subagent_policy_for("unknown"),
+        Default::default()
+    );
 }

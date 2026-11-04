@@ -28,7 +28,7 @@
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 
 === existing GiB value opens as whole GB (140x30) ===
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
@@ -60,7 +60,7 @@ Enter open · / searc                                                           
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 editor value: 107
 
 === unit suffix refused (140x30) ===
@@ -93,7 +93,7 @@ editor value: 107
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 stored size after rejection: "100GiB"
 
 === zero refused with a default hint (140x30) ===
@@ -126,7 +126,7 @@ stored size after rejection: "100GiB"
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 stored size after rejection: "100GiB"
 saved machine.local: {"kind":"local","build_cache":{"max_total_size":"12GB"}}
 
@@ -225,7 +225,7 @@ budget after Use default: null
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 
 === scheduler values entered (140x30) ===
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
@@ -257,7 +257,7 @@ Enter open · / searc                                                           
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 saved scheduler: {"cpus":12,"memory":"6GiB"}
 
 === Build cache Tab reaches Back after its controls (140x30) ===
@@ -290,7 +290,7 @@ saved scheduler: {"cpus":12,"memory":"6GiB"}
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 
 === Build cache Tab reaches Save (140x30) ===
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
@@ -322,7 +322,7 @@ Enter open · / searc                                                           
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 Tab-reached Save action: true
 
 === Build cache arrows reach footer (140x30) ===
@@ -355,7 +355,7 @@ Tab-reached Save action: true
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 
 === Up and Enter return from Save to the machine page (140x30) ===
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
@@ -387,7 +387,7 @@ Enter open · / searc                                                           
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 
 === shared storage budget uses GB (140x30) ===
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
@@ -419,7 +419,7 @@ Enter open · / searc                                                           
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 
 === Build cache summary before keyboard open (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -461,7 +461,7 @@ Enter open · / searc                                                           
 │                                                                                                                                                              │
 │                                                                                                                                                              │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 
 === Build cache opened by keyboard (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -503,7 +503,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                                                              │
 │                                                                                                                                                              │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 
 === disabled cache summary after keyboard journey (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -545,7 +545,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                                                              │
 │                                                                                                                                                              │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 summary contains changed state: true
 
 === Build cache summary before mouse open (160x40) ===
@@ -588,7 +588,7 @@ summary contains changed state: true
 │                                                                                                                                                              │
 │                                                                                                                                                              │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 
 === Build cache opened by mouse (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -630,7 +630,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                                                              │
 │                                                                                                                                                              │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 
 === disabled cache summary after mouse journey (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -672,5 +672,5 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                                                              │
 │                                                                                                                                                              │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 summary contains changed state: true

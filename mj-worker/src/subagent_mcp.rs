@@ -43,7 +43,7 @@ static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-const REVIEW_GATE_INSTRUCTIONS: &str = "Before `git push` or `gh pr create`, commit your work and call `request_review`. It answers at once whether a review started; the verdict arrives later as a Mjolnir message. The repository's pre-push hook refuses a push of commits that have not been reviewed clean.";
+const REVIEW_GATE_INSTRUCTIONS: &str = "Commit and call `request_review` before `git push` or `gh pr create`. It replies immediately; the verdict arrives later as a Mjolnir message. Pass `path` when pushing from another worktree. The pre-push gate requires every reviewer to be clean. Retry incomplete reviews. For complete findings you judge wrong or unreasonable, `override_review` records the exact reviewed trees and audits your reason in the transcript.";
 
 /// A child's advice when Mjolnir has not confirmed its report. Calling again
 /// is safe: a report that did arrive is refused as already delivered.
@@ -59,6 +59,9 @@ const UNANSWERED_ADVICE: &str =
 fn unanswered_advice(action: &SubagentToolAction) -> &'static str {
     match action {
         SubagentToolAction::Handback { .. } => HANDBACK_UNANSWERED_ADVICE,
+        SubagentToolAction::Fetch { .. } => {
+            "The fetch is safe to repeat; call fetch again for its result."
+        }
         _ => UNANSWERED_ADVICE,
     }
 }
@@ -107,6 +110,7 @@ impl DaemonContact {
 fn not_picked_up_advice(action: &SubagentToolAction) -> &'static str {
     match action {
         SubagentToolAction::Handback { .. } => HANDBACK_UNANSWERED_ADVICE,
+        SubagentToolAction::Fetch { .. } => "The fetch is safe to repeat; call fetch again later.",
         SubagentToolAction::ListAgents | SubagentToolAction::ListProfiles => {
             "It changes nothing, so call it again later."
         }
@@ -433,7 +437,7 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         .is_some_and(|launch| !launch["reviewer_launch"].is_null());
     static REVIEWER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
         format!(
-            "You are a Mjolnir reviewer child. Call handback once as your last action with the complete rubric JSON. Your report may contain up to {} characters.",
+            "You are a Mjolnir reviewer child. Call handback once as your last action with your plain-text findings, or exactly `No findings.` if there are none. Your report may contain up to {} characters.",
             mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS
         )
     });
@@ -443,7 +447,14 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
             parent_instructions,
             tool_definitions_with_options(harness, options),
         ),
-        SubagentMcpRole::MessageOnly => (MESSAGE_ONLY_INSTRUCTIONS, vec![send_message_tool()]),
+        SubagentMcpRole::MessageOnly => (
+            MESSAGE_ONLY_INSTRUCTIONS,
+            vec![send_message_tool(), fetch_tool()],
+        ),
+        SubagentMcpRole::FetchOnly => (
+            "Use fetch to copy files or list paths from a Mjolnir session into your target.",
+            vec![fetch_tool()],
+        ),
         SubagentMcpRole::Child => {
             let mut tools = child_tool_definitions();
             if let Some(budget) = &report_budget {
@@ -513,6 +524,15 @@ struct ChildArgs {
 struct SendMessageArgs {
     session_id: String,
     message: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FetchArgs {
+    session_id: String,
+    path: PathBuf,
+    #[serde(default)]
+    ls: bool,
 }
 
 #[derive(Deserialize)]
@@ -590,13 +610,23 @@ fn call_with_budget_and_options(
     options: ParentTools,
 ) -> Result<(Value, bool)> {
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
-    let legacy_alias = params.name == "send_input" && role != SubagentMcpRole::Child;
-    let push_review =
-        params.name == "request_review" && role == SubagentMcpRole::Parent && options.review_gate;
+    let legacy_alias = params.name == "send_input"
+        && matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly);
+    let push_review = matches!(params.name.as_str(), "request_review" | "override_review")
+        && role == SubagentMcpRole::Parent
+        && options.review_gate;
     if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias && !push_review {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
     let action = match params.name.as_str() {
+        "fetch" => {
+            let args: FetchArgs = serde_json::from_value(params.arguments)?;
+            SubagentToolAction::Fetch {
+                session_id: args.session_id,
+                path: args.path,
+                ls: args.ls,
+            }
+        }
         "spawn" => {
             if ["files", "context"]
                 .iter()
@@ -630,7 +660,19 @@ fn call_with_budget_and_options(
                 files: Vec::new(),
             }
         }
-        "request_review" => SubagentToolAction::RequestReview {},
+        "request_review" => SubagentToolAction::RequestReview {
+            path: serde_json::from_value::<RequestReviewArgs>(params.arguments)?.path,
+        },
+        "override_review" => {
+            let args: OverrideReviewArgs = serde_json::from_value(params.arguments)?;
+            let reason = args.reason.trim();
+            if reason.is_empty() {
+                bail!("override_review reason cannot be empty");
+            }
+            SubagentToolAction::OverrideReview {
+                reason: reason.to_owned(),
+            }
+        }
         "list_agents" => SubagentToolAction::ListAgents,
         "send_message" => {
             if params.arguments.get("child_session_id").is_some() {
@@ -811,7 +853,7 @@ fn spawn_tool(subtle_subagents: bool) -> Value {
     tool(
         "spawn",
         &format!(
-            "{lead} Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota supporting {selection}. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`."
+            "{lead} Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting {selection}. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`."
         ),
         json!({
             "type":"object",
@@ -825,7 +867,17 @@ fn tool_definitions_with_options(
     _harness: Option<HarnessKind>,
     options: ParentTools,
 ) -> Vec<Value> {
-    let child = json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false});
+    let child = json!({
+        "type":"object",
+        "properties":{
+            "child_session_id":{
+                "type":"string",
+                "description":"Full child session ID or a unique case-insensitive hexadecimal prefix of at least 8 characters."
+            }
+        },
+        "required":["child_session_id"],
+        "additionalProperties":false
+    });
     let mut tools = vec![
         spawn_tool(options.subtle_subagents),
         read_only(tool(
@@ -836,14 +888,28 @@ fn tool_definitions_with_options(
         send_message_tool(),
         tool(
             "close",
-            "Stop one child session and retain its conversation. Closing a child deletes its report directory, so read the files you need first. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
+            "Stop one child session identified by its full ID or a unique hexadecimal prefix of at least 8 characters, and retain its conversation. Closing a child keeps its report directory; only destroying the child or its parent removes it. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished and contains the resolved full child session ID; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
             child,
         ),
+        fetch_tool(),
     ];
     if options.review_gate {
-        tools.push(tool("request_review", "Request review of committed work before pushing. The verdict arrives later as a Mjolnir message.", json!({"type":"object","properties":{},"additionalProperties":false})));
+        tools.push(tool("request_review", "Request review of committed work before pushing. Reviews HEAD of `path`, a worktree of a workspace repository (default: the session working directory). The verdict arrives later as a Mjolnir message.", json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false})));
+        tools.push(tool("override_review", "Override the last complete before-push findings verdict and record the reviewed tree so the push can proceed. Use it only for findings you have judged incorrect or unreasonable; the reason is written into the session transcript. Refused if a review is running, a reviewer failed, or the reviewed tree contents changed.", json!({"type":"object","properties":{"reason":{"type":"string","description":"Why the findings do not need to be addressed."}},"required":["reason"],"additionalProperties":false})));
     }
     tools
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestReviewArgs {
+    path: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OverrideReviewArgs {
+    reason: String,
 }
 
 fn send_message_tool() -> Value {
@@ -862,18 +928,32 @@ fn send_message_tool() -> Value {
     )
 }
 
-/// A child's only tool: its report to the session that started it. It is
-/// read-only: a report changes nothing in the workspace, and reviewer children
-/// run in plan mode, where harnesses refuse or ask before other MCP tools.
+fn fetch_tool() -> Value {
+    read_only(tool(
+        "fetch",
+        "Copy a file or directory from a Mjolnir session's target into your target's temporary directory, like `mj fetch`. Returns the local path, source path, kind and byte count; directories are saved as zip archives. Set ls to true to return a structured listing with sizes and modification times instead. Relative paths resolve in the source session's working directory; absolute paths must lie in its workspace, sub-agent reports or temporary directory. Symlinks cannot escape those boundaries. Files and zip archives are limited to 16 MiB.",
+        json!({"type":"object","properties":{
+            "session_id":{"type":"string","description":"Source session's full ID."},
+            "path":{"type":"string","description":"File or directory on the source session's target."},
+            "ls":{"type":"boolean","description":"List the path instead of copying its content.","default":false}
+        },"required":["session_id","path"],"additionalProperties":false}),
+    ))
+}
+
+/// Children can fetch shared files and hand back their report. Both tools
+/// leave the workspace unchanged, including for reviewers in plan mode.
 fn child_tool_definitions() -> Vec<Value> {
-    vec![read_only(tool(
-        "handback",
-        &format!(
-            "Hand back once, as your last action. Repeats in one turn are refused. {}",
-            mj_core::subagent::HANDBACK_REPORT_RULES
-        ),
-        json!({"type":"object","properties":{"message":{"type":"string","description":"Your report, at most 4,000 characters; details go in files in your report directory."}},"required":["message"],"additionalProperties":false}),
-    ))]
+    vec![
+        read_only(tool(
+            "handback",
+            &format!(
+                "Hand back once, as your last action. Repeats in one turn are refused. {}",
+                mj_core::subagent::HANDBACK_REPORT_RULES
+            ),
+            json!({"type":"object","properties":{"message":{"type":"string","description":"Your report, at most 4,000 characters; details go in files in your report directory."}},"required":["message"],"additionalProperties":false}),
+        )),
+        fetch_tool(),
+    ]
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
@@ -916,7 +996,7 @@ mod tests {
         let spawn = spawn_definition(ParentTools::default());
         assert_eq!(
             spawn["description"],
-            "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`."
+            "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`."
         );
         assert_eq!(
             spawn["inputSchema"]["properties"]["task_type"]["enum"],
@@ -953,13 +1033,13 @@ mod tests {
     }
 
     #[test]
-    fn only_list_agents_is_read_only() {
+    fn observations_are_read_only() {
         let read_only = tool_definitions(None)
             .into_iter()
             .filter(|tool| tool["annotations"]["readOnlyHint"] == true)
             .map(|tool| tool["name"].clone())
             .collect::<Vec<_>>();
-        assert_eq!(read_only, vec![json!("list_agents")]);
+        assert_eq!(read_only, vec![json!("list_agents"), json!("fetch")]);
     }
 
     #[test]
@@ -1024,6 +1104,51 @@ mod tests {
         worker.join().unwrap();
         assert!(!is_error, "{value}");
         assert_eq!(value["child_session_id"], "child");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn override_review_sends_reason_in_durable_action() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("subagents.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: SubagentToolRequest = serde_json::from_str(&line).unwrap();
+            assert_eq!(
+                request.action,
+                SubagentToolAction::OverrideReview {
+                    reason: "finding is unreasonable".into()
+                }
+            );
+            reader
+                .into_inner()
+                .write_all(b"{\"result\":{\"accepted\":true}}\n")
+                .unwrap();
+        });
+        let (value, is_error) = call_with_budget_and_options(
+            &socket,
+            None,
+            SubagentMcpRole::Parent,
+            Some(
+                &json!({"name":"override_review","arguments":{"reason":"finding is unreasonable"}}),
+            ),
+            &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
+            |_| Duration::from_secs(5),
+            ParentTools {
+                review_gate: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        worker.join().unwrap();
+        assert!(!is_error);
+        assert_eq!(value["accepted"], true);
     }
 
     #[cfg(unix)]
@@ -1114,6 +1239,10 @@ mod tests {
                     tools.iter().any(|tool| tool["name"] == "request_review"),
                     expected
                 );
+                assert_eq!(
+                    tools.iter().any(|tool| tool["name"] == "override_review"),
+                    expected
+                );
                 let instructions =
                     replies.iter().find(|r| r["id"] == 1).unwrap()["result"]["instructions"]
                         .as_str()
@@ -1129,6 +1258,23 @@ mod tests {
                             None,
                             role,
                             Some(&json!({"name":"request_review"})),
+                            &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
+                            |_| Duration::from_millis(1),
+                            ParentTools {
+                                review_gate,
+                                ..Default::default()
+                            }
+                        )
+                        .is_err()
+                    );
+                    assert!(
+                        call_with_budget_and_options(
+                            Path::new("unused.sock"),
+                            None,
+                            role,
+                            Some(
+                                &json!({"name":"override_review","arguments":{"reason":"because"}})
+                            ),
                             &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
                             |_| Duration::from_millis(1),
                             ParentTools {
@@ -1168,7 +1314,7 @@ mod tests {
         let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         assert!(output.contains(&mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS.to_string()));
         assert!(!output.contains("4,000"));
-        assert!(output.contains("complete rubric JSON"));
+        assert!(output.contains("plain-text findings"));
     }
 
     struct ContractWriter(Arc<Mutex<Vec<u8>>>);
@@ -1187,11 +1333,11 @@ mod tests {
     fn initialize_and_tool_list_deliver_concise_parent_and_child_contracts() {
         for role in [
             SubagentMcpRole::Parent,
-            SubagentMcpRole::Parent,
+            SubagentMcpRole::FetchOnly,
             SubagentMcpRole::MessageOnly,
             SubagentMcpRole::Child,
         ] {
-            for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Dsh] {
+            for harness in HarnessKind::ALL {
                 let input = format!(
                     "{}\n{}\n",
                     json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
@@ -1238,7 +1384,18 @@ mod tests {
                     );
                     assert!(!description.contains(DELEGATION_ROUTING));
                 }
+                let fetch = tools.iter().find(|t| t["name"] == "fetch").unwrap();
+                assert_eq!(
+                    fetch["inputSchema"]["required"],
+                    json!(["session_id", "path"])
+                );
+                assert_eq!(fetch["annotations"]["readOnlyHint"], true);
                 match role {
+                    SubagentMcpRole::FetchOnly => {
+                        assert!(!instructions.contains(DELEGATION_ROUTING));
+                        assert_eq!(tools.len(), 1);
+                        assert_eq!(tools[0]["name"], "fetch");
+                    }
                     SubagentMcpRole::Child => {
                         assert!(!instructions.contains(DELEGATION_ROUTING));
                         assert!(instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES));
@@ -1247,7 +1404,7 @@ mod tests {
                                 .iter()
                                 .map(|tool| tool["name"].as_str().unwrap())
                                 .collect::<Vec<_>>(),
-                            ["handback"]
+                            ["handback", "fetch"]
                         );
                     }
                     SubagentMcpRole::MessageOnly => {
@@ -1257,7 +1414,7 @@ mod tests {
                                 .iter()
                                 .map(|tool| tool["name"].as_str().unwrap())
                                 .collect::<Vec<_>>(),
-                            ["send_message"]
+                            ["send_message", "fetch"]
                         );
                         let send_message = &tools[0];
                         assert_eq!(
@@ -1735,7 +1892,7 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap_or_default())
             .collect::<Vec<_>>();
-        assert_eq!(names, ["handback"]);
+        assert_eq!(names, ["handback", "fetch"]);
         assert_eq!(
             tools[0]["inputSchema"]["required"],
             json!(["message"]),

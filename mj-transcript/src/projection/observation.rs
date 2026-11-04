@@ -74,11 +74,37 @@ pub(super) fn project_observation(
         RelayObservation::SessionConfigured { config_options } => {
             let mut configuration = current.configuration.clone();
             configuration.values = configuration_values(config_options)?;
+            configuration
+                .values
+                .remove(crate::handoff::HANDOFF_STATE_KEY);
+            if let Some(state) = current
+                .configuration
+                .values
+                .get(crate::handoff::HANDOFF_STATE_KEY)
+            {
+                configuration
+                    .values
+                    .insert(crate::handoff::HANDOFF_STATE_KEY.into(), state.clone());
+            }
             mutation.configuration = Some(configuration);
         }
         RelayObservation::SessionModesConfigured { .. } => {}
         RelayObservation::SessionUpdate { update } => {
             project_session_update(current, index, event, update, mutation)?;
+            if let Some(configuration) = mutation.configuration.as_mut() {
+                configuration
+                    .values
+                    .remove(crate::handoff::HANDOFF_STATE_KEY);
+                if let Some(state) = current
+                    .configuration
+                    .values
+                    .get(crate::handoff::HANDOFF_STATE_KEY)
+                {
+                    configuration
+                        .values
+                        .insert(crate::handoff::HANDOFF_STATE_KEY.into(), state.clone());
+                }
+            }
         }
         RelayObservation::PermissionAutoApproved {
             option_id,
@@ -118,9 +144,25 @@ pub(super) fn project_observation(
         RelayObservation::ElicitationResolved {
             elicitation_id,
             reply,
-            ..
+            action,
         } => {
-            if let Some(reply) = reply {
+            if action == mj_core::elicitation::OPERATOR_AWAY_ACTION {
+                if let Some(request) = current
+                    .pending_elicitations
+                    .iter()
+                    .find(|request| request.id == *elicitation_id)
+                {
+                    push_system(
+                        mutation,
+                        event,
+                        format!(
+                            "Not shown because you were away: {}",
+                            mj_core::state::normalize_session_title(&request.message)
+                                .unwrap_or_default()
+                        ),
+                    );
+                }
+            } else if let Some(reply) = reply {
                 close_streams(index, mutation, event.recorded_at_ms);
                 upsert(
                     mutation,
@@ -154,6 +196,16 @@ pub(super) fn project_observation(
             command,
             created_at_ms,
         } => match command {
+            RelayCommand::InstallPromptContext { text } => {
+                if let Some(state) = crate::handoff::parse_handoff(text) {
+                    let mut configuration = current.configuration.clone();
+                    configuration.values.insert(
+                        crate::handoff::HANDOFF_STATE_KEY.into(),
+                        serde_json::to_value(state)?,
+                    );
+                    mutation.configuration = Some(configuration);
+                }
+            }
             RelayCommand::ClearContext => {
                 mutation.execution = Some(MaterializedExecutionState::Running {
                     started_at_ms: *created_at_ms,
@@ -585,6 +637,10 @@ pub(super) fn project_observation(
             // Typed control failures remain visible to the person.
         }
         RelayObservation::ConfigurationUpdated { key, value } => {
+            if key == crate::handoff::HANDOFF_STATE_KEY {
+                tracing::warn!("harness attempted to change reserved handoff state key");
+                return Ok(());
+            }
             let mut configuration = current.configuration.clone();
             configuration
                 .values
@@ -883,7 +939,13 @@ fn delivered_external_events(
     }
     let lines = events
         .iter()
-        .filter(|event| event.message_text().is_none())
+        .filter(|event| {
+            event.message_text().is_none()
+                && !matches!(
+                    event.body,
+                    mj_core::mailbox::MailboxEventBody::OperatorAway { .. }
+                )
+        })
         .map(|event| {
             let description = mj_core::mailbox::describe_mailbox_event(event);
             // A child report is the parent's only record of the child's
@@ -897,6 +959,9 @@ fn delivered_external_events(
             }
         })
         .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return;
+    }
     close_streams(index, mutation, delivery.recorded_at_ms);
     push_system_with_id(
         mutation,

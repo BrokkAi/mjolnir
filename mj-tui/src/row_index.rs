@@ -9,7 +9,7 @@ use mj_core::snapshot_map::SnapshotMap;
 #[derive(Default)]
 pub(crate) struct RowIndex {
     records: SnapshotMap<String, SessionRecord>,
-    relations: SnapshotMap<String, mj_core::subagent::SubagentRecord>,
+    relations: SnapshotMap<String, mj_core::subagent::SubagentMetadata>,
     pub(crate) live: BTreeSet<String>,
     children: BTreeMap<String, BTreeSet<String>>,
     pub(crate) active_children: BTreeMap<String, BTreeSet<String>>,

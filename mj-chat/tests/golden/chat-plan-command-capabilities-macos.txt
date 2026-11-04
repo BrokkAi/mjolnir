@@ -16,13 +16,13 @@
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic  PLAN MODE ─────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: PlanCommand { original: "/plan", control: SetSessionMode { mode_id: "plan" }, requested_active: true, prompt: None }
 
 === Grok exits plan mode (100x24) ===
@@ -43,13 +43,13 @@ action: PlanCommand { original: "/plan", control: SetSessionMode { mode_id: "pla
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: PlanCommand { original: "/plan", control: SetSessionMode { mode_id: "default" }, requested_active: false, prompt: None }
 
 === explicit plan off (100x24) ===
@@ -70,13 +70,13 @@ action: PlanCommand { original: "/plan", control: SetSessionMode { mode_id: "def
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Plan mode is already off
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
 
 === explicit plan on (100x24) ===
@@ -97,13 +97,13 @@ action: None
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic  PLAN MODE ─────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: PlanCommand { original: "/plan ON", control: SetSessionMode { mode_id: "plan" }, requested_active: true, prompt: None }
 
 === unrecognized plan suffix becomes prompt (100x24) ===
@@ -124,13 +124,13 @@ action: PlanCommand { original: "/plan ON", control: SetSessionMode { mode_id: "
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic  PLAN MODE ─────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: Prompt("sideways")
 
 === advertised mode config (100x24) ===
@@ -151,13 +151,13 @@ action: Prompt("sideways")
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic  PLAN MODE ─────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: PlanCommand { original: "/plan", control: SetConfig { key: "mode", value: "plan" }, requested_active: true, prompt: None }
 
 === Grok trusted mode fallback (100x24) ===
@@ -178,13 +178,13 @@ action: PlanCommand { original: "/plan", control: SetConfig { key: "mode", value
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic  PLAN MODE ─────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: PlanCommand { original: "/plan", control: SetSessionMode { mode_id: "plan" }, requested_active: true, prompt: None }
 
 === Muse advertised plan skill (100x24) ===
@@ -205,13 +205,13 @@ action: PlanCommand { original: "/plan", control: SetSessionMode { mode_id: "pla
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: Prompt("/plan the migration")
 
 === Muse plan mode selector (100x24) ===
@@ -232,13 +232,13 @@ action: Prompt("/plan the migration")
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic  PLAN MODE ─────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: PlanCommand { original: "/plan the migration", control: SetConfig { key: "mode", value: "plan" }, requested_active: true, prompt: Some("the migration") }
 
 === unified plan command wins over skill (100x24) ===
@@ -259,13 +259,13 @@ action: PlanCommand { original: "/plan the migration", control: SetConfig { key:
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic  PLAN MODE ─────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: PlanCommand { original: "/plan the migration", control: SetSessionMode { mode_id: "plan" }, requested_active: true, prompt: Some("the migration") }
 
 === no compatible plan surface (100x24) ===
@@ -286,13 +286,13 @@ action: PlanCommand { original: "/plan the migration", control: SetSessionMode {
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 /plan: This ACP harness does not expose compatible plan/default modes.
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
 
 === Codex collaboration mode preserves permission mode (100x24) ===
@@ -313,13 +313,13 @@ action: None
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic  PLAN MODE ─────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: PlanCommand { original: "/plan inspect the migration", control: SetConfig { key: "collaboration_mode", value: "plan" }, requested_active: true, prompt: Some("inspect the migration") }
 prompt history: ["/plan inspect the migration"]
 
@@ -341,13 +341,13 @@ prompt history: ["/plan inspect the migration"]
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic  PLAN MODE ─────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: PlanCommand { original: "/plan", control: SetConfig { key: "mode", value: "plan" }, requested_active: true, prompt: None }
 
 === Kimi exact mode config (100x24) ===
@@ -368,13 +368,13 @@ action: PlanCommand { original: "/plan", control: SetConfig { key: "mode", value
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic  PLAN MODE ─────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: PlanCommand { original: "/plan", control: SetConfig { key: "mode", value: "plan" }, requested_active: true, prompt: None }
 
 === Grok set mode without catalogue (100x24) ===
@@ -395,13 +395,13 @@ action: PlanCommand { original: "/plan", control: SetConfig { key: "mode", value
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic  PLAN MODE ─────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: PlanCommand { original: "/plan", control: SetSessionMode { mode_id: "plan" }, requested_active: true, prompt: None }
 
 === unsupported plan command /plan design it (100x24) ===
@@ -422,13 +422,13 @@ action: PlanCommand { original: "/plan", control: SetSessionMode { mode_id: "pla
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 /plan: This ACP harness does not expose compatible plan/default modes.
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
 
 === unsupported plan command /implement (100x24) ===
@@ -449,13 +449,13 @@ action: None
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 /implement: This ACP harness does not expose compatible plan/default modes.
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
 
 === implement exits plan and carries instruction (100x24) ===
@@ -476,13 +476,13 @@ action: None
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: PlanCommand { original: "/implement start with the parser", control: SetSessionMode { mode_id: "default" }, requested_active: false, prompt: Some("start with the parser") }
 
 === plan review choice implement (100x24) ===
@@ -503,13 +503,13 @@ action: PlanCommand { original: "/implement start with the parser", control: Set
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic  PLAN MODE ─────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 followup: Some(PlanReviewFollowup { desired_active: false, control: None, prompt: None })
 
 === plan review choice revise (100x24) ===
@@ -530,13 +530,13 @@ followup: Some(PlanReviewFollowup { desired_active: false, control: None, prompt
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic  PLAN MODE ─────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 followup: Some(PlanReviewFollowup { desired_active: true, control: None, prompt: Some("add tests") })
 
 === plan review choice exit (100x24) ===
@@ -557,13 +557,13 @@ followup: Some(PlanReviewFollowup { desired_active: true, control: None, prompt:
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic  PLAN MODE ─────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 followup: Some(PlanReviewFollowup { desired_active: false, control: Some(SetSessionMode { mode_id: "default" }), prompt: None })
 
 === plan waits for idle agent (100x24) ===
@@ -584,11 +584,11 @@ followup: Some(PlanReviewFollowup { desired_active: false, control: Some(SetSess
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 /plan is only available while the agent is idle
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None

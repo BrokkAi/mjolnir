@@ -73,7 +73,10 @@ The second check reads `host.security.rootless` and `host.idMappings.uidmap`.
 It works through a remote client, so the same check covers local rootless
 Podman on Linux, a rootless `podman machine` on macOS, and a Podman host
 reached over SSH. On Linux, a `serviceIsRemote` engine is rejected because the
-local target would otherwise record containers on another host.
+target would otherwise record containers on another host. A Mac, local or
+reached over SSH, always reports a remote service for its Podman machine, which
+is that Mac's own engine, so it is accepted there; the SSH preflight learns the
+host is a Mac from `uname -s`.
 
 For a session, Mjolnir starts a detached, labeled container from the configured
 image, uses `podman exec` for the worker, Git, harness, and clone commands, and
@@ -189,6 +192,12 @@ then uses it as a Git object reference, avoiding repeated object downloads
 while preserving the image's checkout behavior. Git object files are
 immutable, so local snapshots can share them with hardlinks; filesystem
 reflink or ZFS permissions are not required.
+
+Concurrent launches share an overlapping mirror refresh. Each launch pins its
+own local snapshot before releasing the mirror lock, then builds any
+history-limited bundle and sets snapshot permissions independently. A slow
+bundle does not block other launches, and cache eviction cannot remove objects
+from a snapshot already being prepared.
 
 The cache is opportunistic. Missing host Git, authentication trouble, or a
 cache preparation failure produces a launch notice and falls back to the

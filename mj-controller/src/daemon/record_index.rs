@@ -16,6 +16,7 @@ pub(super) struct RecordIndexes {
     pub(super) targets: Groups,
     pub(super) bundles: Groups,
     pub(super) children: Groups,
+    pub(super) report_parents: Groups,
 }
 
 impl RecordIndexes {
@@ -25,6 +26,12 @@ impl RecordIndexes {
             indexes.record_changed(id, None, Some(record));
         }
         for (id, relation) in &state.subagents {
+            change_group(
+                &mut indexes.report_parents,
+                id,
+                None,
+                report_parent(state, id),
+            );
             change_group(
                 &mut indexes.children,
                 id,
@@ -38,8 +45,20 @@ impl RecordIndexes {
     pub(super) fn apply(&mut self, before: &State, after: &State) {
         for (id, record) in before.sessions.changes(&after.sessions) {
             self.record_changed(id, before.sessions.get(id), record);
+            change_group(
+                &mut self.report_parents,
+                id,
+                report_parent(before, id),
+                report_parent(after, id),
+            );
         }
         for (id, relation) in before.subagents.changes(&after.subagents) {
+            change_group(
+                &mut self.report_parents,
+                id,
+                report_parent(before, id),
+                report_parent(after, id),
+            );
             change_group(
                 &mut self.children,
                 id,
@@ -101,6 +120,19 @@ impl RecordIndexes {
             after.map(|record| record.bundle_id.as_str()),
         );
     }
+}
+
+/// Parent reconciliation cannot produce another report for a cleanly closed
+/// child. Keep failed resumes eligible and restore membership on resume.
+fn report_parent<'a>(state: &'a State, id: &str) -> Option<&'a str> {
+    let record = state.sessions.get(id)?;
+    if record.is_cleanly_stopped() {
+        return None;
+    }
+    state
+        .subagents
+        .get(id)
+        .map(|relation| relation.parent_session_id.as_str())
 }
 
 fn change_member(members: &mut Members, id: &str, before: bool, after: bool) {

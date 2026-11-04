@@ -57,17 +57,19 @@ impl RuntimeState {
     pub async fn reload_controller(&self) -> Result<()> {
         // Serialize installs so an earlier phone publication cannot overwrite
         // a later completed lifecycle with the controller snapshot it loaded.
-        let _mutation = self.config_mutation.lock().await;
+        let mut inactivity = self.config_mutation.lock().await;
         if self.committed.is_some() {
             let config = tokio::task::spawn_blocking(Config::load)
                 .await
                 .context("daemon configuration reader panicked")??;
+            self.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
             self.owner().install_config(config);
         } else {
             let controller_loader = self.controller_loader;
             let controller = tokio::task::spawn_blocking(controller_loader)
                 .await
                 .context("daemon controller loader panicked")??;
+            self.configure_inactivity(&mut inactivity, controller.config.advanced.auto_afk_minutes);
             self.owner().install_controller(controller);
         }
         self.publish_revision();
@@ -115,32 +117,82 @@ impl RuntimeState {
         session_id: &str,
         detail: String,
         observed_updated_at: String,
-    ) -> Result<()> {
-        let changed = blocking({
-            let session_id = session_id.to_owned();
-            let detail = detail.clone();
-            move || {
-                crate::database::mark_session_target_missing_if_current(
-                    &session_id,
-                    &detail,
-                    &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    &observed_updated_at,
-                )
+    ) {
+        let mut failure_reported = false;
+        let (changed, committed_at) = loop {
+            // This timestamp is the optimistic revision of this exact write.
+            let updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+            let result = blocking({
+                let session_id = session_id.to_owned();
+                let detail = detail.clone();
+                let observed_updated_at = observed_updated_at.clone();
+                let updated_at = updated_at.clone();
+                move || {
+                    crate::database::mark_session_target_missing_if_current(
+                        &session_id,
+                        &detail,
+                        &updated_at,
+                        &observed_updated_at,
+                    )
+                }
+            })
+            .await;
+            match result {
+                Ok(changed) => break (changed, updated_at),
+                Err(error) => {
+                    self.report_missing_target_retry(session_id, &error, &mut failure_reported);
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
             }
-        })
-        .await?;
-        if changed.is_some() {
-            self.reload_controller().await?;
+        };
+        // Keep the committed outcome through reload retries. Rewriting would
+        // now return None and lose the one-time notice or Lost cleanup.
+        loop {
+            match self.reload_controller().await {
+                Ok(()) => break,
+                Err(error) => {
+                    self.report_missing_target_retry(session_id, &error, &mut failure_reported);
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+            }
+        }
+        let still_current = {
+            let owner = self.owner();
+            owner
+                .controller()
+                .state
+                .sessions
+                .get(session_id)
+                .is_some_and(|session| {
+                    Some(session.state) == changed && session.updated_at == committed_at
+                })
+        };
+        if let Some(state) = changed.filter(|_| still_current) {
             // A lost session has no checkpoint and no target, so its record
             // offers nothing but Destroy. Report it once and discard it
             // instead of leaving a tombstone behind.
-            if changed == Some(SessionState::Lost) {
+            if state == SessionState::Lost {
                 self.discard_lost_session(session_id.to_owned()).await;
             } else {
                 self.push_notice(session_id, detail);
             }
         }
-        Ok(())
+    }
+
+    fn report_missing_target_retry(
+        &self,
+        session_id: &str,
+        error: &anyhow::Error,
+        reported: &mut bool,
+    ) {
+        tracing::warn!(%session_id, %error, "could not persist missing worker target; retrying");
+        if !*reported {
+            self.push_notice(
+                session_id,
+                format!("Could not record missing session target: {error:#}; retrying"),
+            );
+            *reported = true;
+        }
     }
 
     /// One pass of the harness readiness wait: which live sessions have run
@@ -258,7 +310,7 @@ impl RuntimeState {
     }
 
     pub(super) async fn publish_session(
-        &self,
+        self: &Arc<Self>,
         session_id: String,
         view: ManagedSessionView,
     ) -> Result<()> {
@@ -270,7 +322,7 @@ impl RuntimeState {
             has_snapshot,
             "daemon received a session view"
         );
-        {
+        let recovered_failure = {
             let mut owner = self.owner();
             let controller = owner.controller();
             if !controller.state.sessions.contains_key(&session_id)
@@ -278,6 +330,21 @@ impl RuntimeState {
             {
                 return Ok(());
             }
+            // All prompt sources and harness-initiated turns reach this
+            // projection publication. Compare start positions with the last
+            // observed frontier, not activity: a running turn predating the
+            // failure cannot retire it, nor can its completion. The window
+            // retains starts even when a whole turn coalesces into one update.
+            // The first attachment establishes a baseline; replay is not a
+            // newly observed turn start.
+            let recovered_failure = view.snapshot.as_ref().and_then(|snapshot| {
+                let previous = owner.sessions.get(&session_id)?;
+                previous.operational.as_ref()?;
+                let start = snapshot.window.latest_turn_start_position?;
+                let record = controller.state.sessions.get(&session_id)?;
+                let error = record.public_error()?;
+                (start > previous.projection_ordinal).then(|| error.to_owned())
+            });
             if view.connected
                 && let Some(snapshot) = view.snapshot.as_ref()
                 && let Some(session) = controller.state.sessions.get(&session_id)
@@ -332,7 +399,26 @@ impl RuntimeState {
             } else {
                 owner.background_policies.remove(&session_id);
             }
-            owner.publish_view(session_id, view);
+            owner.publish_view(session_id.clone(), view);
+            recovered_failure
+        };
+        if let Some(recorded_error) = recovered_failure {
+            let state = self.clone();
+            match crate::upgrade::activity("lifecycle failure clear") {
+                Ok(upgrade_task) => {
+                    tokio::spawn(async move {
+                        let _upgrade_task = upgrade_task;
+                        state
+                            .clear_recorded_lifecycle_failure(&session_id, &recorded_error)
+                            .await;
+                    });
+                }
+                Err(error) => tracing::warn!(
+                    %session_id,
+                    %error,
+                    "could not admit lifecycle failure clear"
+                ),
+            }
         }
         reach_test_hook("relay_projection_before_revision_publication").await?;
         self.publish_revision();
@@ -350,4 +436,75 @@ fn record_age(updated_at: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Du
     now.signed_duration_since(written.with_timezone(&chrono::Utc))
         .to_std()
         .ok()
+}
+
+impl RuntimeState {
+    /// Persist before publishing; the mutex orders concurrent operator toggles.
+    pub async fn set_operator_away(&self, away: bool) -> Result<()> {
+        let mut inactivity = self.config_mutation.lock().await;
+        let ids = self.persist_operator_away(away).await?;
+        inactivity.reset();
+        self.inactivity_changed.notify_one();
+        drop(inactivity);
+        self.deliver_operator_away(ids).await;
+        Ok(())
+    }
+
+    // Caller holds the inactivity/config coordinator through commit.
+    pub(super) async fn persist_operator_away(&self, away: bool) -> Result<Vec<String>> {
+        let changed = tokio::task::spawn_blocking(move || crate::database::set_operator_away(away))
+            .await
+            .context("operator away database writer panicked")??;
+        if !changed {
+            return Ok(Vec::new());
+        }
+        // The committed owner is refreshed on access; bootstrap tests have no
+        // committed feed and install the freshly loaded controller instead.
+        if self.committed.is_none() {
+            let load = self.controller_loader;
+            let controller = tokio::task::spawn_blocking(load).await??;
+            self.owner().install_controller(controller);
+        }
+        self.publish_revision();
+        let ids = self
+            .owner()
+            .sessions
+            .iter()
+            .filter(|(_, view)| {
+                view.connected
+                    && view
+                        .operational
+                        .as_ref()
+                        .and_then(|state| state.relay_protocol_version)
+                        .is_some_and(|version| {
+                            version >= mj_core::relay::RELAY_OPERATOR_AWAY_PROTOCOL
+                        })
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        Ok(ids)
+    }
+
+    pub(super) async fn deliver_operator_away(&self, ids: Vec<String>) {
+        let mut deliveries = tokio::task::JoinSet::new();
+        for id in ids {
+            let manager = self.session_manager.clone();
+            deliveries.spawn(async move {
+                let delivered = tokio::time::timeout(Duration::from_secs(3), async {
+                    if let Some(handle) = manager.find_session(id.clone()).await? {
+                        handle.sync_now().await?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }).await;
+                if !matches!(delivered, Ok(Ok(()))) {
+                    tracing::warn!(session_id=%id, result=?delivered, "could not synchronize operator away setting; reconnect will retry");
+                }
+            });
+        }
+        while let Some(result) = deliveries.join_next().await {
+            if let Err(error) = result {
+                tracing::warn!(%error, "operator away delivery task failed");
+            }
+        }
+    }
 }

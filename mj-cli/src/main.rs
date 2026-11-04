@@ -17,6 +17,7 @@ mod go;
 mod hints;
 mod import;
 mod logging;
+mod node;
 mod pollers;
 mod session_presentation;
 mod simple;
@@ -101,6 +102,9 @@ enum Command {
     /// Internal persistent controller process.
     #[command(hide = true)]
     DaemonRun,
+    /// Internal process that runs the daemon's work on this computer.
+    #[command(hide = true)]
+    Node,
     /// Serve the Agent Client Protocol on standard input and output, running
     /// each session it creates through this daemon.
     Acp(acp::AcpArgs),
@@ -269,12 +273,38 @@ struct DaemonArgs {
 
 #[derive(Debug, Subcommand)]
 enum DaemonCommand {
+    /// Set or show whether the operator is away.
+    Afk {
+        #[command(subcommand)]
+        command: AfkCommand,
+    },
     /// Show daemon PID, version, start time, and client count.
     Status,
-    /// Gracefully stop the daemon. Detached workers keep running.
-    Stop,
+    /// Gracefully stop the daemon. Detached workers keep running unless
+    /// `--suspend-sessions` suspends them first.
+    Stop(DaemonStopArgs),
     /// Gracefully replace the daemon with this Mjolnir build.
     Restart,
+}
+
+#[derive(Debug, Subcommand)]
+enum AfkCommand {
+    On,
+    Off,
+    Status,
+}
+
+#[derive(Debug, Args)]
+struct DaemonStopArgs {
+    /// Suspend every active session first, saving a recovery copy of each,
+    /// then stop the daemon. A session that does not suspend keeps the
+    /// daemon running and is named.
+    #[arg(long)]
+    suspend_sessions: bool,
+    /// Confirm suspending sessions whose saved Git work is not verified as
+    /// pushed.
+    #[arg(long, requires = "suspend_sessions")]
+    acknowledge_unpublished_work: bool,
 }
 
 #[derive(Debug, Args)]
@@ -480,6 +510,14 @@ fn main() -> Result<()> {
     // child inherits it. This also covers `daemon-run`, which is this same
     // binary, so a per-instance daemon validates its own environment on boot.
     mj_core::config::apply_instance_flag(cli.instance.as_deref())?;
+    if matches!(cli.command, Some(Command::DaemonRun)) {
+        // Set this before starting threads: the launcher's session checkout
+        // can be removed while the daemon is still running.
+        let home =
+            mj_core::path_input::user_home().context("locate the daemon's home directory")?;
+        std::env::set_current_dir(&home)
+            .with_context(|| format!("set daemon working directory to {}", home.display()))?;
+    }
     let log = Some(logging::ControllerLog::start(
         command_name(cli.command.as_ref()),
         process_kind(cli.command.as_ref()),
@@ -529,13 +567,13 @@ fn run(cli: Cli) -> Result<()> {
         &result,
         Ok(DashboardExit::Detached | DashboardExit::Interrupted | DashboardExit::Restart { .. })
     ) {
+        let detached = matches!(result, Ok(DashboardExit::Detached))
+            .then(|| runtime.block_on(detach_notice()));
         // A dashboard has already drained durable mutations and restored its
         // terminal. Do not let disposable blocking reads delay process exit.
         shutdown_dashboard_runtime(runtime);
-        if matches!(result, Ok(DashboardExit::Detached)) {
-            println!(
-                "Active sessions will continue working; Mjolnir will reattach to them on your next invocation."
-            );
+        if let Some(notice) = detached {
+            println!("{notice}");
         }
     } else {
         mj_core::runtime::shutdown(
@@ -548,6 +586,214 @@ fn run(cli: Cli) -> Result<()> {
         DashboardExit::Restart { target, resume } => resume.restart(&target),
         _ => Ok(()),
     }
+}
+
+/// How long a detaching terminal waits to count the daemon's sessions before
+/// it leaves without the count.
+const DETACH_COUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What a detaching terminal says it leaves behind: the daemon, how many
+/// sessions it is still running, and the command that stops them all.
+async fn detach_notice() -> String {
+    let count = tokio::time::timeout(DETACH_COUNT_TIMEOUT, active_session_count())
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("no answer within {DETACH_COUNT_TIMEOUT:?}")));
+    let stop_all = mj_command("daemon stop --suspend-sessions");
+    match count {
+        Ok(0) => format!(
+            "The Mjolnir daemon is still running with no active sessions. \
+             `{}` stops it.",
+            mj_command("daemon stop")
+        ),
+        Ok(count) => format!(
+            "The Mjolnir daemon is still running, and {count} active session{} keep{} working; \
+             Mjolnir reattaches to them on your next invocation.\n\
+             `{stop_all}` suspends every session and stops the daemon.",
+            if count == 1 { "" } else { "s" },
+            if count == 1 { "s" } else { "" },
+        ),
+        Err(error) if daemon::daemon_not_running(&error).is_some() => format!(
+            "The Mjolnir daemon is not running. Sessions whose workers are still running \
+             keep working; `{stop_all}` suspends them."
+        ),
+        // Whether a daemon is running is not known here: it may be busy, or
+        // may have left its endpoint behind when it exited.
+        Err(error) => {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "could not count active sessions on detach"
+            );
+            format!(
+                "Active sessions keep working; Mjolnir reattaches to them on your next invocation.\n\
+                 `{stop_all}` suspends every session and stops the daemon."
+            )
+        }
+    }
+}
+
+/// An `mj` command line for this instance, for a message to suggest.
+fn mj_command(arguments: &str) -> String {
+    match mj_core::config::instance_name() {
+        Some(instance) => format!("mj --instance {instance} {arguments}"),
+        None => format!("mj {arguments}"),
+    }
+}
+
+/// A session as a stop or detach message names it.
+struct ListedSession {
+    title: String,
+    lifecycle: mj_controller::server::ViewerLifecycleCategory,
+}
+
+/// Every session that suspending stands for itself, in every workspace,
+/// read from the runtime feed the dashboard itself follows: each session but
+/// a sub-agent whose parent is active, since suspending the parent stops it.
+/// A sub-agent left behind by a parent that is not is its own root, as a
+/// workspace close counts it. The socket is used rather than the web API so
+/// this works with the web viewer disabled.
+async fn session_roots(
+    client: &mut daemon::DaemonClient,
+) -> Result<BTreeMap<String, ListedSession>> {
+    use mj_controller::server::ViewerLifecycleCategory;
+    let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } =
+        client.runtime_changes(None, false).await?
+    else {
+        bail!("the daemon answered a request for its sessions without a snapshot");
+    };
+    let active = |id: &str| {
+        projection
+            .records
+            .get(id)
+            .is_some_and(|record| ViewerLifecycleCategory::of(record.state).is_dashboard_visible())
+    };
+    Ok(projection
+        .records
+        .values()
+        .filter(|record| {
+            !projection
+                .subagents
+                .get(&record.id)
+                .is_some_and(|child| active(&child.parent_session_id))
+        })
+        .map(|record| {
+            (
+                record.id.clone(),
+                ListedSession {
+                    title: record.listed_title().to_owned(),
+                    lifecycle: ViewerLifecycleCategory::of(record.state),
+                },
+            )
+        })
+        .collect())
+}
+
+/// The roots the daemon still holds on its dashboard: the same lifecycle
+/// category the web API and the dashboard call active.
+async fn active_sessions(
+    client: &mut daemon::DaemonClient,
+) -> Result<BTreeMap<String, ListedSession>> {
+    let mut sessions = session_roots(client).await?;
+    sessions.retain(|_, session| session.lifecycle.is_dashboard_visible());
+    Ok(sessions)
+}
+
+/// How many sessions the running daemon is still running. It never starts a
+/// daemon.
+async fn active_session_count() -> Result<usize> {
+    Ok(active_sessions(&mut daemon::connect_existing().await?)
+        .await?
+        .len())
+}
+
+/// Wait for a session that is already suspending, or being destroyed, to
+/// leave the dashboard, and say how it ended. The daemon owns that operation
+/// and decides when it ends; this only reads its outcome.
+async fn await_stopping_session(session_id: &str) -> Result<&'static str> {
+    use mj_controller::server::ViewerLifecycleCategory;
+    let mut client = daemon::connect_existing().await?;
+    loop {
+        let lifecycle = session_roots(&mut client)
+            .await?
+            .remove(session_id)
+            .map(|session| session.lifecycle);
+        match lifecycle {
+            Some(lifecycle) if lifecycle.is_dashboard_visible() => {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Some(ViewerLifecycleCategory::Suspended) => return Ok("Suspended"),
+            // Only a destroy removes a session's record.
+            None => return Ok("Destroyed"),
+            Some(_) => bail!(
+                "it failed to stop; `{}` says why",
+                mj_command(&format!("sessions --session {session_id}"))
+            ),
+        }
+    }
+}
+
+/// Suspend every active session, together, and return once each one has
+/// stopped, as `mj daemon stop --suspend-sessions` does before it stops the
+/// daemon. Suspending a parent stops its sub-agents. A session already
+/// suspending or being destroyed is waited for, not suspended again. Fails,
+/// naming each session, when any of them did not stop; those that did stay
+/// stopped, so running the command again picks up only what is left. The
+/// sessions are those active when it is asked: one another client starts
+/// meanwhile is not among them. Returns how many sessions it stopped.
+async fn suspend_all_sessions(acknowledge_unpublished_work: bool) -> Result<usize> {
+    // Workers outlive a stopped daemon, so this starts one when none is
+    // running: only a daemon can suspend them.
+    let sessions = active_sessions(&mut daemon::connect_or_start().await?).await?;
+    let count = sessions.len();
+    if count == 0 {
+        return Ok(0);
+    }
+    println!(
+        "Suspending {count} active session{}…",
+        if count == 1 { "" } else { "s" }
+    );
+    let mut jobs = tokio::task::JoinSet::new();
+    for (id, session) in sessions {
+        let name = format!("{id} ({})", session.title);
+        // A suspension answers when it has ended, which takes as long as its
+        // recovery copy, so each one has its own connection.
+        jobs.spawn(async move {
+            let result = if session.lifecycle
+                == mj_controller::server::ViewerLifecycleCategory::Suspending
+            {
+                await_stopping_session(&id).await
+            } else {
+                async {
+                    daemon::connect_existing()
+                        .await?
+                        .suspend_session_with_ack(id, acknowledge_unpublished_work)
+                        .await
+                }
+                .await
+                .map(|()| "Suspended")
+            };
+            (name, result)
+        });
+    }
+    let mut failures = Vec::new();
+    while let Some(joined) = jobs.join_next().await {
+        match joined {
+            Ok((name, Ok(outcome))) => println!("{outcome} {name}."),
+            Ok((name, Err(error))) => failures.push(format!(
+                "{name}: {:#}",
+                api_commands::name_suspend_flags(error)
+            )),
+            Err(error) => failures.push(format!("a suspension task failed: {error}")),
+        }
+    }
+    if failures.is_empty() {
+        return Ok(count);
+    }
+    bail!(
+        "the Mjolnir daemon was left running; {} session{} did not stop:\n  {}",
+        failures.len(),
+        if failures.len() == 1 { "" } else { "s" },
+        failures.join("\n  ")
+    )
 }
 
 fn install_panic_logging() {
@@ -566,7 +812,7 @@ fn install_panic_logging() {
 /// short CLI invocations never push a long-running process's log out of it.
 fn process_kind(command: Option<&Command>) -> logging::ProcessKind {
     match command {
-        Some(Command::DaemonRun) => logging::ProcessKind::Daemon,
+        Some(Command::DaemonRun) | Some(Command::Node) => logging::ProcessKind::Daemon,
         None
         | Some(Command::Go(_))
         | Some(Command::Simple(_))
@@ -586,6 +832,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::DesktopBootstrap) => "desktop-bootstrap",
         Some(Command::Daemon(_)) => "daemon",
         Some(Command::DaemonRun) => "daemon-run",
+        Some(Command::Node) => "node",
         Some(Command::Acp(_)) => "acp",
         Some(Command::Doctor(_)) => "doctor",
         Some(Command::Setup(_)) => "setup",
@@ -757,6 +1004,7 @@ async fn run_command(
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
             .map(|()| DashboardExit::Normal),
+        Some(Command::Node) => node::run_node().await.map(|()| DashboardExit::Normal),
         Some(Command::Acp(args)) => {
             let Some(workspace) = args.workspace.or(requested_workspace) else {
                 return Err(workspace_required("mj acp").await);
@@ -1111,9 +1359,18 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         queue,
         acknowledge_interruption: true,
     };
+    let mut warnings = LaunchWarnings::new().await;
+    let mut notice_poll = Box::pin(async {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            warnings.report(&args.session).await;
+        }
+    });
     let mut operation = Box::pin(daemon.move_session(request));
     let outcome = tokio::select! {
         result = &mut operation => result?,
+        _ = &mut notice_poll => bail!("launch notice polling stopped unexpectedly"),
         signal = tokio::signal::ctrl_c() => {
             signal.context("listen for Ctrl-C while moving session")?;
             // Dropping the request future only detaches this client. Ask the
@@ -1147,6 +1404,8 @@ async fn move_session(args: MoveArgs) -> Result<()> {
             return Err(error);
         }
     };
+    drop(notice_poll);
+    warnings.report(&args.session).await;
     if args.json {
         print_move_json(&outcome)?;
     } else {
@@ -1188,6 +1447,87 @@ fn queued_commands_need_choice(pending: usize) -> String {
         if pending == 1 { "" } else { "s" },
         if pending == 1 { "requires" } else { "require" }
     )
+}
+
+/// Reads daemon-produced launch notices without changing the daemon protocol.
+struct LaunchWarnings {
+    client: Option<daemon::DaemonClient>,
+    cursor: Option<mj_client::runtime_feed::RuntimeCursor>,
+    last_notice: u64,
+}
+
+impl LaunchWarnings {
+    async fn new() -> Self {
+        match Self::connect().await {
+            Ok(warnings) => warnings,
+            Err(error) => {
+                eprintln!("Could not read launch notices: {error:#}");
+                Self {
+                    client: None,
+                    cursor: None,
+                    last_notice: 0,
+                }
+            }
+        }
+    }
+
+    async fn connect() -> Result<Self> {
+        let mut client = daemon::connect_or_start().await?;
+        let mj_client::runtime_feed::RuntimeFrame::Snapshot { cursor, projection } =
+            client.runtime_changes(None, false).await?
+        else {
+            bail!("the daemon did not return a runtime snapshot");
+        };
+        Ok(Self {
+            client: Some(client),
+            cursor: Some(cursor),
+            last_notice: projection
+                .metadata
+                .notices
+                .iter()
+                .map(|notice| notice.id)
+                .max()
+                .unwrap_or(0),
+        })
+    }
+
+    async fn report(&mut self, session_id: &str) {
+        if let Err(error) = self.read(session_id).await {
+            eprintln!("Could not read launch notices: {error:#}");
+        }
+    }
+
+    async fn read(&mut self, session_id: &str) -> Result<()> {
+        use mj_client::runtime_feed::RuntimeFrame;
+        let Some(client) = self.client.as_mut() else {
+            return Ok(());
+        };
+        let metadata = match client.runtime_changes(self.cursor.clone(), false).await? {
+            RuntimeFrame::Snapshot { cursor, projection } => {
+                self.cursor = Some(cursor);
+                Some(projection.metadata)
+            }
+            RuntimeFrame::Delta {
+                cursor, changes, ..
+            } => {
+                self.cursor = Some(cursor);
+                changes.metadata
+            }
+            RuntimeFrame::ResetRequired => {
+                self.cursor = None;
+                return Ok(());
+            }
+        };
+        if let Some(metadata) = metadata {
+            for notice in metadata.notices {
+                if notice.id > self.last_notice && notice.session_id == session_id {
+                    eprintln!("{}", notice.text);
+                }
+                self.last_notice = self.last_notice.max(notice.id);
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn prompt_queue_choice(pending: usize) -> Result<ResumeQueueDisposition> {
@@ -1448,13 +1788,10 @@ async fn run_workspace_dashboard(
 
     // Attach only once the dashboard is certain to run, so a startup that
     // fails or is cancelled never leaves an attachment behind.
-    daemon.attach(client_id.clone(), std::process::id()).await?;
+    daemon.attach(client_id.clone()).await?;
     let attachment_cancellation = tokio_util::sync::CancellationToken::new();
-    let attachment = daemon::maintain_attachment(
-        client_id.clone(),
-        std::process::id(),
-        attachment_cancellation.clone(),
-    );
+    let attachment =
+        daemon::maintain_attachment(client_id.clone(), attachment_cancellation.clone());
     let result = match loaded {
         Some(loaded) => {
             let screen = match screen {
@@ -1556,13 +1893,12 @@ async fn start_dashboard(
             .into_iter()
             .map(|listing| listing.workspace)
             .collect();
-        Some(
-            tokio::task::spawn_blocking(move || {
-                dashboard::LoadedDashboard::load(&selected, &client_id, workspaces)
-            })
-            .await
-            .context("load dashboard state task failed")??,
-        )
+        let startup = daemon
+            .dashboard_startup(client_id.clone(), selected.clone())
+            .await?;
+        Some(dashboard::LoadedDashboard::from_daemon(
+            &selected, &client_id, workspaces, startup,
+        ))
     } else {
         None
     };
@@ -1616,9 +1952,10 @@ pub(crate) async fn workspace_required(command: &str) -> anyhow::Error {
     anyhow::anyhow!(workspace_required_message(command, workspaces.as_deref()))
 }
 
-/// The workspaces as a running daemon lists them or, when no daemon runs, as
-/// the store holds them. Never starts a daemon. `None` when no list could be
-/// read.
+/// The workspaces as a running daemon lists them or, when none runs and the
+/// daemon's store lives on this computer, as that store holds them. Never
+/// starts a daemon. `None` when no list could be read, which includes a store
+/// in a daemon container's volume.
 async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
     match daemon::connect_existing().await {
         Ok(mut daemon) => daemon
@@ -1635,7 +1972,7 @@ async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::
             })
             .ok(),
         Err(error) if daemon::daemon_not_running(&error).is_some() => {
-            tokio::task::spawn_blocking(stored_workspaces)
+            tokio::task::spawn_blocking(stored_workspaces_on_this_computer)
                 .await
                 .ok()
                 .flatten()
@@ -1645,6 +1982,27 @@ async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::
             None
         }
     }
+}
+
+/// The workspaces in a host daemon's store, read while no daemon runs. Only
+/// a host placement has its store here; a container's is in its volume. A
+/// store that does not exist yet has none; one that cannot be read answers
+/// `None`.
+fn stored_workspaces_on_this_computer() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
+    let placement = mj_core::config::Config::load_from(&mj_core::config::config_path())
+        .map(|config| config.daemon.runtime)
+        .unwrap_or_default();
+    if placement.engine().is_some() {
+        return None;
+    }
+    if !mj_controller::database::database_path().exists() {
+        return Some(Vec::new());
+    }
+    mj_controller::database::list_workspaces()
+        .map_err(|error| {
+            tracing::warn!(%error, "could not read the workspaces from the store");
+        })
+        .ok()
 }
 
 /// Refuse a `--workspace` name that no workspace carries, before anything
@@ -1664,19 +2022,6 @@ pub(crate) async fn refuse_unknown_workspace(name: &str) -> Result<()> {
         return Ok(());
     }
     Err(unknown_workspace(name, &workspaces))
-}
-
-/// The workspaces in the store, read without a daemon. A store that does not
-/// exist yet has none; one that cannot be read answers `None`.
-fn stored_workspaces() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
-    if !mj_controller::database::database_path().exists() {
-        return Some(Vec::new());
-    }
-    mj_controller::database::list_workspaces()
-        .map_err(|error| {
-            tracing::warn!(%error, "could not read the workspaces from the store");
-        })
-        .ok()
 }
 
 fn workspace_required_message(command: &str, workspaces: Option<&[(String, u64)]>) -> String {
@@ -1778,6 +2123,33 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
 
 async fn daemon_command(args: DaemonArgs) -> Result<()> {
     match args.command {
+        DaemonCommand::Afk { command } => {
+            let mut client = daemon::connect_or_start().await?;
+            if !matches!(command, AfkCommand::Status) {
+                let away = matches!(command, AfkCommand::On);
+                match client
+                    .request(daemon::DaemonAction::SetOperatorAway { away })
+                    .await?
+                {
+                    daemon::DaemonReply::Done => {}
+                    reply => bail!("unexpected operator away reply: {reply:?}"),
+                }
+            }
+            let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } =
+                client.runtime_changes(None, false).await?
+            else {
+                bail!("daemon did not return a runtime snapshot");
+            };
+            println!(
+                "Operator away: {}",
+                if projection.metadata.operator_presence.away {
+                    "on"
+                } else {
+                    "off"
+                }
+            );
+            return Ok(());
+        }
         DaemonCommand::Status => {
             let mut daemon = match daemon::connect_management().await {
                 Ok(daemon) => daemon,
@@ -1811,7 +2183,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             // Two builds can report the same version, so the version line
             // cannot answer "is my rebuilt code running?". The executable file
             // can, and it is the question a development restart turns on.
-            match daemon::process_runs_this_executable(status.pid)? {
+            match daemon::daemon_runs_this_build(status.pid, &status.build_version)? {
                 Some(true) => println!("This daemon runs this build."),
                 Some(false) => println!(
                     "This daemon runs a different executable ({}) than this client ({}); \
@@ -1833,11 +2205,23 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 );
             }
         }
-        DaemonCommand::Stop => {
+        DaemonCommand::Stop(stop) => {
             mj_core::config::ensure_may_control_store(
                 &mj_core::config::data_dir(),
                 "stop the Mjolnir daemon",
             )?;
+            if stop.suspend_sessions {
+                let stopped = suspend_all_sessions(stop.acknowledge_unpublished_work).await?;
+                let daemon = daemon::connect_management().await?;
+                daemon.stop_and_wait().await?;
+                node::withdraw_endpoint();
+                match stopped {
+                    0 => println!("Mjolnir daemon stopped; no sessions were active."),
+                    1 => println!("Mjolnir daemon stopped after stopping its active session."),
+                    n => println!("Mjolnir daemon stopped after stopping its {n} active sessions."),
+                }
+                return Ok(());
+            }
             let daemon = match daemon::connect_management().await {
                 Ok(daemon) => daemon,
                 Err(error) if daemon::daemon_not_running(&error).is_some() => {
@@ -1847,7 +2231,12 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 Err(error) => return Err(error.context("Mjolnir daemon is not answering")),
             };
             daemon.stop_and_wait().await?;
-            println!("Mjolnir daemon stopped; detached workers remain active.");
+            node::withdraw_endpoint();
+            println!(
+                "Mjolnir daemon stopped; detached workers remain active. \
+                 `{}` suspends them too.",
+                mj_command("daemon stop --suspend-sessions")
+            );
         }
         DaemonCommand::Restart => {
             let restarted = daemon::restart_daemon().await?;

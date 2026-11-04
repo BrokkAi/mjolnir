@@ -373,6 +373,22 @@ pub fn sync_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Create `directory` and any missing parents reachable only by their owner.
+/// Session transcripts, credentials, and logs live in these directories, so on
+/// Unix they must never be group- or world-traversable.
+pub fn create_owner_only_directory(directory: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(directory)
+        .with_context(|| format!("create {}", directory.display()))
+}
+
 fn atomic_write_with_parent(
     path: &Path,
     body: &[u8],

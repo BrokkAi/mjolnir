@@ -15,6 +15,11 @@ ARG MJ_RUST_TOOLCHAIN=1.99.1
 # Keep REQUIRED_BIFROST_VERSION in mj-review/src/bifrost.rs equal to this value.
 ARG BIFROST_VERSION=0.12.0
 ARG BIFROST_BUILDER_IMAGE=docker.io/library/rust:1.97.1-trixie
+# Go installs below from go.dev's official tarball, not apt: Debian's golang
+# package trails upstream by months. GO_VERSION plays the role
+# rust-toolchain.toml plays for Rust; the build checks a per-arch sha256 and
+# fails unless the installed toolchain reports exactly this version.
+ARG GO_VERSION=1.27.3
 
 FROM ${NODE_IMAGE} AS node
 
@@ -78,11 +83,15 @@ RUN set -eu \
         echo "the worker reports build $built, but the image is labelled $MJ_WORKER_BUILD_ID" >&2; \
         exit 1; \
     fi \
-    && install -D -m 0755 "$binary" /out/mj-worker \
+    && install -D -m 0755 "$binary" /out/opt/mjolnir/mj-worker \
+    && cargo build --release --locked -p brokk-mjolnir --bin mj \
+    && install -D -m 0755 target/release/mj /out/opt/mjolnir/mj \
+    && ln -s mj-worker "/out/opt/mjolnir/mj-worker-$MUSL" \
     && rm -rf target
 
 FROM ${RUST_IMAGE}
 ARG MJ_RUST_TOOLCHAIN
+ARG GO_VERSION
 
 # The Node image and Rust image share the Trixie base. Copying /usr/local
 # brings in Node, npm, npx, Corepack, and the headers needed by native modules.
@@ -113,6 +122,7 @@ RUN apt-get update \
         clang \
         cmake \
         curl \
+        docker-cli \
         eatmydata \
         fd-find \
         file \
@@ -130,6 +140,7 @@ RUN apt-get update \
         openssh-client \
         patch \
         pkg-config \
+        podman-remote \
         procps \
         python3 \
         python3-dev \
@@ -141,29 +152,68 @@ RUN apt-get update \
         tmux \
         unzip \
         zip \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/bin/podman-remote /usr/local/bin/podman
+
+# `docker-cli` and `podman-remote` (as `podman`) are clients only. A daemon run
+# in this image with `[daemon] runtime = "docker"` or `"podman"` reaches the
+# host's engine through its mounted socket (`CONTAINER_HOST` for Podman), so
+# container sessions launch on the host exactly as from a host daemon.
 
 # Astral's distroless image provides native binaries for both supported
 # architectures. Keep uv on the shared PATH, including unprivileged sessions.
 COPY --from=ghcr.io/astral-sh/uv:0.12.20 /uv /uvx /usr/local/bin/
 RUN uv --version && uvx --version && python3-config --embed --ldflags
 
+# Pinned go.dev tarball per arch, like cargo-nextest below. The `go` binary
+# resolves GOROOT from its own path, so symlinking into /usr/local/bin (which
+# Debian's login-shell PATH keeps) is enough; /usr/local/go/bin needs no PATH
+# entry.
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "$ARCH" in \
+        amd64) \
+            GOARCH=amd64; \
+            GO_SHA256=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 \
+            ;; \
+        arm64) \
+            GOARCH=arm64; \
+            GO_SHA256=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49 \
+            ;; \
+        *) echo "unsupported arch $ARCH" >&2; exit 1 ;; \
+    esac \
+    && GO_TARBALL="go${GO_VERSION}.linux-${GOARCH}.tar.gz" \
+    && curl --fail --location --silent --show-error "https://go.dev/dl/${GO_TARBALL}" --output "/tmp/${GO_TARBALL}" \
+    && echo "${GO_SHA256}  /tmp/${GO_TARBALL}" | sha256sum --check --strict \
+    && rm -rf /usr/local/go \
+    && tar -xzf "/tmp/${GO_TARBALL}" -C /usr/local \
+    && rm "/tmp/${GO_TARBALL}" \
+    && ln -s /usr/local/go/bin/go /usr/local/bin/go \
+    && ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
+    && go version \
+    && [ "$(go env GOVERSION)" = "go${GO_VERSION}" ]
+
 # Keep these in lockstep with mj-core/src/harness_runtime.rs (see "Harness
-# pins" in AGENTS.md). Kimi, Grok, and dsh-acp are not in the image; they
-# install on demand. Muse installs below from its runtime.json file.
+# pins" in AGENTS.md). Muse and MiMo Code install below from their
+# runtime.json files.
 RUN npm install --global --no-audit --no-fund \
-        @brokkai/codex-acp@1.13.7 \
-        @agentclientprotocol/claude-agent-acp@0.94.0 \
-        @anthropic-ai/claude-code@2.1.306 \
-        @brokkai/muse-acp@0.16.0 \
-        @openai/codex@0.160.1 \
-        @mimo-ai/cli@0.1.15 \
+        @brokkai/codex-acp@1.15.0 \
+        @agentclientprotocol/claude-agent-acp@0.99.0 \
+        @anthropic-ai/claude-code@2.1.308 \
+        @brokkai/dsh-acp@0.5.0 \
+        @brokkai/muse-acp@0.20.0 \
+        @moonshot-ai/kimi-code@2.4.0 \
+        @openai/codex@0.165.0 \
+        @opencode/cli@2.2.1 \
+        @xai-official/grok@1.0.70 \
     && npm cache clean --force \
     && codex --version \
     && codex-acp --version \
     && claude --version \
-    && mimo --version \
-    && [ "$(node -p "require('/usr/local/lib/node_modules/@brokkai/muse-acp/package.json').version")" = "0.16.0" ]
+    && [ "$(dsh-acp --version)" = "dsh-acp 0.5.0" ] \
+    && kimi --version | grep -qF 2.4.0 \
+    && grok --version | grep -qF 1.0.70 \
+    && OPENCODE_DISABLE_AUTOUPDATE=1 opencode --version | grep -qF 2.2.1 \
+    && [ "$(node -p "require('/usr/local/lib/node_modules/@brokkai/muse-acp/package.json').version")" = "0.20.0" ]
 
 # The bridge prefers CODEX_PATH over its bundled Codex binary. Select the
 # separately pinned global CLI so containers and managed bare workers use
@@ -174,8 +224,33 @@ ENV CODEX_PATH=/usr/local/lib/node_modules/@openai/codex/bin/codex.js
 # Match the separately pinned Code used by managed bare workers.
 ENV CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude
 
-# MiMo Code applies patch updates during normal startup unless this is set.
-ENV MIMOCODE_DISABLE_AUTOUPDATE=1
+# MiMo Code and OpenCode apply updates during normal startup unless these are
+# set; the managed installations set the same variables.
+ENV MIMOCODE_DISABLE_AUTOUPDATE=1 \
+    OPENCODE_DISABLE_AUTOUPDATE=1
+
+# slopcop sends a session's change to the hosted SlopCop check service; the
+# skill synced into sessions tells agents to run it. Pinned release archive per
+# arch, like Go above: a fourteenth of the npm package, which carries every
+# platform's binary. 0.0.7 is the first release that reports which model wrote
+# each changed file.
+ARG SLOPCOP_VERSION=0.0.7
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "$ARCH" in \
+        amd64) SLOPCOP_SHA256=552e197f2d5c73fd43c7fc010a608c7560e0ecebd1a04a95e7901e83b0d95d3d ;; \
+        arm64) SLOPCOP_SHA256=5337403cd50fb99e9b53fef9dc01473ccbfd2a5e5a9643252d4e9e9b0a3f967a ;; \
+        *) echo "unsupported arch $ARCH" >&2; exit 1 ;; \
+    esac \
+    && SLOPCOP_ARCHIVE="slopcop_v${SLOPCOP_VERSION}_linux_${ARCH}.tar.gz" \
+    && curl --fail --location --silent --show-error \
+        "https://github.com/BrokkAi/slopcop/releases/download/v${SLOPCOP_VERSION}/${SLOPCOP_ARCHIVE}" \
+        --output "/tmp/${SLOPCOP_ARCHIVE}" \
+    && echo "${SLOPCOP_SHA256}  /tmp/${SLOPCOP_ARCHIVE}" | sha256sum --check --strict \
+    && install -d /usr/share/doc/slopcop \
+    && tar -xzf "/tmp/${SLOPCOP_ARCHIVE}" --no-same-owner -C /usr/local/bin slopcop \
+    && tar -xzf "/tmp/${SLOPCOP_ARCHIVE}" --no-same-owner -C /usr/share/doc/slopcop LICENSE \
+    && rm "/tmp/${SLOPCOP_ARCHIVE}" \
+    && [ "$(slopcop version)" = "slopcop version v${SLOPCOP_VERSION}" ]
 
 # Buildx sets TARGETARCH per platform; the dpkg fallback keeps a plain
 # single-arch `podman build` working.
@@ -282,12 +357,19 @@ COPY scripts/install-muse.py /opt/mjolnir/install-muse.py
 RUN python3 /opt/mjolnir/install-muse.py /opt/mjolnir/muse-runtime.json /usr/local/bin
 ENV MUSE_CLI=/usr/local/bin/muse
 
+COPY mj-core/assets/mimo/runtime.json /opt/mjolnir/mimo-runtime.json
+COPY scripts/install-mimo.py /opt/mjolnir/install-mimo.py
+RUN python3 /opt/mjolnir/install-mimo.py /opt/mjolnir/mimo-runtime.json /usr/local/bin \
+    && mimo --version
+
 # Session workers construct a clean login environment instead of inheriting
 # the container exec environment. Keep image tool settings in that login too.
 RUN printf '%s\n' \
         'export CODEX_PATH=/usr/local/lib/node_modules/@openai/codex/bin/codex.js' \
         'export PLAYWRIGHT_BROWSERS_PATH=/ms-playwright' \
         'export MUSE_CLI=/usr/local/bin/muse' \
+        'export MIMOCODE_DISABLE_AUTOUPDATE=1' \
+        'export OPENCODE_DISABLE_AUTOUPDATE=1' \
         > /etc/profile.d/20-mjolnir-tools.sh
 
 RUN useradd --create-home --shell /bin/bash hel \
@@ -303,17 +385,24 @@ WORKDIR /workspace
 # The worker is the last filesystem layer. A release that changes only Mjolnir
 # shares every layer above with the previous image, so a host upgrading `mj`
 # downloads just this one. Sessions link their `hel` to it.
-COPY --from=worker /out/mj-worker /opt/mjolnir/mj-worker
+# `mj` itself comes in the same layer: built in the same stage from the same
+# commit against this image's own C library, it is what a daemon run in this
+# image executes (`[daemon] runtime = "podman"` or `"docker"`). The worker is
+# also linked under its portable triple, so that daemon's local and container
+# sessions both find the worker this image carries beside its `mj`.
+COPY --from=worker /out/opt/mjolnir/ /opt/mjolnir/
 
 # Metadata comes last so that editing it never invalidates the cached layers
 # above; a label-only change then republishes an image whose filesystem layers
 # every host already has. Declared here, after every RUN, so the per-commit
 # worker build cannot invalidate a cached RUN layer.
 ARG MJ_WORKER_BUILD_ID
+ARG MJ_BUILD_REVISION
 LABEL org.opencontainers.image.title="Mjolnir agent development environment" \
       org.opencontainers.image.source="https://github.com/BrokkAi/mjolnir" \
-      org.opencontainers.image.description="Mjolnir agent development environment with Node, Rust, cargo-nextest, OpenJDK, and the pinned ACP bridges" \
-      org.brokk.mjolnir.worker-build="${MJ_WORKER_BUILD_ID}"
+      org.opencontainers.image.description="Mjolnir agent development environment with Node, Rust, Go, cargo-nextest, OpenJDK, and the pinned harnesses" \
+      org.brokk.mjolnir.worker-build="${MJ_WORKER_BUILD_ID}" \
+      org.brokk.mjolnir.revision="${MJ_BUILD_REVISION}"
 
 # Hel overrides the command with the same keepalive, but retaining it here also
 # makes the image convenient to inspect directly.

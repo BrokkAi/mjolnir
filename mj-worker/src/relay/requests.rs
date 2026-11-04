@@ -152,6 +152,11 @@ impl DurableRelay {
             | RelayRequest::ReadAttachment { .. }
             | RelayRequest::CpuUsage
             | RelayRequest::CredentialState
+            | RelayRequest::AwsCredentialsState
+            | RelayRequest::InstallAwsCredentials { .. }
+            | RelayRequest::SlopcopLoginState
+            | RelayRequest::InstallSlopcopLogin { .. }
+            | RelayRequest::RemoveSlopcopLogin
             | RelayRequest::ReadCredentials
             | RelayRequest::InstallCredentials { .. }
             | RelayRequest::SkillsState
@@ -166,7 +171,8 @@ impl DurableRelay {
             | RelayRequest::ReplaceProjectMemoryTree { .. }
             | RelayRequest::CompleteSubagentRequest { .. }
             | RelayRequest::PollSubagentQueue { .. }
-            | RelayRequest::SetSubagentAdmission { .. } => {
+            | RelayRequest::SetSubagentAdmission { .. }
+            | RelayRequest::SetOperatorAway { .. } => {
                 return Ok(relay_error(
                     RelayErrorCode::InvalidState,
                     "connection-only requests must be handled by the live relay transport",

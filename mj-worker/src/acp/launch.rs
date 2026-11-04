@@ -28,6 +28,8 @@ impl ReviewerMcpServer {
 
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
+    /// Live availability shared with the worker control connection.
+    pub operator_away: OperatorAway,
     pub clear_context_request: Option<ContextReset>,
     /// Settings to restore when a failed clear reloads the old conversation.
     pub context_restore: Option<ContextReset>,
@@ -152,8 +154,8 @@ pub(super) fn session_request_meta(
             .expect("goal lock poisoned")
             .asking();
         let mut meta = serde_json::Map::from_iter([(
-            "goal".into(),
-            serde_json::json!({"resumePolicy": if asking {"pause"} else {"preserve"}}),
+            "jetbrains".into(),
+            serde_json::json!({"air":{"goal":{"resumePolicy": if asking {"pause"} else {"preserve"}}}}),
         )]);
         // The launch policy owns suppression independently of MCP exposure:
         // None and children suppress native delegation without a parent socket.
@@ -174,7 +176,6 @@ pub(super) fn session_request_meta(
     let mut claude_code = serde_json::Map::from_iter([(
         "emitRawSDKMessages".to_owned(),
         serde_json::json!([
-            {"type": "system", "subtype": CLAUDE_BACKGROUND_TASKS_CHANGED_SUBTYPE},
             {"type": "result"},
         ]),
     )]);
@@ -205,7 +206,7 @@ pub(super) fn session_request_meta(
         );
     }
     if spec.execution_policy == ExecutionPolicy::ConfiguredApprovals {
-        let mut allowed = Vec::new();
+        let mut allowed = vec!["Bash(gh:*)".to_owned()];
         if include_history_tools {
             for server in project_history_mcp(spec) {
                 if let McpServer::Stdio(server) = server {
@@ -226,10 +227,9 @@ pub(super) fn session_request_meta(
             socket.review_gate && socket.role == mj_core::subagent::SubagentMcpRole::Parent
         }) {
             allowed.push("mcp__mj-agents__request_review".into());
+            allowed.push("mcp__mj-agents__override_review".into());
         }
-        if !allowed.is_empty() {
-            options.insert("allowedTools".to_owned(), serde_json::json!(allowed));
-        }
+        options.insert("allowedTools".to_owned(), serde_json::json!(allowed));
     }
     claude_code.insert("options".to_owned(), serde_json::Value::Object(options));
     Some(serde_json::Map::from_iter([(

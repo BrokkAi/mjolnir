@@ -17,10 +17,12 @@ selected harness's own control: Codex `agent-full-access`, Claude Code
 `bypassPermissions`, Kimi Code `auto`, Grok Build's `--always-approve` launch
 flag, OpenCode's `"permission": "allow"` config setting, MiMo Code's
 dangerously-skip-permissions startup mode, or DSH's `permission_mode` `allow`.
-Muse stages `:ask-me`, selects `promptUnmatched` approvals, turns muse-acp's auto-review
-on, and disables only the sandbox (`--disable-sandbox`): the reviewer answers
-each approval without prompting you, so critical actions can still be denied.
-Every other harness's control approves every call. Note that Kimi Code's
+Muse stages `:ask-me`, selects `allowAll` approvals, turns muse-acp's auto-review
+off, and disables only the sandbox (`--disable-sandbox`), so it runs without
+permission checks like OpenCode. A Muse profile with `muse_auto_review = true`
+opts back into the reviewer (`promptUnmatched` approvals with auto-review on),
+which answers each approval without prompting you, so critical actions can
+still be denied. Every other harness's control approves every call. Note that Kimi Code's
 mode is named `auto` but is not a guardian policy that approves only low-risk
 calls.
 
@@ -90,10 +92,11 @@ a native `mj-worker` for local bare sessions.
 ## Get the agent-dev image
 
 Mjolnir ships a reference container image with everything a session needs
-pre-installed: Rust, cargo-nextest, Node 24, OpenJDK 25, Python 3 with its
-native development headers and library, uv, Git, GitHub CLI, the Codex and
-Claude ACP bridges, Muse Code with `muse-acp`, and MiMo Code. Kimi, Grok,
-OpenCode, and dsh-acp install on demand. It also carries
+pre-installed: Rust, Go, cargo-nextest, Node 24, OpenJDK 25, Python 3 with its
+native development headers and library, uv, Git, GitHub CLI, the `slopcop`
+check CLI, and every harness Mjolnir launches at its pinned version: the Codex
+and Claude ACP bridges, Muse Code with `muse-acp`, MiMo Code, Kimi Code, Grok,
+OpenCode, and dsh-acp. It also carries
 Playwright's Chromium system libraries and the pre-installed Chromium headless
 shell in `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so headless browser tests need no
 privileged install and no run-time browser download, and the profiling tools
@@ -113,6 +116,22 @@ works whether Mjolnir is running it through Podman, Docker, Apple's `container`
 runtime, or an arm64 SSH host. Master publishes the floating `:latest` tag, and
 each release publishes an immutable tag for its own version, such as
 `agent-dev:2.36.0`.
+
+The daemon also uses this image for quota checks that start a harness: the
+Codex app-server, Grok's agent, and Claude Code's login refresh. With
+`[quota] runtime = "auto"`, the default, those checks run in the image of your
+enabled local Podman runtime, else your enabled local Docker runtime, when its
+engine is installed. With no such runtime they run on this machine. A machine
+that runs every session in containers therefore needs no harness installed to
+show its quota, and the check uses the image the daemon already keeps
+downloaded for that runtime. The profile's account directory is mounted at its
+own path, so a refreshed login lands where the host keeps it. Set `runtime` to
+`podman` or `docker` to insist on one engine (with that runtime's image, or the
+release's agent-dev image when none is configured), or to `host` to never use a
+container. A check never downloads the image; the daemon downloads it in the
+background, and until then the check reports that it is waiting for it.
+Claude Code on macOS always checks on the host, because its login lives in the
+Keychain.
 
 The standard local targets already use this published image: an installed
 release names the image built for its own version, while a development build
@@ -282,11 +301,12 @@ mode:
 
 Mjolnir also shows how much CPU and RAM remains after accounting for every
 live container on the physical host and a reserve for the host operating
-system. A new container is refused if either requested amount would overcommit
-that host. Resuming a stopped container and moving a session onto a container
-target use the same admission check. The refusal names the remaining capacity
-and offers the explicit Suspend or Destroy actions; Mjolnir does not stop
-sessions automatically.
+system. CPU overcommit produces a warning and the launch proceeds. Docker and
+Podman also allow RAM overcommit with a warning, including on a Mac: their
+limits are ceilings, not memory reserved by idle containers. Only Apple
+`container` targets refuse RAM overcommit, because their VMs do not return
+freed memory to macOS. Create, resume, and move use the same policy. Mjolnir
+does not stop sessions automatically.
 
 | Mode | Effect |
 | --- | --- |
@@ -400,7 +420,9 @@ syncs its active GitHub token into every live non-local session. That includes
 managed containers, EC2, SSH Podman, and raw SSH targets, and lets `gh` and
 HTTPS Git pushes work without copying SSH keys. The token never goes into a
 recovery archive. Raw SSH targets are therefore inside the token's trust
-boundary; raw localhost sessions are deliberately excluded.
+boundary; raw localhost sessions are deliberately excluded. A slopcop login on
+that machine reaches the same sessions the same way, so an agent can run
+`slopcop` checks there without signing in again.
 
 If Mjolnir or the host crashes, containers it was managing can be orphaned —
 still running, but no longer tracked in Mjolnir's state. Use `mj recover` to

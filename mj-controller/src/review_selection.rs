@@ -1,17 +1,17 @@
 //! One resolver for turn review and plan turn review.
 use crate::controller::Controller;
+use crate::quota::{ProfileQuota, window_applies};
 use crate::server_runtime::profile_catalog::ProfileCatalog;
 use crate::session_manager::ManagedSessionHandle;
-use crate::utility_llm::{UtilityLlmRuntime, UtilityQuotaClass, classify_quota};
+use crate::utility_llm::UtilityLlmRuntime;
 use anyhow::{Context, Result, bail, ensure};
-use mj_core::config::{Config, HarnessProfile, ReviewConfig};
-use mj_core::profile_capabilities::ProfileCapabilitiesSnapshot;
+use mj_core::config::{Config, ReviewConfig};
 use mj_core::review::settings::{
-    ResolvedReviewSettings, ReviewModelSettings, ReviewProvider, model_matches_family,
-    model_version_cmp,
+    ResolvedReviewSettings, ReviewModelFamily, ReviewModelSettings, model_version_cmp,
 };
+use mj_core::usage::{model_catalog, pricing};
 use mj_core::worker_launch::ProfileConfig;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -20,141 +20,132 @@ use std::time::Duration;
 
 #[derive(Debug)]
 struct Candidate {
-    id: String,
-    provider: ReviewProvider,
-    group: u8,
-    quota: UtilityQuotaClass,
-    score: u8,
-    /// The daemon's catalog lists the pinned model for this profile, so trying
-    /// it first needs no discovery to rule it out.
-    advertised: bool,
+    profile: String,
+    model: String,
+    identity: String,
+    family: Option<ReviewModelFamily>,
+    usage_priced: bool,
+    price: Option<u64>,
+    pinned: bool,
 }
 
-/// What the daemon's profile catalog says about a pinned model, per profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CatalogVerdict {
-    /// The catalog lists the model: try this profile first.
-    Offers,
-    /// The catalog is ready and does not list the model: skip without staging.
-    Lacks,
-    /// No ready catalog entry: discovery has to decide, after the known ones.
-    Unknown,
-}
-
-/// Judges one profile against a pinned model using the daemon's catalog, so
-/// Auto never stages or launches a profile only to learn it lacks the model
-/// (2026-10-02: a DeepSeek session asking for gpt-6-luna staged eight other
-/// profiles, then retried a broken Muse discovery every minute, and its
-/// review never started).
-fn catalog_verdict(
-    offered: Option<&mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>,
-    key: &str,
-    model: &str,
-) -> CatalogVerdict {
-    use mj_core::profile_capabilities::CapabilityState;
-    match offered
-        .and_then(|snapshot| snapshot.profiles.get(key))
-        .map(|entry| &entry.choices)
-    {
-        Some(CapabilityState::Ready(choices)) => {
-            if choices.models.iter().any(|choice| choice.value == model) {
-                CatalogVerdict::Offers
-            } else {
-                CatalogVerdict::Lacks
-            }
+impl Candidate {
+    fn tier(&self) -> u8 {
+        if self.family.is_some() || self.pinned {
+            u8::from(self.usage_priced)
+        } else {
+            2
         }
-        _ => CatalogVerdict::Unknown,
+    }
+
+    fn duplicates(&self, primary: Option<&str>) -> bool {
+        primary.is_some_and(|primary| match ReviewModelFamily::for_model(primary) {
+            Some(family) => self.family == Some(family),
+            None => self.identity.eq_ignore_ascii_case(primary),
+        })
     }
 }
 
-/// Each enabled profile's review provider, and why any could not be
-/// inspected. This reads harness configuration, so call it off an actor loop.
-pub(crate) fn inspect_providers(
-    config: &Config,
-) -> (BTreeMap<String, ReviewProvider>, Vec<String>) {
-    let mut providers = BTreeMap::new();
-    let mut reasons = Vec::new();
-    for (id, profile) in config.enabled_profiles() {
-        match ReviewProvider::for_profile(profile) {
-            Ok(provider) => {
-                providers.insert(id.to_owned(), provider);
-            }
-            Err(error) => reasons.push(format!("{id}: could not inspect provider: {error:#}")),
-        }
-    }
-    (providers, reasons)
-}
-
-/// The enabled profiles Auto may try, before quota is read.
-#[derive(Debug, Default)]
-pub(crate) struct AutoProfiles<'a> {
-    /// In configuration order.
-    pub(crate) supported: Vec<(&'a str, &'a HarnessProfile)>,
-    /// Profiles the catalog confirms offer the named model.
-    pub(crate) advertised: BTreeSet<String>,
-    /// Enabled profiles Auto has no model policy for, while no model is named.
-    pub(crate) excluded: Vec<String>,
-}
-
-/// Judges each enabled profile by [`ReviewProvider::auto_eligible`], the
-/// rule the launch's review baseline also applies, and then by the catalog
-/// when a model is named. A named model can come from any enabled profile
-/// that offers it, not only from providers Auto has a policy for. A profile
-/// missing from `providers` could not be inspected, and its reason is
-/// already recorded.
-pub(crate) fn auto_profiles<'a>(
-    config: &'a Config,
-    providers: &BTreeMap<String, ReviewProvider>,
-    settings: &ReviewConfig,
-    offered: Option<&ProfileCapabilitiesSnapshot>,
-    reasons: &mut Vec<String>,
-) -> AutoProfiles<'a> {
-    let mut auto = AutoProfiles::default();
-    for (id, profile) in config.enabled_profiles() {
-        let Some(provider) = providers.get(id) else {
-            continue;
-        };
-        if !provider.auto_eligible(settings) {
-            auto.excluded.push(id.to_owned());
-            continue;
-        }
-        if let Some(model) = settings.model.as_deref() {
-            match catalog_verdict(offered, &profile.capabilities_key(id), model) {
-                CatalogVerdict::Offers => {
-                    auto.advertised.insert(id.to_owned());
-                }
-                CatalogVerdict::Lacks => {
-                    reasons.push(format!("{id}: does not advertise model {model}"));
-                    continue;
-                }
-                CatalogVerdict::Unknown => {}
-            }
-        }
-        auto.supported.push((id, profile));
-    }
-    auto
-}
-
-fn rank(candidates: &mut [Candidate]) {
+fn rank(candidates: &mut [Candidate], primary: Option<&str>) {
     candidates.sort_by(|a, b| {
-        a.group
-            .cmp(&b.group)
-            .then_with(|| b.quota.cmp(&a.quota))
-            .then_with(|| a.provider.cmp(&b.provider))
-            .then_with(|| b.score.cmp(&a.score))
-            .then_with(|| a.id.cmp(&b.id))
+        a.tier()
+            .cmp(&b.tier())
+            .then_with(|| {
+                (a.tier() == 2 && a.price.is_none()).cmp(&(b.tier() == 2 && b.price.is_none()))
+            })
+            .then_with(|| a.duplicates(primary).cmp(&b.duplicates(primary)))
+            .then_with(|| a.family.cmp(&b.family))
+            // Preferred families have fixed priorities, independent of cost.
+            .then_with(|| {
+                if a.tier() == 2 {
+                    a.price
+                        .unwrap_or(u64::MAX)
+                        .cmp(&b.price.unwrap_or(u64::MAX))
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .then_with(|| model_version_cmp(&b.identity, &a.identity))
+            .then_with(|| a.profile.cmp(&b.profile))
+            .then_with(|| a.model.cmp(&b.model))
     });
 }
 
-/// `catalog` is the daemon's profile catalog. A chat view outside the daemon
-/// has none and reads the same cache through [`offered_choices`].
+fn candidates_for_profile(
+    profile: &str,
+    offered: &ProfileConfig,
+    quota: Option<&ProfileQuota>,
+    settings: &ReviewConfig,
+    reasons: &mut Vec<String>,
+) -> Vec<Candidate> {
+    let mut newest = BTreeMap::new();
+    let mut others = Vec::new();
+    for choice in &offered.models {
+        if settings
+            .model
+            .as_ref()
+            .is_some_and(|model| model != &choice.value)
+        {
+            continue;
+        }
+        let identity = model_catalog::model_id(&offered.models, &choice.value);
+        if quota.is_some_and(|quota| {
+            quota.error.is_none()
+                && quota.windows.iter().any(|window| {
+                    window_applies(window, &identity) && window.remaining_percent == Some(0)
+                })
+        }) {
+            reasons.push(format!(
+                "{profile}: quota is exhausted for {}",
+                choice.value
+            ));
+            continue;
+        }
+        let family = ReviewModelFamily::for_model(&identity);
+        let candidate = Candidate {
+            profile: profile.into(),
+            model: choice.value.clone(),
+            price: pricing::rates(&identity).map(|rates| rates[0] + rates[1]),
+            identity,
+            family,
+            usage_priced: quota.is_some_and(ProfileQuota::is_usage_priced),
+            pinned: settings.model.is_some(),
+        };
+        if let Some(family) = family {
+            if newest.get(&family).is_none_or(|current: &Candidate| {
+                model_version_cmp(&candidate.identity, &current.identity).is_gt()
+            }) {
+                newest.insert(family, candidate);
+            }
+        } else {
+            others.push(candidate);
+        }
+    }
+    others.extend(newest.into_values());
+    if others.is_empty()
+        && settings.model.is_some()
+        && !offered
+            .models
+            .iter()
+            .any(|choice| Some(&choice.value) == settings.model.as_ref())
+    {
+        reasons.push(format!(
+            "{profile}: does not advertise model {}",
+            settings.model.as_deref().unwrap()
+        ));
+    }
+    others
+}
+
+/// Read the primary model from the session owner's current publication. All
+/// model discovery uses the daemon's one catalog; independent profiles join
+/// their cached discovery concurrently and remain cancellable.
 pub(crate) async fn resolve(
     handle: ManagedSessionHandle,
     settings: Option<ReviewConfig>,
     cancelled: Arc<AtomicBool>,
     catalog: Option<Arc<ProfileCatalog>>,
 ) -> Result<ResolvedReviewSettings> {
-    let offered = catalog.as_ref().map(|catalog| catalog.snapshot());
     let controller = tokio::task::spawn_blocking(Controller::load).await??;
     let settings = settings.unwrap_or_else(|| controller.config.review.clone());
     let session = controller
@@ -163,117 +154,154 @@ pub(crate) async fn resolve(
         .get(handle.session_id())
         .context("review session is missing")?;
     ensure!(!session.archived, "this session is archived");
-    let primary = session.last_profile.clone();
-    let config = controller.config.clone();
-    // Provider inspection reads harness configuration, so never do it on an actor loop.
-    let (providers, primary_provider, primary, mut reasons) =
-        tokio::task::spawn_blocking(move || {
-            let primary_provider = config
-                .profiles
-                .get(&primary)
-                .and_then(|profile| ReviewProvider::for_profile(profile).ok())
-                .unwrap_or(ReviewProvider::Other);
-            let (providers, reasons) = inspect_providers(&config);
-            (providers, primary_provider, primary, reasons)
-        })
-        .await?;
-    let mut candidates = Vec::new();
-    let turned_away = if let Some(id) = &settings.profile {
-        let provider = providers.get(id).with_context(|| {
-            format!(
-                "reviewer profile {id:?} is missing, disabled, or unavailable: {}",
-                reasons.join("; ")
-            )
-        })?;
-        candidates.push(Candidate {
-            id: id.clone(),
-            provider: *provider,
-            group: 0,
-            quota: UtilityQuotaClass::Unknown,
-            score: 0,
-            advertised: true,
-        });
-        Vec::new()
-    } else {
-        let AutoProfiles {
-            supported,
-            advertised,
-            excluded,
-        } = auto_profiles(
-            &controller.config,
-            &providers,
-            &settings,
-            offered.as_ref(),
-            &mut reasons,
-        );
-        let quotas = UtilityLlmRuntime::shared()
-            .quotas(&controller.config, &supported)
-            .await;
-        for (id, _) in supported {
-            let provider = providers[id];
-            let Some((quota, score)) = quotas
-                .get(id)
-                .map(classify_quota)
-                .unwrap_or(Some((UtilityQuotaClass::Unknown, 0)))
-            else {
-                reasons.push(format!("{id}: quota is exhausted"));
-                continue;
-            };
-            candidates.push(Candidate {
-                id: id.to_owned(),
-                provider,
-                group: if id == primary {
-                    2
-                } else {
-                    u8::from(provider == primary_provider)
-                },
-                quota,
-                score,
-                advertised: advertised.contains(id),
-            });
-        }
-        rank(&mut candidates);
-        // Profiles the catalog confirms come first; unknown ones only if they all fail.
-        candidates.sort_by_key(|candidate| !candidate.advertised);
-        excluded
-    };
-    for candidate in candidates {
+    if let Some(profile) = &settings.profile {
         ensure!(
-            !cancelled.load(Ordering::Acquire),
-            "review preparation cancelled"
+            controller.config.enabled_profile(profile).is_some(),
+            "reviewer profile {profile:?} is missing or disabled"
         );
-        let result = resolve_candidate(catalog.as_ref(), &candidate, &settings, &cancelled).await;
-        match result {
-            Ok(mut resolved) => {
-                resolved.same_provider = candidate.provider == primary_provider;
-                return Ok(resolved);
+        return resolve_candidate(
+            catalog.as_ref(),
+            profile,
+            ReviewModelSettings {
+                model: settings.model.clone(),
+                effort: settings.effort.clone(),
+                fast_mode: false,
+            },
+            false,
+            false,
+            &cancelled,
+        )
+        .await;
+    }
+    let profiles = controller.config.enabled_profiles().collect::<Vec<_>>();
+    let quotas = UtilityLlmRuntime::shared()
+        .quotas(&controller.config, &profiles)
+        .await;
+    let primary = handle.view().snapshot.and_then(|snapshot| {
+        snapshot
+            .materialized
+            .configuration
+            .values
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    });
+    resolve_auto(
+        catalog.as_ref(),
+        &controller.config,
+        &quotas,
+        &settings,
+        primary
+            .as_deref()
+            .map(|model| (session.last_profile.as_str(), model)),
+        &cancelled,
+    )
+    .await
+}
+
+async fn resolve_auto(
+    catalog: Option<&Arc<ProfileCatalog>>,
+    config: &Config,
+    quotas: &BTreeMap<String, ProfileQuota>,
+    settings: &ReviewConfig,
+    primary_selection: Option<(&str, &str)>,
+    cancelled: &AtomicBool,
+) -> Result<ResolvedReviewSettings> {
+    use mj_core::profile_capabilities::CapabilityState;
+    let snapshot = catalog.map(|catalog| catalog.snapshot());
+    let mut known = Vec::new();
+    let mut unknown = Vec::new();
+    let mut reasons = Vec::new();
+    for (id, profile) in config.enabled_profiles() {
+        if let Some(model) = &settings.model {
+            // A pinned model must never stage an unrelated profile, and a
+            // broken unknown profile must not delay a confirmed match.
+            let ready = Some(profile.capabilities_key(id))
+                .and_then(|key| snapshot.as_ref()?.profiles.get(&key))
+                .and_then(|entry| match &entry.choices {
+                    CapabilityState::Ready(choices) => Some(choices),
+                    _ => None,
+                });
+            match ready {
+                Some(choices) if choices.models.iter().any(|choice| &choice.value == model) => {
+                    known.push(id)
+                }
+                Some(_) => reasons.push(format!("{id}: does not advertise model {model}")),
+                None => unknown.push(id),
             }
-            Err(error) if settings.profile.is_some() => return Err(error),
-            Err(error) => {
-                tracing::warn!(profile = %candidate.id, %error, "Auto reviewer candidate unavailable");
-                reasons.push(format!("{}: {error:#}", candidate.id));
+        } else {
+            known.push(id);
+        }
+    }
+    let mut primary = primary_selection.map(|(_, model)| model.to_owned());
+    for profiles in [known, unknown] {
+        let discoveries =
+            futures::future::join_all(profiles.iter().map(|id| async move {
+                (*id, offered_choices(catalog, id, None, cancelled).await)
+            }))
+            .await;
+        let mut candidates = Vec::new();
+        for (id, discovery) in discoveries {
+            ensure!(
+                !cancelled.load(Ordering::Acquire),
+                "review preparation cancelled"
+            );
+            match discovery {
+                Ok(offered) => {
+                    if let Some((_, model)) =
+                        primary_selection.filter(|(profile, _)| *profile == id)
+                    {
+                        primary = Some(model_catalog::model_id(&offered.models, model));
+                    }
+                    candidates.extend(candidates_for_profile(
+                        id,
+                        &offered,
+                        quotas.get(id),
+                        settings,
+                        &mut reasons,
+                    ));
+                }
+                Err(error) => reasons.push(format!("{id}: {error:#}")),
+            }
+        }
+        rank(&mut candidates, primary.as_deref());
+        for candidate in candidates {
+            ensure!(
+                !cancelled.load(Ordering::Acquire),
+                "review preparation cancelled"
+            );
+            let price_unknown = candidate.tier() == 2 && candidate.price.is_none();
+            let result = resolve_candidate(
+                catalog,
+                &candidate.profile,
+                ReviewModelSettings {
+                    model: Some(candidate.model.clone()),
+                    effort: Some("high".into()),
+                    fast_mode: false,
+                },
+                true,
+                price_unknown,
+                cancelled,
+            )
+            .await;
+            match result {
+                Ok(resolved) => return Ok(resolved),
+                Err(error) => {
+                    tracing::warn!(profile = %candidate.profile, model = %candidate.model, %error, "Auto reviewer candidate unavailable");
+                    reasons.push(format!(
+                        "{} / {}: {error:#}",
+                        candidate.profile, candidate.model
+                    ));
+                }
             }
         }
     }
     if reasons.is_empty() {
-        // Nothing qualified and nothing failed: every enabled profile, if
-        // any, lacks an Auto policy and the session named no model.
-        reasons.push(match turned_away.first() {
-            None => "Auto chooses only Codex, Claude, Kimi, or DeepSeek-through-Codex profiles; enable one, or select another profile, such as DSH, as the reviewer in Settings".into(),
-            Some(example) => format!(
-                "Auto chooses only Codex, Claude, Kimi, or DeepSeek-through-Codex profiles, and no enabled profile is one of those (enabled: {}); enable one, or select another profile, such as {example}, as the reviewer in Settings",
-                turned_away.join(", ")
-            ),
-        });
+        reasons.push("enable a profile that advertises a model with High effort".into());
     }
     bail!("No usable Auto reviewer: {}", reasons.join("; "))
 }
 
-/// The models and efforts `profile` offers, with the efforts of `model` (or
-/// of its default model), from the daemon's profile catalog: the same cached
-/// answer `mj models` and the profile configuration endpoint give, so Auto
-/// never judges a profile by different facts (#1320). Without the daemon's
-/// catalog, the cached discovery that catalog is built on answers.
 async fn offered_choices(
     catalog: Option<&Arc<ProfileCatalog>>,
     profile: &str,
@@ -305,64 +333,15 @@ async fn offered_choices(
     }
 }
 
-fn family_model(offered: &ProfileConfig, family: &str) -> Result<String> {
-    offered
-        .models
-        .iter()
-        .filter(|c| model_matches_family(&c.value, family))
-        .max_by(|a, b| model_version_cmp(&a.value, &b.value))
-        .map(|c| c.value.clone())
-        .with_context(|| format!("no advertised {family} model"))
-}
-
-fn select_models(
-    provider: ReviewProvider,
-    settings: &ReviewConfig,
-    offered: &ProfileConfig,
-) -> Result<ReviewModelSettings> {
-    let automatic = settings.profile.is_none();
-    let main = if automatic {
-        // Auto takes its model and effort from the provider's policy, except
-        // where the session or `[review]` names one.
-        let policy = provider.main_policy();
-        let model = match &settings.model {
-            Some(model) => {
-                ensure!(
-                    offered.models.iter().any(|c| &c.value == model),
-                    "does not advertise model {model}"
-                );
-                model.clone()
-            }
-            None => family_model(offered, policy.context("provider is manual-only")?.0)?,
-        };
-        ReviewModelSettings {
-            model: Some(model),
-            effort: settings
-                .effort
-                .clone()
-                .or_else(|| policy.map(|(_, effort)| effort.into())),
-            fast_mode: false,
-        }
-    } else {
-        ReviewModelSettings {
-            model: settings.model.clone(),
-            effort: settings.effort.clone(),
-            fast_mode: false,
-        }
-    };
-    Ok(main)
-}
-
 async fn resolve_candidate(
     catalog: Option<&Arc<ProfileCatalog>>,
-    candidate: &Candidate,
-    settings: &ReviewConfig,
+    profile: &str,
+    main: ReviewModelSettings,
+    automatic: bool,
+    price_unknown: bool,
     cancelled: &AtomicBool,
 ) -> Result<ResolvedReviewSettings> {
-    let automatic = settings.profile.is_none();
-    let profile = candidate.id.as_str();
     let offered = offered_choices(catalog, profile, None, cancelled).await?;
-    let main = select_models(candidate.provider, settings, &offered)?;
     if let Some(model) = &main.model {
         ensure!(
             offered.models.iter().any(|c| &c.value == model),
@@ -370,8 +349,6 @@ async fn resolve_candidate(
         );
     }
     if let Some(effort) = &main.effort {
-        // Efforts belong to one model. The profile's own entry lists those of
-        // its default model; any other model has an entry of its own.
         let for_model = match &main.model {
             Some(model) if offered.model.as_ref() != Some(model) => {
                 offered_choices(catalog, profile, Some(model.clone()), cancelled).await?
@@ -386,10 +363,10 @@ async fn resolve_candidate(
         );
     }
     Ok(ResolvedReviewSettings {
-        profile: candidate.id.clone(),
+        profile: profile.into(),
         main,
         automatic,
-        same_provider: false,
+        price_unknown,
     })
 }
 
@@ -406,236 +383,405 @@ pub(crate) fn preempted_by_lifecycle(reason: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn candidate(
-        id: &str,
-        provider: ReviewProvider,
-        group: u8,
-        quota: UtilityQuotaClass,
-        score: u8,
-    ) -> Candidate {
-        Candidate {
-            id: id.into(),
-            provider,
-            group,
-            quota,
-            score,
-            advertised: false,
-        }
-    }
-    fn snapshot(
-        entries: &[(
-            &str,
-            mj_core::profile_capabilities::CapabilityState<Vec<&str>>,
-        )],
-    ) -> mj_core::profile_capabilities::ProfileCapabilitiesSnapshot {
-        use mj_core::profile_capabilities::{CapabilityState, ProfileCapabilities};
-        mj_core::profile_capabilities::ProfileCapabilitiesSnapshot {
-            profiles: entries
-                .iter()
-                .map(|(key, state)| {
-                    let choices = match state {
-                        CapabilityState::Pending => CapabilityState::Pending,
-                        CapabilityState::Failed(error) => CapabilityState::Failed(error.clone()),
-                        CapabilityState::Ready(models) => CapabilityState::Ready(ProfileConfig {
-                            model: None,
-                            models: choices(models),
-                            efforts: Vec::new(),
-                            observed_at: 0,
-                        }),
-                    };
-                    (
-                        (*key).to_owned(),
-                        ProfileCapabilities {
-                            choices,
-                            efforts: Default::default(),
-                        },
-                    )
-                })
-                .collect(),
-        }
-    }
+    use crate::server_runtime::profile_catalog::test_config;
+    use mj_client::quota::{API_LABEL, QuotaWindow};
+    use mj_core::acp::SessionConfigChoice;
+    use mj_core::config::HarnessKind;
 
-    // Hard-won: 3eefab64: Auto staged unrelated profiles and credentials before rejecting models they could not run
-    #[test]
-    fn a_pinned_model_rules_profiles_in_or_out_from_the_catalog_alone() {
-        use mj_core::profile_capabilities::CapabilityState;
-        let offered = snapshot(&[
-            (
-                "codex3",
-                CapabilityState::Ready(vec!["gpt-6-luna", "gpt-6.1-sol"]),
-            ),
-            ("kimi", CapabilityState::Ready(vec!["k3", "k3-256k"])),
-            (
-                "muse",
-                CapabilityState::Failed("discovery harness stopped".into()),
-            ),
-            ("claude", CapabilityState::Pending),
-        ]);
-        let verdict = |key| catalog_verdict(Some(&offered), key, "gpt-6-luna");
-        assert_eq!(verdict("codex3"), CatalogVerdict::Offers);
-        // A ready catalog without the model is skipped before anything is staged.
-        assert_eq!(verdict("kimi"), CatalogVerdict::Lacks);
-        // Failed, pending or absent entries leave the decision to discovery.
-        assert_eq!(verdict("muse"), CatalogVerdict::Unknown);
-        assert_eq!(verdict("claude"), CatalogVerdict::Unknown);
-        assert_eq!(verdict("glm"), CatalogVerdict::Unknown);
-        assert_eq!(
-            catalog_verdict(None, "codex3", "gpt-6-luna"),
-            CatalogVerdict::Unknown
-        );
-    }
-
-    // Hard-won: 3eefab64: Auto tried a failing unknown profile before the known profile that offered the pinned model
-    #[test]
-    fn confirmed_profiles_are_tried_before_unknown_ones_whatever_their_rank() {
-        let mut candidates = vec![
-            candidate(
-                "muse",
-                ReviewProvider::Other,
-                0,
-                UtilityQuotaClass::Unknown,
-                0,
-            ),
-            Candidate {
-                advertised: true,
-                ..candidate(
-                    "codex3",
-                    ReviewProvider::Codex,
-                    1,
-                    UtilityQuotaClass::Unknown,
-                    0,
-                )
-            },
-            candidate(
-                "glm",
-                ReviewProvider::Other,
-                0,
-                UtilityQuotaClass::Unknown,
-                0,
-            ),
-        ];
-        rank(&mut candidates);
-        candidates.sort_by_key(|candidate| !candidate.advertised);
-        assert_eq!(candidates[0].id, "codex3");
-    }
-
-    #[test]
-    fn review_selection_uses_one_model_and_effort_from_an_acp_config_fixture() {
-        // ACP v1 documents session options as id/name/type/currentValue/options.
-        let options: Vec<agent_client_protocol::schema::v1::SessionConfigOption> =
-            serde_json::from_str(include_str!(
-                "../tests/fixtures/review-acp-config-options.json"
-            ))
-            .expect("ACP v1 session config options");
-        let offered = ProfileConfig {
-            model: None,
-            models: mj_core::acp::session_config_choices(&options, "model"),
-            efforts: mj_core::acp::session_config_choices(&options, "effort"),
-            observed_at: 0,
-        };
-
-        let reviewer = select_models(ReviewProvider::Codex, &ReviewConfig::default(), &offered)
-            .expect("select the advertised Codex review model");
-
-        assert_eq!(reviewer.model.as_deref(), Some("gpt-6.10-astra"));
-        assert_eq!(reviewer.effort.as_deref(), Some("medium"));
-        assert!(!reviewer.fast_mode);
-    }
-
-    /// A DeepSeek-backed Codex profile as the catalog holds it: the default
-    /// entry describes `deepseek-v4-pro`, and each model has its own efforts.
-    fn deepseek_catalog() -> Arc<ProfileCatalog> {
-        use crate::server_runtime::profile_catalog::test_config;
-        let offered = |model: &str| ProfileConfig {
-            model: Some(model.to_owned()),
-            models: choices(&["deepseek-flash", "deepseek-v4-pro"]),
-            efforts: choices(if model == "deepseek-flash" {
-                &["low", "high", "max"]
-            } else {
-                &["high"]
-            }),
-            observed_at: 0,
-        };
-        let catalog = ProfileCatalog::with_probes(
-            Arc::new(move |_| Box::pin(async move { Ok(offered("deepseek-v4-pro")) })),
-            Arc::new(move |_, model| Box::pin(async move { Ok(offered(&model)) })),
-        );
-        catalog.sync(&test_config(&[(
-            "deepseek",
-            mj_core::config::HarnessKind::Codex,
-        )]));
-        catalog
-    }
-
-    fn deepseek() -> Candidate {
-        Candidate {
-            advertised: true,
-            ..candidate(
-                "deepseek",
-                ReviewProvider::DeepSeek,
-                1,
-                UtilityQuotaClass::Unknown,
-                0,
-            )
-        }
-    }
-
-    // Hard-won: #1320: Auto read a reviewer staged in the session's worker instead of the profile catalog, so a DeepSeek profile "did not advertise" the model every other surface listed
-    #[tokio::test]
-    async fn auto_takes_a_pinned_model_and_its_effort_from_the_profile_catalog() {
-        let catalog = deepseek_catalog();
-        let settings = ReviewConfig {
-            model: Some("deepseek-flash".into()),
-            effort: Some("max".into()),
-            ..ReviewConfig::default()
-        };
-
-        let resolved = resolve_candidate(
-            Some(&catalog),
-            &deepseek(),
-            &settings,
-            &AtomicBool::new(false),
-        )
-        .await
-        .expect("the catalog offers deepseek-flash at max");
-
-        assert_eq!(resolved.profile, "deepseek");
-        assert_eq!(resolved.main.model.as_deref(), Some("deepseek-flash"));
-        assert_eq!(resolved.main.effort.as_deref(), Some("max"));
-        assert!(resolved.automatic);
-    }
-
-    #[tokio::test]
-    async fn an_effort_is_judged_by_the_pinned_models_own_entry_not_the_default_models() {
-        let catalog = deepseek_catalog();
-        // `max` exists for deepseek-flash only; the default entry, for
-        // deepseek-v4-pro, lists `high` alone.
-        let refused = resolve_candidate(
-            Some(&catalog),
-            &deepseek(),
-            &ReviewConfig {
-                model: Some("deepseek-v4-pro".into()),
-                effort: Some("max".into()),
-                ..ReviewConfig::default()
-            },
-            &AtomicBool::new(false),
-        )
-        .await
-        .expect_err("deepseek-v4-pro offers no max effort");
-        assert_eq!(
-            format!("{refused:#}"),
-            "reviewer deepseek does not advertise effort max for deepseek-v4-pro"
-        );
-    }
-
-    fn choices(ids: &[&str]) -> Vec<mj_core::acp::SessionConfigChoice> {
+    fn choices(ids: &[&str]) -> Vec<SessionConfigChoice> {
         ids.iter()
-            .map(|id| mj_core::acp::SessionConfigChoice {
+            .map(|id| SessionConfigChoice {
                 value: (*id).into(),
                 name: (*id).into(),
                 description: None,
             })
             .collect()
+    }
+
+    fn offered(ids: &[&str]) -> ProfileConfig {
+        ProfileConfig {
+            model: ids.first().map(|id| (*id).into()),
+            models: choices(ids),
+            efforts: choices(&["low", "high"]),
+            observed_at: 0,
+        }
+    }
+
+    fn quota(id: &str, remaining: Option<u8>, api: bool) -> ProfileQuota {
+        ProfileQuota {
+            banked_resets: None,
+            profile_id: id.into(),
+            harness: HarnessKind::Codex,
+            windows: remaining
+                .map(|remaining| QuotaWindow {
+                    label: "weekly".into(),
+                    remaining_percent: Some(remaining),
+                    duration_seconds: None,
+                    model_scope: None,
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: None,
+                })
+                .into_iter()
+                .collect(),
+            extra: api.then(|| API_LABEL.into()),
+            error: None,
+            refreshed_at_epoch_seconds: 0,
+            rate_limited_until_epoch_seconds: None,
+        }
+    }
+
+    fn catalog(
+        entries: BTreeMap<String, ProfileConfig>,
+        no_high: Vec<String>,
+    ) -> (Config, Arc<ProfileCatalog>) {
+        let profiles = entries
+            .keys()
+            .map(|id| (id.as_str(), HarnessKind::Dsh))
+            .collect::<Vec<_>>();
+        let config = test_config(&profiles);
+        let entries = Arc::new(entries);
+        let initial = entries.clone();
+        let initial_no_high = no_high.clone();
+        let catalog = ProfileCatalog::with_probes(
+            Arc::new(move |id| {
+                let mut result = initial[&id].clone();
+                if result
+                    .model
+                    .as_ref()
+                    .is_some_and(|model| initial_no_high.contains(model))
+                {
+                    result.efforts = choices(&["medium", "max"]);
+                }
+                Box::pin(async move { Ok(result) })
+            }),
+            Arc::new(move |id, model| {
+                let mut result = entries[&id].clone();
+                result.model = Some(model.clone());
+                if no_high.contains(&model) {
+                    result.efforts = choices(&["medium", "max"]);
+                }
+                Box::pin(async move { Ok(result) })
+            }),
+        );
+        catalog.sync(&config);
+        (config, catalog)
+    }
+
+    #[tokio::test]
+    async fn acp_catalog_selection_orders_billing_then_model_diversity_then_newest_family() {
+        let options: Vec<agent_client_protocol::v1::schema::SessionConfigOption> =
+            serde_json::from_str(include_str!(
+                "../tests/fixtures/review-acp-config-options.json"
+            ))
+            .unwrap();
+        let terra = ProfileConfig {
+            model: None,
+            models: mj_core::acp::session_config_choices(&options, "model"),
+            efforts: mj_core::acp::session_config_choices(&options, "effort"),
+            observed_at: 0,
+        };
+        let mut haiku = offered(&["haiku"]);
+        haiku.models[0].name = "Haiku 5.5".into();
+        let (config, catalog) = catalog(
+            BTreeMap::from([
+                ("terra".into(), terra),
+                (
+                    "flash".into(),
+                    offered(&["deepseek-v4-pro", "deepseek-flash", "deepseek-v4-flash"]),
+                ),
+                ("haiku".into(), haiku),
+                ("grok".into(), offered(&["grok-4.6", "grok-4.7"])),
+            ]),
+            vec![],
+        );
+        // Quota headroom no longer changes family priority.
+        let sub = BTreeMap::from([
+            ("terra".into(), quota("terra", Some(1), false)),
+            ("flash".into(), quota("flash", Some(100), false)),
+        ]);
+        for (primary, expected_profile, expected_model) in [
+            (None, "terra", "gpt-6.10-terra"),
+            (
+                Some(("terra", "gpt-6.9-terra")),
+                "flash",
+                "deepseek-v4-flash",
+            ),
+            (Some(("flash", "deepseek-flash")), "terra", "gpt-6.10-terra"),
+        ] {
+            let selected = resolve_auto(
+                Some(&catalog),
+                &config,
+                &sub,
+                &ReviewConfig::default(),
+                primary,
+                &AtomicBool::new(false),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                (selected.profile.as_str(), selected.main.model.as_deref()),
+                (expected_profile, Some(expected_model))
+            );
+            assert_eq!(selected.main.effort.as_deref(), Some("high"));
+        }
+        let all_api = config
+            .profiles
+            .keys()
+            .map(|id| (id.clone(), quota(id, None, true)))
+            .collect::<BTreeMap<_, _>>();
+        let mut billing = all_api.clone();
+        billing.insert("grok".into(), quota("grok", Some(1), false));
+        let selected = resolve_auto(
+            Some(&catalog),
+            &config,
+            &billing,
+            &ReviewConfig::default(),
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            selected.profile, "grok",
+            "subscription Grok precedes API Terra"
+        );
+        billing.insert("terra".into(), quota("terra", Some(1), false));
+        let selected = resolve_auto(
+            Some(&catalog),
+            &config,
+            &billing,
+            &ReviewConfig::default(),
+            Some(("grok", "grok-4.7")),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.profile, "terra");
+        billing.insert("grok".into(), quota("grok", None, true));
+        let selected = resolve_auto(
+            Some(&catalog),
+            &config,
+            &billing,
+            &ReviewConfig::default(),
+            Some(("terra", "gpt-6.10-terra")),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            selected.profile, "terra",
+            "subscription wins even when it duplicates the primary family"
+        );
+        let selected = resolve_auto(
+            Some(&catalog),
+            &config,
+            &all_api,
+            &ReviewConfig::default(),
+            Some(("terra", "gpt-6.10-terra")),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.profile, "flash");
+    }
+
+    #[tokio::test]
+    async fn catalog_efforts_and_model_scoped_quota_decide_availability_without_weakening_high() {
+        let (config, catalog) = catalog(
+            BTreeMap::from([
+                ("terra".into(), offered(&["gpt-6.1-terra"])),
+                (
+                    "multi".into(),
+                    offered(&[
+                        "deepseek-v4-pro",
+                        "deepseek-v4-flash",
+                        "claude-haiku-5-5",
+                        "grok-4.7",
+                    ]),
+                ),
+            ]),
+            vec!["gpt-6.1-terra".into()],
+        );
+        let mut report = quota("multi", Some(0), false);
+        report.windows[0].model_scope = Some("flash".into());
+        let quotas = BTreeMap::from([("multi".into(), report.clone())]);
+        let selected = resolve_auto(
+            Some(&catalog),
+            &config,
+            &quotas,
+            &ReviewConfig::default(),
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.main.model.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(selected.main.effort.as_deref(), Some("high"));
+        // Unknown quota stays eligible, even after a failed reading.
+        report.error = Some("provider unavailable".into());
+        let selected = resolve_auto(
+            Some(&catalog),
+            &config,
+            &BTreeMap::from([("multi".into(), report)]),
+            &ReviewConfig::default(),
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.main.model.as_deref(), Some("deepseek-v4-flash"));
+        let settings = ReviewConfig {
+            model: Some("deepseek-v4-flash".into()),
+            effort: Some("low".into()),
+            ..Default::default()
+        };
+        let selected = resolve_auto(
+            Some(&catalog),
+            &config,
+            &BTreeMap::new(),
+            &settings,
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            selected.main.effort.as_deref(),
+            Some("high"),
+            "a session effort cannot weaken Auto"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_uses_shared_prices_and_keeps_unknown_distinct_from_free() {
+        let (config, catalog) = catalog(
+            BTreeMap::from([(
+                "other".into(),
+                offered(&[
+                    "unknown-expensive-model",
+                    "kimi-k3",
+                    "glm-5.3-flash",
+                    "gpt-6-luna",
+                ]),
+            )]),
+            vec![],
+        );
+        let selected = resolve_auto(
+            Some(&catalog),
+            &config,
+            &BTreeMap::new(),
+            &ReviewConfig::default(),
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.main.model.as_deref(), Some("gpt-6-luna"));
+        let selected = resolve_auto(
+            Some(&catalog),
+            &config,
+            &BTreeMap::new(),
+            &ReviewConfig::default(),
+            Some(("other", "gpt-6-luna")),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.main.model.as_deref(), Some("glm-5.3-flash"));
+        let settings = ReviewConfig {
+            model: Some("unknown-expensive-model".into()),
+            ..Default::default()
+        };
+        let selected = resolve_auto(
+            Some(&catalog),
+            &config,
+            &BTreeMap::new(),
+            &settings,
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            selected.main.model.as_deref(),
+            Some("unknown-expensive-model")
+        );
+        let (config, catalog) = self::catalog(
+            BTreeMap::from([("unpriced".into(), offered(&["unknown-expensive-model"]))]),
+            vec![],
+        );
+        let selected = resolve_auto(
+            Some(&catalog),
+            &config,
+            &BTreeMap::new(),
+            &ReviewConfig::default(),
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert!(selected.description().contains("price unavailable"));
+        let (config, catalog) = self::catalog(
+            BTreeMap::from([("last-priced".into(), offered(&["kimi-k3", "unknown-model"]))]),
+            vec![],
+        );
+        let selected = resolve_auto(
+            Some(&catalog),
+            &config,
+            &BTreeMap::new(),
+            &ReviewConfig::default(),
+            Some(("last-priced", "kimi-k3")),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            selected.main.model.as_deref(),
+            Some("kimi-k3"),
+            "avoiding the primary cannot promote an unknown price ahead of a known one"
+        );
+    }
+
+    // Hard-won: 3eefab64: a broken unknown profile delayed a pinned model already offered by a ready profile
+    #[tokio::test]
+    async fn a_confirmed_pinned_model_does_not_wait_for_unrelated_discovery() {
+        let config = test_config(&[("known", HarnessKind::Dsh), ("unknown", HarnessKind::Dsh)]);
+        let catalog = ProfileCatalog::with_probes(
+            Arc::new(|id| {
+                Box::pin(async move {
+                    if id == "unknown" {
+                        std::future::pending::<()>().await;
+                    }
+                    Ok(offered(&["gpt-6.1-terra"]))
+                })
+            }),
+            Arc::new(|_, model| Box::pin(async move { Ok(offered(&[&model])) })),
+        );
+        catalog.sync(&config);
+        offered_choices(Some(&catalog), "known", None, &AtomicBool::new(false))
+            .await
+            .unwrap();
+        let settings = ReviewConfig {
+            model: Some("gpt-6.1-terra".into()),
+            ..Default::default()
+        };
+        let selected = tokio::time::timeout(
+            Duration::from_secs(2),
+            resolve_auto(
+                Some(&catalog),
+                &config,
+                &BTreeMap::new(),
+                &settings,
+                None,
+                &AtomicBool::new(false),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.profile, "known");
     }
 }
 

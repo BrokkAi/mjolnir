@@ -2,10 +2,13 @@ use super::*;
 
 pub fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefreshRequest> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let runtime = crate::quota::QuotaRuntimeConfig::of(&controller.config);
     controller
         .config
         .enabled_profiles()
-        .map(|(id, profile)| QuotaRefreshRequest::for_profile(id, profile, cwd.clone()))
+        .map(|(id, profile)| {
+            QuotaRefreshRequest::for_profile(id, profile, cwd.clone(), runtime.clone())
+        })
         .collect()
 }
 
@@ -46,6 +49,18 @@ pub fn spawn_quota_refresher(
     let (profiles_tx, mut profiles_rx) = tokio::sync::watch::channel(QuotaRefreshBatch::default());
     let (updates_tx, updates_rx) = tokio::sync::mpsc::channel(32);
     tokio::spawn(async move {
+        // A daemon that stopped mid-check left its quota container running;
+        // this instance owns it, and nothing else will remove it.
+        if let Err(error) = tokio::task::spawn_blocking(|| {
+            crate::quota_runtime::sweep_quota_containers(
+                &mj_core::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
+                std::env::var_os("PATH").as_deref(),
+            )
+        })
+        .await
+        {
+            tracing::warn!(%error, "quota container sweep task failed");
+        }
         let mut quotas = QuotaManager::default();
         let mut batch = QuotaRefreshBatch::default();
         // The cache identity each profile was last adopted under. A changed

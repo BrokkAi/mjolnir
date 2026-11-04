@@ -1,10 +1,11 @@
 name: Nightly
 
-# Nightly and manual runs of the shared macOS and Windows lanes, which
-# ordinary check-ins start only for platform-sensitive changes. A failing lane
+# Nightly and manual runs of the shared macOS and Windows lanes. Check-ins run
+# Linux only; release tags also run both lanes through ci.yml. A failing lane
 # opens or reopens its own tracking issue ("Nightly macOS CI is failing" or
 # "Nightly Windows CI is failing"), and that lane's next passing run closes
-# it. Only the report jobs can write issues.
+# it. Only the report jobs can write issues. When both lanes pass on a
+# scheduled run, the release job releases the tested commit.
 
 on:
   schedule:
@@ -68,3 +69,89 @@ jobs:
         CI_LANE: windows
         LANE_RESULT: ${{ needs.windows.result }}
       run: bash scripts/nightly-issue.sh
+
+  # Every scheduled run whose macOS and Windows lanes both pass releases the
+  # commit they tested, as long as master's own CI passed on it and it holds a
+  # change the latest release does not. It is an ordinary release: the minor
+  # version goes up by one with cargo-release, as in RELEASING.md, and
+  # release.yml publishes the tag on every channel. A tag pushed with
+  # GITHUB_TOKEN starts no workflow, so the explicit dispatch runs release.yml
+  # once. A manual dispatch never releases.
+  release:
+    name: Release master
+    needs: [macos, windows]
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Read master's CI run and dispatch release.yml.
+      actions: write
+      # Push the version commit and the tag.
+      contents: write
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    # The version commits and merges this job pushes get no CI run of their
+    # own, so the newest commit on master's first-parent line that a person
+    # made is the one whose CI decides, and whether a release already holds
+    # it decides whether there is anything to release.
+    - name: Check that there is a green change to release
+      id: check
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        source="$(git log --first-parent --format='%H%x09%an' HEAD |
+          awk -F '\t' '$2 != "github-actions[bot]" { print $1; exit }')"
+        latest="$(gh release view --json tagName --jq .tagName)"
+        if git merge-base --is-ancestor "$source" "$latest"; then
+          printf 'Not releasing: %s already contains %s.\n' "$latest" "$source" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+        result="$(gh run list --workflow ci.yml --commit "$source" --event push --limit 1 \
+          --json status,conclusion --jq '.[0] | "\(.status) \(.conclusion)"')"
+        if [[ "$result" != 'completed success' ]]; then
+          printf 'Not releasing: CI for %s is "%s".\n' "$source" "${result:-not run}" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+        echo "release=true" >> "$GITHUB_OUTPUT"
+
+    - uses: dtolnay/rust-toolchain@1.99.1
+      if: ${{ steps.check.outputs.release == 'true' }}
+
+    - name: Install cargo-release
+      if: ${{ steps.check.outputs.release == 'true' }}
+      run: cargo install --locked cargo-release --version 1.1.5
+
+    # The tag is the version commit on top of exactly what the lanes tested.
+    # Master gets that commit directly when it has not moved, or a merge of it
+    # when it has; the master update and the tag land together or not at all.
+    - name: Tag the release and update master
+      if: ${{ steps.check.outputs.release == 'true' }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        git config user.name 'github-actions[bot]'
+        git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+        cargo release minor --workspace --execute --no-confirm
+        version="$(sed -n '/^\[workspace\.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+        test -n "$version"
+        tag="v$version"
+        release_commit="$(git rev-parse HEAD)"
+        git tag "$tag" "$release_commit"
+        for attempt in 1 2 3; do
+          git fetch --quiet origin master
+          git checkout --quiet --detach origin/master
+          git merge --quiet --no-edit -m "Merge release $tag" "$release_commit"
+          if git push --atomic origin HEAD:refs/heads/master "refs/tags/$tag"; then
+            gh workflow run release.yml --ref "$tag"
+            printf 'Tagged %s on %s and started release.yml on it.\n' "$tag" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          sleep $((attempt * 15))
+        done
+        echo "master kept moving; $tag was not pushed" >&2
+        exit 1

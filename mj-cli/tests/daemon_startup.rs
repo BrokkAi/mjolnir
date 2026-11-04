@@ -75,7 +75,8 @@ exit 64
 "#,
     );
     let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", tools.display());
-    let mut daemon = common::own_test_daemons(&mut Command::new(env!("CARGO_BIN_EXE_mj")))
+    let mut daemon_command = Command::new(env!("CARGO_BIN_EXE_mj"));
+    common::own_test_daemons(&mut daemon_command)
         .arg("daemon-run")
         .env("MJ_DATA_DIR", &data)
         .env("MJ_CONFIG_DIR", &config)
@@ -87,9 +88,11 @@ exit 64
         .env("MJOLNIR_NO_UPDATE_CHECK", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(std::process::Stdio::null());
+    let mut daemon = daemon_command.spawn().unwrap();
+    // The daemon starts Apple container through its node, the process that
+    // runs its commands on this computer, as the launcher provides one.
+    let _node = common::start_test_node(&daemon_command, &data);
 
     let deadline = Instant::now() + Duration::from_secs(30);
     while !started.exists() {
@@ -171,8 +174,33 @@ exit 64
         "unexpected container CLI sequence:\n{calls}"
     );
 
+    let stopped = common::own_test_daemons(&mut Command::new(env!("CARGO_BIN_EXE_mj")))
+        .args(["daemon", "stop"])
+        .env("MJ_DATA_DIR", &data)
+        .env("MJ_CONFIG_DIR", &config)
+        .env("MJOLNIR_NO_UPDATE_CHECK", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        stopped.status.success(),
+        "daemon stop failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let exit_deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = daemon.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= exit_deadline {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
+            panic!("the daemon did not exit after daemon stop");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(status.success(), "daemon exited with {status}");
     drop(storage);
-    assert!(daemon.wait().unwrap().success());
 }
 
 /// Run one concurrent upgrade client with its output in a file and a deadline.
@@ -218,9 +246,13 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // Hard-won: 803c9fe1: rewound upgrade fixtures retained the later mailbox failure column.
     // Hard-won: #1302: the old-store fixture must also remove the notification epoch.
     // Hard-won: 5f5e74082: kept current GitHub watch tables, so migration 85 found no v84 columns to drop.
+    // Restore the singleton preference table used before schema 101.
+    // Restore the review table before migrations 104 and 106 add these columns.
     connection
         .execute_batch(
-            "ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;
+            "ALTER TABLE turn_review_state DROP COLUMN active_group;
+         ALTER TABLE turn_review_state DROP COLUMN push_findings;
+         ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;
          ALTER TABLE mailbox_outbox DROP COLUMN failure;
          DROP TABLE quota_reset_cache;
          DROP TABLE subagent_accounting;
@@ -230,6 +262,11 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
          DROP TABLE github_watch_items;
          DROP TABLE github_watch_classifications;
          DROP TABLE github_watch_cursors;
+         ALTER TABLE subagent_preference RENAME TO subagent_preference_profiled;
+         CREATE TABLE subagent_preference (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), policy TEXT NOT NULL CHECK(json_valid(policy)));
+         INSERT INTO subagent_preference(singleton, policy)
+             SELECT 1, policy FROM subagent_preference_profiled WHERE profile_id='';
+         DROP TABLE subagent_preference_profiled;
          PRAGMA writable_schema=ON;
          UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '')
              WHERE type='table' AND name='sessions';
@@ -332,6 +369,49 @@ fn the_daemon_is_listed_as_mj_daemon_run() {
         .map(|argument| String::from_utf8_lossy(argument).into_owned())
         .collect::<Vec<_>>();
     assert_eq!(arguments, ["mj", "daemon-run"]);
+}
+
+#[cfg(target_os = "linux")]
+// Hard-won: 92b39c9da: suspending the launcher's session deleted the daemon's working directory.
+#[test]
+fn daemon_working_directory_survives_removal_of_the_launching_checkout() {
+    let storage = upgrade_storage();
+    let home = storage.path().join("home");
+    let checkout = storage.path().join("checkout");
+    fs::create_dir(&home).unwrap();
+    fs::create_dir(&checkout).unwrap();
+    fs::write(home.join(".gitconfig"), "[user]\nname = Test User\n").unwrap();
+    let output = mj_core::subprocess::run_with_input(
+        upgrade_command(&storage)
+            .env("HOME", &home)
+            .current_dir(&checkout),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(storage.path().join("data/daemon.json")).unwrap())
+            .unwrap();
+    fs::remove_dir(&checkout).unwrap();
+    let daemon_cwd = std::path::PathBuf::from(format!("/proc/{}/cwd", metadata.pid));
+    let output = mj_core::subprocess::run_with_input(
+        Command::new("git")
+            .args(["config", "--global", "--includes", "--null", "--list"])
+            .env("HOME", &home)
+            .current_dir(&daemon_cwd),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_link(daemon_cwd).unwrap(), home);
 }
 
 #[test]

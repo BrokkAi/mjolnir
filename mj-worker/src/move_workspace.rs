@@ -30,11 +30,11 @@ fn git_text(root: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Where Git keeps `name` in the Git directory of the checkout at `root`.
-///
-/// Git 2.25 has no `--path-format=absolute`: it prints the option back and
-/// exits successfully. `--git-path` answers relative to `root`.
 fn git_path(root: &Path, name: &str) -> Result<PathBuf> {
-    let output = git_text(root, &["rev-parse", "--git-path", name])?;
+    let output = git_text(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-path", name],
+    )?;
     mj_core::local_git::resolve_git_path(root, &output)
 }
 
@@ -144,10 +144,6 @@ pub fn inspect(repositories: &[WorkspaceRepository]) -> Result<WorkspaceAssessme
                 path,
             };
             location.validate()?;
-            if mj_checkpoint::archive::is_secret_like_path(&location.path) {
-                assessment.credential_files += 1;
-                continue;
-            }
             let metadata = fs::symlink_metadata(root.join(&location.path))?;
             ensure!(
                 metadata.is_file() || metadata.is_symlink(),
@@ -219,6 +215,7 @@ pub fn capture(
         .open(destination.with_extension("move-lock"))?;
     lock.try_lock()
         .context("another process owns this Move capture; retry after it finishes")?;
+    let _lock = mj_core::file_lock::FileLock::new(lock);
     if destination.join(MANIFEST).is_file() {
         return verify(destination);
     }
@@ -711,6 +708,7 @@ mod tests {
         assert!(inspect(&repositories).is_ok());
     }
 
+    // Hard-won: b63fedbf31: Move silently omitted untracked files based on their names.
     #[test]
     fn disk_backed_move_preserves_git_state_and_selected_large_files() {
         let temp = tempfile::tempdir().unwrap();
@@ -776,13 +774,13 @@ mod tests {
         fs::write(source.join("excluded"), "keep at source").unwrap();
         fs::write(source.join("ignored"), "ignored").unwrap();
         fs::write(source.join(".env"), "private").unwrap();
+        fs::write(source.join("config.json"), "{\"flow\":4}").unwrap();
         let repos = vec![WorkspaceRepository {
             id: "repo".into(),
             root: source.clone(),
         }];
         let assessment = inspect(&repos).unwrap();
         assert_eq!(assessment.ignored_files, 1);
-        assert_eq!(assessment.credential_files, 1);
         let selection = WorkspaceSelection {
             exclusions: vec![WorkspacePath {
                 repository: "repo".into(),
@@ -827,7 +825,11 @@ mod tests {
         assert!(!target.join("excluded").exists());
         assert!(source.join("excluded").exists());
         assert!(!target.join("ignored").exists());
-        assert!(!target.join(".env").exists());
+        assert_eq!(fs::read(target.join(".env")).unwrap(), b"private");
+        assert_eq!(
+            fs::read(target.join("config.json")).unwrap(),
+            b"{\"flow\":4}"
+        );
         fs::write(stage.join("repo/staged.patch"), "corrupt").unwrap();
         assert!(
             verify(&stage)

@@ -78,6 +78,12 @@ impl DashboardState {
     /// whether the notice on screen has been readable long enough for this
     /// key press to dismiss it.
     pub fn handle_key_at(&mut self, key: KeyEvent, now: Instant) -> DashboardAction {
+        if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
+            self.paste_revision = self.paste_revision.wrapping_add(1);
+        }
+        if self.away_dialog().is_some() {
+            return self.handle_away_event(Event::Key(key));
+        }
         if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
             return DashboardAction::None;
         }
@@ -89,6 +95,11 @@ impl DashboardState {
             return self.handle_pane_menu_event(Event::Key(key));
         }
         if is_paste_shortcut(key) {
+            if !self.component_modal_open()
+                && let Some(action) = self.handle_standby_prompt_key(key)
+            {
+                return action;
+            }
             self.record_event_handled();
             return DashboardAction::PasteFromClipboard;
         }
@@ -117,9 +128,6 @@ impl DashboardState {
         if self.component_modal_open() {
             return self.handle_component_event(crossterm::event::Event::Key(key));
         }
-        if matches!(self.mode, Mode::Help(_)) {
-            return self.handle_help_key(key);
-        }
         self.handle_dashboard_key(key)
     }
 
@@ -128,9 +136,27 @@ impl DashboardState {
             .is_some_and(|modal| modal.text_input_focused())
     }
 
+    pub fn paste_target(&self) -> DashboardPasteTarget {
+        DashboardPasteTarget {
+            revision: self.paste_revision,
+            mode: std::mem::discriminant(&self.mode),
+            session: self.current_session_id().map(str::to_owned),
+            pane: self.focused_pane(),
+            focus: self.focus,
+        }
+    }
+    /// A modal clipboard read cannot follow focus into another field or session.
+    pub fn apply_clipboard_text(&mut self, target: &DashboardPasteTarget, text: &str) -> bool {
+        if &self.paste_target() != target {
+            return false;
+        }
+        self.handle_paste(text);
+        true
+    }
     pub fn handle_paste(&mut self, pasted: &str) {
-        if matches!(self.mode, Mode::Help(_)) {
-            self.paste_help(pasted);
+        self.paste_revision = self.paste_revision.wrapping_add(1);
+        if self.away_dialog().is_some() {
+            self.handle_away_event(Event::Paste(pasted.to_owned()));
             return;
         }
         if self.component_modal_open() {
@@ -143,11 +169,8 @@ impl DashboardState {
         let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
         if let Some(session_id) = self.standby_prompt_session() {
             let session_id = session_id.to_owned();
-            self.standby_prompt_mut(&session_id).paste(&normalized);
-        } else if self.launch_standby_capturing()
-            && let Some(standby) = self.launch_standby.as_mut()
-        {
-            standby.paste(&normalized);
+            self.standby_prompt_mut(&session_id)
+                .handle_composer_paste(&normalized);
         }
     }
 
@@ -157,6 +180,10 @@ impl DashboardState {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> DashboardAction {
+        self.paste_revision = self.paste_revision.wrapping_add(1);
+        if self.away_dialog().is_some() {
+            return self.handle_away_event(Event::Mouse(mouse));
+        }
         let now = Instant::now();
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             self.suppress_modal_release =
@@ -203,9 +230,6 @@ impl DashboardState {
             self.begin_pane_menu(pane);
             self.record_event_handled();
             return DashboardAction::None;
-        }
-        if matches!(self.mode, Mode::Help(_)) {
-            return self.handle_help_mouse(mouse);
         }
         if self.component_modal_open() {
             return self.handle_component_event(crossterm::event::Event::Mouse(mouse));
@@ -376,7 +400,7 @@ impl DashboardState {
     ///
     /// Everything that runs a named command is looked up in the action
     /// registry ([`crate::actions`]) rather than matched here, so the keys, the
-    /// footer, and the help overlay are all reading one table. What stays as
+    /// footer, and the command palette all read one table. What stays as
     /// hand-written arms is the input that is not a command: list
     /// navigation, and the two keys whose meaning depends on state.
     pub(crate) fn handle_dashboard_key(&mut self, key: KeyEvent) -> DashboardAction {
@@ -602,6 +626,12 @@ impl DashboardState {
                 error: issue,
                 previous: Box::new(self.mode.clone()),
             }));
+            return DashboardAction::None;
+        }
+        // Explicit Open can enter the selected session's standby composer
+        // while its worker is starting, resuming, moving, or attaching.
+        if self.standby_prompt_session().is_some() {
+            self.focus_prompt();
             return DashboardAction::None;
         }
         if let Some(operation) = self.session_operations.get(&session.id) {

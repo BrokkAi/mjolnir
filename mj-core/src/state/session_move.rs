@@ -275,9 +275,22 @@ pub enum MovePhase {
     Cancelled,
 }
 
+/// The continuation chosen once on the destination before queue admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaMoveContinuation {
+    Prompt,
+    ResumeGoal,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MoveOperation {
+    /// Daemon-owned continuation after an automatic quota profile switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_stop_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_continuation: Option<QuotaMoveContinuation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepared_destination: Option<PreparedMoveDestination>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

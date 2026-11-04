@@ -407,7 +407,6 @@ fn ascii_symbols_draw_settings_and_dialogs_without_non_ascii_text() {
 
     // The dashboard's own dialogs.
     for command in [
-        crate::CommandId::Help,
         crate::CommandId::Palette,
         crate::CommandId::NewSessionWizard,
         crate::CommandId::Workspaces,

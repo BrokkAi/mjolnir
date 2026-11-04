@@ -154,10 +154,14 @@ impl DashboardState {
             return None;
         };
         let config = config_from_draft(dialog.draft.clone()).ok()?;
-        let key = config.profiles_discovery_key();
-        // Saved profiles are already hydrating from daemon startup/reload.
-        if key == self.config.profiles_discovery_key()
+        // A selected model's efforts are discovered only once it is selected,
+        // so a draft choosing another model is warmed like a new profile.
+        let key = config.capability_demand_key();
+        // Saved profiles and selections are already hydrating from daemon
+        // startup/reload.
+        if key == self.config.capability_demand_key()
             || self.profile_hydration_requests.contains_key(&key)
+            || self.profile_hydration_sent.as_ref() == Some(&key)
         {
             return None;
         }
@@ -166,9 +170,7 @@ impl DashboardState {
             .map(|(id, profile)| profile.capabilities_key(id))
             .filter(|identity| !self.profile_capabilities.profiles.contains_key(identity))
             .collect::<BTreeSet<_>>();
-        if missing.is_empty() {
-            return None;
-        }
+        self.profile_hydration_sent = Some(key.clone());
         self.profile_hydration_requests.insert(key.clone(), missing);
         Some(DashboardAction::WarmProfileCapabilities {
             key,
@@ -178,7 +180,8 @@ impl DashboardState {
 
     pub fn apply_profile_hydration(&mut self, key: String, result: Result<(), String>) {
         if let Err(error) = result
-            && self.profile_hydration_requests.contains_key(&key)
+            && (self.profile_hydration_requests.contains_key(&key)
+                || self.profile_hydration_sent.as_ref() == Some(&key))
         {
             self.profile_hydration_errors.insert(key, error.clone());
             self.set_notice(format!("Profile capability hydration failed: {error}"));
@@ -189,27 +192,14 @@ impl DashboardState {
         let Mode::Setup(dialog) = &mut self.mode else {
             return None;
         };
-        let config = config_from_draft(dialog.draft.clone()).ok()?;
-        for task in ["straightforward", "subtle"] {
-            let model = dialog.draft["subagents"][task]["model"].as_str();
-            let mut options = self.profile_capabilities.options(&config, None);
-            if let Some(options) = &mut options
-                && let Some(efforts) = self.profile_capabilities.options(&config, model)
-            {
-                options.efforts = efforts.efforts;
-                options.unavailable = efforts.unavailable;
-            }
-            if let Some(options) = options {
-                if !options.unavailable.is_empty()
-                    && dialog.path.first().is_some_and(|p| p == "subagents")
-                {
-                    dialog.notice = Some(format!("Discovery: {}", options.unavailable.join("; ")));
-                }
-                dialog.draft["_subagent_options"][task] =
-                    serde_json::to_value(options).expect("options serialize");
-            } else {
-                dialog.draft["_subagent_options"][task] = Value::Null;
-            }
+        let Ok(unreachable) = mj_client::settings::discovery::fill_subagent_options(
+            &mut dialog.draft,
+            &self.profile_capabilities,
+        ) else {
+            return None;
+        };
+        if unreachable.is_some() && dialog.path.first().is_some_and(|p| p == "subagents") {
+            dialog.notice = unreachable;
         }
         dialog.prepare();
         None
@@ -235,6 +225,12 @@ impl DashboardState {
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                 );
             if save_shortcut {
+                if review.parsed_reviewer_count().is_none() {
+                    review.save_error = Some("Enter a positive number of reviewers.".into());
+                    dialog.review_editor = Some(review);
+                    self.mode = Mode::Setup(dialog);
+                    return DashboardAction::None;
+                }
                 dialog.sync_review_validation(&review);
                 let action = dialog.save(&self.profile_capabilities);
                 if dialog.saving || dialog.fields.values().any(|field| field.error.is_some()) {
@@ -285,6 +281,13 @@ impl DashboardState {
             self.mode = Mode::Setup(dialog);
             return action;
         }
+        // The Detection results view owns its scroll keys and its way out;
+        // everything else (Tab to the footer, Enter) falls through to the form.
+        if dialog.report.is_some() && handle_report_event(&mut dialog, &event) {
+            self.last_event_consumed.set(true);
+            self.mode = Mode::Setup(dialog);
+            return DashboardAction::None;
+        }
         dialog.prepare();
         let field_focused = dialog.text_input_focused();
         let popup_open = dialog.combo.open_id().is_some()
@@ -305,17 +308,22 @@ impl DashboardState {
                         }))
                     }
                     // Every shortcut below is a bare key, so none of them may
-                    // fire while the search query has the keyboard.
+                    // fire while the search query has the keyboard or the
+                    // Detection results view is up.
                     KeyCode::Char('/')
                         if !field_focused
                             && !popup_open
                             && dialog.search.is_none()
+                            && dialog.report.is_none()
                             && key.modifiers.is_empty() =>
                     {
                         Some(Interaction::Activate(OpenSearch))
                     }
                     KeyCode::Backspace
-                        if !field_focused && !popup_open && dialog.search.is_none() =>
+                        if !field_focused
+                            && !popup_open
+                            && dialog.search.is_none()
+                            && dialog.report.is_none() =>
                     {
                         Some(Interaction::Activate(Back))
                     }
@@ -327,17 +335,26 @@ impl DashboardState {
                         if dialog.editor.is_none()
                             && !popup_open
                             && dialog.search.is_none()
+                            && dialog.report.is_none()
                             && !dialog.path.is_empty()
                             && key.modifiers.is_empty() =>
                     {
                         Some(Interaction::Activate(Back))
                     }
                     KeyCode::Char('a')
-                        if !field_focused && !popup_open && dialog.search.is_none() =>
+                        if !field_focused
+                            && !popup_open
+                            && dialog.search.is_none()
+                            && dialog.report.is_none() =>
                     {
                         Some(Interaction::Activate(Add))
                     }
-                    KeyCode::Delete if !field_focused && !popup_open && dialog.search.is_none() => {
+                    KeyCode::Delete
+                        if !field_focused
+                            && !popup_open
+                            && dialog.search.is_none()
+                            && dialog.report.is_none() =>
+                    {
                         Some(Interaction::Activate(Remove))
                     }
                     _ => None,
@@ -404,6 +421,18 @@ impl DashboardState {
                 if dialog.search.is_some() =>
             {
                 dialog.close_search();
+            }
+            // Esc and Backspace are the report's own; Back here is the footer
+            // button or Enter on it.
+            Some(Interaction::Cancel) | Some(Interaction::Activate(Back))
+                if dialog.report.is_some() =>
+            {
+                dialog.report = None;
+            }
+            Some(Interaction::Activate(DetectionResults))
+                if !dialog.detection_rejected.is_empty() =>
+            {
+                dialog.report = Some(ReportState::default());
             }
             Some(Interaction::Edit(Search, edit)) => {
                 if let Some(search) = &mut dialog.search
@@ -543,50 +572,43 @@ impl DashboardState {
                         .pointer(&pointer(&parent))
                         .is_some_and(|v| is_collection(&parent, v))
                 {
-                    if parent == ["machines"] && key == mj_core::config::LOCAL_MACHINE_ID {
-                        dialog.notice = Some("This machine is always available.".into());
-                    } else {
-                        let removed_path = dialog.path.clone();
-                        match dialog.draft.pointer_mut(&pointer(&parent)).unwrap() {
-                            Value::Object(object) => {
-                                object.remove(&key);
+                    match mj_client::settings::edit::remove_entry(&mut dialog.draft, &dialog.path) {
+                        Err(refusal) => dialog.notice = Some(refusal),
+                        Ok(removal) => {
+                            if removal.notice.is_some() {
+                                dialog.notice = removal.notice;
                             }
-                            Value::Array(array) => {
-                                array.remove(key.parse::<usize>().expect("array entry path"));
+                            // Rebind pending text to the surviving entry when array indices shift.
+                            dialog.fields = std::mem::take(&mut dialog.fields)
+                                .into_iter()
+                                .filter_map(|(mut path, field)| {
+                                    if removal
+                                        .removed
+                                        .iter()
+                                        .any(|removed| path.starts_with(removed))
+                                    {
+                                        return None;
+                                    }
+                                    if let Some(removed) = removal.list_index
+                                        && path.starts_with(&parent)
+                                        && let Some(index) = path
+                                            .get(parent.len())
+                                            .and_then(|part| part.parse::<usize>().ok())
+                                        && index > removed
+                                    {
+                                        path[parent.len()] = (index - 1).to_string();
+                                    }
+                                    Some((path, field))
+                                })
+                                .collect();
+                            if parent.first().is_some_and(|p| p == "profiles") {
+                                dialog.invalidate_review_validation_for(Some(
+                                    parent.get(1).unwrap_or(&key),
+                                ));
                             }
-                            _ => {}
+                            dialog.descriptors.clear();
+                            dialog.open_page(parent);
                         }
-                        let array_index = dialog
-                            .draft
-                            .pointer(&pointer(&parent))
-                            .is_some_and(Value::is_array)
-                            .then(|| key.parse::<usize>().expect("array entry path"));
-                        // Rebind pending text to the surviving entry when array indices shift.
-                        dialog.fields = std::mem::take(&mut dialog.fields)
-                            .into_iter()
-                            .filter_map(|(mut path, field)| {
-                                if path.starts_with(&removed_path) {
-                                    return None;
-                                }
-                                if let Some(removed) = array_index
-                                    && path.starts_with(&parent)
-                                    && let Some(index) = path
-                                        .get(parent.len())
-                                        .and_then(|part| part.parse::<usize>().ok())
-                                    && index > removed
-                                {
-                                    path[parent.len()] = (index - 1).to_string();
-                                }
-                                Some((path, field))
-                            })
-                            .collect();
-                        if parent.first().is_some_and(|p| p == "profiles") {
-                            dialog.invalidate_review_validation_for(Some(
-                                parent.get(1).unwrap_or(&key),
-                            ));
-                        }
-                        dialog.descriptors.clear();
-                        dialog.open_page(parent);
                     }
                 }
             }

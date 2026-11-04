@@ -83,26 +83,26 @@ impl HostState {
         let changed = match self.reviews.get(session_id) {
             Some(slot) => {
                 let mut next = slot.view(session_id);
-                if let Some(session) = slot
-                    .state
-                    .child_session_id
-                    .as_ref()
-                    .and_then(|child| self.sessions.get(child))
-                    .and_then(|watch| watch.materialized.as_ref())
-                {
-                    next.questions = session
-                        .pending_elicitations
-                        .iter()
-                        .filter(|request| !mj_core::acp::is_plan_review_id(&request.id))
-                        .map(|request| ReviewerQuestion {
-                            role: slot
-                                .state
-                                .child_session_id
-                                .clone()
-                                .expect("reviewer child exists"),
-                            request: request.clone(),
-                        })
-                        .collect();
+                if let Some(group) = &slot.state.active_group {
+                    for registration in &group.registrations {
+                        if let Some(child) = &registration.child_session_id
+                            && let Some(session) = self
+                                .sessions
+                                .get(child)
+                                .and_then(|watch| watch.materialized.as_ref())
+                        {
+                            next.questions.extend(
+                                session
+                                    .pending_elicitations
+                                    .iter()
+                                    .filter(|request| !mj_core::acp::is_plan_review_id(&request.id))
+                                    .map(|request| ReviewerQuestion {
+                                        role: child.clone(),
+                                        request: request.clone(),
+                                    }),
+                            );
+                        }
+                    }
                 }
                 if views.get(session_id) == Some(&next) {
                     false
@@ -111,14 +111,22 @@ impl HostState {
                     true
                 }
             }
-            None if self.preparing.contains(session_id) => {
+            None if self.preparing.contains_key(session_id) => {
                 let next = RuntimeReviewView {
                     child_session_id: None,
                     session_id: session_id.into(),
                     questions: Vec::new(),
                     phase: TurnReviewPhase::LaunchingReviewer,
                     roles: Vec::new(),
-                    status: "Preparing reviewer…".into(),
+                    status: if matches!(
+                        self.preparing.get(session_id),
+                        Some(PreparingOperation::Override { .. })
+                    ) {
+                        "Overriding review…"
+                    } else {
+                        "Preparing reviewer…"
+                    }
+                    .into(),
                     verdict: None,
                 };
                 let changed = views.get(session_id) != Some(&next);
@@ -134,9 +142,45 @@ impl HostState {
     }
 
     pub(super) async fn shutdown(&mut self) -> Result<(), String> {
-        let session_ids = self
+        // A validated override has accepted daemon-owned work. It must finish
+        // while the persistence lane and the worker connection are still live.
+        for operation in self.preparing.values_mut() {
+            if let PreparingOperation::Override { task, admitted, .. } = operation
+                && !*admitted
+            {
+                task.abort();
+            }
+        }
+        let override_ids: Vec<_> = self
             .preparing
             .iter()
+            .filter(|(_, operation)| matches!(operation, PreparingOperation::Override { .. }))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for session_id in override_ids {
+            if let Some(PreparingOperation::Override {
+                task,
+                mut result,
+                reply,
+                ..
+            }) = self.preparing.remove(&session_id)
+            {
+                if let Err(error) = task.await
+                    && !error.is_cancelled()
+                {
+                    tracing::warn!(%error, "push review override task stopped during shutdown");
+                }
+                let response = result.try_recv().unwrap_or_else(|_| {
+                    Err(StartRefusal(
+                        "push review override stopped during shutdown".into(),
+                    ))
+                });
+                let _ = reply.send(response);
+            }
+        }
+        let session_ids = self
+            .preparing
+            .keys()
             .chain(self.reviews.keys())
             .chain(self.recovery_in_flight.iter())
             .chain(self.recovery_candidates.iter())
@@ -160,7 +204,10 @@ impl HostState {
         }
         let lane = self.persistence.take();
         // A review still preparing has no state row to keep its marker in.
-        for session_id in &self.preparing {
+        for (session_id, operation) in &self.preparing {
+            if !matches!(operation, PreparingOperation::Review { .. }) {
+                continue;
+            }
             if self.reviews.contains_key(session_id) {
                 continue;
             }
@@ -202,10 +249,11 @@ impl HostState {
                 tracing::warn!(session_id, %error, "could not queue review shutdown persistence");
             }
         }
-        for flag in self.preparation_cancellation.values() {
-            flag.store(true, std::sync::atomic::Ordering::Release);
+        for operation in self.preparing.values() {
+            if let PreparingOperation::Review { cancelled } = operation {
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+            }
         }
-        self.preparation_cancellation.clear();
         self.preparing.clear();
         self.closing.clear();
         self.reviews.clear();

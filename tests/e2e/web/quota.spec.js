@@ -27,7 +27,12 @@ function profiles() {
     harness_kind: id.replace(/\d+$/, ''),
     quota: {
       windows: [
-        { label: 'Week', percent_used: index * 20, resets_at: '12:00 Sep 12' },
+        {
+          label: 'Week',
+          percent_used: index === 0 ? 79 : index * 20,
+          ...(index === 0 ? { fable_remaining_percent: 17 } : index === 1 ? { fable_remaining_percent: null } : {}),
+          resets_at: '12:00 Sep 12',
+        },
         ...(index % 2 ? [] : [{ label: '5H', percent_used: 10, projects_exhaustion_before_reset: true }]),
       ],
       refreshed_at_epoch_seconds: 1788642251,
@@ -63,6 +68,14 @@ test('golden_viewer_quota_overview', async ({ context }) => {
     await page.setViewportSize(viewport);
     await page.clock.install({ time: new Date(1788642251000) });
     await mount(page, profiles());
+    await expect(page.locator('.quota-overview-heading')).toContainText('Week');
+    await expect(page.locator('.quota-overview-heading')).not.toContainText('Week (Fable)');
+    await expect(page.locator('[data-profile-id="claude"] .quota-overview-row')).toContainText('21% (17%)');
+    await expect(page.locator('[data-profile-id="claude"] .quota-overview-row')).toHaveAttribute('aria-label', /Fable weekly 17% left/);
+    await expect(page.locator('[data-profile-id="claude2"] .quota-overview-row')).toContainText('80%');
+    await expect(page.locator('[data-profile-id="claude2"] .quota-overview-row')).not.toContainText('(');
+    await expect(page.locator('[data-profile-id="codex"] .quota-overview-row')).toContainText('60%');
+    await expect(page.locator('[data-profile-id="codex"] .quota-overview-row')).not.toContainText('(');
     const capture = async label => {
       output.push(`=== ${label} (${viewport.width}x${viewport.height}) ===`);
       output.push((await page.locator('#quota-page').innerText()).trim());
@@ -84,6 +97,8 @@ test('golden_viewer_quota_overview', async ({ context }) => {
     const row = page.locator('[data-profile-id="claude"]');
     await row.locator('summary').focus();
     await page.keyboard.press('Enter');
+    await expect(row.locator('.quota-window').first().locator('.quota-label')).toContainText('Week (Fable 17% left)');
+    expect(await row.locator('.quota-window').first().locator('.meter-fill').evaluate(node => node.style.getPropertyValue('--fill'))).toBe('79%');
     await capture('quota details opened on demand');
     await page.evaluate(() => {
       snapshot.profiles[0].quota.windows[0].percent_used = 17;

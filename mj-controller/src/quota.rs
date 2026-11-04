@@ -14,22 +14,91 @@ use crate::claude_usage;
 use crate::codex_usage::{self, CodexUsageClient, CodexUsageStatus};
 use crate::grok_usage;
 use mj_core::codex_provider::BuiltInCodexProvider;
-use mj_core::config::{HarnessKind, HarnessProfile, harness_authentication_marker};
+use mj_core::config::{
+    AuthScheme, HarnessKind, HarnessProfile, QuotaRuntimeChoice, harness_authentication_marker,
+};
 use mj_core::credentials::{
     MAX_CREDENTIAL_BYTES, credential_expiry, credential_fingerprint, credential_freshness,
 };
 
-pub use mj_client::quota::{API_LABEL, ProfileQuota, QuotaWindow, projects_exhaustion};
+pub use mj_client::quota::{
+    API_LABEL, NOT_REPORTED_LABEL, ProfileQuota, QuotaWindow, projects_exhaustion,
+};
+
+/// Clone a daemon report for a user-facing quota surface, retaining only
+/// unscoped windows and Claude's Fable weekly allowance. Internal selection
+/// and health keep the complete report.
+pub(crate) fn surface_quota_report(report: &ProfileQuota) -> ProfileQuota {
+    let mut visible = report.clone();
+    let fable_weekly = report.fable_weekly_window().cloned();
+    visible
+        .windows
+        .retain(|window| window.model_scope.is_none());
+    if let Some(window) = fable_weekly {
+        visible.windows.push(window);
+    }
+    visible
+}
 
 #[derive(Debug, Clone)]
 pub struct QuotaRefreshRequest {
     pub profile_id: String,
     pub harness: HarnessKind,
+    pub auth_scheme: AuthScheme,
     pub source_home: std::path::PathBuf,
     pub environment: BTreeMap<String, String>,
     pub cwd: std::path::PathBuf,
     /// Where a Codex profile's quota comes from. Other harnesses ignore it.
     pub codex_source: CodexQuotaSource,
+    /// Where a check that starts the harness runs it (`[quota] runtime`).
+    pub runtime: QuotaRuntimeConfig,
+}
+
+/// What `[quota] runtime` and the configured runtimes allow a check that
+/// starts a harness to use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotaRuntimeConfig {
+    pub choice: QuotaRuntimeChoice,
+    /// The image of the enabled local Podman runtime, preferring one the
+    /// person configured over a standard candidate.
+    pub podman_image: Option<String>,
+    /// The same for Docker.
+    pub docker_image: Option<String>,
+}
+
+impl QuotaRuntimeConfig {
+    pub fn of(config: &mj_core::config::Config) -> Self {
+        let image = |wanted: mj_core::targets::ImageHost| {
+            let mut enabled = config
+                .targets
+                .iter()
+                .filter(|(id, _)| !config.disabled_targets.contains(*id))
+                .filter_map(|(id, target)| {
+                    let (host, container) = target.image_host()?;
+                    (host == wanted).then(|| (config.default_targets.contains(id), container))
+                })
+                .collect::<Vec<_>>();
+            // Configured runtimes first: `false` sorts before `true`.
+            enabled.sort_by_key(|(standard, _)| *standard);
+            enabled
+                .first()
+                .map(|(_, container)| container.image.clone())
+        };
+        Self {
+            choice: config.quota.runtime,
+            podman_image: image(mj_core::targets::ImageHost::LocalPodman),
+            docker_image: image(mj_core::targets::ImageHost::LocalDocker),
+        }
+    }
+
+    /// Never a container.
+    pub fn host() -> Self {
+        Self {
+            choice: QuotaRuntimeChoice::Host,
+            podman_image: None,
+            docker_image: None,
+        }
+    }
 }
 
 /// Where a Codex profile's quota comes from, decided once from its provider
@@ -126,6 +195,7 @@ impl QuotaRefreshRequest {
         profile_id: &str,
         profile: &HarnessProfile,
         cwd: std::path::PathBuf,
+        runtime: QuotaRuntimeConfig,
     ) -> Self {
         let mut environment = profile.environment.resolved().clone();
         profile.kind.configure_profile_home_environment(
@@ -136,10 +206,12 @@ impl QuotaRefreshRequest {
         Self {
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
+            auth_scheme: profile.auth_scheme(),
             source_home: profile.home.clone(),
             environment,
             cwd,
             codex_source: CodexQuotaSource::of_profile(profile),
+            runtime,
         }
     }
 }
@@ -420,11 +492,27 @@ async fn refresh_profile_with_cache_root(
     let QuotaRefreshRequest {
         profile_id,
         harness,
+        auth_scheme,
         source_home,
         environment,
         cwd,
         codex_source,
+        runtime,
     } = request;
+    // Only the checks that start a harness program consult the runtime.
+    let container = || -> Result<Option<crate::quota_runtime::ContainerCheck>> {
+        Ok(
+            match crate::quota_runtime::QuotaRuntime::current(&runtime)? {
+                crate::quota_runtime::QuotaRuntime::Host => None,
+                crate::quota_runtime::QuotaRuntime::Container(runtime) => {
+                    Some(crate::quota_runtime::ContainerCheck {
+                        runtime,
+                        home: source_home.clone(),
+                    })
+                }
+            },
+        )
+    };
     let environment = environment.into_iter().collect::<HashMap<_, _>>();
     let refreshed_at_epoch_seconds = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -444,6 +532,12 @@ async fn refresh_profile_with_cache_root(
         error: None,
         refreshed_at_epoch_seconds,
         rate_limited_until_epoch_seconds: None,
+    };
+    // A harness that never shares its quota has nothing to probe and nothing
+    // that failed, so it says `n/a` instead of reading as unavailable.
+    let not_reported = || ProfileQuota {
+        extra: Some(NOT_REPORTED_LABEL.to_owned()),
+        ..usage_priced()
     };
     let result = match harness {
         // A Codex profile that authenticates with an API key against a custom
@@ -465,6 +559,8 @@ async fn refresh_profile_with_cache_root(
                             .map(|window| QuotaWindow {
                                 label: window.label,
                                 remaining_percent: Some(window.remaining_percent),
+                                duration_seconds: None,
+                                model_scope: None,
                                 used: window.used,
                                 limit: window.limit,
                                 resets: window.resets_at.and_then(format_reset_local_seconds),
@@ -483,7 +579,12 @@ async fn refresh_profile_with_cache_root(
             CodexQuotaSource::Unreadable(error) => Err(anyhow::anyhow!(
                 "could not read the Codex configuration: {error}"
             )),
-            CodexQuotaSource::ChatGptLogin => {
+            CodexQuotaSource::ChatGptLogin => 'codex: {
+                let launcher = match container() {
+                    Ok(Some(check)) => codex_usage::CodexLauncher::Container(check),
+                    Ok(None) => codex_usage::CodexLauncher::Managed(cache_root.clone()),
+                    Err(error) => break 'codex Err(error),
+                };
                 // A poll starts at most one app-server. A failed rotation drops its
                 // client. When that client was cached from an earlier poll, a new
                 // one may still read the quota, which is how a login that the old
@@ -497,7 +598,7 @@ async fn refresh_profile_with_cache_root(
                         &mut codex_client,
                         cwd.clone(),
                         environment.clone(),
-                        cache_root.clone(),
+                        &launcher,
                     )
                     .await;
                     match login_refresh {
@@ -524,7 +625,7 @@ async fn refresh_profile_with_cache_root(
                             &mut codex_client,
                             cwd,
                             environment,
-                            cache_root,
+                            &launcher,
                         )
                         .await
                     }
@@ -540,6 +641,8 @@ async fn refresh_profile_with_cache_root(
                             .map(|window| QuotaWindow {
                                 label: window.label,
                                 remaining_percent: Some(window.remaining_percent),
+                                duration_seconds: window.duration_seconds,
+                                model_scope: None,
                                 used: None,
                                 limit: None,
                                 resets: window.resets_at.and_then(format_reset_local_seconds),
@@ -555,44 +658,94 @@ async fn refresh_profile_with_cache_root(
                 }
             }
         },
-        HarnessKind::Claude => claude_usage::query(source_home, environment)
-            .await
-            .map(|report| ProfileQuota {
-                banked_resets: report.banked_resets,
-                profile_id: profile_id.clone(),
-                harness,
-                windows: [
-                    report.five_hour.map(|window| ("5H", window)),
-                    report.week.map(|window| ("Week", window)),
-                ]
-                .into_iter()
-                .flatten()
-                .map(|(label, window)| QuotaWindow {
-                    label: label.to_string(),
-                    remaining_percent: Some(window.remaining_percent),
-                    used: None,
-                    limit: None,
-                    resets: window
-                        .reset_context
-                        .as_deref()
-                        .and_then(normalize_reset_text),
-                    resets_at_epoch_seconds: window
-                        .reset_context
-                        .as_deref()
-                        .and_then(normalize_reset_epoch_seconds),
+        // Bedrock bills through AWS and has no Claude subscription allowance.
+        HarnessKind::Claude if auth_scheme == AuthScheme::AwsCredentialChain => Ok(usage_priced()),
+        HarnessKind::Claude => match if cfg!(target_os = "macos") {
+            Ok(None)
+        } else {
+            container()
+        } {
+            Err(error) => Err(error),
+            Ok(container) => claude_usage::query(source_home, environment, container)
+                .await
+                .map(|report| ProfileQuota {
+                    banked_resets: report.banked_resets,
+                    profile_id: profile_id.clone(),
+                    harness,
+                    windows: {
+                        let mut windows = Vec::new();
+                        if let Some(window) = report.five_hour {
+                            windows.push(QuotaWindow {
+                                label: "5H".to_owned(),
+                                remaining_percent: Some(window.remaining_percent),
+                                duration_seconds: window.duration_seconds,
+                                model_scope: None,
+                                used: None,
+                                limit: None,
+                                resets: window
+                                    .reset_context
+                                    .as_deref()
+                                    .and_then(normalize_reset_text),
+                                resets_at_epoch_seconds: window
+                                    .reset_context
+                                    .as_deref()
+                                    .and_then(normalize_reset_epoch_seconds),
+                            });
+                        }
+                        if let Some(window) = report.week {
+                            windows.push(QuotaWindow {
+                                label: "Week".to_owned(),
+                                remaining_percent: Some(window.remaining_percent),
+                                duration_seconds: window.duration_seconds,
+                                model_scope: None,
+                                used: None,
+                                limit: None,
+                                resets: window
+                                    .reset_context
+                                    .as_deref()
+                                    .and_then(normalize_reset_text),
+                                resets_at_epoch_seconds: window
+                                    .reset_context
+                                    .as_deref()
+                                    .and_then(normalize_reset_epoch_seconds),
+                            });
+                        }
+                        for (scope, window) in report.scoped_weeks {
+                            let mut chars = scope.chars();
+                            let label_scope = chars.next().map_or_else(String::new, |first| {
+                                first.to_ascii_uppercase().to_string() + chars.as_str()
+                            });
+                            windows.push(QuotaWindow {
+                                label: format!("Week ({label_scope})"),
+                                remaining_percent: Some(window.remaining_percent),
+                                duration_seconds: window.duration_seconds,
+                                model_scope: Some(scope),
+                                used: None,
+                                limit: None,
+                                resets: window
+                                    .reset_context
+                                    .as_deref()
+                                    .and_then(normalize_reset_text),
+                                resets_at_epoch_seconds: window
+                                    .reset_context
+                                    .as_deref()
+                                    .and_then(normalize_reset_epoch_seconds),
+                            });
+                        }
+                        windows
+                    },
+                    extra: None,
+                    error: None,
+                    refreshed_at_epoch_seconds,
+                    rate_limited_until_epoch_seconds: None,
                 })
-                .collect(),
-                extra: None,
-                error: None,
-                refreshed_at_epoch_seconds,
-                rate_limited_until_epoch_seconds: None,
-            })
-            .map_err(|error| match error {
-                claude_usage::ClaudeUsageError::RateLimited(retry_after) => {
-                    anyhow::Error::new(RateLimited { retry_after })
-                }
-                error => anyhow::anyhow!(error.to_string()),
-            }),
+                .map_err(|error| match error {
+                    claude_usage::ClaudeUsageError::RateLimited(retry_after) => {
+                        anyhow::Error::new(RateLimited { retry_after })
+                    }
+                    error => anyhow::anyhow!(error.to_string()),
+                }),
+        },
         HarnessKind::Kimi => {
             query_kimi(&source_home, &environment)
                 .await
@@ -609,8 +762,12 @@ async fn refresh_profile_with_cache_root(
         }
         // Grok Build publishes no HTTP quota endpoint. Its own usage view polls
         // an ACP billing extension, and so does Mjolnir.
-        HarnessKind::Grok => {
-            grok_usage::query(source_home.clone(), cwd, environment)
+        HarnessKind::Grok => 'grok: {
+            let container = match container() {
+                Ok(container) => container,
+                Err(error) => break 'grok Err(error),
+            };
+            grok_usage::query(source_home.clone(), cwd, environment, container)
                 .await
                 .map(|report| ProfileQuota {
                     banked_resets: None,
@@ -619,6 +776,8 @@ async fn refresh_profile_with_cache_root(
                     windows: vec![QuotaWindow {
                         label: report.period_label.clone(),
                         remaining_percent: Some(report.remaining_percent()),
+                        duration_seconds: None,
+                        model_scope: None,
                         // Grok Build reports a share of the allowance, not the
                         // credit amounts behind it.
                         used: None,
@@ -645,6 +804,8 @@ async fn refresh_profile_with_cache_root(
                     .map(|window| QuotaWindow {
                         label: window.label,
                         remaining_percent: Some(window.remaining_percent),
+                        duration_seconds: window.duration_seconds,
+                        model_scope: None,
                         used: None,
                         limit: None,
                         resets: window.resets_at.and_then(format_reset_local_seconds),
@@ -656,14 +817,12 @@ async fn refresh_profile_with_cache_root(
                 refreshed_at_epoch_seconds,
                 rate_limited_until_epoch_seconds: None,
             }),
-        // OpenCode talks to many third-party providers through its own
-        // gateway; it publishes no quota endpoint of its own to poll.
-        HarnessKind::OpenCode => Err(anyhow::anyhow!(
-            "OpenCode does not publish a quota endpoint"
-        )),
-        HarnessKind::Mimo => Err(anyhow::anyhow!(
-            "MiMo Code does not publish a quota endpoint"
-        )),
+        // OpenCode reads no allowance from any provider: rate-limit headers
+        // reach it only on failed requests.
+        HarnessKind::OpenCode => Ok(not_reported()),
+        // MiMo Code reads no allowance from Xiaomi or any other provider;
+        // Xiaomi's Token Plan usage is only on its web console.
+        HarnessKind::Mimo => Ok(not_reported()),
         // dsh-acp talks to DeepSeek's API, which bills by usage.
         HarnessKind::Dsh => Ok(usage_priced()),
     };
@@ -679,30 +838,34 @@ async fn refresh_profile_with_cache_root(
             refreshed_at_epoch_seconds + rate_limit_hold(limited.retry_after).as_secs()
         }),
     });
-    // The daemon reads the reset-time cache when a session runs out of quota,
-    // and the daemon's own refreshes keep it: the web server's quota poller,
-    // and the refresh quota recovery makes just before it reads the cache.
-    // The dashboard polls the same quota for its display, but it has no
-    // database writer and must not write the store, so it leaves the cache to
-    // the daemon (R9-1).
-    if report.error.is_none() {
-        if crate::database::database_writer_installed() {
-            let cached = report.clone();
-            match tokio::task::spawn_blocking(move || {
-                crate::database::save_quota_cache(&cache_identity, &cached)
-            })
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => tracing::warn!(%error, "could not preserve quota reset times"),
-                Err(error) => tracing::warn!(%error, "quota cache task failed"),
-            }
-        } else {
-            tracing::debug!(
+    // Only refresh attempts reach this point, not reports adopted from the
+    // daemon's reset cache. A reader can still reuse its recent provider data.
+    // Persist failures before the manager substitutes old windows for display.
+    // Only the daemon owns the writer; other callers leave persistence to it.
+    if crate::database::database_writer_installed() {
+        let observed = report.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::database::save_quota_report(&cache_identity, &observed)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(
                 profile_id = %report.profile_id,
-                "this process has no database writer; leaving quota reset times to the daemon"
-            );
+                %error,
+                "could not preserve quota history and reset times"
+            ),
+            Err(error) => tracing::warn!(
+                profile_id = %report.profile_id,
+                %error,
+                "quota persistence task failed"
+            ),
         }
+    } else {
+        tracing::debug!(
+            profile_id = %report.profile_id,
+            "this process has no database writer; leaving quota history and reset times to the daemon"
+        );
     }
     let credential_after = credential_marker_fingerprint(&credential_path).await;
     let credentials_changed = match (credential_before, credential_after) {
@@ -1026,18 +1189,11 @@ fn required_string<'a>(payload: &'a Value, key: &str, context: &str) -> Result<&
 /// the same directory the same way, so its refresh and the CLI's never spend
 /// the same single-use refresh token.
 struct KimiRefreshLock {
-    path: std::path::PathBuf,
-    heartbeat: tokio::task::JoinHandle<()>,
+    _lock: crate::oauth_lock::OAuthRefreshLock,
 }
 
-/// How often a holder republishes the lock's modification time. It fits inside
-/// the CLI's 5 second stale window several times over.
 const KIMI_LOCK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
-/// How long a lock's modification time must be still before Mjolnir removes
-/// it as abandoned. Longer than the CLI's own 5 seconds, so Mjolnir never
-/// breaks a lock the CLI would still consider live.
 const KIMI_LOCK_STALE_AFTER: Duration = Duration::from_secs(10);
-const KIMI_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const KIMI_LOCK_WAIT: Duration = Duration::from_secs(60);
 
 impl KimiRefreshLock {
@@ -1053,116 +1209,20 @@ impl KimiRefreshLock {
             .open(oauth_dir.join("kimi-code"))
             .await
             .context("prepare Kimi Code OAuth lock sentinel")?;
-        let path = oauth_dir.join("kimi-code.lock");
-        let deadline = tokio::time::Instant::now() + wait;
-        loop {
-            match tokio::fs::create_dir(&path).await {
-                Ok(()) => return Ok(Self::held(path)),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if tokio::time::Instant::now() >= deadline {
-                        bail!(
-                            "timed out waiting for Kimi Code OAuth refresh lock {}",
-                            path.display()
-                        );
-                    }
-                    if !break_stale_kimi_lock(&path).await {
-                        tokio::time::sleep(KIMI_LOCK_RETRY_INTERVAL).await;
-                    }
-                }
-                Err(error) => return Err(error).context("acquire Kimi Code OAuth refresh lock"),
-            }
-        }
-    }
-
-    fn held(path: std::path::PathBuf) -> Self {
-        let heartbeat_path = path.clone();
-        let heartbeat = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(KIMI_LOCK_HEARTBEAT_INTERVAL).await;
-                if let Err(error) = touch_kimi_lock(&heartbeat_path, SystemTime::now()) {
-                    tracing::debug!(path = %heartbeat_path.display(), %error, "heartbeat Kimi Code OAuth refresh lock");
-                }
-            }
-        });
-        Self { path, heartbeat }
+        Ok(Self {
+            _lock: crate::oauth_lock::OAuthRefreshLock::acquire(
+                oauth_dir.join("kimi-code.lock"),
+                wait,
+                KIMI_LOCK_STALE_AFTER,
+                KIMI_LOCK_HEARTBEAT_INTERVAL,
+            )
+            .await?,
+        })
     }
 }
 
-impl Drop for KimiRefreshLock {
-    fn drop(&mut self) {
-        self.heartbeat.abort();
-        match std::fs::remove_dir(&self.path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                tracing::warn!(path = %self.path.display(), %error, "release Kimi Code OAuth refresh lock");
-            }
-        }
-    }
-}
-
-/// The lock directory's modification time, or `None` when it is gone.
-fn kimi_lock_mtime(path: &Path) -> std::io::Result<Option<SystemTime>> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => metadata.modified().map(Some),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-/// Publish a lock directory's modification time. Windows opens a directory
-/// handle only under backup semantics.
-fn touch_kimi_lock(path: &Path, modified: SystemTime) -> std::io::Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
-    }
-    options
-        .open(path)?
-        .set_times(std::fs::FileTimes::new().set_modified(modified))
-}
-
-/// Remove a lock whose holder stopped heartbeating, so a holder killed
-/// mid-refresh cannot block every later refresh. Returns whether the caller
-/// should retry the create at once.
-async fn break_stale_kimi_lock(path: &Path) -> bool {
-    let modified = match kimi_lock_mtime(path) {
-        Ok(Some(modified)) => modified,
-        Ok(None) => return true,
-        Err(error) => {
-            tracing::warn!(path = %path.display(), %error, "inspect Kimi Code OAuth refresh lock");
-            return false;
-        }
-    };
-    // A modification time in the future (the CLI rounds its writes up) is not
-    // stale.
-    let Some(age) = SystemTime::now()
-        .duration_since(modified)
-        .ok()
-        .filter(|age| *age >= KIMI_LOCK_STALE_AFTER)
-    else {
-        return false;
-    };
-    match tokio::fs::remove_dir(path).await {
-        Ok(()) => {
-            tracing::warn!(
-                path = %path.display(),
-                age_seconds = age.as_secs(),
-                "removed a Kimi Code OAuth refresh lock whose holder stopped heartbeating"
-            );
-            true
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-        Err(error) => {
-            tracing::warn!(path = %path.display(), %error, "remove stale Kimi Code OAuth refresh lock");
-            false
-        }
-    }
-}
+#[cfg(test)]
+use crate::oauth_lock::{mtime as kimi_lock_mtime, touch as touch_kimi_lock};
 
 fn parse_kimi_usage(payload: &Value) -> (Vec<QuotaWindow>, Option<String>) {
     let mut windows = Vec::new();
@@ -1265,6 +1325,8 @@ fn parse_kimi_window(value: &Value, fallback: &str) -> Option<QuotaWindow> {
     Some(QuotaWindow {
         label,
         remaining_percent,
+        duration_seconds: None,
+        model_scope: None,
         used,
         limit,
         resets,
@@ -1284,6 +1346,8 @@ fn parse_kimi_ratio_window(value: &Value, label: &str) -> Option<QuotaWindow> {
     Some(QuotaWindow {
         label: label.to_owned(),
         remaining_percent: Some(100 - used_percent),
+        duration_seconds: None,
+        model_scope: None,
         used: None,
         limit: None,
         resets: reset_value.and_then(normalize_kimi_reset),
@@ -1495,4 +1559,7 @@ fn format_reset_label(reset: DateTime<FixedOffset>) -> String {
 mod tests;
 
 mod recovery;
-pub(crate) use recovery::{merge_reset_windows, message_reset, recovery_reset};
+pub(crate) use recovery::{
+    exhausted, long_window_stop, merge_reset_windows, message_reset, recovery_reset,
+};
+pub(crate) use recovery::{quota_score, window_applies};

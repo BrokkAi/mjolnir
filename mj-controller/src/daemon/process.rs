@@ -26,12 +26,19 @@ pub async fn run_daemon_process() -> Result<()> {
     // Checked before the store is locked so a bad value fails fast and leaves
     // no daemon state behind.
     let owner_pid = owner_pid_to_watch()?;
+    let cancellation = crate::termination::Coordinator::install().token();
+    // Everything this process runs on the user's computer goes to its node.
+    // Daemons that tests run inside their own process keep running commands
+    // locally, because they never reach this line.
+    crate::node_registry::install_command_host(cancellation.clone())?;
     let opening = Instant::now();
     let guard = ControllerStoreGuard::acquire()?;
     let database_writer = guard.start_database_writer()?;
     log_startup_phase("open the store", opening);
     let epilogue_started = AtomicBool::new(false);
-    let mut outcome = run_daemon_runtime(&epilogue_started, owner_pid).await;
+    let mut outcome = run_daemon_runtime(&epilogue_started, owner_pid, cancellation.clone()).await;
+    cancellation.cancel();
+    crate::node_registry::registry().finish().await;
     if !epilogue_started.load(Ordering::Acquire) {
         // Initialization failed before the runtime-owned epilogue existed.
         // The same process-level bound still applies to closing the writer.
@@ -59,6 +66,7 @@ pub async fn run_daemon_process() -> Result<()> {
 pub(super) async fn run_daemon_runtime(
     epilogue_started: &AtomicBool,
     owner_pid: Option<u32>,
+    cancellation: CancellationToken,
 ) -> Result<()> {
     let progress = super::diagnostics::DaemonProgressMonitor::start()?;
     // Before this daemon can start a checkpoint, so every checkpoint file older
@@ -101,19 +109,39 @@ pub(super) async fn run_daemon_runtime(
         .await
         .context("earlier sessions' profile home link task failed")?;
     }
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+    // The launcher may choose the endpoint and token, so it can hand them to
+    // the node before the daemon is ready; otherwise the daemon picks both.
+    let listen = match mj_core::config::env_override("DAEMON_LISTEN") {
+        Some(address) => address
+            .parse::<SocketAddr>()
+            .with_context(|| format!("MJ_DAEMON_LISTEN is not an address: {address:?}"))?,
+        None => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+    };
+    let listener = TcpListener::bind(listen)
         .await
-        .context("bind Mjolnir daemon loopback endpoint")?;
+        .with_context(|| format!("bind the Mjolnir daemon endpoint {listen}"))?;
+    let token = match mj_core::config::env_override("DAEMON_TOKEN") {
+        Some(token) if !token.is_empty() => token,
+        _ => random_hex::<32>()?,
+    };
     let metadata = DaemonMetadata {
         protocol_version: PROTOCOL_VERSION,
         pid: std::process::id(),
         address: listener.local_addr()?,
-        token: random_hex::<32>()?,
+        token: token.clone(),
         started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         // The version, with the revision and build times as semver build
         // metadata that older clients ignore; see `mj_client::build_identity`.
         build_version: mj_client::build_identity::this_build().published(),
     };
+    // Startup recovery can run commands, and commands run on the node, so the
+    // node has to be able to connect before this daemon is ready for clients.
+    let early_accept_stop = CancellationToken::new();
+    let early_accept = tokio::spawn(accept_nodes_while_starting(
+        listener,
+        token,
+        early_accept_stop.clone(),
+    ));
     let workspaces = tokio::task::spawn_blocking(crate::database::list_workspaces)
         .await
         .context("daemon workspace load task panicked")??;
@@ -163,7 +191,6 @@ pub(super) async fn run_daemon_runtime(
             .map(|target| target.session_id.clone())
             .collect(),
     );
-    let cancellation = crate::termination::Coordinator::install().token();
     let apple_container_startup = spawn_apple_container_startup(
         state.clone(),
         cancellation.clone(),
@@ -331,7 +358,17 @@ pub(super) async fn run_daemon_runtime(
     let image_refresh = spawn_image_refresher(
         {
             let state = state.clone();
-            move || state.with_config(crate::controller::image_refresh_plan)
+            move || {
+                state.with_config(|config| {
+                    let mut plan = crate::controller::image_refresh_plan(config);
+                    crate::quota_runtime::add_quota_image(
+                        &mut plan,
+                        &crate::quota::QuotaRuntimeConfig::of(config),
+                        std::env::var_os("PATH").as_deref(),
+                    );
+                    plan
+                })
+            }
         },
         {
             // A background download is the daemon's own work, not a session's,
@@ -551,6 +588,12 @@ pub(super) async fn run_daemon_runtime(
     // Everything a client can use is initialized before this atomic
     // publication. From here on every exit, including an error from the test
     // hook or the event loop, flows through the same bounded epilogue.
+    let mut auto_afk = auto_afk::spawn(state.clone(), cancellation.clone());
+    let mut auto_afk_outcome = None;
+    early_accept_stop.cancel();
+    let listener = early_accept
+        .await
+        .context("the startup node acceptor failed")?;
     let mut outcome = async {
         write_metadata(&daemon_metadata_path, &metadata)?;
         reach_test_hook("daemon_metadata_before_listening").await?;
@@ -568,26 +611,31 @@ pub(super) async fn run_daemon_runtime(
                         targets.send_replace(prepared_targets.borrow_and_update().clone());
                     }
                 }
-                result = &mut cache_task => {
-                    cache_outcome = Some(result.context("machine cache service failed").and_then(|result| result));
-                    anyhow::bail!("machine build cache service stopped unexpectedly");
+                result = supervise_service(&mut auto_afk, &mut auto_afk_outcome, &cancellation, "auto AFK service") => {
+                    result?;
+                    break;
                 }
-                result = &mut mailbox_task => {
-                    mailbox_outcome = Some(result.context("mailbox outbox service failed").and_then(|result| result));
-                    anyhow::bail!("mailbox outbox service stopped unexpectedly");
+                result = supervise_service(&mut cache_task, &mut cache_outcome, &cancellation, "machine build cache service") => {
+                    result?;
+                    break;
                 }
-                result = &mut github_watch_task => {
-                    github_watch_outcome = Some(result.context("GitHub watch service failed").and_then(|result| result));
-                    anyhow::bail!("GitHub watch service stopped unexpectedly");
+                result = supervise_service(&mut mailbox_task, &mut mailbox_outcome, &cancellation, "mailbox outbox service") => {
+                    result?;
+                    break;
                 }
-                result = &mut delegation_task => {
-                    delegation_outcome = Some(result.map_err(anyhow::Error::from).and_then(|result| result));
-                    anyhow::bail!("delegation coordinator stopped unexpectedly");
+                result = supervise_service(&mut github_watch_task, &mut github_watch_outcome, &cancellation, "GitHub watch service") => {
+                    result?;
+                    break;
+                }
+                result = supervise_service(&mut delegation_task, &mut delegation_outcome, &cancellation, "delegation coordinator") => {
+                    result?;
+                    break;
                 }
                 _ = idle_tick.tick(), if exit_when_idle && state.ever_attached.load(Ordering::Acquire) => {
                     progress.phase(ServingPhase::IdleCheck);
                     state.prune_dead_clients();
                     if state.attachments().is_empty() {
+                        crate::node_registry::registry().dismiss_node_on_exit();
                         break;
                     }
                 }
@@ -597,6 +645,7 @@ pub(super) async fn run_daemon_runtime(
                         && !process_is_alive(owner)
                     {
                         tracing::info!(owner_pid = owner, "daemon owner process exited; shutting down");
+                        crate::node_registry::registry().dismiss_node_on_exit();
                         break;
                     }
                 }
@@ -694,12 +743,11 @@ pub(super) async fn run_daemon_runtime(
                         let state = state.clone();
                         let session_id = update.session_id.clone();
                         client_tasks.spawn(async move {
-                            if let Err(error) = state.persist_missing_target(
+                            // Shutdown cancels this task. An uncommitted write
+                            // is rediscovered from the next daemon's actor.
+                            state.persist_missing_target(
                                 &session_id, detail, observed_updated_at,
-                            ).await {
-                                tracing::warn!(%session_id, %error, "could not persist missing worker target");
-                                state.push_notice(&session_id, format!("Could not record missing session target: {error:#}"));
-                            }
+                            ).await;
                         });
                     }
                     if let Some(publisher) = phone_publisher.as_ref()
@@ -733,6 +781,17 @@ pub(super) async fn run_daemon_runtime(
     // Idle exit and fallible loop exits do not arrive through the termination
     // coordinator. Stop every daemon-owned task before closing the sole writer.
     cancellation.cancel();
+    epilogue.record(
+        &mut outcome,
+        "join auto AFK timer",
+        match auto_afk_outcome {
+            Some(result) => result,
+            None => auto_afk
+                .await
+                .context("auto AFK task panicked")
+                .and_then(|result| result),
+        },
+    );
     epilogue.record(
         &mut outcome,
         "join API activity cleanup",
@@ -948,6 +1007,29 @@ pub(super) fn tombstone_session_ids(controller: &Controller) -> Vec<String> {
         })
         .map(|session| session.id.clone())
         .collect()
+}
+
+/// A service can observe cancellation and finish before the serving loop
+/// selects its own cancellation branch. The shared token owns that decision;
+/// selecting a completed task alone does not mean the service failed.
+async fn supervise_service(
+    task: &mut tokio::task::JoinHandle<Result<()>>,
+    outcome: &mut Option<Result<()>>,
+    cancellation: &CancellationToken,
+    service: &'static str,
+) -> Result<()> {
+    let result = task.await;
+    // Preserve errors for the epilogue even during an orderly shutdown, and
+    // record the consumed join so cleanup never polls the task a second time.
+    *outcome = Some(
+        result
+            .with_context(|| format!("{service} failed"))
+            .and_then(std::convert::identity),
+    );
+    if cancellation.is_cancelled() {
+        return Ok(());
+    }
+    anyhow::bail!("{service} stopped unexpectedly")
 }
 
 pub(super) fn remove_daemon_metadata(path: &Path) -> Result<()> {
@@ -1210,7 +1292,7 @@ pub(super) fn spawn_manager_target_refresher(
                     if changed.is_err() { return; }
                 }
                 _ = compatibility.tick() => {
-                    let _config_mutation = state.config_mutation.lock().await;
+                    let mut inactivity = state.config_mutation.lock().await;
                     let mut cache = auth.clone();
                     let staging = inputs.clone();
                     let preference_owner = state.clone();
@@ -1234,6 +1316,7 @@ pub(super) fn spawn_manager_target_refresher(
                     }).await;
                     match refreshed {
                         Ok(Ok((config, cache, staged, recent_changed))) => {
+                            state.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
                             staged_sources = Some((inputs.clone(), staged));
                             auth = cache;
                             auth_profiles = Some(config.profiles.clone());
@@ -1339,5 +1422,149 @@ pub(super) async fn refresh_runtime_controller(state: &RuntimeState) {
             error = format!("{error:#}"),
             "could not refresh daemon controller state"
         );
+    }
+}
+
+/// Accept node connections while the daemon starts, and nothing else: no
+/// client can use a daemon that has not published itself. Returns the
+/// listener once the daemon is ready to serve everyone on it.
+async fn accept_nodes_while_starting(
+    listener: TcpListener,
+    token: String,
+    stop: CancellationToken,
+) -> TcpListener {
+    let mut connections = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => break,
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => {
+                    connections.spawn(serve_while_starting(stream, token.clone()));
+                }
+                Err(error) => tracing::warn!(%error, "could not accept a connection while starting"),
+            },
+            Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                match joined {
+                    Ok(Err(error)) => tracing::debug!(error = format!("{error:#}"), "startup connection ended"),
+                    Err(error) => tracing::warn!(%error, "startup connection task failed"),
+                    Ok(Ok(())) => {}
+                }
+            }
+        }
+    }
+    // An adopted node lives in the registry; a refused client has its answer.
+    connections.detach_all();
+    listener
+}
+
+async fn serve_while_starting(mut stream: TcpStream, token: String) -> Result<()> {
+    let request: RequestEnvelope = read_frame(&mut stream).await?;
+    let request_id = request.request_id;
+    let protocol_version = request.protocol_version;
+    match request.action {
+        DaemonAction::NodeConnect { node_id }
+            if request.token == token && protocol_version == PROTOCOL_VERSION =>
+        {
+            write_response(
+                &mut stream,
+                ResponseEnvelope {
+                    protocol_version,
+                    request_id,
+                    result: Ok(DaemonReply::Done),
+                },
+            )
+            .await?;
+            crate::node_registry::registry()
+                .adopt(stream, node_id)
+                .await
+        }
+        _ => {
+            write_response(
+                &mut stream,
+                ResponseEnvelope {
+                    protocol_version,
+                    request_id,
+                    result: Err("the Mjolnir daemon is still starting".to_owned()),
+                },
+            )
+            .await
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hard-won: #1383: a service finishing on cancellation made clean daemon shutdown fail.
+    #[tokio::test]
+    async fn service_completion_selected_before_shutdown_is_not_unexpected() {
+        let cancellation = CancellationToken::new();
+        let stop = cancellation.clone();
+        let mut task = tokio::spawn(async move {
+            stop.cancelled().await;
+            Ok(())
+        });
+        cancellation.cancel();
+        // Both select branches must be ready. Force the service branch to win,
+        // reproducing the daemon's losing order without scheduler timing.
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let mut outcome = None;
+        tokio::select! {
+            biased;
+            result = supervise_service(&mut task, &mut outcome, &cancellation, "GitHub watch service") => result.unwrap(),
+            () = cancellation.cancelled() => panic!("service completion must win"),
+        }
+        outcome.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_completion_while_serving_is_unexpected() {
+        let cancellation = CancellationToken::new();
+        let mut task = tokio::spawn(async { Ok(()) });
+        let mut outcome = None;
+        let error = supervise_service(
+            &mut task,
+            &mut outcome,
+            &cancellation,
+            "GitHub watch service",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "GitHub watch service stopped unexpectedly"
+        );
+        outcome.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_failure_during_shutdown_is_preserved_for_cleanup() {
+        let cancellation = CancellationToken::new();
+        let stop = cancellation.clone();
+        let mut task = tokio::spawn(async move {
+            stop.cancelled().await;
+            anyhow::bail!("service cleanup failed")
+        });
+        cancellation.cancel();
+        let mut outcome = None;
+        supervise_service(
+            &mut task,
+            &mut outcome,
+            &cancellation,
+            "GitHub watch service",
+        )
+        .await
+        .unwrap();
+        let mut daemon_outcome = Ok(());
+        record_daemon_cleanup(
+            &mut daemon_outcome,
+            "join GitHub watch service",
+            outcome.unwrap(),
+        );
+        assert!(format!("{:#}", daemon_outcome.unwrap_err()).contains("service cleanup failed"));
     }
 }

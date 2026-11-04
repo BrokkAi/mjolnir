@@ -276,6 +276,10 @@ pub struct AdvancedConfig {
     /// included. Zero shows none.
     #[serde(skip_serializing_if = "is_default_tool_output_lines")]
     pub tool_output_lines: usize,
+    /// Enter AFK after this many minutes without operator input. Zero
+    /// disables automatic AFK.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub auto_afk_minutes: u32,
 }
 
 impl Default for AdvancedConfig {
@@ -286,6 +290,7 @@ impl Default for AdvancedConfig {
             symbols: None,
             tool_output: ToolOutput::default(),
             tool_output_lines: DEFAULT_TOOL_OUTPUT_LINES,
+            auto_afk_minutes: 0,
         }
     }
 }
@@ -294,6 +299,10 @@ pub const DEFAULT_TOOL_OUTPUT_LINES: usize = 5;
 
 fn is_default_tool_output_lines(lines: &usize) -> bool {
     *lines == DEFAULT_TOOL_OUTPUT_LINES
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 /// How the conversation draws tool calls.

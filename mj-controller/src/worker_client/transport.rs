@@ -77,7 +77,7 @@ impl Drop for RelayClient {
 
 /// Let EOF traverse a proxy launcher, then stop and reap it without relying on
 /// an async runtime that may already be shutting down.
-pub(super) fn reap_dropped_relay_proxy(mut child: Child, session_id: String) {
+pub(super) fn reap_dropped_relay_proxy(mut child: proxy::ProxyChild, session_id: String) {
     let deadline = Instant::now() + RELAY_PROXY_DETACH_GRACE;
     loop {
         match child.try_wait() {

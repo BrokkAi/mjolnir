@@ -189,16 +189,23 @@ impl DashboardState {
     /// Reports that a session's worker cannot be reached, in one plain
     /// sentence. The host keeps the relay's own error and any worker
     /// diagnostics for its log; the footer only says what happened.
-    /// `checking` is true while worker diagnostics are still being collected.
-    pub fn report_session_unreachable(&mut self, session_id: &str, checking: bool) {
+    pub fn report_session_unreachable(&mut self, session_id: &str) {
+        if self.unreachable_notices.contains_key(session_id) {
+            return;
+        }
         let name = self.session_notice_name(session_id);
-        let text = if checking {
-            format!("{name} cannot be reached; checking its worker.")
-        } else {
-            format!("{name} cannot be reached. The log has the worker's details.")
-        };
+        let text = format!("{name} cannot be reached. The log has the worker's details.");
         self.set_notice(text.clone());
         self.unreachable_notices.insert(session_id.to_owned(), text);
+    }
+
+    /// Forget an unreachable episode when its worker is no longer expected.
+    pub fn clear_session_unreachable(&mut self, session_id: &str) {
+        if let Some(text) = self.unreachable_notices.remove(session_id)
+            && self.notice().as_deref() == Some(text.as_str())
+        {
+            self.clear_notice();
+        }
     }
 
     /// Withdraws the unreachable notice for a session whose worker answered
@@ -232,7 +239,7 @@ impl DashboardState {
                 .state
                 .sessions
                 .get(session_id)
-                .is_some_and(|session| !session.state.is_active())
+                .is_some_and(|session| !session.state.has_live_worker())
     }
 
     /// Whether a pane holding `session_id` must let it go rather than attach
@@ -360,7 +367,8 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
-                last_subagent_policy: Default::default(),
+                operator_presence: Default::default(),
+                last_subagent_policies: Default::default(),
                 subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions,
@@ -473,13 +481,13 @@ mod tests {
     fn an_unreachable_worker_is_reported_plainly_and_withdrawn_on_recovery() {
         let mut dashboard = dashboard();
         let title = dashboard.state.sessions["done"].display_title().to_owned();
-        dashboard.report_session_unreachable("done", true);
+        dashboard.report_session_unreachable("done");
         let notice = dashboard.notice().unwrap();
         assert_eq!(
             notice,
-            format!("Session {title} cannot be reached; checking its worker.")
+            format!("Session {title} cannot be reached. The log has the worker's details.")
         );
-        dashboard.report_session_unreachable("done", false);
+        dashboard.report_session_unreachable("done");
         assert!(!dashboard.notice().unwrap().contains("stderr"));
         dashboard.report_session_reachable("done");
         assert_eq!(
@@ -487,9 +495,43 @@ mod tests {
             format!("Session {title} is reachable again.")
         );
         // A later, unrelated notice is left alone by another recovery.
-        dashboard.report_session_unreachable("done", false);
+        dashboard.report_session_unreachable("done");
         dashboard.set_notice("Profile quotas refreshed.");
         dashboard.report_session_reachable("done");
         assert_eq!(dashboard.notice().unwrap(), "Profile quotas refreshed.");
+    }
+
+    // Hard-won: #1444: repeated worker polls restored a dismissed unreachable warning.
+    #[test]
+    fn unreachable_episode_stays_dismissed_until_recovery_and_new_failure() {
+        let mut dashboard = dashboard();
+        dashboard.report_session_unreachable("done");
+        let first_deadline = std::time::Instant::now() + mj_chat::chat::NOTICE_MINIMUM_DISPLAY;
+        let first = dashboard.notice().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        dashboard.report_session_unreachable("done");
+        assert!(dashboard.notices.dismiss(first_deadline));
+        dashboard.report_session_unreachable("done");
+        assert_eq!(dashboard.notice(), None);
+        assert_eq!(dashboard.notices.history().len(), 1);
+
+        dashboard.report_session_reachable("done");
+        assert_eq!(dashboard.notice(), None);
+        dashboard.report_session_unreachable("done");
+        assert_eq!(dashboard.notice().as_deref(), Some(first.as_str()));
+        dashboard.set_notice("The daemon found a missing target.");
+        dashboard.report_session_unreachable("done");
+        assert_eq!(
+            dashboard.notice().as_deref(),
+            Some("The daemon found a missing target.")
+        );
+        let mut without_session = (*dashboard.state).clone();
+        without_session.sessions.remove("done");
+        dashboard.set_state(without_session);
+        assert!(!dashboard.unreachable_notices.contains_key("done"));
+        assert_eq!(
+            dashboard.notice().as_deref(),
+            Some("The daemon found a missing target.")
+        );
     }
 }

@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 
 use crate::targets::{
@@ -35,6 +35,11 @@ use mj_core::relay::{
 };
 
 pub use mj_client::session::RelayAttachment;
+
+pub(crate) type SubagentQueueSnapshot = (
+    mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentToolRequest>>,
+    mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentCompletion>>,
+);
 
 const RELAY_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const RELAY_SLOW_OPERATION_WARNING: Duration = Duration::from_secs(5);
@@ -94,7 +99,7 @@ type ProxyStderrTail = Arc<std::sync::Mutex<VecDeque<String>>>;
 /// routine MaxSessions refusal is not a warning (R7-1). Once the connection
 /// is up, anything the proxy says is a warning.
 async fn drain_proxy_stderr(
-    errors: tokio::process::ChildStderr,
+    errors: proxy::ProxyReader,
     purpose: String,
     session_id: String,
     tail: ProxyStderrTail,
@@ -129,6 +134,7 @@ mod errors;
 pub use errors::*;
 mod connect;
 mod exchange;
+mod proxy;
 mod relay;
 mod reviewer;
 mod transport;
@@ -142,9 +148,9 @@ pub use credential_sync::*;
 /// Callers persist bounded attachment pages, then acknowledge only a frontier
 /// that is already durable locally.
 pub struct RelayClient {
-    child: Option<Child>,
-    input: Option<ChildStdin>,
-    output: BufReader<ChildStdout>,
+    child: Option<proxy::ProxyChild>,
+    input: Option<proxy::ProxyWriter>,
+    output: BufReader<proxy::ProxyReader>,
     request_timeout: Duration,
     /// Why this connection can no longer be used, once a call gave up on a
     /// reply that is still in flight. See [`RelayClient::exchange`].
@@ -161,6 +167,9 @@ pub struct RelayClient {
     latest_digest: String,
     subagent_acknowledged: Option<u64>,
     subagent_queue: BTreeMap<String, mj_core::subagent::SubagentQueueChange>,
+    /// Invalidated under this connection's exclusive borrow before applying
+    /// queue changes; partial-page failures cannot leave a valid stale view.
+    subagent_publication: Option<SubagentQueueSnapshot>,
     /// The shared-connection session the proxy runs on. Unlike the admission
     /// permit, which is released once hello completes, the session is in use
     /// for as long as the proxy runs, so the lease lives as long as `child`.

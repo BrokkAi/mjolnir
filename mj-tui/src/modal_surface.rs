@@ -1,4 +1,5 @@
 //! One erased view of whichever modal is open.
+//! The daemon presence overlay takes precedence while preserving the local mode.
 //!
 //! Every [`Mode`] variant except [`Mode::Dashboard`] carries a payload, and the
 //! dashboard asks each of them the same short list of questions: is a
@@ -10,8 +11,8 @@
 //! [`ModalSurface`] is that question list behind a trait object. Most payloads
 //! answer every question through the single `RefCell<Dialog<K>>` they own, so
 //! they implement the smaller [`DialogModal`] instead and pick up a blanket
-//! implementation. [`SetupDialog`] and [`HelpOverlay`] answer differently and
-//! write [`ModalSurface`] out by hand; `SetupDialog`'s lives in
+//! implementation. `SetupDialog` answers differently and writes
+//! [`ModalSurface`] out by hand; it lives in
 //! `crate::setup` because it reads that dialog's private fields.
 //!
 //! [`Mode::surface`] and [`Mode::surface_mut`] are now the only exhaustive
@@ -30,7 +31,6 @@ use crate::dialogs::{
     ImportBundleConfirmation, ImportProgress, NoticeLogDialog, RenameEditor,
     RepositoryOriginDialog, SessionCpuReportDialog, TargetActionsDialog, WebDialog,
 };
-use crate::help::HelpOverlay;
 use crate::palette::{CommandPalette, PaletteControl};
 use crate::resume::{ResumeDialog, ResumeFocus};
 use crate::wizards::{NewWizard, ResumeWizard, WizardControl, WizardStep};
@@ -377,45 +377,6 @@ impl DialogModal for ResumeWizard {
     }
 }
 
-impl ModalSurface for HelpOverlay {
-    /// Help owns no draft, so it never raises an unsaved-changes confirmation.
-    fn confirmation_open(&self) -> bool {
-        false
-    }
-
-    fn render_confirmation(
-        &self,
-        _frame: &mut Frame<'_>,
-        _area: Rect,
-        _surfaces: &mut FrameSurfaces,
-    ) {
-    }
-
-    /// Help hit-tests the rectangle it last drew into rather than its form, so
-    /// a click anywhere on the panel, including its plain text, is the
-    /// overlay's rather than the selectable body underneath.
-    fn handles_mouse(&self, column: u16, row: u16) -> bool {
-        let form = self.form.borrow();
-        form.captures_pointer() || self.area.get().contains((column, row).into())
-    }
-
-    fn cancel_pointer(&mut self) -> bool {
-        let form = self.form.get_mut();
-        let captured = form.captures_pointer();
-        form.cancel_pointer();
-        captured
-    }
-
-    fn reset_geometry(&mut self) {
-        self.form.get_mut().reset_geometry();
-        self.area.set(Rect::default());
-    }
-
-    fn text_input_focused(&self) -> bool {
-        self.search_focused
-    }
-}
-
 /// Writes both `Mode` accessors from one list of the variants that carry a
 /// modal. Both matches stay exhaustive, so a new `Mode` variant fails to
 /// compile here, and adding it to this list is the whole change.
@@ -458,7 +419,6 @@ mode_surfaces!(
     Importing,
     ConfirmImportBundle,
     Confirm,
-    Help,
     Palette,
     Setup,
     Welcome,
@@ -466,10 +426,18 @@ mode_surfaces!(
 
 impl DashboardState {
     pub(crate) fn active_modal(&self) -> Option<&dyn ModalSurface> {
+        if let Some(dialog) = self.away_dialog() {
+            return Some(dialog);
+        }
         self.mode.surface()
     }
 
     pub(crate) fn active_modal_mut(&mut self) -> Option<&mut dyn ModalSurface> {
+        if let crate::operator_away::OperatorPresence::Away { dialog, .. } =
+            &mut self.operator_presence
+        {
+            return Some(dialog.as_mut());
+        }
         self.mode.surface_mut()
     }
 }

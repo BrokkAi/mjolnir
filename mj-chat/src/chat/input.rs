@@ -23,6 +23,7 @@ impl ChatState {
             attachments::replace_range(&mut self.input, &mut self.input_images, range, inserted);
         self.input_cursor = cursor;
         self.input_generation = self.input_generation.wrapping_add(1);
+        self.composer_runtime.submit_when_ready = None;
         self.feedback.clear();
         self.next_image_number = self.next_image_number.max(
             self.input_images
@@ -54,7 +55,7 @@ impl ChatState {
             // as Ctrl-V and let the background clipboard reader retrieve it.
             // An agent without image support cannot use that content, so
             // say so instead of reading the clipboard.
-            if !self.prompt_images_supported
+            if !(self.standby || self.prompt_images_supported)
                 && self.elicitation.is_none()
                 && self.clipboard_target() == super::input_state::ClipboardTarget::Composer
             {
@@ -71,7 +72,9 @@ impl ChatState {
     pub(super) fn paste_or_attach(&mut self, pasted: &str) -> ChatAction {
         if self.elicitation.is_none()
             && self.history_search.is_none()
-            && self.prompt_images_supported
+            && (self.standby
+                || self.composer_runtime.accepting_staged
+                || self.prompt_images_supported)
             && self.clipboard_target() == super::input_state::ClipboardTarget::Composer
         {
             let text = sanitize_terminal_text(pasted);

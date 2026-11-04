@@ -228,8 +228,8 @@ async fn a_message_without_a_sender_is_submitted_as_the_users_prompt() {
     assert_eq!(json_body(again).await, first);
 
     let plain_prompt = mj_core::relay::RelayCommand::Prompt {
-        prompt: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
-            agent_client_protocol::schema::v1::TextContent::new("check the final patch"),
+        prompt: vec![agent_client_protocol::v1::schema::ContentBlock::Text(
+            agent_client_protocol::v1::schema::TextContent::new("check the final patch"),
         )],
     };
     assert_eq!(
@@ -1155,7 +1155,7 @@ impl SubagentBackend for FakeBackend {
                     profile_id: parent_profile,
                     harness: mj_core::config::HarnessKind::Codex,
                     choices,
-                    remaining_percent: None,
+                    quota: crate::server::api::CandidateQuota::Unknown,
                     unhealthy: Default::default(),
                 }],
                 unavailable: Vec::new(),
@@ -2046,7 +2046,16 @@ fn model_candidate_with_efforts(
                 .collect(),
             observed_at: 1,
         },
-        remaining_percent: Some(remaining_percent),
+        quota: crate::server::api::CandidateQuota::Windows(vec![crate::quota::QuotaWindow {
+            label: "Week".into(),
+            remaining_percent: Some(remaining_percent),
+            duration_seconds: None,
+            model_scope: None,
+            used: None,
+            limit: None,
+            resets: None,
+            resets_at_epoch_seconds: None,
+        }]),
         unhealthy: Default::default(),
     }
 }
@@ -2099,6 +2108,7 @@ async fn model_first_session_start_selects_the_profile_that_offers_the_model() {
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
     let response = response.await.unwrap().unwrap();
@@ -2240,6 +2250,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
 
@@ -2318,6 +2329,7 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
     assert_eq!(
@@ -2330,6 +2342,7 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
     assert_eq!(followups[0].1.prompt.as_deref(), Some("go"));
 }
 
+// Hard-won: 4b84c75cf: weighted draws made the valid Codex winner nondeterministic.
 #[tokio::test]
 async fn subagent_model_selection_uses_any_enabled_profile() {
     let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend {
@@ -2358,7 +2371,8 @@ async fn subagent_model_selection_uses_any_enabled_profile() {
         }),
         subagent_model_candidates: Some(SubagentCandidates {
             offered: vec![
-                model_candidate("codex-1", 5, "luna"),
+                // Keep the cross-profile assertion independent of the weighted random draw.
+                model_candidate("codex-1", 0, "luna"),
                 model_candidate_for_harness(
                     "claude4",
                     98,
@@ -2415,6 +2429,7 @@ async fn start_without_a_profile_uses_the_saved_default_to_break_quota_ties() {
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
     assert_eq!(
@@ -2466,6 +2481,7 @@ async fn start_without_a_saved_default_selects_a_model_with_an_explicit_target()
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
     assert_eq!(
@@ -2564,29 +2580,6 @@ async fn start_without_a_profile_refuses_an_effort_the_selected_model_does_not_o
     assert!(body.contains("codex-1 offers efforts: high"), "{body}");
     assert!(actions.try_recv().is_err(), "nothing was launched");
 }
-// Hard-won: 00325fa0: API start refusals dropped running and limit counts.
-#[tokio::test]
-async fn start_names_the_pool_counts_when_the_daemon_is_at_its_action_limit() {
-    let backend = Arc::new(FakeBackend::default());
-    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
-
-    let response = tokio::spawn(app.oneshot(start_request(start_body(""))));
-    let request = actions.recv().await.unwrap();
-    request
-        .reply
-        .send(ActionOutcome::Busy {
-            running: 4,
-            limit: 4,
-        })
-        .unwrap();
-
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    let body = json_body(response).await;
-    assert_eq!(body["running_actions"], 4, "{body}");
-    assert_eq!(body["action_limit"], 4, "{body}");
-}
-
 /// The unavailable-model refusal reaches the client with its code, so each
 /// client can add the remedy that fits it.
 // Hard-won: 9fe54d8e: API refusals directed browser callers to CLI-only flags.
@@ -2658,6 +2651,7 @@ async fn start_sizes_a_container_session_from_the_host_default_and_overrides() {
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
     assert_eq!(
@@ -4648,7 +4642,10 @@ async fn structured_inputs_are_listed_validated_and_forwarded() {
     );
     action
         .reply
-        .send(ActionOutcome::Accepted { session_id: None })
+        .send(ActionOutcome::Accepted {
+            session_id: None,
+            notice: None,
+        })
         .unwrap();
     assert_eq!(
         response.await.unwrap().unwrap().status(),
@@ -4742,7 +4739,10 @@ async fn resume_response_waits_until_a_stale_stopped_snapshot_shows_the_operatio
     assert!(matches!(request.action, ControllerAction::Resume { .. }));
     request
         .reply
-        .send(ActionOutcome::Accepted { session_id: None })
+        .send(ActionOutcome::Accepted {
+            session_id: None,
+            notice: None,
+        })
         .unwrap();
     tokio::task::yield_now().await;
     assert!(
@@ -5305,6 +5305,7 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
                 remembered_container_size: None,
                 container_host_limits: None,
                 container_capacity: None,
+                container_memory_hard_limit: false,
                 default_resource_allocation: None,
                 runtime_missing: false,
                 default_candidate: false,
@@ -5373,6 +5374,7 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
             remembered_container_size: None,
             container_host_limits: None,
             container_capacity: None,
+            container_memory_hard_limit: false,
             default_resource_allocation: None,
             runtime_missing: true,
             default_candidate: false,
@@ -5537,6 +5539,7 @@ async fn start_without_identifiers_uses_the_saved_default() {
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
     assert_eq!(
@@ -5566,6 +5569,7 @@ async fn start_without_identifiers_uses_the_saved_default() {
         .reply
         .send(ActionOutcome::Accepted {
             session_id: Some("session-2".into()),
+            notice: None,
         })
         .unwrap();
     assert_eq!(
@@ -5884,6 +5888,7 @@ fn spawn_wait(
 /// callers beside three streaming sessions kept the daemon above two cores.
 /// It must still answer as soon as its own session asks for input.
 // Hard-won: f5c83878: waiters opened the database repeatedly on unrelated session changes.
+// Hard-won: 8c88175f7: wait wakeups linearly searched the entire session history.
 #[tokio::test(start_paused = true)]
 async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own() {
     let backend = Arc::new(FakeBackend {
@@ -5901,7 +5906,14 @@ async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own
         })]),
         ..FakeBackend::default()
     });
-    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), add_second_session);
+    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+        add_second_session(snapshot);
+        for index in 0..6_000 {
+            let mut history = snapshot.sessions.get("session-1").unwrap().clone();
+            history.id = format!("history-{index:06}");
+            snapshot.sessions.push(history);
+        }
+    });
     let reads = || {
         backend
             .turn_state_reads
@@ -5911,12 +5923,14 @@ async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own
     let waiter = spawn_wait(app, r#"{"return_on_input":true,"timeout_secs":600}"#);
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(reads(), 1, "the first pass decides");
+    crate::server::take_viewer_session_scan_visits();
 
     for revision in 0..50 {
         snapshot_tx.send_modify(|snapshot| {
             snapshot.revision += 1;
-            snapshot.sessions[1].title = format!("streaming {revision}");
-            snapshot.sessions[1].latest_event_ordinal = revision;
+            let other = snapshot.sessions.0.get_mut("session-2").unwrap();
+            other.title = format!("streaming {revision}");
+            other.latest_event_ordinal = revision;
         });
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -5938,11 +5952,21 @@ async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own
         50,
         "every publication woke the waiter, and none needed a decision"
     );
+    assert_eq!(
+        crate::server::take_viewer_session_scan_visits(),
+        0,
+        "unrelated revisions must not walk historical viewer rows"
+    );
     assert!(!waiter.is_finished());
 
     snapshot_tx.send_modify(|snapshot| {
         snapshot.revision += 1;
-        snapshot.sessions[0].pending_elicitations = vec![input_request()];
+        snapshot
+            .sessions
+            .0
+            .get_mut("session-1")
+            .unwrap()
+            .pending_elicitations = vec![input_request()];
     });
     let response = tokio::time::timeout(Duration::from_secs(1), waiter)
         .await
@@ -6124,6 +6148,7 @@ async fn review_status_reports_the_open_review_or_none() {
             roles: vec![crate::server::ViewerReviewRole {
                 label: "reviewer".into(),
                 state: "findings".into(),
+                child_session_id: Some("reviewer-child".into()),
             }],
             verdict: Some(crate::server::ViewerReviewVerdict {
                 kind: "findings".into(),
@@ -6299,7 +6324,7 @@ async fn recovery_prompt_identity_is_forwarded_to_the_worker() {
         .zip(["/clear", "/clear", "restart attempt"])
     {
         assert!(
-            matches!(command, mj_core::relay::RelayCommand::Prompt { prompt: actual, .. } if matches!(actual.as_slice(), [agent_client_protocol::schema::v1::ContentBlock::Text(block)] if block.text == text))
+            matches!(command, mj_core::relay::RelayCommand::Prompt { prompt: actual, .. } if matches!(actual.as_slice(), [agent_client_protocol::v1::schema::ContentBlock::Text(block)] if block.text == text))
         );
     }
 }

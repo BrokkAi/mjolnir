@@ -1,0 +1,9 @@
+{
+  "version": "0.1.16",
+  "platforms": {
+    "linux-x86_64": {"archive":"mimocode-linux-x64.tar.gz","sha256":"3793d8b08ae7c1c6cee707645da1b1c827e0f13faa5d40d076f08ea4ee1d9a5e"},
+    "linux-aarch64": {"archive":"mimocode-linux-arm64.tar.gz","sha256":"220c621eb61a175ba0bc8e9c45c217abfed8dace1f17111c3717bceb95ad2ab3"},
+    "macos-x86_64": {"archive":"mimocode-darwin-x64.zip","sha256":"2cb812cc978379be322340fd59f22c6baa42f2bd2534078fb1d291a71220368f"},
+    "macos-aarch64": {"archive":"mimocode-darwin-arm64.zip","sha256":"191d5c9634e8e24fe3038b31ea1191bdd8f23afcf5f389988cc6856077a632b3"}
+  }
+}

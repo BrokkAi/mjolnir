@@ -163,7 +163,9 @@ mod tests {
     fn project_memory_replace_is_gated_and_uses_the_relay_wire_shape() {
         let request = RelayRequest::ReplaceProjectMemoryTree {
             expected_replica: mj_core::project_memory::TreeVersion("tree-v1".into()),
-            tree: mj_core::project_memory::ProjectMemorySnapshot::default(),
+            tree: mj_core::relay::ProjectMemoryWireTree::Plain(
+                mj_core::project_memory::ProjectMemorySnapshot::default(),
+            ),
         };
         assert_eq!(
             request.minimum_protocol(),

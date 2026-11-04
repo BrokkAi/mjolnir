@@ -93,7 +93,7 @@ impl ApiBackend {
                     "only a top-level session can send messages"
                 ));
             }
-            let target_id = resolve_session_message_target(
+            let target_id = resolve_session_target(
                 &state,
                 Some(&sender_for_auth),
                 &requested_target_for_auth,
@@ -559,12 +559,12 @@ impl ApiBackend {
     }
 }
 
-/// Resolve a message recipient without widening the sender's existing target
+/// Resolve a session target without widening the sender's existing target
 /// scope. Exact IDs are passed through so the authorization checks below keep
 /// returning their established refusals for self and foreign-child targets.
 /// With no sender the message is the user's prompt, and the user may prompt
 /// any session, a sub-agent included.
-pub(super) fn resolve_session_message_target(
+pub(super) fn resolve_session_target(
     state: &mj_core::state::State,
     sender_session_id: Option<&str>,
     requested_id: &str,

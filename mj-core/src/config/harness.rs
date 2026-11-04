@@ -50,8 +50,8 @@ impl HarnessHost {
 pub enum ExecutionPolicy {
     /// Preserve the harness and profile's configured approval behavior.
     ConfiguredApprovals,
-    /// Run without sandboxing. Most harnesses also skip approval checks;
-    /// Muse keeps its auto-review, with only the sandbox disabled.
+    /// Run without sandboxing. Most harnesses also skip approval checks,
+    /// including Muse unless its profile opts back into auto-review.
     Unconstrained,
 }
 
@@ -61,8 +61,8 @@ pub enum ExecutionPolicy {
 pub enum PermissionMode {
     /// Preserve the selected harness profile's approval behavior.
     Guardian,
-    /// Run without sandboxing. Most harnesses also skip approval checks;
-    /// Muse keeps its auto-review, with only the sandbox disabled.
+    /// Run without sandboxing. Most harnesses also skip approval checks,
+    /// including Muse unless its profile opts back into auto-review.
     Yolo,
 }
 
@@ -222,6 +222,13 @@ fn xdg_home(name: &str, fallback: &str) -> Option<PathBuf> {
         .or_else(|| crate::path_input::user_home().map(|home| home.join(fallback)))
 }
 
+/// MiMo Code's stock directory in the XDG tree `name` names, such as
+/// `~/.local/share/mimocode`. The stock install names these trees after its
+/// program, `mimocode`, not after Mjolnir's `mimo` harness id.
+fn mimo_stock_xdg_dir(name: &str, fallback: &str) -> Option<PathBuf> {
+    xdg_home(name, fallback).map(|base| base.join("mimocode"))
+}
+
 /// Whether a MiMo Code profile's own `config/` tree carries a configuration
 /// file, which makes it authoritative over the stock XDG configuration.
 fn mimo_config_is_seeded(config: &Path) -> bool {
@@ -354,10 +361,10 @@ impl HarnessKind {
         if self == Self::Mimo && self.is_default_home(home) {
             if home.join("data/auth.json").is_file() {
                 environment.insert(self.home_env().into(), crate::target_path::text(home));
-                if let Some(stock) = xdg_home("XDG_CONFIG_HOME", ".config") {
+                if let Some(stock) = mimo_stock_xdg_dir("XDG_CONFIG_HOME", ".config") {
                     environment.insert(
                         "MIMOCODE_CONFIG_DIR".into(),
-                        crate::target_path::text(&stock.join(self.id())),
+                        crate::target_path::text(&stock),
                     );
                 }
                 environment.insert("MIMOCODE_DISABLE_AUTOUPDATE".into(), "1".into());
@@ -408,7 +415,7 @@ impl HarnessKind {
         if self != Self::Mimo {
             return vec![home.to_path_buf()];
         }
-        let stock = xdg_home("XDG_CONFIG_HOME", ".config").map(|base| base.join(self.id()));
+        let stock = mimo_stock_xdg_dir("XDG_CONFIG_HOME", ".config");
         mimo_configuration_sources(home, self.is_default_home(home), stock.as_deref())
     }
 
@@ -425,7 +432,7 @@ impl HarnessKind {
         if self != Self::Mimo {
             return home.to_path_buf();
         }
-        let stock = xdg_home("XDG_DATA_HOME", ".local/share").map(|base| base.join(self.id()));
+        let stock = mimo_stock_xdg_dir("XDG_DATA_HOME", ".local/share");
         mimo_data_source(home, self.is_default_home(home), stock.as_deref())
     }
 
@@ -743,7 +750,7 @@ impl HarnessKind {
             }
             Self::Claude => "Install it with `npm install -g @anthropic-ai/claude-code`".to_owned(),
             Self::Mimo => {
-                "Install it with `npm install -g @mimo-ai/cli` (Node.js 22 or newer)".to_owned()
+                "Install it with `curl -fsSL https://mimo.xiaomi.com/install | bash`".to_owned()
             }
             Self::Dsh => "Install it with `npm install -g @brokkai/dsh-acp` (Node.js 22 or newer), or from a release archive at https://github.com/BrokkAi/dsh-acp/releases".to_owned(),
             other => format!("Install the {} CLI", other.display_name()),
@@ -762,28 +769,32 @@ impl HarnessKind {
 
     /// How this harness realizes a target-level execution policy. Configured
     /// approvals preserve harness configuration, except that Codex, Claude,
-    /// and Muse select their guardian mode explicitly. Muse also reviews in
-    /// unconstrained targets, where only the sandbox is disabled.
+    /// and Muse select their guardian mode explicitly. Unconstrained targets
+    /// run every harness without approval checks; only the sandbox is
+    /// disabled for Muse, whose profile may opt back into auto-review.
     pub const fn execution_enforcement(
         self,
         policy: ExecutionPolicy,
     ) -> Option<ExecutionEnforcement> {
         match (self, policy) {
             (Self::Muse, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
-                // muse-acp's client-side auto-review only sees permission
-                // requests, and `allowAll` emits none ("giving up review
-                // entirely"). Unconstrained Muse keeps autonomy through the
-                // reviewer instead of blind approval; the container remains
-                // the isolation boundary, so only the sandbox is off.
-                label: "promptUnmatched / auto-review / sandbox-off / :ask-me",
+                // Isolated targets run Muse without permission checks, like
+                // OpenCode's `permission = "allow"`: `allowAll` emits no
+                // permission requests, so the adapter's client-side
+                // auto-review would have nothing to decide, and it stays
+                // off. The container remains the isolation boundary, so only
+                // the sandbox is off. A profile that sets `muse_auto_review
+                // = true` opts back into the reviewer (see
+                // `HarnessProfile::execution_enforcement`).
+                label: "allowAll / no-review / sandbox-off / :ask-me",
                 // muse-acp 0.10 puts Default, Read-only, and Plan on `mode`
                 // and the approval policy on `approval_mode`. Container images
                 // built before it keep the approval policy on `mode`.
-                acp_mode: Some("promptUnmatched"),
+                acp_mode: Some("allowAll"),
                 acp_mode_selector: Some("approval_mode"),
-                acp_setting: Some(("auto_review", "on")),
+                acp_setting: Some(("auto_review", "off")),
                 launch_flag: None,
-                launch_environment: Some(("MUSE_APPROVAL_MODE", "promptUnmatched")),
+                launch_environment: Some(("MUSE_APPROVAL_MODE", "allowAll")),
                 launch_argument: Some(LaunchArgument {
                     variable: "MUSE_SERVE_ARGS",
                     word: "--disable-sandbox",
@@ -954,6 +965,48 @@ impl HarnessKind {
                 staged_setting: None,
             }),
         }
+    }
+
+    /// The unconstrained Muse enforcement with auto-review on: the behavior
+    /// before isolated targets defaulted to no permission checks. A Muse
+    /// profile with `muse_auto_review = true` selects this instead of the
+    /// default `allowAll` / `off` enforcement above.
+    pub const fn muse_unconstrained_review_enforcement() -> ExecutionEnforcement {
+        ExecutionEnforcement {
+            label: "promptUnmatched / auto-review / sandbox-off / :ask-me",
+            acp_mode: Some("promptUnmatched"),
+            acp_mode_selector: Some("approval_mode"),
+            acp_setting: Some(("auto_review", "on")),
+            launch_flag: None,
+            launch_environment: Some(("MUSE_APPROVAL_MODE", "promptUnmatched")),
+            launch_argument: Some(LaunchArgument {
+                variable: "MUSE_SERVE_ARGS",
+                word: "--disable-sandbox",
+                present: true,
+            }),
+            session_sandbox: None,
+            staged_setting: Some(StagedSetting {
+                file: "settings.json",
+                path: &["permissions", "default_profile"],
+                value: ":ask-me",
+                object_version: Some(("schema_version", 1)),
+            }),
+        }
+    }
+
+    /// Execution enforcement for `policy`, honoring a Muse profile's
+    /// `muse_auto_review` choice. The worker carries that choice in its
+    /// launch config because it only knows the harness kind; the controller
+    /// resolves it from the profile. Guardian targets always review.
+    pub fn resolve_execution_enforcement(
+        self,
+        policy: ExecutionPolicy,
+        muse_auto_review: bool,
+    ) -> Option<ExecutionEnforcement> {
+        if self == Self::Muse && policy == ExecutionPolicy::Unconstrained && muse_auto_review {
+            return Some(Self::muse_unconstrained_review_enforcement());
+        }
+        self.execution_enforcement(policy)
     }
 
     /// Apply the launch environment required to realize `policy`. The
@@ -1147,6 +1200,16 @@ pub struct HarnessProfile {
     /// [`crate::codex_provider::effective_config`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_profile: Option<String>,
+    /// Whether an unconstrained Muse session (containers, EC2, `yolo` SSH)
+    /// keeps muse-acp's auto-review on. Absent or `false` runs without
+    /// permission checks, like OpenCode's `permission = "allow"`: `allowAll`
+    /// approvals with auto-review off and only the sandbox disabled. `true`
+    /// restores the reviewer (`promptUnmatched` approvals with auto-review
+    /// on) inside the container boundary. Only valid on a Muse profile; the
+    /// guardian policy (raw local, guardian SSH) always reviews, so this
+    /// changes nothing there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muse_auto_review: Option<bool>,
     /// Consume legacy per-profile choices without migrating them to global settings.
     #[serde(default, rename = "subagents", skip_serializing)]
     pub legacy_subagents: Option<serde_json::Value>,
@@ -1261,7 +1324,63 @@ impl HarnessProfile {
     }
 
     pub fn execution_enforcement(&self, policy: ExecutionPolicy) -> Option<ExecutionEnforcement> {
-        self.kind.execution_enforcement(policy)
+        // A Muse profile that opts back into review keeps the previous
+        // unconstrained behavior: the reviewer answers each approval inside
+        // the container boundary, with only the sandbox disabled.
+        self.kind
+            .resolve_execution_enforcement(policy, self.muse_auto_review.unwrap_or(false))
+    }
+
+    /// Whether this Muse profile keeps auto-review on in unconstrained
+    /// targets. Guardian targets always review; this only changes the
+    /// unconstrained enforcement above.
+    pub fn muse_auto_review_unconstrained(&self) -> bool {
+        self.kind == HarnessKind::Muse && self.muse_auto_review.unwrap_or(false)
+    }
+
+    /// Apply the launch environment for `policy`, honoring this profile's
+    /// `muse_auto_review` choice for Muse. The controller writes this into
+    /// new launch configs, and the worker repeats it so persisted configs
+    /// from older releases acquire the same enforcement after an upgrade.
+    pub fn configure_execution_environment(
+        &self,
+        policy: ExecutionPolicy,
+        environment: &mut BTreeMap<String, String>,
+    ) -> Result<()> {
+        let Some(enforcement) = self.execution_enforcement(policy) else {
+            return Ok(());
+        };
+        if let Some(argument) = enforcement.launch_argument() {
+            let args = environment
+                .get(argument.variable)
+                .map(String::as_str)
+                .unwrap_or_default();
+            let has_word = args.split_whitespace().any(|word| word == argument.word);
+            if argument.present && !has_word {
+                let args = environment.entry(argument.variable.to_owned()).or_default();
+                if !args.is_empty() {
+                    args.push(' ');
+                }
+                args.push_str(argument.word);
+            } else if !argument.present && has_word {
+                // The harness splits this variable on whitespace without
+                // quoting, so rejoining the other words keeps their meaning.
+                let rest = args
+                    .split_whitespace()
+                    .filter(|word| *word != argument.word)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if rest.is_empty() {
+                    environment.remove(argument.variable);
+                } else {
+                    environment.insert(argument.variable.to_owned(), rest);
+                }
+            }
+        }
+        if let Some((key, value)) = enforcement.launch_environment() {
+            environment.insert(key.to_owned(), value.to_owned());
+        }
+        Ok(())
     }
 
     /// The provider named in this profile's Codex configuration, if any.
@@ -1499,6 +1618,9 @@ impl HarnessProfile {
                 );
             }
         }
+        if self.muse_auto_review.is_some() && self.kind != HarnessKind::Muse {
+            bail!("profile {id:?}: `muse_auto_review` applies only to a Muse profile");
+        }
         Ok(())
     }
 
@@ -1521,6 +1643,10 @@ impl HarnessProfile {
         if !super::secrets::resolves_values() {
             return;
         }
+        if self.kind == HarnessKind::Dsh {
+            self.resolve_dsh_key();
+            return;
+        }
         if let Some(env_key) = self.kind.api_key_variable() {
             self.environment.inherit(env_key);
             return;
@@ -1538,6 +1664,54 @@ impl HarnessProfile {
                 .and_then(|custom| custom.env_key.as_deref())
         {
             self.environment.inherit(env_key);
+        }
+    }
+
+    /// Decide the key a DSH profile authenticates with, first found wins: the
+    /// key saved in DSH itself (its home's `.credentials.yaml`), the one in
+    /// the environment Mjolnir started with, the one in the DSH home's
+    /// `.env`, and last the profile's own `environment` entry, such as a
+    /// secret from `secrets.toml`. The first three are DSH's own order, so a
+    /// session uses the key the person's `dsh` uses.
+    fn resolve_dsh_key(&mut self) {
+        let Some(env_key) = self.kind.api_key_variable() else {
+            return;
+        };
+        let home = self.home.clone();
+        // A DSH file Mjolnir cannot use keeps a lower source usable: the
+        // session sends only the key, so DSH's own refusal of the file does
+        // not stop it. It is the reason when no source has a key.
+        let mut problems = Vec::new();
+        let mut usable = |found: Result<Option<String>>| match found {
+            Ok(key) => key.filter(|key| !key.trim().is_empty()),
+            Err(error) => {
+                problems.push(format!("{error:#}"));
+                None
+            }
+        };
+        let stored = super::dsh_credentials::stored(&home, env_key);
+        let account_signed_in = stored.as_ref().is_ok_and(|stored| stored.account_signed_in);
+        let key = usable(stored.map(|stored| stored.api_key))
+            .or_else(|| usable(Ok(super::secrets::Environment::from_process(env_key))))
+            .or_else(|| usable(super::dsh_credentials::dotenv(&home, env_key)));
+        if !problems.is_empty() {
+            tracing::warn!(home = %home.display(), "DSH credentials: {}", problems.join("; "));
+        }
+        if let Some(key) = key {
+            self.environment.supply(env_key, key);
+            return;
+        }
+        if self.supplies_api_key(env_key) {
+            return;
+        }
+        if account_signed_in {
+            problems.push(format!(
+                "DSH in {} is signed in to a DeepSeek account but holds no API key; dsh-acp authenticates only with an API key, so save one in DSH's Models settings, or export {env_key} and run `mj daemon restart`",
+                home.display()
+            ));
+        }
+        if !problems.is_empty() {
+            self.environment.refuse(env_key, problems.join("; "));
         }
     }
 
@@ -1597,6 +1771,17 @@ impl HarnessProfile {
             if let Some((source, env_key)) = api_key
                 && !self.supplies_api_key(env_key)
             {
+                if self.kind == HarnessKind::Dsh {
+                    bail!(
+                        "DSH authenticates with {env_key}, which is found neither in DSH's own credentials ({}), the environment Mjolnir started with, {}, nor under [profiles.{id}.environment]; save a key in DSH, export {env_key} and run `mj daemon restart`, or put it in secrets.toml and add `{env_key} = {{ from_secret = \"{env_key}\" }}` under [profiles.{id}.environment]",
+                        self.home
+                            .join(super::dsh_credentials::CREDENTIALS_FILE)
+                            .display(),
+                        self.home
+                            .join(super::dsh_credentials::DOTENV_FILE)
+                            .display(),
+                    );
+                }
                 bail!(
                     "{source} authenticates with {env_key}, which is set neither in the environment Mjolnir started with nor under [profiles.{id}.environment]; export {env_key} and run `mj daemon restart`, or put it in secrets.toml and add `{env_key} = {{ from_secret = \"{env_key}\" }}` under [profiles.{id}.environment]"
                 );
@@ -1960,6 +2145,7 @@ mod tests {
             environment: Environment::default(),
             context_window_bytes: None,
             guardian_review_model: None,
+            muse_auto_review: None,
             codex_profile: None,
             legacy_subagents: None,
         };
@@ -2019,6 +2205,22 @@ mod tests {
             home.join("data"),
             "a login Mjolnir created in the profile root wins over the stock one"
         );
+
+        // Hard-won: MiMo sessions staged no login because the stock trees were
+        // looked up under the harness id, `~/.local/share/mimo`.
+        for (variable, fallback) in [
+            ("XDG_CONFIG_HOME", ".config"),
+            ("XDG_DATA_HOME", ".local/share"),
+        ] {
+            assert_eq!(
+                mimo_stock_xdg_dir(variable, fallback)
+                    .unwrap()
+                    .file_name()
+                    .unwrap(),
+                "mimocode",
+                "MiMo Code 0.1.15 names its {variable} tree `mimocode`"
+            );
+        }
 
         assert_eq!(
             HarnessKind::Mimo.configuration_sources(&home),

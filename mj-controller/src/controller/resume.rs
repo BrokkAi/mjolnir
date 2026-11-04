@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::v1::ContentBlock;
+use agent_client_protocol::v1::schema::ContentBlock;
 use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 use tokio_util::sync::CancellationToken;
@@ -51,31 +51,9 @@ use super::{
     target_profile_home,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResumeRepositorySourceMismatch {
-    pub session_id: String,
-    pub bundle_id: String,
-    pub repository_id: String,
-    pub missing_commit: String,
-    pub archived_origin: String,
-    pub configured_origin: String,
-}
-
-pub use mj_core::state::ResumeRepositorySourceReceipt;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResumeRepositorySourcePreflight {
-    Ready(ResumeRepositorySourceReceipt),
-    RepositoryMoved(ResumeRepositorySourceMismatch),
-    /// The resume converts a local checkout into an isolated workspace. The
-    /// receipt is already valid; the preview is what a person has to confirm
-    /// before the checkout is snapshotted and the session moves off this
-    /// machine.
-    ConvertingRawCheckout {
-        receipt: ResumeRepositorySourceReceipt,
-        preview: Box<mj_core::state::RawConversionPreview>,
-    },
-}
+pub use mj_core::state::{
+    ResumeRepositorySourceMismatch, ResumeRepositorySourcePreflight, ResumeRepositorySourceReceipt,
+};
 
 struct ResumeRepositoryBundles {
     checkpoint_sha256: String,
@@ -439,7 +417,9 @@ impl Controller {
                     .expect("accepted project source resolved above"),
             );
         }
-        let github_token = if let Some(app) = self.config.github.app.as_ref() {
+        let github_token = if self.config.github.session_token_path.is_some() {
+            self.github_token_for_session(session_id).await?
+        } else if let Some(app) = self.config.github.app.as_ref() {
             if let Some(project) = &project {
                 let bundle = project.bundle.clone();
                 let network_sources = project.network_sources.clone();
@@ -584,11 +564,13 @@ pub(super) enum WorkerRootReset {
     /// state on a bare target, then make sure the worker root exists.
     FreshTarget,
     /// The environment is being kept and only the harness replaced. Stop the
-    /// live daemon, clear relay state, unlink the installed worker files, and
-    /// remove the previous per-session profile home. Runs on every locator.
+    /// live daemon and clear relay state. A compatible native Move keeps its
+    /// executable and native home; a full replacement removes them.
     InPlace {
         /// The per-session profile root the replaced harness ran from.
         previous_profile_root: String,
+        /// The compatible native conversation and executable already exist here.
+        retain_native: bool,
     },
 }
 
@@ -627,8 +609,8 @@ pub(super) struct RestoreIntoTarget<'a> {
 }
 
 impl Controller {
-    /// Install the worker, restore the archive into the target, start the
-    /// harness, and report the projection the destination answers with.
+    /// Prepare the destination worker, seed its relay, start the harness, and
+    /// report the projection the destination answers with.
     pub(super) async fn restore_into_target(
         &mut self,
         session_id: &str,
@@ -656,6 +638,13 @@ impl Controller {
             } = restore;
             let archive_manifest = &archive.manifest;
             let canonical_session = &archive.canonical_session;
+            let retain_native = matches!(
+                &worker_root_reset,
+                WorkerRootReset::InPlace {
+                    retain_native: true,
+                    ..
+                }
+            );
             // Sub-agents the suspend stopped: the model hears about them on its
             // first prompt, and the person in a conversation line. The list is
             // kept until the relay has the note, so a resume that fails tells
@@ -679,7 +668,10 @@ impl Controller {
                             .clone()
                             .unwrap_or_default(),
                         profile.kind,
-                        self.state.subagents.get(session_id),
+                        self.state
+                            .subagents
+                            .get(session_id)
+                            .map(|child| child.handback_tool),
                         true,
                     );
             resume_notices.extend(mj_core::subagent::stopped_subagents_notice(
@@ -792,102 +784,129 @@ impl Controller {
                             )?,
                         )?;
                     }
-                    // The environment survives this restore, so the old
-                    // harness has to be taken out of it: its daemon, its relay
-                    // state, the installed worker files, and its profile home.
-                    // The same command recreates the worker root.
+                    // Stop the owning process before changing its files. A
+                    // native continuation needs only a fresh relay; a new
+                    // harness also replaces its executable and native home.
                     WorkerRootReset::InPlace {
                         previous_profile_root,
+                        retain_native,
                     } => {
-                        execute_checked(
-                            syncing,
+                        let reset = if *retain_native {
+                            targets::retained_native_worker_reset_plan(&backend, session_id)?
+                        } else {
                             targets::in_place_worker_reset_plan(
                                 &backend,
                                 session_id,
                                 previous_profile_root,
-                            )?,
-                        )?;
+                            )?
+                        };
+                        execute_checked(syncing, reset)?;
                     }
                 }
             }
-            let staging = tempfile::tempdir().context("create restore staging")?;
-            let local_spec = staging.path().join("restore-spec.json");
-            std::fs::write(&local_spec, serde_json::to_vec_pretty(&restore)?)?;
-            // Two independent lanes into the target. The checkpoint transfer
-            // needs nothing from the worker install, and the worker install
-            // is independent of archive upload, so both run concurrently.
-            let controller = &*self;
-            let backend_ref = &backend;
-            let worker_root_ref = worker_root.as_str();
-            let local_spec_ref = local_spec.as_path();
-            // The archive lands in the worker root and unpacks into the
-            // workspace and the harness home; each filesystem needs room.
-            crate::target_storage::ensure_room_for(
-                &backend,
-                [
-                    worker_root.as_str(),
-                    workspace_root.as_str(),
-                    harness_home.as_str(),
-                ],
-                || {
-                    Ok(std::fs::metadata(restored_archive)
-                        .with_context(|| format!("measure {}", restored_archive.display()))?
-                        .len())
-                },
-                "restore the checkpoint",
-            )?;
-            execute_concurrent_lanes(
-                || {
-                    let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-                    controller.prepare_worker_files(
-                        session_id,
-                        backend_ref,
-                        worker_root_ref,
-                        syncing,
-                    )?;
-                    super::provisioning::install_inherited_git_settings(
-                        syncing,
-                        backend_ref,
-                        session_id,
-                    )?;
-                    Ok(())
-                },
-                || {
-                    let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                    if should_upload_restore_archive(&backend) {
-                        upload_checkpoint_spec(
-                            restoring,
-                            backend_ref,
-                            session_id,
-                            restored_archive,
-                            &remote_archive,
-                        )?;
-                    }
-                    upload_checkpoint_spec(
-                        restoring,
-                        backend_ref,
-                        session_id,
-                        local_spec_ref,
-                        &remote_spec,
-                    )
-                },
-            )?;
-            {
-                let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                execute_checked(
-                    restoring,
-                    restore_command(&backend, session_id, &remote_spec)?,
-                )?;
-            }
-            if should_install_attached_resources {
+            if retain_native {
                 let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-                install_attached_resources(
-                    &self.state,
+                self.prepare_worker_files_for(
                     session_id,
                     &backend,
                     &worker_root,
                     syncing,
+                    super::worker_binary::WorkerFilePreparation::RefreshProfile,
                 )?;
+                let seed = mj_checkpoint::checkpoint::relay_seed_for_restore(
+                    canonical_session,
+                    true,
+                    queue_policy,
+                )?;
+                let staging = tempfile::tempdir().context("stage retained native relay seed")?;
+                let local_seed = staging
+                    .path()
+                    .join(mj_core::relay::RESTORED_RELAY_SEED_FILE);
+                mj_core::config::atomic_write(&local_seed, &serde_json::to_vec(&seed)?)?;
+                let remote_seed = mj_core::target_path::text(
+                    &mj_core::relay::restored_relay_seed_path(Path::new(&worker_root)),
+                );
+                upload_checkpoint_spec(syncing, &backend, session_id, &local_seed, &remote_seed)?;
+            } else {
+                let staging = tempfile::tempdir().context("create restore staging")?;
+                let local_spec = staging.path().join("restore-spec.json");
+                std::fs::write(&local_spec, serde_json::to_vec_pretty(&restore)?)?;
+                // Two independent lanes into the target. The checkpoint transfer
+                // needs nothing from the worker install, and the worker install
+                // is independent of archive upload, so both run concurrently.
+                let controller = &*self;
+                let backend_ref = &backend;
+                let worker_root_ref = worker_root.as_str();
+                let local_spec_ref = local_spec.as_path();
+                // The archive lands in the worker root and unpacks into the
+                // workspace and the harness home; each filesystem needs room.
+                crate::target_storage::ensure_room_for(
+                    &backend,
+                    [
+                        worker_root.as_str(),
+                        workspace_root.as_str(),
+                        harness_home.as_str(),
+                    ],
+                    || {
+                        Ok(std::fs::metadata(restored_archive)
+                            .with_context(|| format!("measure {}", restored_archive.display()))?
+                            .len())
+                    },
+                    "restore the checkpoint",
+                )?;
+                execute_concurrent_lanes(
+                    || {
+                        let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+                        controller.prepare_worker_files(
+                            session_id,
+                            backend_ref,
+                            worker_root_ref,
+                            syncing,
+                        )?;
+                        super::provisioning::install_inherited_git_settings(
+                            syncing,
+                            backend_ref,
+                            session_id,
+                        )?;
+                        Ok(())
+                    },
+                    || {
+                        let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
+                        if should_upload_restore_archive(&backend) {
+                            upload_checkpoint_spec(
+                                restoring,
+                                backend_ref,
+                                session_id,
+                                restored_archive,
+                                &remote_archive,
+                            )?;
+                        }
+                        upload_checkpoint_spec(
+                            restoring,
+                            backend_ref,
+                            session_id,
+                            local_spec_ref,
+                            &remote_spec,
+                        )
+                    },
+                )?;
+                {
+                    let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
+                    execute_checked(
+                        restoring,
+                        restore_command(&backend, session_id, &remote_spec)?,
+                    )?;
+                }
+                if should_install_attached_resources {
+                    let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+                    install_attached_resources(
+                        &self.state,
+                        session_id,
+                        &backend,
+                        &worker_root,
+                        syncing,
+                    )?;
+                }
             }
             match projection_build {
                 Some(build) => {
@@ -921,6 +940,7 @@ impl Controller {
                         executor,
                         &backend,
                         &worker_root,
+                        &self.config.github,
                     )?;
                     connect_started_worker(&spec, session_id, executor, &backend, &worker_root)
                         .await?
@@ -1619,12 +1639,7 @@ impl Controller {
             .with_context(|| format!("unknown profile {profile_id:?}"))?
             .clone();
         ensure!(profile.enabled, "profile {profile_id:?} is disabled");
-        let target_template = self
-            .config
-            .targets
-            .get(target_id)
-            .with_context(|| format!("unknown target template {target_id:?}"))?
-            .clone();
+        let target_template = self.config.ensure_target_enabled(target_id)?.clone();
         // Decide the representation before the record changes, so an
         // incompatible target fails here instead of during provisioning.
         self.validate_muse_resume_destination(&previous, profile.kind, target_id)?;
@@ -1773,6 +1788,11 @@ impl Controller {
         // provisioning below. Clone only the configuration it reads so the
         // controller can continue owning and mutating its session record.
         let utility_config = (!native_continuity).then(|| self.config.clone());
+        let native_prior = if utility_config.is_some() {
+            native_prior_while_cancellable(session_id, &verified_archive, executor).await?
+        } else {
+            None
+        };
         let discard_queued_prompts = discard_queue || !native_continuity;
         // When this controller archived the session, its durable projection is
         // already the archive's content. Reading one row decides that; a read
@@ -2006,6 +2026,7 @@ impl Controller {
                             github_token.as_deref(),
                             config,
                             &canonical_session,
+                            native_prior.as_ref(),
                             context_bytes,
                         )
                         .context("prepare the cross-harness destination")?,
@@ -2517,6 +2538,7 @@ impl<E: CommandExecutor + ?Sized> CommandExecutor for CrossHarnessProvisionExecu
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn provision_with_cross_harness_handoff(
     controller: &mut Controller,
     session_id: &str,
@@ -2524,6 +2546,7 @@ fn provision_with_cross_harness_handoff(
     github_token: Option<&str>,
     config: &Config,
     snapshot: &CanonicalSessionSnapshot,
+    prior: Option<&crate::compaction::PriorCompaction>,
     context_bytes: usize,
 ) -> Result<String> {
     let (_provision, handoff) = execute_joined_cross_harness_work(
@@ -2551,6 +2574,7 @@ fn provision_with_cross_harness_handoff(
                     session_id,
                     config,
                     snapshot,
+                    prior,
                     context_bytes,
                     executor,
                     cancellation,
@@ -2664,6 +2688,43 @@ fn execute_joined_cross_harness_work<A: Send, B: Send>(
     })
 }
 
+/// Cooperatively stop native parsing on cancellation and join its blocking
+/// task before releasing the source archive and lifecycle ownership.
+async fn native_prior_while_cancellable(
+    session_id: &str,
+    archive: &VerifiedResumeArchive,
+    executor: &impl CommandExecutor,
+) -> Result<Option<crate::compaction::PriorCompaction>> {
+    ensure!(
+        !executor.cancellation_requested(),
+        "operation cancelled while reading native compaction"
+    );
+    let cancel = CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    let operation = crate::handoff::native_prior_from_archive(
+        session_id,
+        &archive.archive_path,
+        &archive.manifest,
+        &archive.canonical_session,
+        cancel.clone(),
+    );
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            result = &mut operation => return result,
+            _ = tokio::time::sleep(super::readiness::CANCELLATION_POLL_INTERVAL) => {
+                if executor.cancellation_requested() {
+                    cancel.cancel();
+                    return match operation.await {
+                        Ok(_) => Err(anyhow::anyhow!("operation cancelled while reading native compaction")),
+                        Err(error) => Err(error.context("operation cancelled while reading native compaction")),
+                    };
+                }
+            }
+        }
+    }
+}
+
 /// Discover a utility model and compact the cross-harness handoff while still
 /// watching for cancellation. Discovery and compaction can both make several
 /// network requests, so a cancelled resume must not wait them out.
@@ -2671,6 +2732,7 @@ async fn utility_handoff_while_cancellable(
     session_id: &str,
     config: &Config,
     snapshot: &CanonicalSessionSnapshot,
+    prior: Option<&crate::compaction::PriorCompaction>,
     context_bytes: usize,
     executor: &impl CommandExecutor,
     cancellation: CancellationToken,
@@ -2681,8 +2743,14 @@ async fn utility_handoff_while_cancellable(
     }
     let _compacting = ProvisionStageGuard::new(executor, ProvisionStage::Compacting);
     let cancel = cancellation.child_token();
-    let operation =
-        crate::handoff::build_handoff_context(session_id, config, snapshot, context_bytes, &cancel);
+    let operation = crate::handoff::build_handoff_context_with_prior(
+        session_id,
+        config,
+        snapshot,
+        context_bytes,
+        prior,
+        &cancel,
+    );
     tokio::pin!(operation);
     loop {
         tokio::select! {

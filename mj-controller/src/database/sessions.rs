@@ -38,13 +38,21 @@ pub(super) fn save_new_session_to(
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     validate_session_record(session)?;
+    ensure!(
+        !session.last_profile.is_empty(),
+        "a session profile id cannot use the reserved legacy preference key"
+    );
     insert_session(&tx, session)?;
     if let Some((host, size)) = container_size.filter(|_| remember_container_size) {
         write_host_container_size(&tx, &host, size)?;
     }
     let policy = session.subagents.clone().unwrap_or_default();
     if remember_launch_choices && policy.updates_remembered_choice(session.harness_kind) {
-        tx.execute("INSERT INTO subagent_preference(singleton, policy) VALUES(1, ?1) ON CONFLICT(singleton) DO UPDATE SET policy = excluded.policy", [serde_json::to_string(&policy)?])?;
+        tx.execute(
+            "INSERT INTO subagent_preference(profile_id, policy) VALUES(?1, ?2)
+             ON CONFLICT(profile_id) DO UPDATE SET policy = excluded.policy",
+            params![session.last_profile, serde_json::to_string(&policy)?],
+        )?;
     }
     tx.commit()?;
     Ok(())
@@ -80,6 +88,16 @@ pub fn save_subagent_session(
     session: &SessionRecord,
     subagent: &mj_core::subagent::SubagentRecord,
 ) -> Result<()> {
+    register_subagent_with_startup(session, subagent, Vec::new())
+}
+
+/// Publish the child and its complete initial input in the same transaction.
+/// Recovery must never find a newly registered worker without its first brief.
+pub(crate) fn register_subagent_with_startup(
+    session: &SessionRecord,
+    subagent: &mj_core::subagent::SubagentRecord,
+    startup: Vec<super::startup::StartupDelivery>,
+) -> Result<()> {
     let session = session.clone();
     let subagent = subagent.clone();
     submit_database_write("save_subagent_session", move |_| {
@@ -102,6 +120,7 @@ pub fn save_subagent_session(
                 serde_json::to_string(&subagent)?,
             ],
         )?;
+        super::startup::enqueue_startup_deliveries_with(&tx, startup)?;
         tx.commit()?;
         Ok(())
     })
@@ -598,6 +617,26 @@ pub fn save_lifecycle_session(session: &SessionRecord) -> Result<()> {
     })
 }
 
+/// Clear exactly the failure observed at turn start. The writer owns the
+/// comparison and update together so a concurrent lifecycle result survives.
+pub(crate) fn clear_recorded_lifecycle_failure(
+    previous: &SessionRecord,
+    updated_at: &str,
+) -> Result<bool> {
+    if previous.public_error().is_none() {
+        return Ok(false);
+    }
+    let previous = previous.clone();
+    let updated_at = updated_at.to_owned();
+    submit_database_write("clear_recorded_lifecycle_failure", move |connection| {
+        Ok(connection.execute(
+            "UPDATE sessions SET last_error = NULL, updated_at = ?3
+             WHERE session_id = ?1 AND last_error = ?2",
+            params![previous.id, previous.last_error, updated_at],
+        )? == 1)
+    })
+}
+
 /// Install a lifecycle transition together with the checkpoint it just
 /// verified and the harness session id that produced it.
 pub fn save_checkpointed_session(session: &SessionRecord) -> Result<()> {
@@ -632,7 +671,48 @@ pub fn set_session_title_override(session_id: &str, title: &str, updated_at: &st
 /// turn in one SQLite transaction. Configuration is stored separately, so the controller owns
 /// coordinating this update with the matching config-map rename.
 pub fn rename_profile_references(old_id: &str, new_id: &str) -> Result<usize> {
-    rename_session_reference("last_profile", old_id, new_id)
+    let old_id = old_id.to_owned();
+    let new_id = new_id.to_owned();
+    submit_database_write("rename_profile_references", move |_| {
+        rename_profile_references_at(&database_path(), &old_id, &new_id)
+    })
+}
+
+pub(super) fn rename_profile_references_at(
+    path: &Path,
+    old_id: &str,
+    new_id: &str,
+) -> Result<usize> {
+    ensure!(
+        !old_id.is_empty() && !new_id.is_empty(),
+        "profile ids cannot use the reserved legacy preference key"
+    );
+    if old_id == new_id {
+        return Ok(0);
+    }
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let changed = tx.execute(
+        "UPDATE sessions SET last_profile = ?2 WHERE last_profile = ?1",
+        params![old_id, new_id],
+    )?;
+    tx.execute(
+        "UPDATE session_turn_selections SET profile = ?2 WHERE profile = ?1",
+        params![old_id, new_id],
+    )?;
+    // The source wins on a rename. A retry after commit finds no source row.
+    tx.execute(
+        "INSERT INTO subagent_preference(profile_id, policy)
+         SELECT ?2, policy FROM subagent_preference WHERE profile_id = ?1
+         ON CONFLICT(profile_id) DO UPDATE SET policy = excluded.policy",
+        params![old_id, new_id],
+    )?;
+    tx.execute(
+        "DELETE FROM subagent_preference WHERE profile_id = ?1",
+        [old_id],
+    )?;
+    tx.commit()?;
+    Ok(changed)
 }
 
 /// Rewrite a configured target id in every persisted session in one SQLite
@@ -647,7 +727,7 @@ pub(super) fn rename_session_reference(
     new_id: &str,
 ) -> Result<usize> {
     ensure!(
-        matches!(column, "last_profile" | "target_template_id"),
+        column == "target_template_id",
         "unsupported session reference column"
     );
     let old_id = old_id.to_owned();
@@ -669,13 +749,6 @@ pub(super) fn rename_session_reference_at(
         &format!("UPDATE sessions SET {column} = ?2 WHERE {column} = ?1"),
         params![old_id, new_id],
     )?;
-    if column == "last_profile" {
-        // Usage stays with the renamed profile, including destroyed sessions'.
-        tx.execute(
-            "UPDATE session_turn_selections SET profile = ?2 WHERE profile = ?1",
-            params![old_id, new_id],
-        )?;
-    }
     tx.commit()?;
     Ok(changed)
 }
@@ -765,7 +838,7 @@ pub(super) fn mark_session_target_missing_if_current_to(
              updated_at = ?3
          WHERE session_id = ?1
            AND (?4 IS NULL OR updated_at = ?4)
-           AND state IN ('provisioning', 'running', 'disconnected', 'error')",
+           AND state IN ('running', 'disconnected')",
         params![session_id, detail, updated_at, observed_updated_at],
     )?;
     ensure!(changed <= 1, "updated {changed} sessions for {session_id}");
@@ -1259,13 +1332,19 @@ pub fn append_session_draft_input(session_id: &str, text: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     let text = text.to_owned();
     submit_database_write("append_session_draft_input", move |connection| {
-        let updated = connection.execute(
-            "UPDATE sessions SET draft_input = CASE WHEN ?2 = '' THEN draft_input
-             WHEN draft_input = '' THEN ?2 ELSE draft_input || char(10) || char(10) || ?2 END
-             WHERE session_id = ?1",
-            params![session_id, text],
+        let tx = connection.transaction()?;
+        let existing: String = tx.query_row(
+            "SELECT draft_input FROM sessions WHERE session_id=?1",
+            [&session_id],
+            |row| row.get(0),
+        )?;
+        let merged = mj_core::draft::merge_drafts(&existing, &text)?;
+        let updated = tx.execute(
+            "UPDATE sessions SET draft_input=?2 WHERE session_id=?1",
+            params![session_id, merged],
         )?;
         ensure!(updated == 1, "unknown session {session_id}");
+        tx.commit()?;
         Ok(())
     })
 }

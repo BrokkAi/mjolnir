@@ -174,17 +174,18 @@ pub(crate) async fn background_task_stop_response(
             // The relay expects the adapter's acknowledgement once a Claude
             // stop is requested; forget it if the stop never gets there.
             let claude_task_id = match &target {
-                mj_core::relay::BackgroundTaskStopTarget::ClaudeAsyncTask { task_id } => {
-                    Some(task_id.clone())
-                }
+                mj_core::relay::BackgroundTaskStopTarget::AirAsyncTask {
+                    session_id,
+                    task_id,
+                } => Some((session_id.clone(), task_id.clone())),
                 _ => None,
             };
             let stop_not_sent = || {
-                if let Some(task_id) = &claude_task_id {
+                if let Some((session_id, task_id)) = &claude_task_id {
                     relay
                         .lock()
                         .expect("relay state lock poisoned")
-                        .claude_stop_not_sent(task_id);
+                        .claude_stop_not_sent(session_id, task_id);
                 }
             };
             let (resolved, resolution) = tokio::sync::oneshot::channel();
@@ -362,12 +363,19 @@ pub(crate) fn apply_project_memory_request(
     let baseline = mj_core::project_memory::ProjectMemoryStore::new(&memory.baseline_root);
     match request {
         RelayRequest::ProjectMemorySnapshot => Ok(RelayResponsePayload::ProjectMemorySnapshot {
-            baseline: baseline.snapshot()?,
-            replica: replica.snapshot()?,
+            baseline: mj_core::relay::ProjectMemoryWireTree::encode(
+                baseline.snapshot()?,
+                mj_core::relay::RELAY_PROTOCOL_VERSION,
+            )?,
+            replica: mj_core::relay::ProjectMemoryWireTree::encode(
+                replica.snapshot()?,
+                mj_core::relay::RELAY_PROTOCOL_VERSION,
+            )?,
         }),
         RelayRequest::InstallProjectMemorySnapshot { snapshot } => {
-            replica.install_snapshot(snapshot)?;
-            baseline.install_snapshot(snapshot)?;
+            let snapshot = snapshot.clone().decode()?;
+            replica.install_snapshot(&snapshot)?;
+            baseline.install_snapshot(&snapshot)?;
             Ok(RelayResponsePayload::ProjectMemorySnapshotInstalled)
         }
         RelayRequest::ReplaceProjectMemoryTree {
@@ -380,8 +388,9 @@ pub(crate) fn apply_project_memory_request(
                     outcome: mj_core::project_memory::ReplicaReplaceOutcome::ReplicaChanged,
                 });
             }
-            replica.replace_tree(tree)?;
-            baseline.replace_tree(tree)?;
+            let tree = tree.clone().decode()?;
+            replica.replace_tree(&tree)?;
+            baseline.replace_tree(&tree)?;
             Ok(RelayResponsePayload::ProjectMemoryTreeReplaced {
                 outcome: mj_core::project_memory::ReplicaReplaceOutcome::Replaced,
             })
@@ -413,7 +422,47 @@ pub(crate) fn apply_credential_request_at(
         MAX_SKILLS_ARCHIVE_BYTES, SkillsArchive, collect_skills, install_skills,
     };
 
+    let slopcop_login_path = endpoint.home.join(mj_core::slopcop::LOGIN_FILE);
     match request {
+        RelayRequest::AwsCredentialsState => Ok(credential_state_payload(
+            &mj_core::aws_credentials::state(&endpoint.home)?,
+        )),
+        RelayRequest::SlopcopLoginState => Ok(credential_state_payload(
+            &mj_core::slopcop::read_login(&slopcop_login_path)?.0,
+        )),
+        RelayRequest::InstallSlopcopLogin { data } => {
+            if data.len() > mj_core::slopcop::MAX_LOGIN_BYTES * 2 {
+                bail!(
+                    "slopcop login is above the {} byte limit",
+                    mj_core::slopcop::MAX_LOGIN_BYTES
+                );
+            }
+            let bytes = BASE64
+                .decode(data.as_bytes())
+                .context("decode slopcop login payload")?;
+            Ok(credential_state_payload(&mj_core::slopcop::write_login(
+                &slopcop_login_path,
+                &bytes,
+            )?))
+        }
+        RelayRequest::RemoveSlopcopLogin => {
+            mj_core::slopcop::remove_login(&slopcop_login_path)?;
+            Ok(credential_state_payload(
+                &mj_core::credentials::CredentialSnapshot::absent(),
+            ))
+        }
+        RelayRequest::InstallAwsCredentials { data } => {
+            if data.len() > MAX_CREDENTIAL_BYTES * 2 {
+                bail!("AWS credential payload is above the {MAX_CREDENTIAL_BYTES} byte limit");
+            }
+            let bytes = BASE64
+                .decode(data.as_bytes())
+                .context("decode AWS credential payload")?;
+            let credentials = mj_core::aws_credentials::AwsCredentials::decode(&bytes)?;
+            Ok(credential_state_payload(
+                &credentials.install(&endpoint.home, &endpoint.home)?,
+            ))
+        }
         RelayRequest::CredentialState => {
             let (snapshot, _) = read_credential_file(endpoint.harness, &endpoint.marker)?;
             Ok(credential_state_payload(&snapshot))

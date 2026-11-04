@@ -8,6 +8,10 @@ pub(super) async fn handle_action(
 ) -> Result<DaemonReply> {
     let _work = upgrade_request_activity(&action)?;
     match action {
+        DaemonAction::RecordOperatorActivity => {
+            state.record_operator_activity().await;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::PrepareUpgrade => {
             if crate::upgrade::gate().try_close() {
                 cancellation.cancel();
@@ -15,6 +19,10 @@ pub(super) async fn handle_action(
             } else {
                 Ok(DaemonReply::UpgradePending)
             }
+        }
+        DaemonAction::SetOperatorAway { away } => {
+            state.set_operator_away(away).await?;
+            Ok(DaemonReply::Done)
         }
         DaemonAction::Ping => Ok(DaemonReply::Pong),
         // Each blocker carries its count and age, so the waiting client can say
@@ -136,8 +144,18 @@ pub(super) async fn handle_action(
             state.close_workspace(workspace_id).await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::Attach { client_id, pid } => {
-            state.attachments().insert(client_id, Attachment { pid });
+        DaemonAction::NodeConnect { .. } => {
+            bail!(
+                "a node connection is taken over by the connection loop, not handled as a request"
+            )
+        }
+        DaemonAction::Attach { client_id } => {
+            state.attachments().insert(
+                client_id,
+                Attachment {
+                    renewed: std::time::Instant::now(),
+                },
+            );
             state.ever_attached.store(true, Ordering::Release);
             Ok(DaemonReply::Done)
         }
@@ -276,30 +294,15 @@ pub(super) async fn handle_action(
             refresh_runtime_controller(state).await;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::SetSessionAcpTitle { session_id, title } => {
-            blocking(move || crate::database::set_session_acp_title(&session_id, title.as_deref()))
-                .await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::MarkSessionTargetMissing {
-            session_id,
-            detail,
-            updated_at,
+            session_id: _,
+            detail: _,
+            updated_at: _,
         } => {
-            let marked_session_id = session_id.clone();
-            let changed = blocking(move || {
-                crate::database::mark_session_target_missing(&session_id, &detail, &updated_at)
-            })
-            .await?;
-            refresh_runtime_controller(state).await;
-            // The same discard the daemon's own view watcher does, so a
-            // surface that reports the missing target over RPC ends up with
-            // the same store.
-            if changed == Some(SessionState::Lost) {
-                state.discard_lost_session(marked_session_id).await;
-            }
-            Ok(DaemonReply::OptionalSessionState(changed))
+            // Older clients still send this action. Only the daemon's worker
+            // view owns a definitive missing-target observation and its
+            // revision; a client-supplied detail may already be stale.
+            Ok(DaemonReply::OptionalSessionState(None))
         }
         DaemonAction::CheckpointSession { session_id } => Ok(DaemonReply::Checkpoint(
             state.checkpoint_session_now(&session_id).await?,
@@ -331,6 +334,10 @@ pub(super) async fn handle_action(
                     project,
                 },
             ))
+        }
+        DaemonAction::RemoveProject { bundle_id } => {
+            state.remove_project(bundle_id).await?;
+            Ok(DaemonReply::Done)
         }
         DaemonAction::WikiSearch { query, limit } => Ok(DaemonReply::WikiRows(
             state.wiki_search(query, limit).await?,
@@ -418,8 +425,122 @@ pub(super) async fn handle_action(
             let snapshot = blocking(move || workspace_snapshot(&workspace_id)).await?;
             Ok(DaemonReply::Snapshot(snapshot))
         }
-        DaemonAction::RuntimeChanges { cursor, wait } => Ok(DaemonReply::RuntimeChanges(Box::new(
-            state.runtime_changes(cursor, wait).await?,
+        DaemonAction::DashboardStartup {
+            client_id,
+            workspace_id,
+        } => {
+            let stored = blocking(move || dashboard_reads::dashboard_stored(&workspace_id)).await?;
+            let frame = state
+                .runtime_changes_for_subagent_parents(None, false, stored.subagent_parents)
+                .await?;
+            let mj_client::runtime_feed::RuntimeFrame::Snapshot {
+                cursor,
+                mut projection,
+            } = frame
+            else {
+                bail!("dashboard bootstrap did not produce a runtime snapshot");
+            };
+            let records = std::mem::take(&mut projection.records);
+            projection.records =
+                blocking(move || dashboard_reads::client_read_frontiers(records, &client_id))
+                    .await?;
+            let queued_prompts = stored
+                .queued_prompts
+                .into_iter()
+                .filter(|(id, _)| projection.records.contains_key(id))
+                .collect();
+            Ok(DaemonReply::DashboardStartup(Box::new(DashboardStartup {
+                runtime: mj_client::runtime_feed::RuntimeBootstrap {
+                    cursor,
+                    projection: *projection,
+                },
+                metadata: stored.metadata,
+                pane_sizes: stored.layouts.pane_sizes,
+                conversation_layouts: stored.layouts.conversation_layouts,
+                queued_prompts,
+            })))
+        }
+        DaemonAction::WorkspaceLayouts { workspace_ids } => Ok(DaemonReply::WorkspaceLayouts(
+            blocking(move || dashboard_reads::workspace_layouts(workspace_ids)).await?,
+        )),
+        DaemonAction::StoredSessionMetadata => Ok(DaemonReply::StoredSessionMetadata(
+            blocking(dashboard_reads::stored_session_metadata).await?,
+        )),
+        DaemonAction::StoredProjectionTail { session_id, items } => {
+            let tail = blocking(move || {
+                crate::database::load_materialized_projection_tail(&session_id, items)
+            })
+            .await?;
+            Ok(DaemonReply::StoredProjectionTail(
+                tail.map(|(session, _)| Box::new(session)),
+            ))
+        }
+        DaemonAction::StoredSessionSummary { session_id } => {
+            let summary =
+                blocking(move || crate::database::load_materialized_session_summary(&session_id))
+                    .await?;
+            Ok(DaemonReply::StoredSessionSummary(summary.map(Box::new)))
+        }
+        DaemonAction::ResumeRepositoryPreflight {
+            session_id,
+            target_id,
+        } => {
+            let controller = blocking(Controller::load).await?;
+            let executor = repository_preflight_executor();
+            let preflight = controller
+                .preflight_resume_repository_sources(&session_id, &target_id, &executor)
+                .await?;
+            Ok(DaemonReply::ResumeRepositoryPreflight(Box::new(preflight)))
+        }
+        DaemonAction::ReplaceResumeRepositoryOrigin {
+            session_id,
+            repository_id,
+            replacement,
+        } => {
+            ensure!(
+                !crate::controller::move_session::move_owns_session(&session_id),
+                "session is moving; repair its repository after Move finishes"
+            );
+            let mut controller = blocking(Controller::load).await?;
+            let executor = repository_preflight_executor();
+            let preflight = controller
+                .replace_resume_repository_origin(
+                    &session_id,
+                    &repository_id,
+                    &replacement,
+                    &executor,
+                )
+                .await?;
+            refresh_runtime_controller(state).await;
+            Ok(DaemonReply::ResumeRepositoryPreflight(Box::new(preflight)))
+        }
+        DaemonAction::ArchiveSpacePreview { older_than_days } => {
+            Ok(DaemonReply::ArchiveSpacePreview(
+                blocking(move || crate::sessionwiki::archive_space_preview(older_than_days))
+                    .await?,
+            ))
+        }
+        DaemonAction::SaveSetup { original, updated } => {
+            let saved = blocking(move || {
+                let sessions = crate::database::load_state()?;
+                mj_client::settings::save::save_at(
+                    &mj_core::config::config_path(),
+                    &original,
+                    &updated,
+                    &sessions,
+                )
+            })
+            .await?;
+            Ok(DaemonReply::SavedSetup(Box::new(saved)))
+        }
+        DaemonAction::RuntimeChanges {
+            cursor,
+            wait,
+            subagent_parents,
+        } => Ok(DaemonReply::RuntimeChanges(Box::new(
+            state
+                .runtime_changes_for_subagent_parents(cursor, wait, subagent_parents)
+                .await?,
         ))),
         DaemonAction::SessionTail { session_id, cursor } => Ok(DaemonReply::SessionTail(Box::new(
             state.session_tail(&session_id, &cursor),
@@ -532,28 +653,88 @@ pub(super) async fn handle_action(
         }
         DaemonAction::QueueStartupPrompt {
             session_id,
+            command_id,
             text,
+            prompt,
+            encoded_draft,
+            move_operation_id,
             inherited_draft,
         } => {
             ensure!(
-                !text.trim().is_empty(),
-                "a queued startup prompt needs text to send"
+                !command_id.is_empty(),
+                "a queued startup prompt needs a command ID"
             );
-            state
-                .queue_startup_step(
+            ensure!(
+                !prompt.is_empty(),
+                "a queued startup prompt needs content to send"
+            );
+            // Validate references before persistence: raw image bytes never belong
+            // in a durable command, including while the destination is unknown.
+            mj_core::attachment::references(&prompt)?;
+            mj_core::draft::validate_reference_draft(&encoded_draft)?;
+            if let Some(draft) = &inherited_draft {
+                mj_core::draft::validate_reference_draft(draft)?;
+            }
+            for block in &prompt {
+                match block {
+                    ContentBlock::Text(_) => {}
+                    ContentBlock::Image(image) => {
+                        ensure!(
+                            mj_core::attachment::image_reference(image)?.is_some(),
+                            "queued images must be installed attachments"
+                        );
+                    }
+                    _ => bail!("startup prompts support text and installed images"),
+                }
+            }
+            match state
+                .queue_startup_steps_with_ids(
                     &session_id,
-                    StartupStep::Prompt {
-                        text,
-                        inherited_draft,
-                    },
+                    vec![(
+                        command_id,
+                        StartupStep::Prompt {
+                            text,
+                            prompt: Some(prompt),
+                            encoded_draft: Some(encoded_draft),
+                            move_operation_id,
+                            inherited_draft,
+                        },
+                    )],
+                    None,
                     cancellation,
                 )
-                .await?;
-            Ok(DaemonReply::Done)
+                .await
+            {
+                Ok(()) => Ok(DaemonReply::Done),
+                Err(error) if error.is::<mj_client::daemon::StartupPromptIdentityConflict>() => {
+                    Ok(DaemonReply::StartupPromptIdentityConflict)
+                }
+                Err(error) => Err(error),
+            }
         }
-        DaemonAction::WithdrawStartupPrompt { session_id, text } => Ok(
-            DaemonReply::PromptWithdrawn(state.withdraw_startup_prompt(&session_id, &text).await?),
-        ),
+        DaemonAction::WithdrawStartupPrompt {
+            session_id,
+            command_id,
+        } => Ok(DaemonReply::PromptWithdrawn(
+            state
+                .withdraw_startup_prompt(&session_id, &command_id)
+                .await?,
+        )),
+        DaemonAction::StartupPromptOutcomes {
+            session_id,
+            command_ids,
+        } => {
+            ensure!(
+                command_ids.len() <= 128,
+                "request at most 128 startup prompt outcomes"
+            );
+            Ok(DaemonReply::StartupPromptOutcomes(
+                blocking(move || {
+                    crate::database::startup_prompt_outcomes(&session_id, &command_ids)
+                })
+                .await?,
+            ))
+        }
         DaemonAction::StartTurnReview { session_id } => {
             state
                 .review_host()
@@ -589,10 +770,19 @@ pub(super) async fn handle_action(
             elicitation_id,
             response,
         } => {
-            let (session_id, elicitation_id) = state
+            let target = state
                 .review_host()
                 .question_target(&session_id, &elicitation_id)
-                .unwrap_or((session_id, elicitation_id));
+                .await;
+            let (session_id, elicitation_id) = match target {
+                Some(target) => target,
+                None if mj_client::review::parse_reviewer_question_id(&elicitation_id)
+                    .is_some() =>
+                {
+                    anyhow::bail!("that reviewer question is no longer active")
+                }
+                None => (session_id, elicitation_id),
+            };
             state
                 .session_manager
                 .session(session_id)
@@ -629,6 +819,12 @@ pub(super) async fn handle_action(
         } => {
             state
                 .suspend_session_with_ack(session_id, acknowledge_unpublished_work)
+                .await?;
+            Ok(DaemonReply::Done)
+        }
+        DaemonAction::IgnoreNestedRepositoriesAndSuspend { session_id } => {
+            state
+                .ignore_nested_repositories_and_suspend(session_id)
                 .await?;
             Ok(DaemonReply::Done)
         }
@@ -731,6 +927,8 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::Stop => {
+            // Stopping, not handing off: the node goes with this daemon.
+            crate::node_registry::registry().dismiss_node_on_exit();
             // A destroy in flight was acknowledged as accepted and nothing
             // about it is durable, so the stop waits for it, up to a bound
             // (#1191). The reply does not wait.
@@ -753,9 +951,19 @@ pub(super) async fn handle_action(
 pub(super) fn upgrade_request_activity(
     action: &DaemonAction,
 ) -> Result<Option<crate::upgrade::Work>> {
+    if matches!(action, DaemonAction::RemoveProject { .. }) {
+        return crate::upgrade::activity("project removal").map(Some);
+    }
+    if matches!(action, DaemonAction::SetOperatorAway { .. }) {
+        return crate::upgrade::activity("operator away setting").map(Some);
+    }
     if matches!(
         action,
-        DaemonAction::Ping
+        DaemonAction::RecordOperatorActivity
+            // A draining daemon still needs its node to finish the bounded
+            // work the handoff waits for.
+            | DaemonAction::NodeConnect { .. }
+            | DaemonAction::Ping
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade
@@ -773,6 +981,13 @@ pub(super) fn upgrade_request_activity(
     }
 }
 
+/// Repository preflights fetch over the network. The 30 seconds the terminal
+/// always allowed them also bound how long a handoff waits for one.
+fn repository_preflight_executor() -> CancellableProcessExecutor {
+    CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
+        .with_deadline(Duration::from_secs(30))
+}
+
 /// Destroy requests carry a flag, not a controller enum, so the wire protocol
 /// stays independent of the controller's types.
 fn branch_disposition(delete_branch: bool) -> BranchDisposition {
@@ -780,5 +995,60 @@ fn branch_disposition(delete_branch: bool) -> BranchDisposition {
         BranchDisposition::Delete
     } else {
         BranchDisposition::Keep
+    }
+}
+
+#[cfg(all(test, unix))]
+mod missing_target_compat_tests {
+    use super::*;
+
+    // Hard-won: #1444: an old client could mark a newly resumed session missing from a stale poll.
+    #[tokio::test]
+    async fn stale_client_missing_target_report_cannot_invalidate_a_resumed_session() {
+        const CHILD: &str = "MJ_TEST_STALE_MISSING_TARGET_ACTION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(
+                    module_path!(),
+                    "stale_client_missing_target_report_cannot_invalidate_a_resumed_session",
+                ),
+            )
+            .env(CHILD, "1")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("Resumed session").unwrap();
+        let mut session = super::super::tests::runtime_test_session(
+            "resumed",
+            &workspace.id,
+            SessionState::Running,
+        );
+        session.updated_at = "2026-11-02T18:00:00Z".into();
+        crate::database::save_session(&session).unwrap();
+
+        let state = super::super::tests::test_runtime_state();
+        let metadata = super::super::tests::test_metadata("127.0.0.1:1".parse().unwrap());
+        let reply = handle_action(
+            DaemonAction::MarkSessionTargetMissing {
+                session_id: session.id.clone(),
+                detail: "old working directory was missing".into(),
+                updated_at: "2026-11-02T17:00:00Z".into(),
+            },
+            &metadata,
+            &state,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(reply, DaemonReply::OptionalSessionState(None)));
+        let stored = crate::database::load_session_record(&session.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, SessionState::Running);
+        assert_eq!(stored.updated_at, session.updated_at);
+        assert_eq!(stored.last_error, None);
     }
 }

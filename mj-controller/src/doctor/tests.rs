@@ -180,11 +180,63 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     let subagent_checks = subagent_policy_checks(Ok(&config));
     let mut checks = vec![aws_check, docker_check, podman_check, missing_ssh_check];
     checks.extend(subagent_checks);
+
+    // External Git distributions vary their version suffixes. Exercise the
+    // complete report, including failures, rather than just the parser.
+    for response in [
+        Ok(output("git version 2.25.1\n")),
+        Ok(output("git version 2.30.9\n")),
+        Ok(output("git version 2.31.0\n")),
+        Ok(output("git version 2.39.5 (Apple Git-154)\n")),
+        Ok(output("git version 2.47.1.windows.1\n")),
+        Ok(output("unexpected version output\n")),
+        Ok(failed("Git installation is broken")),
+        Err(anyhow!("git executable is unavailable")),
+    ] {
+        let executor = FakeExecutor::new([response]);
+        checks.extend(git_checks(Err(ConfigGap::Missing), &executor));
+        let commands = executor.commands.borrow();
+        assert_eq!(commands[0].program, "git");
+        assert_eq!(commands[0].args, ["--version"]);
+    }
+    let mut git_ssh = ssh_connection();
+    git_ssh.extra_args = vec!["-o".into(), "StrictHostKeyChecking=accept-new".into()];
+    let remote_git = config_with([(
+        "builder",
+        TargetTemplate::SshBare {
+            ssh: git_ssh,
+            permissions: mj_core::config::PermissionMode::Yolo,
+            workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
+        },
+    )]);
+    let executor = FakeExecutor::new([
+        Ok(output("git version 2.43.0\n")),
+        Ok(output("git version 2.25.1\n")),
+    ]);
+    let git_checks = git_checks(Ok(&remote_git), &executor);
+    assert!(!all_ready(&git_checks));
+    assert_eq!(git_checks[1].id, "git.ssh-bare.builder");
+    let json = serde_json::to_value(&git_checks).unwrap();
+    assert_eq!(json[1]["status"], "fixable");
+    assert!(json[1]["remediation"].as_str().unwrap().contains("2.31"));
+    let commands = executor.commands.borrow();
+    assert_eq!(commands[1].program, "ssh");
+    assert_eq!(&commands[1].args[..2], ["-o", "StrictHostKeyChecking=yes"]);
+    assert!(
+        commands[1]
+            .args
+            .last()
+            .unwrap()
+            .ends_with("'git' '--version'")
+    );
+    drop(commands);
+    checks.extend(git_checks);
 
     let home = tempfile::tempdir().unwrap();
     let claude = HarnessProfile {
@@ -202,6 +254,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     assert!(crate::setup::harness_is_authenticated_with_executor(
         &claude,
@@ -248,9 +301,10 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     assert_eq!(arguments, ["auth", "login"]);
     assert_eq!(profile_quota_source(&native), "Claude subscription quota");
 
-    // A machine no runtime runs on is asked what it could run: one runs a
-    // worker and Docker, one does not answer, one can run nothing Mjolnir
-    // supports, and an EC2 template needs no host to answer.
+    // A machine no runtime runs on is asked what it could run, each SSH
+    // host in one call: one runs a worker and Docker, one does not answer,
+    // one can run nothing Mjolnir supports, and an EC2 template is checked
+    // against AWS as a launch checks it.
     let mut machines = Config::default();
     for (id, host) in [
         ("builder", "builder.example.test"),
@@ -292,30 +346,43 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     )]);
     let probes = FakeExecutor::new([
         // builder
-        Ok(output(b"")),
-        Ok(output(b"Linux x86_64\n")),
-        Ok(output(&podman_missing)),
-        Ok(output(b"27.5.1 linux\n")),
+        Ok(output(crate::setup::machine_probe_fixture(&[
+            ("platform", 0, b"Linux x86_64\n", ""),
+            ("podman", 0, &podman_missing, ""),
+            ("docker", 0, b"27.5.1 linux\n", ""),
+        ]))),
         // laptop
-        Ok(failed(b"Host key verification failed.")),
-        // pi
-        Ok(output(b"")),
-        Ok(output(b"Linux riscv64\n")),
-        Ok(output(&podman_missing)),
         Ok(CommandOutput {
-            status: 127,
+            status: 255,
             stdout: vec![],
-            stderr: b"bash: line 1: docker: command not found".to_vec(),
+            stderr: b"Host key verification failed.".to_vec(),
         }),
+        // pi
+        Ok(output(crate::setup::machine_probe_fixture(&[
+            ("platform", 0, b"Linux riscv64\n", ""),
+            ("podman", 0, &podman_missing, ""),
+            (
+                "docker",
+                127,
+                b"",
+                "bash: line 1: docker: command not found",
+            ),
+        ]))),
+        // spot: AWS credentials, then the launch template
+        Ok(output(br#"{"Account":"123456789012"}"#)),
+        Ok(output(b"{}")),
     ]);
     checks.extend(machine_runtime_checks(Ok(&machines), &probes));
     assert!(probes.responses.borrow().is_empty());
-    assert!(
+    assert_eq!(
         probes
             .commands
             .borrow()
             .iter()
-            .all(|command| command.program == "ssh")
+            .map(|command| command.program.as_str())
+            .collect::<Vec<_>>(),
+        ["ssh", "ssh", "ssh", "aws", "aws"],
+        "one SSH call per host"
     );
 
     for check in &mut checks {
@@ -405,6 +472,7 @@ fn a_config_without_a_bundle_is_ready_for_sessions() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     Config {
         profiles: [("work".to_owned(), profile)].into_iter().collect(),
@@ -1748,6 +1816,7 @@ fn doctor_reports_an_inline_token_provider_as_usage_priced() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     assert_eq!(
         profile_quota_source(&profile),
@@ -1777,6 +1846,7 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     let referenced = with_secret_resolver(
@@ -1805,6 +1875,7 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     let mut target = container("ghcr.io/example/agent:latest");

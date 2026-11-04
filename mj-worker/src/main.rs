@@ -175,6 +175,17 @@ enum WorkerCommand {
         #[arg(long)]
         list: bool,
     },
+    /// Save fetched bytes in this target's temporary directory.
+    StoreFetch {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        directory: bool,
+        #[arg(long)]
+        length: usize,
+    },
     /// Atomically publish stdin as a file in the session workspace.
     WriteFile {
         #[arg(long)]
@@ -592,6 +603,32 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
                     .encode()?,
             )
         }
+        WorkerCommand::StoreFetch {
+            session,
+            source,
+            directory,
+            length,
+        } => {
+            let bytes = mj_checkpoint::archive::read_session_file_input(std::io::stdin().lock())
+                .map_err(export_error)?;
+            anyhow::ensure!(
+                bytes.len() == length,
+                "incomplete fetch transfer: expected {length} bytes, received {}",
+                bytes.len()
+            );
+            let fetched = mj_checkpoint::archive::FetchedPath {
+                kind: if directory {
+                    mj_checkpoint::archive::FetchedKind::Directory
+                } else {
+                    mj_checkpoint::archive::FetchedKind::File
+                },
+                path: source,
+                bytes,
+            };
+            write_stdout(&serde_json::to_vec(
+                &fetched.save(&std::env::temp_dir(), &session)?,
+            )?)
+        }
         WorkerCommand::WriteFile {
             root,
             path,
@@ -799,6 +836,79 @@ mod tests {
         // ordinary error so the daemon reports it as a failure.
         let failed = push_error(PushBranchError::Failed(anyhow::anyhow!("git exploded")));
         assert!(failed.downcast_ref::<ExportRefused>().is_none());
+    }
+
+    #[test]
+    fn fetch_storage_streams_the_maximum_file_and_refuses_truncated_input() {
+        use mj_core::targets::{CancellableProcessExecutor, CommandExecutor, CommandSpec};
+        const CHILD_ROOT: &str = "MJ_TEST_FETCH_STORAGE_ROOT";
+        const SOURCE: &str = "/workspace/λ binary.dat";
+        const SESSION: &str = "source-session";
+        const LENGTH: usize = mj_checkpoint::archive::MAX_SESSION_FILE_BYTES as usize;
+        if std::env::var_os(CHILD_ROOT).is_some() {
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(run_command(
+                    Command::Worker(WorkerArgs {
+                        command: WorkerCommand::StoreFetch {
+                            session: SESSION.into(),
+                            source: SOURCE.into(),
+                            directory: false,
+                            length: LENGTH,
+                        },
+                    }),
+                    None,
+                ))
+                .unwrap();
+            write_stdout(b"\n").unwrap();
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let bytes: Vec<u8> = (0..LENGTH).map(|i| (i % 251) as u8).collect();
+        let name = "tests::fetch_storage_streams_the_maximum_file_and_refuses_truncated_input";
+        let mut command = CommandSpec::new(
+            std::env::current_exe().unwrap().to_string_lossy(),
+            ["--exact", name, "--nocapture", "--quiet"],
+        )
+        .with_sensitive_stdin(bytes.clone());
+        for key in [CHILD_ROOT, "TMPDIR", "TEMP", "TMP", "MJ_DATA_DIR"] {
+            command
+                .env
+                .insert(key.into(), root.path().to_string_lossy().into());
+        }
+        let execute = |command: &CommandSpec| {
+            CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(30))
+                .execute(command)
+                .unwrap()
+        };
+        let output = execute(&command);
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let saved: mj_checkpoint::archive::SavedFetch = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| serde_json::from_str(line).ok())
+            .expect("worker returns saved-file metadata");
+        assert!(
+            saved
+                .path
+                .starts_with(root.path().join("mjolnir").join(SESSION))
+        );
+        assert_eq!(saved.source, SOURCE);
+        assert_eq!(saved.bytes, LENGTH);
+        assert_eq!(std::fs::read(&saved.path).unwrap(), bytes);
+        let truncated = command.with_sensitive_stdin(vec![0; 128 * 1024]);
+        let output = execute(&truncated);
+        assert_ne!(output.status, 0);
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("incomplete fetch transfer")
+                || String::from_utf8_lossy(&output.stderr).contains("incomplete fetch transfer")
+        );
+        assert_eq!(std::fs::read(&saved.path).unwrap(), bytes);
     }
 
     #[test]

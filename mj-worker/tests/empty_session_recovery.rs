@@ -1,7 +1,7 @@
 //! Exercise native recovery through a real, disposable worker process.
 #![cfg(unix)]
 
-use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate, TextContent};
+use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate, TextContent};
 use mj_core::relay::{
     RELAY_EVENT_GENESIS_DIGEST, RELAY_PROTOCOL_VERSION, RelayCommand, RelayCommandOutcome,
     RelayObservation, RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponsePayload,
@@ -10,6 +10,10 @@ use mj_core::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
 use mj_worker::relay::DurableRelay;
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
+
+#[path = "../src/test_support/timeouts.rs"]
+mod timeouts;
+use timeouts::IO_TIMEOUT;
 
 const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 
@@ -53,14 +57,30 @@ enum RelayOrigin {
     RestoredSeed,
 }
 
-fn recover_missing_native_session(harness: &str, missing_error: &str, used: bool) {
+/// Codex's answer for a thread it never wrote: codex-acp wraps the reason in
+/// an internal error.
+fn codex_missing_thread(details: &str) -> serde_json::Value {
+    serde_json::json!({"code": -32603, "message": "Internal error", "data": {"details": details}})
+}
+
+/// claude-agent-acp 0.99's answer for a session with no transcript on disk.
+fn claude_missing_session() -> serde_json::Value {
+    serde_json::json!({
+        "code": -32002,
+        "message": "Resource not found",
+        "data": {"sessionId": "missing-thread"}
+    })
+}
+
+fn recover_missing_native_session(harness: &str, missing_error: serde_json::Value, used: bool) {
     recover_missing_native_session_from(RelayOrigin::Journal, harness, missing_error, used);
 }
 
+/// `missing_error` is the JSON-RPC error the bridge answers every reload with.
 fn recover_missing_native_session_from(
     origin: RelayOrigin,
     harness: &str,
-    missing_error: &str,
+    missing_error: serde_json::Value,
     used: bool,
 ) {
     let temp = tempfile::tempdir().unwrap();
@@ -72,7 +92,7 @@ fn recover_missing_native_session_from(
         format!(
             r#"import json, sys
 log = {log}
-error = {error}
+error = json.loads({error})
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
@@ -83,7 +103,7 @@ for line in sys.stdin:
         result = {{"protocolVersion": 1, "agentCapabilities": {{"loadSession": True}}}}
     elif method in ("session/load", "session/resume"):
         print(json.dumps({{"jsonrpc": "2.0", "id": ident,
-                          "error": {{"code": -32603, "message": error}}}}), flush=True)
+                          "error": error}}), flush=True)
         continue
     elif method == "session/new":
         result = {{"sessionId": "replacement", "modes": {{"currentModeId": "agent",
@@ -104,7 +124,7 @@ for line in sys.stdin:
         print(json.dumps({{"jsonrpc": "2.0", "id": ident, "result": result}}), flush=True)
 "#,
             log = serde_json::to_string(&log).unwrap(),
-            error = serde_json::to_string(missing_error).unwrap(),
+            error = serde_json::to_string(&missing_error.to_string()).unwrap(),
         ),
     )
     .unwrap();
@@ -216,12 +236,13 @@ for line in sys.stdin:
     command
         .env
         .insert("MJ_INSTANCE".into(), "wrong-launcher-instance".into());
-    let worker = std::thread::spawn(move || {
-        BoundedProcessExecutor::new(Duration::from_secs(20)).execute(&command)
-    });
+    // Leave time for both the observation and the subsequent stop.
+    let worker =
+        std::thread::spawn(move || BoundedProcessExecutor::new(IO_TIMEOUT * 2).execute(&command));
 
+    // Hard-won: fdd49cc1e: Startup under load exhausted the fixture budget before the bridge received work.
     let observation = (|| -> anyhow::Result<String> {
-        let deadline = Instant::now() + Duration::from_secs(12);
+        let deadline = Instant::now() + IO_TIMEOUT;
         loop {
             let methods = std::fs::read_to_string(&log).unwrap_or_default();
             if used && methods.contains("session/load") && worker.is_finished() {
@@ -231,6 +252,10 @@ for line in sys.stdin:
                 return Ok(methods);
             }
             anyhow::ensure!(
+                !worker.is_finished(),
+                "worker exited before recovering queued work: {methods}"
+            );
+            anyhow::ensure!(
                 Instant::now() < deadline,
                 "bridge never received queued work: {methods}"
             );
@@ -238,8 +263,8 @@ for line in sys.stdin:
         }
     })();
     let stop = mj_controller::targets::stop_worker_daemon_script(root.to_str().unwrap());
-    let stopped = BoundedProcessExecutor::new(Duration::from_secs(8))
-        .execute(&CommandSpec::new("sh", ["-c", &stop]));
+    let stopped =
+        BoundedProcessExecutor::new(IO_TIMEOUT).execute(&CommandSpec::new("sh", ["-c", &stop]));
     let owner = worker.join().expect("worker owner panicked");
     let worker_log = std::fs::read_to_string(root.join("worker.log"))
         .expect("read the owning worker's diagnostics");
@@ -338,32 +363,24 @@ for line in sys.stdin:
 fn codex_missing_unused_thread_recovers_after_worker_restart() {
     recover_missing_native_session(
         "codex",
-        r#"Internal error: {"details": "no rollout found for thread id missing-thread"}"#,
+        codex_missing_thread("no rollout found for thread id missing-thread"),
         false,
     );
 }
 
 #[test]
 fn claude_missing_unused_session_recovers_after_worker_restart() {
-    recover_missing_native_session(
-        "claude",
-        "Resource not found: missing-thread: {\n  \"uri\": \"missing-thread\"\n}",
-        false,
-    );
+    recover_missing_native_session("claude", claude_missing_session(), false);
 }
 
 #[test]
 fn used_native_history_is_not_replaced_after_worker_restart() {
     recover_missing_native_session(
         "codex",
-        r#"Internal error: {"details": "no rollout found for thread id missing-thread"}"#,
+        codex_missing_thread("no rollout found for thread id missing-thread"),
         true,
     );
-    recover_missing_native_session(
-        "claude",
-        "Resource not found: missing-thread: {\n  \"uri\": \"missing-thread\"\n}",
-        true,
-    );
+    recover_missing_native_session("claude", claude_missing_session(), true);
 }
 
 /// I2-7: resume after suspending a session that was never prompted. The
@@ -376,20 +393,20 @@ fn a_never_prompted_session_resumes_fresh_from_its_checkpoint() {
     recover_missing_native_session_from(
         RelayOrigin::RestoredSeed,
         "codex",
-        r#"Internal error: {"details": "thread not found: missing-thread"}"#,
+        codex_missing_thread("thread not found: missing-thread"),
         false,
     );
     recover_missing_native_session_from(
         RelayOrigin::RestoredSeed,
         "claude",
-        "Resource not found: missing-thread: {\n  \"uri\": \"missing-thread\"\n}",
+        claude_missing_session(),
         false,
     );
     // A checkpoint that cannot vouch for the session keeps it protected.
     recover_missing_native_session_from(
         RelayOrigin::RestoredSeed,
         "codex",
-        r#"Internal error: {"details": "thread not found: missing-thread"}"#,
+        codex_missing_thread("thread not found: missing-thread"),
         true,
     );
 }

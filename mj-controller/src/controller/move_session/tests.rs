@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent};
+use agent_client_protocol::v1::schema::{ContentBlock, ImageContent, TextContent};
 use anyhow::Result;
 
 #[cfg(unix)]
@@ -45,6 +45,7 @@ const PREPARATION_SNAPSHOT_CHILD: &str = "MJ_MOVE_PREPARATION_SNAPSHOT_CHILD";
 const RECOVERY_TERMINAL_CHILD: &str = "MJ_MOVE_RECOVERY_TERMINAL_CHILD";
 const MOVE_QUEUE_RELAY_ROOT: &str = "MJ_MOVE_QUEUE_RELAY_ROOT";
 const MOVE_QUEUE_RELAY_MARKER: &str = "MJ_MOVE_QUEUE_RELAY_MARKER";
+const MOVE_QUEUE_GOAL: &str = "MJ_MOVE_QUEUE_GOAL";
 const MOVE_QUEUE_SESSION_ID: &str = "0123456789abcdef0123456789abcdef";
 
 fn add_codex_profile(config: &mut Config, home: &Path) {
@@ -59,6 +60,7 @@ fn add_codex_profile(config: &mut Config, home: &Path) {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
 }
@@ -161,8 +163,20 @@ fn move_queue_relay_child() {
             continue;
         }
         let relay = relay.get_or_insert_with(|| {
-            DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "1.0.0")
-                .expect("open move queue test relay")
+            let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "1.0.0")
+                .expect("open move queue test relay");
+            if crash_after_first && std::env::var(MOVE_QUEUE_GOAL).as_deref() == Ok("1") {
+                relay.record_session_update(serde_json::from_value(serde_json::json!({
+                    "sessionUpdate": "session_info_update",
+                    "_meta": {
+                        "mjGoalCapability": {"version": 1, "controlMethod": "_session/goal", "actions": ["resume", "pause"]},
+                        "goal": {"objective": "Finish the interrupted work", "status": "limited", "createdAt": 42,
+                            "controlMethod": "_session/goal", "limitReason": "usage"},
+                        "execution": {"version": 1, "status": "idle"}
+                    }
+                })).unwrap()).unwrap();
+            }
+            relay
         });
         if let RelayRequest::Submit {
             command_id,
@@ -182,13 +196,37 @@ fn move_queue_relay_child() {
             && matches!(
                 &request.request,
                 RelayRequest::Submit {
-                    command: RelayCommand::Prompt { .. } | RelayCommand::SetConfig { .. },
+                    command: RelayCommand::Prompt { .. }
+                        | RelayCommand::SetConfig { .. }
+                        | RelayCommand::GoalControl { .. },
                     ..
                 }
             );
-        let response = relay.handle(request);
+        let response = if matches!(request.request, RelayRequest::SetOperatorAway { .. }) {
+            RelayResponseEnvelope {
+                request_id: request.request_id,
+                protocol_version: request.protocol_version,
+                body: RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::Status(relay.operational_state()),
+                },
+            }
+        } else {
+            relay.handle(request)
+        };
         write_relay_frame(&mut output, &response).expect("write relay response");
         if should_crash {
+            if std::env::var(MOVE_QUEUE_GOAL).as_deref() == Ok("1") {
+                // The accepted resume changes the live predicate before the
+                // daemon can save queue completion or reconnect after the crash.
+                relay.record_session_update(serde_json::from_value(serde_json::json!({
+                    "sessionUpdate": "session_info_update",
+                    "_meta": {
+                        "goal": {"objective": "Finish the interrupted work", "status": "active", "createdAt": 42,
+                            "controlMethod": "_session/goal"},
+                        "execution": {"version": 1, "status": "running"}
+                    }
+                })).unwrap()).unwrap();
+            }
             fs::write(&marker, b"accepted then crashed").expect("record relay crash");
             return;
         }
@@ -314,6 +352,8 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             resource_allocation: None,
         };
         let operation = MoveOperation {
+            quota_stop_reason: None,
+            quota_continuation: None,
             prepared_destination: None,
             accepted_preparation: None,
             acknowledge_interruption: false,
@@ -705,9 +745,19 @@ fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetada
 #[test]
 fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store() {
     let short = "move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store";
-    if !isolated_test_child(&test_name(short), "MJ_MOVE_QUEUE_REPLAY_CHILD") {
+    if std::env::var_os("MJ_MOVE_QUEUE_REPLAY_CHILD").is_none() {
+        for goal in ["0", "1"] {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(short))
+                .env("MJ_MOVE_QUEUE_REPLAY_CHILD", "1")
+                .env(MOVE_QUEUE_GOAL, goal)
+                .isolated_store(directory.path())
+                .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+                .run();
+        }
         return;
     }
+    let goal = std::env::var(MOVE_QUEUE_GOAL).as_deref() == Ok("1");
     let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     let worker_root = directory.path().join(MOVE_QUEUE_SESSION_ID);
@@ -756,12 +806,18 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .move_configuration_fingerprint(&selection)
         .unwrap();
     let mut operation = MoveOperation {
+        quota_stop_reason: Some("the weekly quota is exhausted".into()),
+        quota_continuation: Some(if goal {
+            mj_core::state::QuotaMoveContinuation::ResumeGoal
+        } else {
+            mj_core::state::QuotaMoveContinuation::Prompt
+        }),
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
         workspace_transfer: None,
         handoff: None,
-        in_place: false,
+        in_place: true,
         source_checkpoint_only: false,
         operation_id: "move-queue-replay".into(),
         selection,
@@ -807,6 +863,18 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .clone()
         .expect("store identity is persisted before queue replay");
     assert!(!operation.queue_admission_finished);
+    let retry_id = format!("quota-retry-{}", operation.operation_id);
+    let accepted_ordinal = {
+        let relay = DurableRelay::open(&worker_root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
+        relay.events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST).unwrap()
+            .into_iter().find(|event| matches!(&event.observation,
+                mj_core::relay::RelayObservation::CommandQueued { command_id, .. } if command_id == &retry_id))
+            .unwrap().ordinal
+    };
+    // Resume from the durable intent, as a replacement daemon does.
+    operation = crate::database::load_move_operation(MOVE_QUEUE_SESSION_ID)
+        .unwrap()
+        .unwrap();
 
     runtime
         .block_on(controller.admit_move_queue(&mut operation, &RefusingExecutor("move preflight")))
@@ -832,21 +900,75 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     );
     let reopened = DurableRelay::open(&worker_root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
     let operational = reopened.operational_state();
+    if goal {
+        assert!(operational.goal.running());
+        assert!(!operational.goal.resumable_after_quota());
+    } else {
+        assert_eq!(
+            operational
+                .active_prompt
+                .as_ref()
+                .map(|prompt| prompt.command_id.as_str()),
+            Some(retry_id.as_str())
+        );
+    }
+    if !goal {
+        assert_eq!(
+            operational
+                .queued_prompts
+                .iter()
+                .map(|queued| queued.command_id.as_str())
+                .collect::<Vec<_>>(),
+            ["queued-image", "queued-config"]
+        );
+    }
     assert_eq!(
-        operational
-            .active_prompt
-            .as_ref()
-            .map(|prompt| prompt.command_id.as_str()),
-        Some("queued-image")
+        operation.quota_continuation,
+        Some(if goal {
+            mj_core::state::QuotaMoveContinuation::ResumeGoal
+        } else {
+            mj_core::state::QuotaMoveContinuation::Prompt
+        })
     );
+
+    let accepted: Vec<_> = reopened
+        .events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.observation {
+            mj_core::relay::RelayObservation::CommandQueued { command_id, .. } => {
+                Some((command_id, event.ordinal))
+            }
+            _ => None,
+        })
+        .collect();
+    let retried: Vec<_> = accepted.iter().filter(|(id, _)| id == &retry_id).collect();
     assert_eq!(
-        operational
-            .queued_prompts
-            .iter()
-            .map(|queued| queued.command_id.as_str())
-            .collect::<Vec<_>>(),
-        ["queued-config"]
+        retried.len(),
+        1,
+        "continuation must be admitted only once: {accepted:?}"
     );
+    assert_eq!(retried[0].1, accepted_ordinal);
+    let image_ordinal = accepted
+        .iter()
+        .find(|(id, _)| id == "queued-image")
+        .unwrap()
+        .1;
+    let config_ordinal = accepted
+        .iter()
+        .find(|(id, _)| id == "queued-config")
+        .unwrap()
+        .1;
+    assert!(accepted_ordinal < image_ordinal && image_ordinal < config_ordinal);
+    let journal = fs::read_to_string(
+        worker_root
+            .join(mj_core::relay::RELAY_JOURNAL_DIR)
+            .join(mj_core::relay::RELAY_ACTIVE_SEGMENT),
+    )
+    .unwrap();
+    assert!(journal.contains("because the weekly quota is exhausted"));
+    assert!(journal.contains("Continuing the interrupted work"));
+    assert!(!journal.contains("The interrupted prompt was not replayed"));
 
     let replacement_target = TargetLocator::LocalBare {
         worker_root: replacement_root,
@@ -954,6 +1076,7 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
 }
 
 #[cfg(unix)]
+// Hard-won: 6b51b56d6: Move preparation waited for a background checkpoint's mutation permit.
 #[test]
 fn move_preparation_can_refresh_a_dead_source_without_starting_its_harness() {
     let name = test_name("move_preparation_can_refresh_a_dead_source_without_starting_its_harness");
@@ -978,10 +1101,21 @@ fn move_preparation_can_refresh_a_dead_source_without_starting_its_harness() {
                 project_memory: None,
             }])
             .unwrap();
-        let snapshot = super::refresh_move_source(&manager.control, MOVE_QUEUE_SESSION_ID)
-            .await
-            .unwrap();
+        let checkpoint_owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+            MOVE_QUEUE_SESSION_ID,
+            "background recovery checkpoint",
+        )
+        .unwrap()
+        .unwrap();
+        let snapshot = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            super::refresh_move_source(&manager.control, MOVE_QUEUE_SESSION_ID),
+        )
+        .await
+        .expect("preparation must not wait for checkpoint ownership")
+        .unwrap();
         assert!(snapshot.is_none());
+        drop(checkpoint_owner);
         manager.shutdown.shutdown().await.unwrap();
     });
 }
@@ -1221,7 +1355,7 @@ fn in_place_move_retains_running_and_parked_children_and_roleless_refusal_names_
             relation(&parked.id, "review the tests"),
         ]
         .into_iter()
-        .map(|child| (child.child_session_id.clone(), child))
+        .map(|child| (child.child_session_id.clone(), child.into()))
         .collect(),
         ..Default::default()
     };
@@ -1333,6 +1467,8 @@ fn ssh_bare_targets_share_an_environment_only_on_the_same_connection() {
 #[cfg(unix)]
 pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> MoveOperation {
     MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
@@ -2129,11 +2265,10 @@ fn a_container_session_moved_to_a_local_checkout_is_restored_into_it() {
     );
 }
 
-/// The rsync that ships with macOS answers `--version` but rejects
-/// `--protect-args`, which every Move transfer passes.
-struct RsyncWithoutProtectArgs(GitWithPodmanPreflightExecutor);
+/// A transport can answer `--version` while rejecting a required option.
+struct RsyncWithoutPartialDir(GitWithPodmanPreflightExecutor);
 
-impl CommandExecutor for RsyncWithoutProtectArgs {
+impl CommandExecutor for RsyncWithoutPartialDir {
     fn execute_with_stdin(
         &self,
         command: &CommandSpec,
@@ -2146,12 +2281,15 @@ impl CommandExecutor for RsyncWithoutProtectArgs {
         if !runs_rsync {
             return self.0.execute(command);
         }
-        let (status, stdout, stderr): (i32, &[u8], &[u8]) =
-            if command.args.iter().any(|a| a == "--protect-args") {
-                (1, b"", b"rsync: unrecognized option `--protect-args'\n")
-            } else {
-                (0, b"openrsync: protocol version 29\n", b"")
-            };
+        let (status, stdout, stderr): (i32, &[u8], &[u8]) = if command
+            .args
+            .iter()
+            .any(|a| a == "--partial-dir=.move-partial")
+        {
+            (1, b"", b"rsync: unrecognized option `--partial-dir'\n")
+        } else {
+            (0, b"rsync fixture\n", b"")
+        };
         Ok(CommandOutput {
             status,
             stdout: stdout.to_vec(),
@@ -2160,14 +2298,14 @@ impl CommandExecutor for RsyncWithoutProtectArgs {
     }
 }
 
-// Hard-won: 6fc2ed80: unsupported rsync protection flags were discovered only after copying began
+// Hard-won: 6fc2ed80: unsupported rsync transfer flags were discovered only after copying began
 #[test]
 #[cfg_attr(
     windows,
     ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
 )]
-fn a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args() {
-    let short = "a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args";
+fn a_move_is_blocked_before_copying_when_an_rsync_rejects_partial_dir() {
+    let short = "a_move_is_blocked_before_copying_when_an_rsync_rejects_partial_dir";
     if !isolated_test_child(&test_name(short), "MJ_MOVE_RSYNC_PROBE_CHILD") {
         return;
     }
@@ -2204,7 +2342,7 @@ fn a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args() {
         additional_mounts: None,
         resource_allocation: None,
     };
-    let executor = RsyncWithoutProtectArgs(GitWithPodmanPreflightExecutor { remote });
+    let executor = RsyncWithoutPartialDir(GitWithPodmanPreflightExecutor { remote });
     let preparation = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2219,9 +2357,9 @@ fn a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args() {
                 .blockers
                 .iter()
                 .any(|blocker| blocker.contains(side)
-                    && blocker.contains("--protect-args")
-                    // The destination is a container: its rsync comes from the image, not brew.
-                    && blocker.contains("brew install rsync") == (side != "Destination")),
+                    && blocker.contains("--partial-dir")
+                    // Container rsync must be supplied by the image.
+                    && blocker.contains("container image") == (side == "Destination")),
             "{side} rsync is not reported: {:?}",
             assessment.blockers
         );
@@ -2232,7 +2370,7 @@ fn a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args() {
             .validate(&assessment)
             .unwrap_err()
             .to_string()
-            .contains("--protect-args"),
+            .contains("--partial-dir"),
         "the transfer must refuse to start"
     );
 }
@@ -2377,6 +2515,9 @@ impl CommandExecutor for RecordingProcessExecutor {
 fn install_in_place_worker_script(worker_root: &Path, frontier: u64, digest: &str) {
     let script = format!(
         r#"case "${{2:-}}" in
+build-id)
+    if [ -f {root}/worker-build ]; then cat {root}/worker-build; else printf '%s\n' '{worker_build}'; fi
+    ;;
 proxy)
     unset {checkpoint_only} MJ_TEST_LATCH_RELAY_MAX_PROTOCOL
     {relay_root}={root}
@@ -2392,6 +2533,7 @@ esac
 exit 0
 "#,
         checkpoint_only = LATCH_CHECKPOINT_ONLY,
+        worker_build = mj_core::worker_build::WORKER_BUILD_ID,
         relay_root = LATCH_RELAY_ROOT,
         root = shell_literal(worker_root),
         binary = shell_literal(&std::env::current_exe().unwrap()),
@@ -2524,6 +2666,7 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
                     codex_profile: None,
+                    muse_auto_review: None,
                 },
             );
         }
@@ -2583,6 +2726,8 @@ fn in_place_operation(controller: &Controller, destination_profile: &str) -> Mov
     };
     let source = &controller.state.sessions[LATCH_RELAY_SESSION];
     MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
@@ -2696,6 +2841,7 @@ fn start_source_relay_manager(
 /// environment it found: nothing is destroyed or created, the worker root and
 /// the workspace survive, and only the previous profile home is removed.
 #[cfg(unix)]
+// Hard-won: 6b51b56d6: unchanged native Moves ran provisioning checks and downloads.
 #[test]
 fn bare_move_preparation_normalizes_an_empty_resource_reset() {
     let name = test_name("bare_move_preparation_normalizes_an_empty_resource_reset");
@@ -2712,11 +2858,10 @@ fn bare_move_preparation_normalizes_an_empty_resource_reset() {
         .build()
         .unwrap();
     let prepared = runtime
-        .block_on(
-            fixture
-                .controller
-                .prepare_move_session_controlled(selection, &ProcessExecutor),
-        )
+        .block_on(fixture.controller.prepare_move_session_controlled(
+            selection,
+            &RefusingExecutor("profile-only Move needs no provisioning commands"),
+        ))
         .unwrap();
     assert!(prepared.in_place);
     assert!(!prepared.selection.clear_resource_allocation);
@@ -2790,7 +2935,7 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         .controller
         .state
         .subagents
-        .insert(child.id.clone(), relation.clone());
+        .insert(child.id.clone(), relation.clone().into());
     let mut selection =
         in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE).selection;
     selection.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
@@ -2904,7 +3049,7 @@ fn recovery_from_in_place_closing_source_keeps_children_and_skips_stop_hook() {
         controller
             .state
             .subagents
-            .insert(relation.child_session_id.clone(), relation);
+            .insert(relation.child_session_id.clone(), relation.into());
     }
     let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
     operation.phase = MovePhase::ClosingSource;
@@ -3206,9 +3351,10 @@ fn in_place_move_with_pre_v32_worker_stops_children_and_reports_fallback() {
 }
 
 #[cfg(unix)]
+// Hard-won: 6b51b56d6: profile-only Move deleted native state and provisioned the same worker again.
 #[test]
-fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
-    let name = test_name("in_place_move_reinstalls_the_harness_without_removing_the_worker_root");
+fn in_place_profile_move_retains_native_state_and_installed_worker() {
+    let name = test_name("in_place_profile_move_retains_native_state_and_installed_worker");
     if std::env::var_os(IN_PLACE_MOVE_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         IsolatedTest::new(name)
@@ -3232,6 +3378,22 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
         mut controller,
         ..
     } = fixture;
+    use std::os::unix::fs::MetadataExt;
+    let installed_worker_inode = fs::symlink_metadata(worker_root.join("hel")).unwrap().ino();
+    let profile = worker_root.join("profile");
+    fs::write(profile.join(".credentials.json"), b"source credentials").unwrap();
+    fs::create_dir_all(profile.join("skills/synced/account")).unwrap();
+    fs::write(
+        profile.join("skills/synced/account/SKILL.md"),
+        b"harness owned",
+    )
+    .unwrap();
+    fs::create_dir_all(profile.join("skills/old-profile")).unwrap();
+    fs::write(profile.join("skills/old-profile/SKILL.md"), b"source skill").unwrap();
+    fs::create_dir_all(profile.join("projects/retained")).unwrap();
+    let native_history = profile.join("projects/retained/native.jsonl");
+    fs::write(&native_history, b"native history stays on its target\n").unwrap();
+    let native_history_inode = fs::metadata(&native_history).unwrap().ino();
     let mut owned = managed_raw_session(mj_core::state::ManagedWorktreeTarget::Local)
         .managed_worktree
         .unwrap();
@@ -3283,6 +3445,9 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
         .target
         .clone();
     let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+    operation.quota_stop_reason = Some("the weekly quota is exhausted".into());
+    operation.quota_continuation = Some(mj_core::state::QuotaMoveContinuation::Prompt);
+    operation.queue = ResumeQueueDisposition::Start;
     // This fixture's fake worker restores native state but does not export Git.
     // Model the verified, sealed source boundary before replacing the harness.
     controller
@@ -3308,7 +3473,11 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
                 && !lowered.contains("podman")
                 && !lowered.contains("docker")
                 && !lowered.contains("create the session worker root")
-                && !lowered.contains("clean"),
+                && !lowered.contains("clean")
+                && !lowered.contains("restore target checkpoint")
+                && !lowered.contains("install shared")
+                && !lowered.contains("prepare exact managed harness")
+                && !lowered.contains("inherit git setting"),
             "an in-place move must not rebuild anything, but it ran {purpose:?} \
              (all: {purposes:?})"
         );
@@ -3341,11 +3510,30 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
         fs::read(checkout.join("untracked.txt")).unwrap(),
         b"agent work"
     );
-    // Every local session owns a staged profile home, macOS included, so the
-    // move replaces it.
+    assert_eq!(
+        fs::read(profile.join("source-only.txt")).unwrap(),
+        b"old harness state"
+    );
+    assert_eq!(
+        fs::metadata(&native_history).unwrap().ino(),
+        native_history_inode
+    );
+    assert_eq!(
+        fs::read(&native_history).unwrap(),
+        b"native history stays on its target\n"
+    );
+    assert_eq!(
+        fs::symlink_metadata(worker_root.join("hel")).unwrap().ino(),
+        installed_worker_inode
+    );
     assert!(
-        !worker_root.join("profile").join("source-only.txt").exists(),
-        "the previous profile home must be gone"
+        !profile.join(".credentials.json").exists(),
+        "the destination has no credential file; do not keep the source's"
+    );
+    assert!(!profile.join("skills/old-profile").exists());
+    assert_eq!(
+        fs::read(profile.join("skills/synced/account/SKILL.md")).unwrap(),
+        b"harness owned"
     );
     let staged_settings: serde_json::Value = serde_json::from_slice(
         &fs::read(worker_root.join("profile").join("settings.json")).unwrap(),
@@ -3412,7 +3600,7 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
     )
     .unwrap();
     assert!(
-        journal.contains("in place; the workspace and environment were kept"),
+        journal.contains("in place because the weekly quota is exhausted"),
         "the move notice is missing from the destination journal: {journal}"
     );
 }
@@ -3732,6 +3920,15 @@ fn in_place_move_to_another_local_bare_target_records_the_new_template() {
         mut controller,
         ..
     } = in_place_fixture(HarnessKind::Codex, HarnessKind::Codex);
+    // A worker retained across a daemon upgrade needs a newer executable,
+    // while its native session and environment can still stay in place.
+    use std::os::unix::fs::MetadataExt;
+    let previous_worker_inode = fs::symlink_metadata(worker_root.join("hel")).unwrap().ino();
+    fs::write(
+        worker_root.join("worker-build"),
+        format!("0.1.0+{}\n", "0".repeat(40)),
+    )
+    .unwrap();
     add_second_local_bare_target();
     controller.config = Config::load().unwrap();
     let source_target = controller.state.sessions[LATCH_RELAY_SESSION]
@@ -3752,6 +3949,14 @@ fn in_place_move_to_another_local_bare_target_records_the_new_template() {
     assert_eq!(moved.last_profile, IN_PLACE_DESTINATION_PROFILE);
     assert_eq!(moved.target_template_id, "local-bare-two");
     assert_eq!(moved.target, source_target, "the environment is kept");
+    assert_ne!(
+        fs::symlink_metadata(worker_root.join("hel")).unwrap().ino(),
+        previous_worker_inode
+    );
+    assert_eq!(
+        fs::read(worker_root.join("profile/source-only.txt")).unwrap(),
+        b"old harness state"
+    );
     assert_eq!(
         fs::read(worker_root.join("build-cache.txt")).unwrap(),
         b"warm cache"
@@ -4582,6 +4787,134 @@ fn in_place_move_with_oversized_file_exports_only_session_handoff() {
             .checkpoint
             .is_none()
     );
+}
+
+/// Restart uses the same bounded handoff as Move, even with a workspace too
+/// large to checkpoint, and keeps both the staged native state and full copy.
+#[cfg(unix)]
+#[test]
+fn restart_with_oversized_workspace_retains_native_state_and_full_checkpoint() {
+    use std::os::unix::fs::MetadataExt;
+
+    let name =
+        test_name("restart_with_oversized_workspace_retains_native_state_and_full_checkpoint");
+    if std::env::var_os("MJ_RESTART_HANDOFF_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_RESTART_HANDOFF_CHILD", "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Codex, HarnessKind::Codex);
+    let large_file = fixture.checkout.join("large-build-output");
+    fs::File::create(&large_file)
+        .unwrap()
+        .set_len(9 * 1024 * 1024 * 1024)
+        .unwrap();
+    let checkout_inode = fs::metadata(&fixture.checkout).unwrap().ino();
+    let native_file = fixture.worker_root.join("profile/source-only.txt");
+    let native_inode = fs::metadata(&native_file).unwrap().ino();
+    let source_target = fixture.controller.state.sessions[LATCH_RELAY_SESSION]
+        .target
+        .clone();
+    let intent = crate::database::begin_session_restart(
+        LATCH_RELAY_SESSION,
+        "restart-handoff",
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        false,
+    )
+    .unwrap();
+    crate::database::mark_session_restart_checkpoint_started(
+        LATCH_RELAY_SESSION,
+        &intent.operation_id,
+    )
+    .unwrap();
+    let source_relay = seed_source_relay(&fixture.worker_root);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let executor = RecordingProcessExecutor::default();
+    runtime.block_on(async {
+        let channels = start_source_relay_manager(&source_relay);
+        let result = fixture
+            .controller
+            .suspend_session_for_restart(
+                LATCH_RELAY_SESSION,
+                &executor,
+                &channels.control,
+                None,
+                false,
+            )
+            .await;
+        channels.shutdown.shutdown().await.unwrap();
+        result.unwrap();
+    });
+    let intent = crate::database::load_session_restart(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    let handoff = intent.handoff.as_ref().expect("Restart owns a handoff");
+    assert_eq!(
+        intent.checkpoint_sha256.as_deref(),
+        Some(handoff.sha256.as_str())
+    );
+    assert!(fs::metadata(&handoff.archive_path).unwrap().len() < 1024 * 1024);
+    let verified = mj_checkpoint::archive::verify_archive_streaming(&handoff.archive_path).unwrap();
+    assert!(
+        verified
+            .manifest
+            .payloads
+            .iter()
+            .filter(|payload| payload.path.starts_with("repositories/"))
+            .all(|payload| payload.size < 1024)
+    );
+    assert_eq!(
+        fixture.controller.state.sessions[LATCH_RELAY_SESSION]
+            .checkpoint
+            .as_ref(),
+        Some(&fixture.checkpoint)
+    );
+    // Model startup: reload durable ownership and sweep unreferenced archives.
+    crate::controller::checkpoint::reconcile_managed_checkpoint_archives().unwrap();
+    assert!(handoff.archive_path.exists());
+    crate::database::advance_session_restart(
+        LATCH_RELAY_SESSION,
+        &intent.operation_id,
+        crate::database::SessionRestartPhase::RestoringInPlace,
+    )
+    .unwrap();
+    runtime
+        .block_on(fixture.controller.restore_session_in_place_for_restart(
+            LATCH_RELAY_SESSION,
+            IN_PLACE_SOURCE_PROFILE,
+            "local-bare",
+            &executor,
+        ))
+        .unwrap()
+        .unwrap();
+    let record = &fixture.controller.state.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(record.state, SessionState::Running);
+    assert_eq!(record.target, source_target);
+    assert_eq!(record.checkpoint.as_ref(), Some(&fixture.checkpoint));
+    assert!(fixture.checkpoint.archive_path.exists());
+    assert_eq!(
+        fs::metadata(&fixture.checkout).unwrap().ino(),
+        checkout_inode
+    );
+    assert_eq!(fs::metadata(&native_file).unwrap().ino(), native_inode);
+    assert_eq!(fs::read(native_file).unwrap(), b"old harness state");
+    assert_eq!(
+        fs::metadata(large_file).unwrap().len(),
+        9 * 1024 * 1024 * 1024
+    );
+    crate::database::finish_session_restart(LATCH_RELAY_SESSION, &intent.operation_id).unwrap();
+    crate::controller::checkpoint::reconcile_managed_checkpoint_archives().unwrap();
+    assert!(!handoff.archive_path.exists());
+    assert!(fixture.checkpoint.archive_path.exists());
 }
 
 #[cfg(unix)]

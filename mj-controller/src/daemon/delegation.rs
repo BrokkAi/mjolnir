@@ -82,7 +82,10 @@ async fn run(
                                 SubagentToolAction::SendInput { .. }
                                     | SubagentToolAction::SendMessage { .. }
                                     | SubagentToolAction::Spawn { .. }
-                                    | SubagentToolAction::RequestReview {}
+                                    | SubagentToolAction::RequestReview { .. }
+                                    | SubagentToolAction::OverrideReview { .. }
+                                    // A temporary copy is safe to repeat after handoff.
+                                    | SubagentToolAction::Fetch { .. }
                             ) {
                                 None
                             } else {
@@ -114,8 +117,7 @@ async fn run(
                 if completion_ids.len() >= 32 {
                     break;
                 }
-                let Some(outcome) = observation.outcome.as_ref().filter(|_| observation.idle)
-                else {
+                let Some(outcome) = observation.outcome.as_ref() else {
                     continue;
                 };
                 if noticed.get(child) == Some(&outcome.completed_ordinal)
@@ -429,7 +431,6 @@ mod tests {
         let observation = DelegationObservation {
             requests: Vec::new(),
             completed: Vec::new(),
-            idle: true,
             in_flight: Vec::new(),
             credential_signal: None,
             outcome: Some(mj_core::state::MaterializedTurnOutcome {

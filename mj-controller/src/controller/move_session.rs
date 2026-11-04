@@ -1,7 +1,6 @@
 //! One recoverable stop/restore operation, independent of its initiating viewer.
 
 mod destination;
-mod handoff;
 #[cfg(test)]
 mod tests;
 mod transfer;
@@ -459,12 +458,17 @@ pub use mj_core::state::{MoveOutcome, MovePreparation, MoveSelection, MoveSessio
 use crate::targets::{CommandExecutor, ProvisionStage, ProvisionStageGuard};
 use mj_core::relay::RelayCommand;
 
-/// Refresh source state without turning a dead source harness into a Move prerequisite.
+/// Observe preparation state without taking the worker's mutation permit.
+/// Confirmed execution leases and refreshes the source before interruption.
 pub async fn refresh_move_source(
     manager: &SessionManagerControl,
     id: &str,
 ) -> Result<Option<mj_core::state::ManagedSessionSnapshot>> {
-    Ok(MoveSourceRelay::lease(manager, id).await?.snapshot())
+    Ok(manager
+        .wait_for_session(id, std::time::Duration::from_secs(5))
+        .await?
+        .view()
+        .snapshot)
 }
 
 /// A Move's hold on its source's relay connection, from the confirmation
@@ -1162,7 +1166,11 @@ impl Controller {
             "destination profile {profile_id:?} is disabled"
         );
         let policy = move_subagent_policy(source, &selection);
-        if policy.uses_mjolnir() || policy != source.subagents.clone().unwrap_or_default() {
+        // An unchanged delegation policy has already been admitted. Changing
+        // credentials for the same harness does not change its eligible models.
+        if profile.kind != source.harness_kind
+            || policy != source.subagents.clone().unwrap_or_default()
+        {
             super::profile_config::validate_session_subagent_policy(
                 &self.config,
                 profile_id,
@@ -1170,11 +1178,11 @@ impl Controller {
             )
             .await?;
         }
-        let target = self
-            .config
+        self.config
             .targets
             .get(target_id)
             .context("unknown destination target")?;
+        let target = self.config.ensure_target_enabled(target_id)?;
         self.validate_muse_resume_destination(source, profile.kind, target_id)?;
         let checkout = self.state.checkout(&source.id)?;
         super::worktree::resume_compatibility_with_checkout(
@@ -1188,6 +1196,13 @@ impl Controller {
             target,
             selection.resource_allocation.as_ref(),
         )?;
+        let in_place = move_in_place_for_record(
+            source,
+            &selection,
+            &self.config.targets,
+            self.state.subagents.contains_key(&source.id),
+            previous.as_ref(),
+        );
         let mounts = selection.additional_mounts.as_deref().unwrap_or_default();
         ensure!(
             !matches!(
@@ -1202,17 +1217,18 @@ impl Controller {
             "attached resources are unsupported for this target; select compatible resources explicitly"
         );
         crate::targets::validate_additional_mounts(mounts)?;
-        for mount in mounts {
-            self.validate_mount_source(target_id, &mount.source, executor)?;
-        }
-        let planned_conversion =
-            self.validate_move_destination_paths(source, target_id, executor)?;
+        let planned_conversion = if in_place {
+            None
+        } else {
+            for mount in mounts {
+                self.validate_mount_source(target_id, &mount.source, executor)?;
+            }
+            self.validate_move_destination_paths(source, target_id, executor)?
+        };
         ensure!(
             profile.home.is_dir(),
             "destination profile home is unavailable; configure the profile before moving"
         );
-        super::worker_binary::preflight_worker_binary(target, executor)?;
-        super::backend::preflight_target(target, executor, super::backend::TargetCheck::Launch)?;
         let source_record = previous
             .as_ref()
             .filter(|operation| {
@@ -1225,6 +1241,16 @@ impl Controller {
             &source_record.last_profile,
             profile_id,
         )?;
+        // A compatible in-place Move already has its worker, mounts and
+        // runtime. Only reconstruction needs provisioning prerequisites.
+        if !in_place || cross_harness || retry {
+            super::worker_binary::preflight_worker_binary(target, executor)?;
+            super::backend::preflight_target(
+                target,
+                executor,
+                super::backend::TargetCheck::Launch,
+            )?;
+        }
         if cross_harness {
             let cancel = tokio_util::sync::CancellationToken::new();
             let resolve =
@@ -1260,13 +1286,6 @@ impl Controller {
             })
             .map(|operation| operation.operation_id.clone())
             .unwrap_or(new_command_id("move")?);
-        let in_place = move_in_place_for_record(
-            source,
-            &selection,
-            &self.config.targets,
-            self.state.subagents.contains_key(&source.id),
-            previous.as_ref(),
-        );
         let destination_has_parent_role =
             parent_tools_enabled(&move_subagent_policy(source, &selection), profile.kind);
         if in_place
@@ -1309,6 +1328,7 @@ impl Controller {
     pub async fn move_session_managed_controlled(
         &mut self,
         request: MoveSessionRequest,
+        quota_move: Option<(String, mj_core::state::QuotaMoveContinuation)>,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<MoveOutcome> {
@@ -1415,6 +1435,8 @@ impl Controller {
                 op
             }
             None => MoveOperation {
+                quota_stop_reason: None,
+                quota_continuation: None,
                 prepared_destination: None,
                 accepted_preparation: None,
                 acknowledge_interruption: false,
@@ -1467,6 +1489,10 @@ impl Controller {
                 error: None,
             },
         };
+        if let Some((reason, continuation)) = quota_move {
+            operation.quota_stop_reason = Some(reason);
+            operation.quota_continuation = Some(continuation);
+        }
         operation.accepted_preparation = Some(Box::new(checked.clone()));
         operation.acknowledge_interruption = request.acknowledge_interruption;
         crate::database::save_move_operation(&operation)?;
@@ -1666,7 +1692,10 @@ impl Controller {
         ) || !worker_subagent_queue_enabled(
             &session.subagents.clone().unwrap_or_default(),
             session.harness_kind,
-            self.state.subagents.get(session_id),
+            self.state
+                .subagents
+                .get(session_id)
+                .map(|child| child.handback_tool),
             true,
         ) {
             return Ok(outcome);
@@ -1937,7 +1966,7 @@ impl Controller {
             "retained Move source cannot be proven; refusing target teardown"
         );
         // A move's source stop was admitted by the move itself.
-        self.recover_interrupted_close_managed(&id, executor, manager, true, None)
+        self.recover_interrupted_close_managed(&id, executor, manager, true, false, None)
             .await?;
         Ok(())
     }
@@ -2400,6 +2429,31 @@ impl Controller {
                 verified.archive_sha256 == checkpoint.sha256 && verified.manifest.session.id == *id,
                 "move queue checkpoint verification failed"
             );
+            if operation.quota_stop_reason.is_some() && !operation.queue_admission_finished {
+                ensure!(
+                    !executor.cancellation_requested(),
+                    "move cancelled during queue admission; destination retained"
+                );
+                use mj_core::state::QuotaMoveContinuation;
+                let continuation = operation
+                    .quota_continuation
+                    .context("quota Move has no saved continuation action")?;
+                let command = match continuation {
+                    // Move owns the lifecycle, so use ordinary Resume semantics.
+                    QuotaMoveContinuation::ResumeGoal => RelayCommand::GoalControl {
+                        action: mj_core::goal::GoalControlAction::Resume,
+                    },
+                    QuotaMoveContinuation::Prompt => RelayCommand::Prompt {
+                        prompt: mj_core::continuation::prompt_blocks(),
+                    },
+                };
+                // The destination store is pinned above before any submission.
+                // Its durable ledger deduplicates this operation across retries,
+                // including a crash after acceptance but before our next save.
+                relay
+                    .submit_accepted(format!("quota-retry-{}", operation.operation_id), command)
+                    .await?;
+            }
             for queued in verified.canonical_session.queued_prompts {
                 if operation.queue_admission_finished {
                     continue;
@@ -2437,7 +2491,11 @@ impl Controller {
         let destination_target = operation.selection.target_template_id.as_deref().unwrap();
         // The two moves are different events for the person reading the
         // conversation: one rebuilt the environment, the other kept it.
-        let text = if operation.in_place {
+        let text = if let Some(reason) = &operation.quota_stop_reason {
+            format!(
+                "Switched from {source_profile} to {destination_profile} in place because {reason}; the workspace and environment were kept. Continuing the interrupted work. {queue_sentence}"
+            )
+        } else if operation.in_place {
             format!(
                 "Switched from {source_profile} / {source_target} to {destination_profile} / {destination_target} in place; the workspace and environment were kept. {queue_sentence} The interrupted prompt was not replayed."
             )
@@ -2577,7 +2635,7 @@ pub(crate) fn parent_tools_enabled(
 pub(crate) fn worker_subagent_queue_enabled(
     policy: &mj_core::subagent::SubagentPolicy,
     harness: mj_core::config::HarnessKind,
-    subagent: Option<&mj_core::subagent::SubagentRecord>,
+    subagent: Option<bool>,
     agent_mailboxes_enabled: bool,
 ) -> bool {
     let managed_subagent = subagent.is_some();
@@ -2585,7 +2643,7 @@ pub(crate) fn worker_subagent_queue_enabled(
     mj_core::worker_launch::resolve_subagent_mcp_role(
         &launch_policy,
         managed_subagent,
-        subagent.is_some_and(|record| record.handback_tool),
+        subagent.unwrap_or(false),
         agent_mailboxes_enabled,
         !managed_subagent,
     )

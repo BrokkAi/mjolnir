@@ -747,16 +747,8 @@ fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
 
 /// A sub-agent whose first prompt was refused for good was recorded as
 /// failed on a bare target, with its worker stopped.
-fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -> Controller {
-    let mut session = checkpoint_test_session(session_id);
-    session.state = SessionState::Error;
-    session.last_error = Some("this agent does not offer high as a effort".into());
-    session.checkpoint = None;
-    session.target_template_id = "local".into();
-    session.target = Some(TargetLocator::LocalBare {
-        worker_root: worker_root.to_owned(),
-    });
-    let relation = mj_core::subagent::SubagentRecord {
+fn failed_subagent_relation(session_id: &str) -> mj_core::subagent::SubagentRecord {
+    mj_core::subagent::SubagentRecord {
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
         child_session_id: session_id.into(),
@@ -772,7 +764,19 @@ fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -
         noticed_turn: None,
         reported_finish: None,
         handback_tool: true,
-    };
+    }
+}
+
+fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -> Controller {
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Error;
+    session.last_error = Some("this agent does not offer high as a effort".into());
+    session.checkpoint = None;
+    session.target_template_id = "local".into();
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: worker_root.to_owned(),
+    });
+    let relation = failed_subagent_relation(session_id);
     let mut config = Config::default();
     config
         .targets
@@ -781,7 +785,7 @@ fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -
         config,
         state: State {
             sessions: [(session_id.into(), session)].into_iter().collect(),
-            subagents: [(session_id.into(), relation)].into_iter().collect(),
+            subagents: [(session_id.into(), relation.into())].into_iter().collect(),
             ..State::default()
         },
     }
@@ -801,9 +805,14 @@ fn seed_child_reports(
     });
     crate::database::save_session(&parent).unwrap();
     controller.state.sessions.insert(parent_id.into(), parent);
-    let relation = controller.state.subagents.get_mut(child_id).unwrap();
+    let mut relation = failed_subagent_relation(child_id);
     relation.parent_session_id = parent_id.into();
-    crate::database::save_subagent_session(&controller.state.sessions[child_id], relation).unwrap();
+    controller
+        .state
+        .subagents
+        .insert(child_id.into(), (&relation).into());
+    crate::database::save_subagent_session(&controller.state.sessions[child_id], &relation)
+        .unwrap();
     let root = directory.join("project/.mj/agents");
     std::fs::create_dir_all(root.join(child_id)).unwrap();
     std::fs::create_dir_all(root.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")).unwrap();
@@ -842,7 +851,51 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
     assert_eq!(closed.state, SessionState::Stopped);
     assert!(closed.target.is_none());
     assert!(!worker_root.exists(), "the child's worker root is removed");
-    assert!(!reports.join(session_id).exists());
+    // #1333: close keeps reports parents were told to cite.
+    assert!(
+        reports.join(session_id).is_dir(),
+        "close keeps the child's report directory"
+    );
+    assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
+}
+
+/// A child closed by an older daemon can retain a checkpoint; reports
+/// survive there too, not only on the no-checkpoint path.
+// Hard-won: #1333: close deleted the child's report_dir that parents were told to cite.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
+fn checkpointed_close_keeps_a_child_report_directory() {
+    if !in_isolated_store("checkpointed_close_keeps_a_child_report_directory") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let mut controller = failed_subagent_controller(&worker_root, session_id);
+    let reports = seed_child_reports(&mut controller, session_id, directory.path());
+    let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
+    let session = controller.state.sessions.get_mut(session_id).unwrap();
+    session.state = SessionState::Closing;
+    session.checkpoint = Some(checkpoint.clone());
+
+    controller
+        .destroy_after_verified_checkpoint_with(session_id, &checkpoint, &ProcessExecutor, |_| {
+            Ok(())
+        })
+        .unwrap();
+
+    let closed = &controller.state.sessions[session_id];
+    assert_eq!(closed.state, SessionState::Stopped);
+    assert!(closed.target.is_none());
+    assert!(
+        reports.join(session_id).is_dir(),
+        "checkpointed close keeps the child's report directory"
+    );
     assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
 }
 
@@ -875,7 +928,7 @@ fn reconciling_an_orphaned_in_flight_state_records_a_readable_cause() {
             .fail_interrupted_lifecycle_with(
                 session_id,
                 "the daemon stopped while provisioning",
-                persist,
+                persist
             )
             .unwrap()
     );
@@ -2070,11 +2123,11 @@ fn destroying_a_stopped_child_removes_reports_through_its_live_parent() {
     assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
 }
 
-// Hard-won: #1331: report removal is best effort and must never prevent child close.
+// Hard-won: #1331: report removal is best effort and must never prevent child destroy.
 #[cfg(unix)]
 #[test]
-fn report_removal_failure_does_not_fail_child_close() {
-    if !in_isolated_store("report_removal_failure_does_not_fail_child_close") {
+fn report_removal_failure_does_not_fail_child_destroy() {
+    if !in_isolated_store("report_removal_failure_does_not_fail_child_destroy") {
         return;
     }
     struct ReportFailureExecutor;
@@ -2092,12 +2145,13 @@ fn report_removal_failure_does_not_fail_child_close() {
     let mut controller = failed_subagent_controller(&directory.path().join(child_id), child_id);
     let reports = seed_child_reports(&mut controller, child_id, directory.path());
     controller
-        .suspend_session_without_checkpoint_with(child_id, &ReportFailureExecutor, |_| Ok(()))
+        .force_destroy_session_with(
+            child_id,
+            &ReportFailureExecutor,
+            BranchDisposition::Keep,
+            |_| Ok(()),
+        )
         .unwrap();
-    assert_eq!(
-        controller.state.sessions[child_id].state,
-        SessionState::Stopped
-    );
     assert!(
         reports.join(child_id).is_dir(),
         "failure did not secretly delete reports"

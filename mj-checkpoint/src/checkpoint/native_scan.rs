@@ -189,11 +189,6 @@ pub fn collect_import_native_artifacts(
         "Codex rollout '{}' is not a JSONL artifact",
         source_path.display()
     );
-    ensure!(
-        !is_secret_like_path(relative),
-        "Codex rollout '{}' has a forbidden path",
-        source_path.display()
-    );
     let metadata = fs::symlink_metadata(source_path)
         .with_context(|| format!("stat Codex rollout {}", source_path.display()))?;
     ensure!(
@@ -416,9 +411,6 @@ pub(super) fn collect_claude_memory_tree(
         return Ok(());
     }
     let relative = path.strip_prefix(home)?;
-    if is_secret_like_path(relative) {
-        return Ok(());
-    }
     ensure!(
         metadata.len() <= MAX_NATIVE_FILE,
         "native artifact is too large"
@@ -486,7 +478,7 @@ pub(super) fn collect_native_tree(
         HarnessKind::Mimo => is_mimo_native_artifact(relative),
         HarnessKind::Dsh => is_dsh_session_record(relative, session_id),
     };
-    if !selected || is_secret_like_path(relative) {
+    if !selected {
         return Ok(());
     }
     ensure!(

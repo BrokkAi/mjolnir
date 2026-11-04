@@ -3,15 +3,9 @@ use super::*;
 #[derive(Debug, Serialize)]
 pub(super) struct ErrorBody<'a> {
     pub(super) error: &'a str,
-    /// Set on a 429 for a full action pool, so a client can say how full it is
-    /// without parsing the sentence.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) running_actions: Option<usize>,
     /// Names a refusal's reason for a client that chooses its own remedy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) code: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) action_limit: Option<usize>,
 }
 
 /// A phone-surface failure.
@@ -24,8 +18,6 @@ pub(super) struct ErrorBody<'a> {
 pub(super) struct ApiError {
     pub(super) status: StatusCode,
     pub(super) message: std::borrow::Cow<'static, str>,
-    /// `(running, limit)` when the refusal is a full action pool.
-    pub(super) busy: Option<(usize, usize)>,
     pub(super) code: Option<&'static str>,
 }
 
@@ -37,18 +29,12 @@ impl ApiError {
         Self {
             status,
             message: message.into(),
-            busy: None,
             code: None,
         }
     }
 
     pub(super) fn with_code(mut self, code: Option<&'static str>) -> Self {
         self.code = code;
-        self
-    }
-
-    pub(super) fn with_busy(mut self, running: usize, limit: usize) -> Self {
-        self.busy = Some((running, limit));
         self
     }
 
@@ -76,8 +62,6 @@ impl IntoResponse for ApiError {
             Json(ErrorBody {
                 error: &self.message,
                 code: self.code,
-                running_actions: self.busy.map(|(running, _)| running),
-                action_limit: self.busy.map(|(_, limit)| limit),
             }),
         )
             .into_response()

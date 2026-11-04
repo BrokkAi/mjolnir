@@ -337,7 +337,12 @@ impl DashboardState {
     /// Select a conversation immediately, retaining the current keyboard focus.
     /// Pinned sessions stay in their pane; other sessions replace Browse.
     pub fn select_active_session(&mut self, session_id: &str) {
-        if !self.state.sessions.contains_key(session_id) {
+        // Navigation owns the selection immediately, even while the daemon
+        // is loading the row detail for this family's compact relationship.
+        let unloaded_child = self.state.subagents.get(session_id).is_some_and(|child| {
+            self.subagent_parent_id() == Some(child.parent_session_id.as_str())
+        });
+        if !self.state.sessions.contains_key(session_id) && !unloaded_child {
             return;
         }
         let pane = self
@@ -346,23 +351,6 @@ impl DashboardState {
         self.reveal_pane(pane);
         self.set_pane_session(pane, Some(session_id));
         self.focus_pane(pane);
-    }
-
-    /// Open the newly created session in the ordinary composer.
-    ///
-    /// The launch selected its session when it started. If the user has
-    /// since selected another row, that choice stands: finishing a launch
-    /// must not move the selection or the keyboard, or the next session
-    /// command would act on a session the user did not choose.
-    pub fn finish_new_session(&mut self, session_id: &str) {
-        if self
-            .selected_session_id()
-            .is_some_and(|selected| selected != session_id)
-        {
-            return;
-        }
-        self.select_active_session(session_id);
-        self.focus_prompt();
     }
 
     /// Global visibility must not change which workspace opens automatically.

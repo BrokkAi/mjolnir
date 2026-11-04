@@ -82,12 +82,16 @@ Type in Prompt and press `Enter`. If the harness is already answering, another s
 The prompt surface also understands:
 
 - `!command` to run `bash -lc` independently inside the session workspace.
+- `/config` to open a settings dialog listing every selectable setting the
+  active harness advertises. `/config <key>` opens that setting's values, while
+  `/config <key> <value>` applies one directly. A change submitted during a
+  turn queues with the other work.
 - `/model` and `/effort` to change the harness settings. A change submitted during a turn queues with the other work.
 - `/fast`, `/plan`, and `/implement` when the active harness exposes the corresponding mode.
 - `/review` for an independent review of the completed turn; see [turn review](/turn-review/).
 - Agent-advertised slash commands, which appear in completion beside Mjolnir's local commands.
 
-Press `Esc` to cancel the active agent turn or shell command. This does not stop the worker, delete queued prompts, or detach the client. Use `prefix+shift+c` only for a lifecycle operation such as launch, resume, or stop.
+Press `Esc` to cancel the active agent turn or shell command. This does not stop the worker, delete queued prompts, or detach the client. A prompt still waiting to join the running turn stays queued and runs next, so `Esc` is also how you stop waiting for a long tool call. Use `prefix+shift+c` only for a lifecycle operation such as launch, resume, or stop.
 
 ### When a turn goes quiet
 
@@ -395,9 +399,14 @@ as staying the same: two local bare targets, or two SSH bare targets with the
 same connection, share one worker root and workspace, so the session keeps its
 environment, transfers no files, shows no **Choose files** page, and only
 records the new target. In place, the container or bare worker root, the
-workspace, untracked files, and build caches are kept, and only the old worker
-daemon and profile home are removed before the new profile is staged and the harness state
-is restored. The confirmation says so: "Only the harness and profile are
+workspace, untracked files, and build caches are kept. A compatible profile
+switch also keeps the installed worker and native conversation files: it
+replaces profile configuration and credentials, seeds the relay's continuation
+metadata, and restarts the harness. It does not upload or restore the handoff
+archive back onto the same target. An older installed worker is upgraded when
+necessary to read the new launch configuration. Switching to an incompatible harness or
+recovering a failed swap restores the verified handoff instead. The confirmation
+says so: "Only the harness and profile are
 replaced; the environment and workspace are kept." When the target changes to a different machine or runtime,
 Move tears the source down and rebuilds the environment from the checkpoint,
 which does not migrate a running process, installed packages, container layers,
@@ -415,9 +424,10 @@ is running. A source worker older than relay protocol 32 cannot keep them, so
 Move stops them, and the confirmation warns about this.
 
 A Move that rebuilds the environment copies the workspace with rsync, so the
-machine running Mjolnir, the source, and the destination each need rsync 3.0 or
-newer. The rsync that ships with macOS is older; install a current one with
-`brew install rsync`. Move checks every side before it interrupts the session.
+machine running Mjolnir, the source, and the destination each need rsync.
+GNU rsync and the rsync included with macOS (including openrsync) are supported.
+Move checks the required transfer options on every side before it interrupts
+the session.
 
 If an in-place swap fails, or the daemon restarts while it runs, Mjolnir does
 not retry in place. It releases the environment and leaves the session suspended
@@ -458,7 +468,7 @@ For Codex, the archive includes the primary thread and child-agent results surfa
 
 ## Import a native harness session
 
-The `prefix+g` picker also has an Import view for sessions created outside Mjolnir. Native sessions from five of the eight supported harnesses can be adopted into a suspended, verified Mjolnir archive and then resumed on a configured target; OpenCode and MiMo Code keep their sessions in SQLite databases, so they cannot be imported yet, and DSH sessions cannot be imported yet either. Muse imports retain their native session IDs and support workspace relocation. Muse accepts one workspace root.
+The `prefix+g` picker also has an Import view for sessions created outside Mjolnir. Native sessions from five of the eight supported harnesses can be imported as suspended Mjolnir sessions and then resumed on a configured target; OpenCode and MiMo Code keep their sessions in SQLite databases, so they cannot be imported yet, and DSH sessions cannot be imported yet either. Muse imports retain their native session IDs and support workspace relocation. Muse accepts one workspace root.
 
 The Import view and `mj import` read the home of each enabled profile. A session Mjolnir runs writes its native history into its own staged home instead, on this machine as on every other target, so it never appears in the Import view, and your harness's own resume command, such as `codex resume` or `claude --resume`, does not list it either. Find it on the **Mjolnir** or **Archived** tab. See [Native session history](/profiles/#native-session-history).
 
@@ -471,14 +481,16 @@ mj import grok --latest --bundle myapp
 mj import muse --session <native-uuid> --bundle myapp
 ```
 
-Dashboard imports that will resume in a bare Git project also offer
-**Create isolated checkout**, even when there are no import warnings. The saved
-choice takes effect on first resume, which then makes the session's clone
-under `.mj/clones/<session id>`.
+Dashboard imports that will resume in a bare Git project show any uncommitted
+changes and offer one option: **Create isolated checkout**. Select it to
+create a clean managed clone under `.mj/clones/<session id>` on first resume.
+Source changes stay in the original checkout. Clear it to resume in that
+original checkout with its current files. Import itself leaves the checkout
+unchanged.
 
 Close the source harness before importing. If it changes the session during import, select it again after it stops. Unsupported native storage versions report an error rather than importing partial history.
 
-If imported Git roots are dirty, Mjolnir warns that it will archive their complete current state; edited non-Git or scratch directories are omitted. An interactive CLI or dashboard import can acknowledge those warnings. For non-interactive use, pass `--allow-dirty` and, when applicable, `--allow-omitted-non-git`. See the [CLI reference](/cli-reference/#import-a-native-session) for every flag.
+Edited non-Git or scratch directories are omitted. An interactive CLI or dashboard import shows those directories before proceeding. For non-interactive CLI use, pass `--allow-dirty` when the checkout has uncommitted changes and, when applicable, `--allow-omitted-non-git`. See the [CLI reference](/cli-reference/#import-a-native-session) for every flag.
 
 ## Search and restore archived sessions
 
@@ -559,10 +571,10 @@ a transcript, and a title or project the index knows, so a session you remember
 only by something said inside it is findable.
 
 The box is closed while the index cannot answer. It reads **Indexing…** during
-the first build, and names a version mismatch when the index file on disk was
-written by another SessionWiki version (see [Match the `sessionwiki`
-version](#match-the-sessionwiki-version)). Either way the tabs and row
-navigation keep working.
+the first build and while Mjolnir rebuilds an index an older SessionWiki wrote.
+It names a version mismatch when a newer SessionWiki wrote the index file on
+disk (see [Match the `sessionwiki` version](#match-the-sessionwiki-version)).
+Either way the tabs and row navigation keep working.
 
 ### The Archived tab
 
@@ -604,17 +616,24 @@ sub-agent child that is not ready to be archived waits for the next pass. Leave
 
 Mjolnir links SessionWiki as a library and writes into your ordinary SessionWiki
 index. The `sessionwiki` command-line tool you install must be the same version.
-SessionWiki drops and rebuilds its whole index when the file's schema version
-differs from the one the program expects, so two programs at different versions
-re-index everything each time you alternate between them — on a large corpus
-that is tens of minutes per switch.
+SessionWiki rebuilds its search cache when the file's schema version differs
+from the one the program expects. Your tags, notes, summaries and archived
+sessions survive a rebuild, but re-indexing takes tens of minutes on a large
+corpus.
 
-This build links the `sessionwiki` crate, version 0.33.1. Install the matching
+When an older SessionWiki wrote the index, Mjolnir rebuilds it at its own
+version and the box reads **Indexing…** until that finishes. A `sessionwiki`
+command older than 0.34.1 rebuilds it back the next time it runs, so the two
+take turns re-indexing everything until you upgrade the command. When a newer
+SessionWiki wrote the index, Mjolnir leaves it alone and search stays closed
+until you upgrade Mjolnir.
+
+This build links the `sessionwiki` crate, version 0.34.5. Install the matching
 tool with either:
 
 ```sh
-cargo install --locked sessionwiki@0.33.1
-npm install --global @youdie006/sessionwiki@0.33.1
+cargo install --locked sessionwiki@0.34.5
+npm install --global @youdie006/sessionwiki@0.34.5
 ```
 
 If you installed `brokk-sessionwiki` for an earlier Mjolnir build, run

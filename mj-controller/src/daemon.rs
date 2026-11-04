@@ -1,5 +1,6 @@
 //! Persistent per-user controller daemon and its authenticated local protocol.
 
+mod auto_afk;
 pub(crate) mod capacity;
 mod container_upgrade;
 mod feed;
@@ -28,7 +29,7 @@ use crate::targets::{
     CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor,
     ProvisionStage, ProvisionStageGuard,
 };
-use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use mj_core::config::Config;
 use mj_core::refusal::Refusal;
@@ -174,13 +175,19 @@ impl LifecycleControl {
 }
 
 #[derive(Debug, Clone)]
+/// A client's presence, renewed by its heartbeat. The daemon never inspects a
+/// client's process: in a container it cannot see one.
 struct Attachment {
-    pid: u32,
+    renewed: std::time::Instant,
 }
+
+/// Clients renew every two seconds, each try bounded by five. A lease this old
+/// belongs to a client that has stopped.
+const ATTACHMENT_LEASE: Duration = Duration::from_secs(15);
 
 #[derive(Default)]
 struct QuotaBoard {
-    snapshot: mj_client::quota::QuotaSnapshot,
+    snapshot: mj_core::snapshot_map::SharedSnapshot<mj_client::quota::QuotaSnapshot>,
     refresh: Option<tokio::sync::mpsc::Sender<()>>,
 }
 
@@ -219,8 +226,11 @@ pub struct RuntimeState {
     /// carries. One ordered queue per session, each drained by one task.
     startup_prompts: Mutex<BTreeMap<String, StartupQueue>>,
     startup_enqueue: tokio::sync::Mutex<()>,
+    /// Orders worker admission against Move source sealing, independently per session.
+    startup_delivery_gates: Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     controller_loader: fn() -> Result<Controller>,
-    config_mutation: tokio::sync::Mutex<()>,
+    config_mutation: tokio::sync::Mutex<auto_afk::Inactivity>,
+    inactivity_changed: tokio::sync::Notify,
     projects: Arc<crate::project_catalog::Catalog>,
     profile_catalog: crate::review_host::SharedProfileCatalog,
     recovery_observer: RecoveryObserver,
@@ -420,8 +430,8 @@ fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>
 ///
 /// A failed startup's teardown must finish. A close or a Restart admitted on a
 /// record that already says `Destroying` was past its point of no return
-/// before this daemon started: the verified checkpoint is sealed and the
-/// target is being removed, so stopping now only strands the target.
+/// before this daemon started: its checkpoint is sealed, or a child's final
+/// conversation is durable, and stopping cleanup now only strands the target.
 fn lifecycle_starts_committed(kind: LifecycleKind, state: Option<SessionState>) -> bool {
     kind == LifecycleKind::StartupCleanup
         || matches!(
@@ -433,6 +443,8 @@ fn lifecycle_starts_committed(kind: LifecycleKind, state: Option<SessionState>) 
 /// How a stop request has to be carried out, given the durable record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CloseRoute {
+    /// Stop only the borrowed worker, keeping its conversation in the store.
+    Subagent,
     /// Run the graceful close from the start.
     Graceful,
     /// A previous close stopped partway; finish it from its checkpoint.
@@ -445,7 +457,7 @@ enum CloseRoute {
     Done,
 }
 
-/// A record mid-close with a live target cannot be closed again from the start:
+/// An owning session mid-close with a live target cannot be closed again from the start:
 /// its worker socket is gone, so a fresh checkpoint attempt only fails on
 /// connect. Recovery finishes it from the checkpoint the first close verified.
 /// `subagent` says the session is a Mjolnir sub-agent; see
@@ -454,7 +466,9 @@ fn close_route(session: Option<&SessionRecord>, subagent: bool) -> CloseRoute {
     let Some(session) = session else {
         return CloseRoute::Graceful;
     };
-    if crate::pollers::is_interrupted_close(session) {
+    if subagent {
+        CloseRoute::Subagent
+    } else if crate::pollers::is_interrupted_close(session) {
         CloseRoute::RecoverInterrupted
     } else if session.state == SessionState::Stopped {
         if session.target.is_some() {
@@ -491,6 +505,13 @@ pub(crate) enum StartupStep {
     },
     Prompt {
         text: String,
+        /// None only for text rows persisted before structured startup prompts.
+        #[serde(default)]
+        prompt: Option<Vec<ContentBlock>>,
+        #[serde(default)]
+        encoded_draft: Option<String>,
+        #[serde(default)]
+        move_operation_id: Option<String>,
         inherited_draft: Option<String>,
     },
     Configure {
@@ -512,6 +533,7 @@ struct StartupQueue {
 }
 
 struct ActiveLifecycle {
+    move_operation_id: Option<String>,
     /// Durable intent bound by Restart admission; cleanup names this exact owner.
     restart_intent: Option<String>,
     upgrade_work: Arc<Mutex<Option<crate::upgrade::Work>>>,
@@ -740,8 +762,9 @@ mod actions;
 use actions::*;
 mod guards;
 pub(crate) use guards::*;
+mod dashboard_reads;
 
 #[cfg(test)]
 mod tests;
 
-mod continuation;
+pub(crate) mod continuation;

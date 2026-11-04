@@ -5,14 +5,14 @@
 │                             ▐││retry                         │
 │                             ▐││                              │
 │                             ▐││                              │
-│                             ▐││                              │
 ╰──────────────────────────────╯╰──────────────────────────────╯
   ●··········· Reviewing
   Forward findings     Dismiss     Cancel      Enter to act · Ta
 
 
 
-Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
+
+Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 selected action: Some(Some(Forward))
 action: TurnReview(Resolve(Forwarded))
 
@@ -23,14 +23,14 @@ action: TurnReview(Resolve(Forwarded))
 │                             ▐││                              │
 │                             ▐││                              │
 │                             ▐││                              │
-│                             ▐││                              │
 ╰──────────────────────────────╯╰──────────────────────────────╯
   ●··········· Reviewing
   Forward findings     Dismiss     Cancel      Enter to act · Ta
 
 
 
-Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
+
+Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 selected action: Some(Some(Dismiss))
 allowed actions: Some([(Forward, false), (Dismiss, true), (Cancel, true)])
 action: TurnReview(Resolve(Dismissed))
@@ -58,14 +58,14 @@ action: TurnReview(Resolve(Dismissed))
 │                             ▐││retry                         │
 │                             ▐││                              │
 │                             ▐││                              │
-│                             ▐││                              │
 ╰──────────────────────────────╯╰──────────────────────────────╯
   ●··········· Reviewing
   Forward findings     Dismiss     Cancel      Enter to act · Ta
 
 
 
-Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
+
+Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
 selected action: Some(Some(Forward))
 verdict selected: true
 

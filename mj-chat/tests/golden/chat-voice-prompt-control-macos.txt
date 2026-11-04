@@ -16,13 +16,13 @@
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
 Alt-V action: None
 draft empty: true
@@ -45,13 +45,13 @@ draft empty: true
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: ToggleVoice
 Alt-V action: None
 
@@ -73,14 +73,14 @@ Alt-V action: None
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
-button area: Some(Rect { x: 2, y: 19, width: 5, height: 1 })
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+button area: Some(Rect { x: 2, y: 18, width: 5, height: 1 })
 
 === mouse activates microphone on release (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -100,13 +100,13 @@ button area: Some(Rect { x: 2, y: 19, width: 5, height: 1 })
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: ToggleVoice
 press action: None
 
@@ -128,15 +128,15 @@ press action: None
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
-button area: Some(Rect { x: 2, y: 19, width: 5, height: 1 })
+button area: Some(Rect { x: 2, y: 18, width: 5, height: 1 })
 
 === Enter preserves a draft during active voice capture (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -156,13 +156,13 @@ button area: Some(Rect { x: 2, y: 19, width: 5, height: 1 })
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
 │> dictated draft                                                                                  │
 │                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Listening… click the microphone to stop · PgUp/PgDn transcript │ ctrl+b then : palette · ? keys
+Listening… click the microphone to stop │ ctrl+b then q detach · : / ? palette
 action: None
 draft: "dictated draft"
 
@@ -196,5 +196,5 @@ button area: None
 ╰────────────────────────────╯
 ╭  mic ──────────────────────╮
 ╰────────────────────────────╯
-ctrl+b then : palette · ? keys
+q detach · : / ? palette
 button area: Some(Rect { x: 6, y: 2, width: 5, height: 1 })

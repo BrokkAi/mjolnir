@@ -66,7 +66,7 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 18
+version = 21
 ```
 
 The top-level keys are listed below. The legacy `[mailbox] enabled` switch is
@@ -74,7 +74,7 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `18`. |
+| `version` | integer | yes | none | Configuration schema version; use `21`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -85,6 +85,7 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 | `review` | table | no | default `[review]` values | Automatic review trigger and reviewer settings. |
 | `continuation` | table | no | enabled | Automatic continuation of already-requested unfinished work; also requires Jev. |
 | `jev` | table | no | enabled | Hosted turn classification, continuation checks, and semantic help search. |
+| `daemon` | table | no | runs on the host | Where the daemon runs: on this computer or in a Podman or Docker container. |
 | `sessionwiki` | table | no | default `[sessionwiki]` values | Full-text session index and automatic archiving. |
 | `keys` | table | no | default `[keys]` values | The prefix key and every command's key bindings. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
@@ -100,7 +101,7 @@ and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
 
-A missing or empty file is treated as an empty version 18 configuration. Older
+A missing or empty file is treated as an empty version 21 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -176,7 +177,7 @@ The default bindings:
 | Field | Default | Action |
 | --- | --- | --- |
 | `prefix` | `ctrl+b` | The prefix key itself |
-| `help` | `prefix+?` | Open help |
+| `help` | `prefix+?` | Open the command palette (legacy alias) |
 | `settings` | `prefix+s` | Open Settings |
 | `detach` | `prefix+q` | Detach this terminal |
 | `new_session` | `prefix+c` | Open the session creation wizard |
@@ -337,6 +338,7 @@ precedence. See [Web viewer and desktop app](/web-viewer/) for access and login.
 ```toml
 [review]
 trigger = "turn"
+count = 2
 profile = "reviewer"
 # model = "provider-model-id"
 # effort = "high"
@@ -345,16 +347,17 @@ profile = "reviewer"
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
 | `trigger` | string enum | no | `"off"` | `"off"` disables automatic review, `"turn"` reviews eligible completed turns after queued work drains, and `"push"` reviews commits before push. An unchanged turn delta resolves without a review prompt. |
+| `count` | positive integer | no | `2` | Independent reviewer sessions per review. 1–3 reviewers are reasonable; more have diminishing returns. Counts above 3 are allowed. |
 | `tier` | string | no | unset | Deprecated compatibility field. Existing `quick` or `extended` values are accepted but ignored. |
-| `profile` | string | no | Auto (unset) | Auto selects an eligible profile by provider and quota. A named enabled review-capable profile is honored, including the primary profile. |
+| `profile` | string | no | Auto (unset) | Auto tries Terra, DeepSeek Flash, Haiku, and Grok on subscriptions, then API billing, then other models by price; always at High effort. A named enabled review-capable profile is honored, including the primary profile. |
 | `model` | string | no | unset (harness default) | Reviewer model override for a named profile. `[review]` refuses it with Auto, which uses fixed model-family defaults; a session's `--review-model` still works with Auto. |
-| `effort` | string | no | unset (harness default) | Reviewer effort override for a named profile. `[review]` refuses it with Auto; a session's `--review-effort` still works with Auto. Required effort is checked against the selected model. |
+| `effort` | string | no | unset (harness default) | Reviewer effort override for a named profile. Auto always requires `high`, including when a session requests another effort. Required effort is checked against the selected model. |
 
-Auto prefers
-another provider, falling back to another profile or the primary profile when
-needed. Reviewers run as hidden child sessions, use the configured review
+Auto prefers a different model family from the primary within each billing group. It selects the newest advertised version of each preferred family, skips exhausted quota and unsupported High effort, and uses the shared usage-report prices for its cheapest-model fallback. Unknown prices sort after known prices and are disclosed if selected. Reviewers run as hidden child sessions, use the configured review
 profile, model, and effort, and show their transcripts in the review view. See
 [Code review](/turn-review/).
+
+The reviewers use the same resolved profile and model in separate conversations. Findings from every reviewer are labeled with their session and may overlap. A group is clean only when every reviewer finishes cleanly; a failed or missing reviewer keeps the push gate blocked.
 
 Push review is available for Claude Code, Codex, and DSH primaries, the harnesses that receive Mjolnir delegation tools. They receive `request_review` and a pre-push gate; other harnesses run without review and receive a transcript notice.
 
@@ -364,9 +367,8 @@ writes `trigger`, not `enabled`.
 
 `mj new --review off|turn|push` and `mj import <harness> --review off|turn|push`
 set the trigger for one session, overriding `[review]`. `--review-model <model>`
-and `--review-effort <effort>` set reviewer choices. Without `--review`, either
-option selects `turn`. In Auto, Mjolnir picks an enabled profile that offers
-the model, including a profile whose provider has no Auto policy, such as DSH.
+and `--review-effort <effort>` set reviewer choices. `--review-count <count>` overrides the number of reviewers for that session. Without `--review`, any of these options selects `turn`; an explicit `--review off` remains off. In Auto, Mjolnir picks an enabled profile that offers
+the model, including DSH or any other enabled profile. Auto always uses High effort; the effort override applies only to a named reviewer profile.
 `/review` remains available when the trigger is `off`.
 
 The deprecated `mj new --review-tier quick|extended` option still accepts
@@ -378,6 +380,45 @@ In the terminal, these review fields are edited inside **Settings** so one Save 
 Cancel applies to the entire configuration draft. Settings can discover the
 selected review profile's supported model and effort choices and filters the
 profile list to compatible reviewer profiles.
+
+## Where the daemon runs `[daemon]`
+
+In the terminal or the web UI this is **Settings → Setup → Daemon**. Saving a
+change moves the daemon at once; running sessions keep going.
+
+```toml
+[daemon]
+runtime = "podman"
+image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+mounts = ["/srv/projects"]
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `runtime` | string | no | `"host"` | `"host"` runs `mj daemon-run` as a process on this computer. `"podman"` or `"docker"` runs it in a container of that engine. Container runtimes need Linux; elsewhere the daemon runs on the host and says so. |
+| `image` | string | no | this release's agent-dev image | The daemon container's image. |
+| `mounts` | array of absolute paths | no | `[]` | Further host directories the daemon container sees at the same path. |
+
+The daemon in the container is the image's own `mj`, built in the image
+from the same commit as your `mj`. Mjolnir uses an image only when its
+`org.brokk.mjolnir.revision` label is your build's revision: the configured
+`image`, or with none configured this release's agent-dev image or any local
+image carrying that label. Release images always match their release. For a
+development build, `scripts/build-agent-dev-image.sh docker` (or `podman`)
+builds a matching image from the checkout. Without one the daemon runs on
+this computer and says why.
+
+The daemon container is one long-lived container per instance. It uses this
+computer's network and process namespaces and runs as your own user, so
+clients reach the daemon at the same loopback address and the same process ID
+as a host daemon. It mounts your home directory, Mjolnir's data and settings
+directories, `/tmp` and your runtime directory at their host paths, plus
+`mounts`. Local sessions run in the container too, with the image's tools and
+worker, and keep running when the daemon is replaced. Container sessions reach
+the host's engine through its socket: Docker's `/var/run/docker.sock`, or your
+Podman socket, which Mjolnir starts with `systemctl --user start podman.socket`
+when it is not running. A change of image or mounts gets a new container. The
+previous container is removed once no session runs in it.
 
 ## Hosted Jev service `[jev]`
 
@@ -528,8 +569,9 @@ design choices, or risk of subtle bugs. A subtle task gets a smarter, more
 expensive agent. Judge difficulty, not brief length. With only straightforward
 configured, `spawn` has no `task_type` and every child uses the straightforward
 choice. The parent is told to delegate straightforward work and to do work
-that needs judgment itself. Mjolnir chooses the enabled profile offering that task type's
-model and effort with the most quota. The agent cannot override the selection.
+that needs judgment itself. Mjolnir chooses the enabled profile offering that
+task type's model and effort with the strongest quota headroom paced against
+its reset times. The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
 Native, or to None for DSH, which refuses `native`; `mj move --subagents native|mjolnir|none` retains the recorded policy when
 omitted, including any session override. `--subagent-straightforward M` and `--subagent-subtle M` independently override
@@ -550,11 +592,16 @@ A configuration file written before the per-session choice existed may still
 have an `enabled` key here. It is read and ignored, and a save drops it.
 
 Mjolnir runs each child with the configured model and effort on an enabled
-profile that supports that selection and has the most quota left, meaning
-the lower of its 5-hour and weekly remaining percentages. A pay-per-use
-profile counts as 100% left, and a profile with no quota report comes last. On
-a tie, the parent's own profile wins. `mj doctor` shows, for each profile,
-where its quota comes from and that sub-agents may use it.
+profile that supports that selection. Profiles with quota to spare are more
+likely to be chosen. Each quota window (for example the 5-hour and weekly
+ones) is compared with an even spend over the window: 5% left three minutes
+before a 5-hour reset is plenty, while 5% left six days before a weekly reset
+is not. The window furthest behind decides. A limit for one model, such as a
+weekly Fable limit, counts only for that model. A pay-per-use profile counts as
+exactly on pace, so a subscription with quota to spare comes first. A profile
+with no quota left, then one with no quota report, comes last. On a tie, the
+parent's own profile wins. `mj doctor` shows, for each profile, where its quota
+comes from and that sub-agents may use it.
 
 A sub-agent ends its task by handing its report back to the session that
 started it. Suspending that session stops its sub-agents and removes them,
@@ -589,9 +636,10 @@ home = "/home/me/.codex-work"
 | `enabled` | boolean | no | `true` | Disabled profiles stay configured but cannot be selected for new work, login, import, review, quota reporting, or utility-model inference. Existing running sessions continue. |
 | `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `muse`, `opencode`, `mimo`, or `dsh`. `deepseek`, the removed DeepSeek harness, fails to load. |
 | `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
-| `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` reads that variable from the environment Mjolnir started with unless it is set here; when it is set in neither, the profile cannot start, the configuration still loads, and `mj doctor` says how to supply it. A DSH profile reads `DEEPSEEK_API_KEY` the same way. |
+| `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` reads that variable from the environment Mjolnir started with unless it is set here; when it is set in neither, the profile cannot start, the configuration still loads, and `mj doctor` says how to supply it. A DSH profile takes `DEEPSEEK_API_KEY` from the key saved in DSH (`.credentials.yaml` in its home) first, then the environment Mjolnir started with, then `.env` in its home, and only then from this table. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
 | `guardian_review_model` | string | no | unset (`newest-flash`) | Which model reviews escalated actions in Codex's guardian mode: `newest-flash`, `session`, or a slug from the provider's model catalog. Only valid on a Codex profile whose `config.toml` names a custom model provider. See [Profiles](/profiles/#choose-the-guardian-review-model). |
+| `muse_auto_review` | boolean | no | unset (`false`) | Whether an unconstrained Muse session (containers, EC2, `yolo` SSH) keeps muse-acp's auto-review on. Unset or `false` runs without permission checks, like OpenCode's `permission = "allow"`. `true` restores the reviewer inside the container boundary. Only valid on a Muse profile; guardian targets always review. |
 
 The profile's harness-home variable cannot appear in `environment`; set `home`
 instead. Those variables are `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
@@ -618,7 +666,8 @@ use their image-provided runtime or the documented installer fallback. The
 `PATH`.
 
 Profiles do not accept `model` or `reasoning_effort`. Use `/model` and `/effort`
-inside a session, or configure the harness's own defaults in its home. For
+or `/config` inside a session, or configure the harness's own defaults in its
+home. For
 credential files, staging allowlists, skills, quotas, and harness limitations,
 see [Profiles and harnesses](/profiles/).
 
@@ -663,6 +712,32 @@ A configuration that uses a reference needs a Mjolnir that understands it;
 an older build reports the entry as an invalid type. Plain strings keep
 working everywhere.
 
+## Session GitHub token `[github]`
+
+Set a controller-side token file to give sessions a dedicated GitHub PAT instead
+of the host GitHub CLI login:
+
+```toml
+[github]
+session_token_path = "~/.secrets/gh_agents_pat"
+```
+
+The path must be absolute or start with `~/`; it is read on the daemon host.
+The file contains just the token, optionally followed by a newline. The token
+is never written into configuration or checkpoints. A configured file that
+cannot be read or validated reports an error instead of falling back to a
+broader credential.
+
+This override takes precedence over GitHub App session tokens and the host
+`GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token` lookup. It applies to local bare,
+SSH, EC2, local container, remote container, and sub-agent sessions. Every
+start, restart, and resume reads the latest file contents. Ordinary credential
+sync can also update running sessions, normally within 60 seconds. Containers
+continue receiving the selected credential as `GH_TOKEN` at creation.
+Removing the setting restores the previous App/host credential selection.
+The host's GitHub CLI login and explicit `mj github-token` App tokens are
+unchanged.
+
 ## GitHub App `[github.app]`
 
 An optional GitHub App can provide installation tokens for private bundle
@@ -691,8 +766,7 @@ Each managed session may use repositories from only one App installation. A
 bundle that resolves to multiple installations is rejected when the session is
 created. App tokens are refreshed before they approach expiry and are delivered
 to running remote/container sessions during credential sync. Local bare
-sessions do not receive periodic refresh; an App token used there expires
-within at most one hour.
+sessions also receive periodic refresh when session credentials are configured.
 
 See [GitHub App credentials](/github-app/) for creating an App and setting up
 its repository permissions.
@@ -932,6 +1006,13 @@ when it is `local`.
 | --- | --- | --- | --- | --- |
 | `kind` | string enum | yes | none | `bare`, `podman`, `docker`, or `apple-container`. |
 | `machine` | string | no | `"local"` | The id of a `[machines.<id>]` entry, or `local`. |
+| `enabled` | boolean | no | `true` | `false` keeps the runtime configured but out of every picker; launch, resume and move refuse it, and running sessions continue. Written only when `false`. Detection never adds a kind its machine already has configured, enabled or not. |
+
+Mjolnir checks what is there when the dashboard starts and whenever the
+new-session or resume picker opens: this computer directly, and each SSH
+machine with one SSH call. It adds each runtime kind a machine newly runs and
+leaves out of the pickers any runtime that is gone, naming it under the list.
+Version 19 added `enabled`; older builds refuse a version 19 file.
 
 `permissions` is valid only on `bare`; setting it on another runtime is an
 error. Build cache settings are valid only on a machine; setting them on a
@@ -953,7 +1034,7 @@ permissions = "guardian"
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables sandbox checks (and approval checks, except Muse keeps its auto-review on). It has no meaning on `local`, where the harness keeps its configured approvals, or on an EC2 machine. |
+| `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables sandbox checks and approval checks. Muse runs without permission checks under `yolo` too, unless its profile sets `muse_auto_review = true`. It has no meaning on `local`, where the harness keeps its configured approvals, or on an EC2 machine. |
 
 The new-session wizard asks for an existing absolute project directory on the
 runtime's machine. A local bare directory may be a plain folder and does not
@@ -966,9 +1047,9 @@ the new checkout is created below the repository's own `.mj/clones/` tree. A
 bare runtime on an EC2 machine launches one instance per session. See
 [SSH and SSH Podman](/ssh/) and [AWS EC2](/aws/).
 
-Review needs a committed Git checkout to capture changes. Create a local
-directory session with `mj new --review off`; automatic review for a plain
-directory is refused, and `/review` explains that it cannot capture changes.
+Review needs a committed Git checkout to capture changes. A local directory
+session without one is created with review off for that session, and `mj new`
+prints a notice saying so; `/review` explains that it cannot capture changes.
 
 ### Common container fields
 
@@ -1104,7 +1185,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 18
+version = 21
 
 [phone]
 enabled = true
@@ -1167,7 +1248,7 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_TURN_TOOL_STALL_TIMEOUT_MS` | Milliseconds one tool call may run before the worker ends the turn the same way. Off unless set to a positive value. |
 | `MJ_GITHUB_CLI_BIN` | Path or command name for the GitHub CLI used to read tokens. |
 | `RUST_LOG` | Tracing/log filter for Mjolnir processes. |
-| `GH_TOKEN`, `GITHUB_TOKEN` | GitHub token source, checked in that order before `gh auth token`, for private clones and live non-local session sync. |
+| `GH_TOKEN`, `GITHUB_TOKEN` | GitHub token source, checked in that order before `gh auth token`, for private clones and live non-local session sync when no session token override or App is configured. |
 | `GIT_SSH_COMMAND` | Overrides Mjolnir's non-interactive SSH command for checkpoint/archive Git operations. |
 
 Worker lookup checks `MJ_WORKER_BINARY`, `MJ_WORKER_DIR`, packaged or sibling

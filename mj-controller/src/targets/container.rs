@@ -4,10 +4,17 @@ pub(crate) fn container_temporary_volume_name(container: &str) -> String {
     format!("{container}-tmp")
 }
 
-pub(crate) fn has_managed_temporary_volume(
+#[derive(Debug)]
+pub(crate) struct ContainerStorage {
+    pub managed_temporary_volume: bool,
+    pub attachments: Vec<AdditionalMount>,
+}
+
+pub(crate) fn inspect_container_storage(
     locator: &TargetLocator,
+    attachments: &[AdditionalMount],
     executor: &impl CommandExecutor,
-) -> Result<bool> {
+) -> Result<ContainerStorage> {
     let (engine, container, ssh) = match locator {
         TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
         TargetLocator::LocalDocker { container_id, .. } => ("docker", container_id, None),
@@ -17,7 +24,23 @@ pub(crate) fn has_managed_temporary_volume(
         TargetLocator::SshDocker {
             container_id, ssh, ..
         } => ("docker", container_id, Some(ssh)),
-        _ => return Ok(false),
+        _ => {
+            return Ok(ContainerStorage {
+                managed_temporary_volume: false,
+                attachments: if locator.container_engine() == Some("container") {
+                    attachments
+                        .iter()
+                        .cloned()
+                        .map(|mut mount| {
+                            mount.access = mount.access.without_overlay();
+                            mount
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+            });
+        }
     };
     let command = CommandSpec::new(
         engine,
@@ -25,11 +48,11 @@ pub(crate) fn has_managed_temporary_volume(
             "container",
             "inspect",
             "--format",
-            "{{range .Mounts}}{{if eq .Destination \"/tmp\"}}{{.Name}}{{end}}{{end}}",
+            "{{json .Mounts}}",
             container,
         ],
     )
-    .purpose("inspect session temporary storage");
+    .purpose("inspect session container storage");
     let command = match ssh {
         Some(ssh) => command_over_ssh(command, ssh),
         None => command,
@@ -37,13 +60,48 @@ pub(crate) fn has_managed_temporary_volume(
     let output = executor.execute(&command)?;
     ensure!(
         output.status == 0,
-        "inspect session temporary storage failed: {}",
+        "inspect session container storage failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    Ok(String::from_utf8(output.stdout)
-        .context("decode session temporary volume")?
-        .trim()
-        == container_temporary_volume_name(container))
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Mount {
+        #[serde(default)]
+        name: String,
+        destination: PathBuf,
+        #[serde(rename = "RW")]
+        writable: bool,
+    }
+    let mounts: Vec<Mount> =
+        serde_json::from_slice(&output.stdout).context("decode session container mounts")?;
+    let attachments = attachments
+        .iter()
+        .map(|attachment| {
+            let actual = mounts
+                .iter()
+                .find(|mount| mount.destination == attachment.destination)
+                .with_context(|| {
+                    format!(
+                        "external attachment {} is missing from container {container}",
+                        attachment.destination.display()
+                    )
+                })?;
+            let mut attachment = attachment.clone();
+            // The engine owns the effective permissions: provisioning can
+            // downgrade a requested overlay without changing the saved choice.
+            if !actual.writable {
+                attachment.access = MountAccess::Ro;
+            }
+            Ok(attachment)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ContainerStorage {
+        managed_temporary_volume: mounts.iter().any(|mount| {
+            mount.destination == Path::new("/tmp")
+                && mount.name == container_temporary_volume_name(container)
+        }),
+        attachments,
+    })
 }
 
 // Podman exec leaves `--user` unset, so each container's stored configured user

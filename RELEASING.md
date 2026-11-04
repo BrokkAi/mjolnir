@@ -50,6 +50,17 @@ GitHub prereleases and use npm's `next` channel; stable versions use `latest`.
 A release request authorizes the normal tag push and publication. Registry
 authorization is configured once, not audited again for every release.
 
+## Nightly release
+
+The scheduled run of `.github/workflows/nightly.yml` (05:41 UTC) releases
+master when its macOS and Windows lanes both pass, master's CI passed on the
+same change, and the latest release does not already contain it. It runs
+`cargo release minor` as above on exactly the commit the lanes tested, tags
+it, updates master with the version commit (merging it if master moved in
+the meantime), and starts `release.yml` on the tag, so the result is an
+ordinary release on every channel. Manual dispatches of `nightly.yml` never
+release.
+
 ## Recovery and optional channels
 
 Rerun failed workflow jobs for the same tag. Registry jobs skip versions already
@@ -57,8 +68,8 @@ published, so partial publication can resume without overwriting packages.
 Manual `publish.yml` and `publish-npm.yml` runs support inspection with
 `publish` disabled.
 
-Homebrew remains a separate manual formula update in `BrokkAi/homebrew-tap`.
-Its wrapper exports `MJOLNIR_MANAGED_BY_HOMEBREW`, not
+The Homebrew formula in `BrokkAi/homebrew-tap` updates and deploys on its own;
+releases need no Homebrew step. Its wrapper exports `MJOLNIR_MANAGED_BY_HOMEBREW`, not
 `MJOLNIR_NO_UPDATE_CHECK`. Discord announcement failures are warnings and do
 not invalidate a release. The installer's SCRIPT_VERSION is independent of
 the application version.

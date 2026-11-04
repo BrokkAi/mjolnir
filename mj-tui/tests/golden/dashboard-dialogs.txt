@@ -1,3 +1,64 @@
+=== nested repository failure, checkpoint=false (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ─                                                                                       │
+│ Create   O                                                                                       │
+│hel ───────  ╭ × Suspension could not complete ─────────────────────────────────────╮             │
+│› ■ ACP pre  │Session: ACP pretty name                                              │  on.        │
+│  Stopped    │                                                                      │             │
+│  │ No mess  │Suspension failed: export target checkpoint failed with status 1:     │             │
+│  │          │repository 'bifrost': cannot checkpoint nested Git repository         │             │
+│             │directory at /workspace/bifrost/.scratch/s47-landing/master-check/:   │             │
+│             │for a disposable scratch worktree, exclude this path using the outer  │             │
+│             │repository's .git/info/exclude; otherwise preserve its work separately│             │
+│             │                                                                      │  ───────────╯
+│             │Ignore and Suspend omits untracked nested Git repositories from the   │  ───────────╮
+│             │recovery copy.                                                        │             │
+│             │Files inside them will not be recoverable after suspension removes the│  o open.    │
+│             │environment.                                                          │  ───────────╯
+│             │                                                                      │  ──── ▁   ▄ ╮
+│             │c Cancel  ·  i Ignore and Suspend                                     │             │
+│             │                                                                      │  ───────────╯
+│             │  Cancel     Ignore and Suspend                                       │  ──── ▁   ▄ ╮
+│             ╰──────────────────────────────────────────────────────────────────────╯   Resets    │
+│                                                                                                  │
+│                                                                                                  │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
+action: IgnoreNestedRepositoriesAndSuspend { session_id: "session-1" }
+
+=== nested repository failure, checkpoint=true (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                                                                                          │
+╰───────────                                                                                       │
+╭ Sessions ─  ╭ × Suspension could not complete ─────────────────────────────────────╮             │
+│ Create   O  │Session: ACP pretty name                                              │             │
+│hel ───────  │                                                                      │             │
+│› ■ ACP pre  │Suspension failed: export target checkpoint failed with status 1:     │  on.        │
+│  Stopped    │repository 'bifrost': cannot checkpoint nested Git repository         │             │
+│  │ No mess  │directory at /workspace/bifrost/.scratch/s47-landing/master-check/:   │             │
+│  │          │for a disposable scratch worktree, exclude this path using the outer  │             │
+│             │repository's .git/info/exclude; otherwise preserve its work separately│             │
+│             │                                                                      │             │
+│             │Ignore and Suspend omits untracked nested Git repositories from the   │             │
+│             │recovery copy.                                                        │  ───────────╯
+│             │Files inside them will not be recoverable after suspension removes the│  ───────────╮
+│             │environment.                                                          │             │
+│             │                                                                      │  o open.    │
+│             │c Cancel  ·  d Discard changes since checkpoint…  ·  i Ignore and     │  ───────────╯
+│             │Suspend                                                               │  ──── ▁   ▄ ╮
+│             │                                                                      │             │
+│             │  Cancel                                                              │  ───────────╯
+│             │  Discard changes since checkpoint…                                   │  ──── ▁   ▄ ╮
+│             │  Ignore and Suspend                                                  │   Resets    │
+│             ╰──────────────────────────────────────────────────────────────────────╯             │
+│                                                                                                  │
+│                                                                                                  │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
+action: IgnoreNestedRepositoriesAndSuspend { session_id: "session-1" }
 action: None
 
 === target actions (120x34) ===
@@ -34,7 +95,7 @@ action: None
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : palette · ? keys
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : / ? palette
 action: TestTarget { target_id: "podman" }
 
 === target test result (120x34) ===
@@ -71,7 +132,7 @@ action: TestTarget { target_id: "podman" }
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : palette · ? keys
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : / ? palette
 
 === target ID editor (120x34) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
@@ -107,7 +168,7 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : palette · ? keys
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : / ? palette
 
 === edited target ID (120x34) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
@@ -143,7 +204,7 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : palette · ? keys
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : / ? palette
 action: RenameTarget { old_id: "podman", new_id: "podman-v2" }
 action: None
 action: None
@@ -182,7 +243,7 @@ action: None
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : palette · ? keys
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : / ? palette
 action: ProbeGitStatus { session_id: "session-1" }
 
 === changed files while the checkout probe is pending (100x24) ===
@@ -209,7 +270,7 @@ action: ProbeGitStatus { session_id: "session-1" }
 │                                      ││  codex-1   Codex        refreshing…                      │
 │                                      ││  codex-2   Codex        refreshing…                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 
 === changed files first page (100x24) ===
 ╭ Worksp                                                                                       ⋯───╮
@@ -235,7 +296,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │         │  Refresh (r)     Close                                                       │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────╯         │
 ╰───────                                                                                    ───────╯
-Enter op                                                                                    keys
+Enter op
 
 === changed files after paging down (100x24) ===
 ╭ Worksp                                                                                       ⋯───╮
@@ -261,7 +322,7 @@ Enter op                                                                        
 │         │  Refresh (r)     Close                                                       │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────╯         │
 ╰───────                                                                                    ───────╯
-Enter op                                                                                    keys
+Enter op
 action: ProbeGitStatus { session_id: "session-1" }
 action: None
 
@@ -289,7 +350,7 @@ action: None
 │                                      ││  codex-1   Codex        refreshing…                      │
 │                                      ││  codex-2   Codex        refreshing…                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 
 === command palette search for recent messages (100x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
@@ -419,7 +480,7 @@ action: None
 │  │ No messages yet                   ││  codex-1   Codex        refreshing…                                          │
 │  │                                   ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 action: None
 
 === CPU by session (120x36) ===
@@ -458,7 +519,7 @@ action: None
 │  │ No me  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │  │                                                                                                                   │
 ╰─────────                                                                                                    ─────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
 === CPU by session after paging down (120x36) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
@@ -496,7 +557,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │ No me  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │  │                                                                                                                   │
 ╰─────────                                                                                                    ─────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 action: None
 
 === Profiles menu with usage report (120x36) ===
@@ -535,7 +596,7 @@ action: None
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
 === Usage by session loading (120x36) ===
 ╭ W                                                                                                                  ──╮
@@ -573,7 +634,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │    │  Refresh     Close                                                                                         │    │
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
-Ent                                                                                                                  eys
+Ent
 
 === Usage by session All with model costs (120x36) ===
 ╭ W                                                                                                                  ──╮
@@ -611,7 +672,7 @@ Ent                                                                             
 │    │  Refresh     Close                                                                                         │    │
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
-Ent                                                                                                                  eys
+Ent
 
 === Usage profile dropdown (120x36) ===
 ╭ W                                                                                                                  ──╮
@@ -649,7 +710,7 @@ Ent                                                                             
 │    │  Refresh     Close                                                                                         │    │
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
-Ent                                                                                                                  eys
+Ent
 
 === Usage period dropdown (120x36) ===
 ╭ W                                                                                                                  ──╮
@@ -687,7 +748,7 @@ Ent                                                                             
 │    │  Refresh     Close                                                                                         │    │
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
-Ent                                                                                                                  eys
+Ent
 
 === Usage daily (120x36) ===
 ╭ W                                                                                                                  ──╮
@@ -725,7 +786,7 @@ Ent                                                                             
 │    │  Refresh     Close                                                                                         │    │
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
-Ent                                                                                                                  eys
+Ent
 
 === Usage weekly including suspended (120x36) ===
 ╭ W                                                                                                                  ──╮
@@ -763,7 +824,7 @@ Ent                                                                             
 │    │  Refresh     Close                                                                                         │    │
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
-Ent                                                                                                                  eys
+Ent
 
 === Usage report failure (120x36) ===
 ╭ W                                                                                                                  ──╮
@@ -830,7 +891,7 @@ notice while the check runs: Some("Still checking the Git identity on this host�
 │                                      ││  codex-1   Codex        refreshing…                      │
 │                                      ││  codex-2   Codex        refreshing…                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 action: SaveGitIdentity { name: "Ada Lovelace", email: "ada.example.com" }
 escape while saving: None
 
@@ -858,7 +919,7 @@ escape while saving: None
 │                                      ││  codex-1   Codex        refreshing…                      │
 │                                      ││  codex-2   Codex        refreshing…                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 
 === Git identity save failure keeps the fields (100x24) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
@@ -884,7 +945,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  codex-1   Codex        refreshing…                      │
 │                                      ││  codex-2   Codex        refreshing…                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 action: SaveGitIdentity { name: "Ada Lovelace", email: "ada.example.com" }
 follow-up after saving: None
 notice after saving: Some("Git identity saved: Ada Lovelace <ada@example.com>")

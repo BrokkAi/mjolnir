@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::controller) enum WorkerFilePreparation {
+    Install,
+    RefreshProfile,
+}
+
 fn disable_mbx_cache_shims(
     session_id: &str,
     backend: &targets::TargetLocator,
@@ -37,6 +43,29 @@ fn build_cache_config_roots(launch: &WorkerLaunchConfig) -> Vec<PathBuf> {
 }
 
 impl Controller {
+    pub(crate) fn aws_credential_source(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<mj_core::aws_credentials::AwsCredentialSource>> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("session is missing")?;
+        let profile = self
+            .config
+            .profiles
+            .get(&session.last_profile)
+            .context("session profile is missing")?;
+        let locator = session
+            .target
+            .as_ref()
+            .context("session target is missing")?;
+        let backend = backend_locator(locator, session, &self.config)?;
+        let runtime = session.target_runtime_settings(&self.config)?;
+        crate::aws_credentials::source(profile, &backend, &runtime.environment)
+    }
+
     /// Where this session's worker lives. This is decided from the session
     /// record and configuration alone, so a caller can name the worker root
     /// before anything is installed into it.
@@ -68,6 +97,23 @@ impl Controller {
         worker_root: &str,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
+        self.prepare_worker_files_for(
+            session_id,
+            backend,
+            worker_root,
+            executor,
+            WorkerFilePreparation::Install,
+        )
+    }
+
+    pub(in crate::controller) fn prepare_worker_files_for(
+        &self,
+        session_id: &str,
+        backend: &targets::TargetLocator,
+        worker_root: &str,
+        executor: &impl CommandExecutor,
+        preparation: WorkerFilePreparation,
+    ) -> Result<()> {
         let owner = crate::worker_lifecycle::require(session_id)?;
         let session = self
             .state
@@ -77,6 +123,34 @@ impl Controller {
         if let Some(target) = session.target.as_ref() {
             owner.verify_target(target)?;
         }
+        // A busy worker can outlive a daemon upgrade. Reusing its history
+        // does not imply that its executable can read this launch format.
+        let upgrade_retained_worker = if preparation == WorkerFilePreparation::RefreshProfile {
+            let executable = mj_core::target_path::join(Path::new(worker_root), Path::new("hel"));
+            let output = execute_checked(
+                executor,
+                targets::command_on_locator(
+                    backend,
+                    session_id,
+                    vec![
+                        mj_core::target_path::text(&executable),
+                        "worker".into(),
+                        "build-id".into(),
+                    ],
+                    "read retained worker build",
+                )?,
+            )?;
+            let build = std::str::from_utf8(&output.stdout)
+                .context("decode retained worker build")?
+                .trim();
+            ensure!(
+                mj_core::worker_build::is_worker_build(build),
+                "retained worker returned an invalid build identity"
+            );
+            build != WORKER_BUILD_ID
+        } else {
+            false
+        };
         let profile = self
             .config
             .profiles
@@ -123,6 +197,10 @@ impl Controller {
             "profile staging completed"
         );
         result?;
+        if let Some(source) = self.aws_credential_source(session_id)? {
+            let credentials = crate::aws_credentials::export(&source, executor)?;
+            credentials.install(&profile_stage, Path::new(&target_profile_home))?;
+        }
         stage_claude_keychain_login(
             profile,
             &profile_stage,
@@ -140,12 +218,23 @@ impl Controller {
                 .skills_scope(),
         )?;
         append_hel_target_environment(profile.kind, &profile_stage, backend)?;
+        // Edits to attachment settings apply on the next container creation;
+        // describe this container's creation snapshot while it is retained.
+        let attachments = session
+            .target_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.container_settings.as_ref())
+            .map_or(session.additional_mounts.as_slice(), |settings| {
+                settings.additional_mounts.as_slice()
+            });
+        let storage = targets::inspect_container_storage(backend, attachments, executor)?;
         append_container_storage_guidance(
             profile.kind,
             &profile_stage,
             backend,
             session.container_workspace.as_deref(),
-            targets::has_managed_temporary_volume(backend, executor)?,
+            storage.managed_temporary_volume,
+            &storage.attachments,
         )?;
         append_subagent_policy(
             profile.kind,
@@ -190,8 +279,36 @@ impl Controller {
                 )?;
             }
         }
+        let shared_login = shared_profile_login(profile, backend);
+        if preparation == WorkerFilePreparation::RefreshProfile {
+            clear_profile_configuration(
+                executor,
+                backend,
+                session_id,
+                &target_profile_home,
+                profile.kind,
+            )?;
+            install_worker_profile_files(
+                executor,
+                backend,
+                session_id,
+                worker_root,
+                &target_profile_home,
+                StagedWorkerProfile {
+                    launch: &launch_path,
+                    ownership: &ownership_path,
+                    profile: &profile_stage,
+                    shared_login: shared_login.as_ref(),
+                },
+            )?;
+            if upgrade_retained_worker {
+                let worker = WorkerInstall::for_target(backend, executor)?;
+                install_worker_binary(executor, backend, session_id, &worker, "hel")?;
+                prepare_installed_managed_harness(executor, backend, worker_root, &launch)?;
+            }
+            return Ok(());
+        }
         let worker = WorkerInstall::for_target(backend, executor)?;
-
         install_worker_files(
             executor,
             backend,
@@ -202,7 +319,7 @@ impl Controller {
             &launch_path,
             &ownership_path,
             &profile_stage,
-            shared_profile_login(profile, backend).as_ref(),
+            shared_login.as_ref(),
         )?;
         if session.build_cache.is_some() {
             self.install_build_cache_shim(session, backend, &launch, executor)
@@ -445,9 +562,13 @@ impl Controller {
             },
             &target,
         )?;
-        launch.reviewer_launch = subagent
-            .as_ref()
-            .and_then(|child| child.reviewer_launch.clone());
+        launch.reviewer_launch = if subagent.is_some() {
+            crate::database::load_subagent(session_id)?
+                .context("sub-agent launch record is missing")?
+                .reviewer_launch
+        } else {
+            None
+        };
         if let Some(reviewer) = &launch.reviewer_launch {
             launch.bridge_command = reviewer.bridge_command.clone();
             launch.bridge_args = reviewer.bridge_args.clone();
@@ -511,6 +632,46 @@ impl Controller {
         // The child's harness opens on its spawn model instead of switching
         // to it from the profile default before the first turn (issue 1217).
         launch.initial_model = subagent.as_ref().and_then(|child| child.model.clone());
+        if let Some(child) = subagent
+            .as_ref()
+            .filter(|child| child.kind == mj_core::subagent::SubagentKind::Worker)
+        {
+            launch.initial_commands = crate::database::load_startup_group(
+                session_id,
+                &format!("subagent-spawn-{}", child.request_key),
+            )?
+            .into_iter()
+            .map(|step| {
+                let (command, optional) =
+                    match serde_json::from_str::<crate::daemon::StartupStep>(&step.step_json)? {
+                        crate::daemon::StartupStep::Configure {
+                            key,
+                            value,
+                            optional,
+                        } => (
+                            mj_core::relay::RelayCommand::SetConfig { key, value },
+                            optional,
+                        ),
+                        crate::daemon::StartupStep::ApiPrompt { text } => (
+                            mj_core::relay::RelayCommand::Prompt {
+                                prompt: vec![
+                                    agent_client_protocol::v1::schema::ContentBlock::Text(
+                                        agent_client_protocol::v1::schema::TextContent::new(text),
+                                    ),
+                                ],
+                            },
+                            false,
+                        ),
+                        _ => anyhow::bail!("sub-agent startup contains a non-input step"),
+                    };
+                Ok(mj_core::worker_launch::InitialWorkerCommand {
+                    command_id: step.command_id,
+                    command,
+                    optional,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        }
         // Capturing the working tree is only ever useful to a turn review, so
         // it is spent only on a session a review can run for: one whose
         // review configuration, with the session's own choice applied, has an
@@ -886,6 +1047,28 @@ pub(super) fn worker_launch_config_with_checkout(
     }
     let mut environment = target_environment.clone();
     environment.extend(profile.environment.resolved().clone());
+    if let Some(source) = crate::aws_credentials::source(profile, backend, &target.environment)? {
+        environment.remove("AWS_DEFAULT_PROFILE");
+        environment.insert(
+            "AWS_PROFILE".into(),
+            source.environment["AWS_PROFILE"].clone(),
+        );
+        for (key, name) in [
+            (
+                "AWS_SHARED_CREDENTIALS_FILE",
+                mj_core::aws_credentials::EMPTY_CREDENTIALS_FILE,
+            ),
+            ("AWS_CONFIG_FILE", mj_core::aws_credentials::CONFIG_FILE),
+        ] {
+            environment.insert(
+                key.into(),
+                mj_core::target_path::text(&mj_core::target_path::join(
+                    Path::new(&target_profile_home),
+                    Path::new(name),
+                )),
+            );
+        }
+    }
     // This ownership fact is generated by the controller, so a profile cannot
     // impersonate another session or turn a child into a top-level sender.
     environment.insert("MJ_SESSION_ID".into(), session_id.to_owned());
@@ -919,9 +1102,7 @@ pub(super) fn worker_launch_config_with_checkout(
     profile
         .kind
         .configure_home_environment(Path::new(&target_profile_home), &mut environment);
-    profile
-        .kind
-        .configure_execution_environment(execution_policy, &mut environment)?;
+    profile.configure_execution_environment(execution_policy, &mut environment)?;
     // The project's identity also keys the shared tool cache and names the
     // Claude project directory, so it is worked out for every session. Only
     // the memory launch config below depends on the session's choice.
@@ -987,6 +1168,7 @@ pub(super) fn worker_launch_config_with_checkout(
     }
     Ok((
         WorkerLaunchConfig {
+            initial_commands: Vec::new(),
             reviewer_launch: None,
             goal_resume_request: None,
             target_environment,

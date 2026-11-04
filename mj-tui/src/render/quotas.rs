@@ -95,6 +95,13 @@ pub(crate) fn minimized_quota_line(
             if usage_priced {
                 return None;
             }
+            if quota.is_some_and(ProfileQuota::is_not_reported) {
+                return Some(SummaryReading {
+                    name: id.to_owned(),
+                    value: NOT_REPORTED_LABEL.into(),
+                    color: None,
+                });
+            }
             if dashboard.quota_refreshing.contains(id) {
                 return Some(SummaryReading {
                     name: id.to_owned(),
@@ -280,8 +287,8 @@ pub(crate) fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
 }
 
 /// Renders the API label in the same black, bordered field as capacity charts.
-pub(crate) fn api_quota_bar() -> Line<'static> {
-    let label = API_LABEL;
+/// The bar a windowless report draws: its label, centred in an empty field.
+pub(crate) fn windowless_quota_bar(label: &'static str) -> Line<'static> {
     let label_cells = label.chars().count().min(QUOTA_BAR_CELLS);
     let left = (QUOTA_BAR_CELLS - label_cells) / 2;
     let right = QUOTA_BAR_CELLS - label_cells - left;
@@ -389,13 +396,13 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
         .enabled_profiles()
         .map(|(id, profile)| {
             let (weekly, weekly_reset, five_hour, five_hour_reset, weekly_chart, five_hour_chart) =
-                if dashboard
+                if let Some(label) = dashboard
                     .quotas
                     .get(id)
-                    .is_some_and(|quota| quota.is_usage_priced())
+                    .and_then(ProfileQuota::windowless_label)
                 {
                     (
-                        api_quota_bar(),
+                        windowless_quota_bar(label),
                         String::new(),
                         Line::default(),
                         String::new(),
@@ -426,7 +433,17 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
                         ),
                         Some(quota) if quota.error.is_none() => {
                             let (weekly_reset, five_hour_reset) = quota_reset_cells(quota, now);
-                            let weekly = quota_bar(quota.summary_window());
+                            let mut weekly = quota_bar(quota.summary_window());
+                            if quota
+                                .weekly_window()
+                                .and_then(quota_remaining_percent)
+                                .is_some()
+                                && let Some(fable) = quota
+                                    .fable_weekly_window()
+                                    .and_then(quota_remaining_percent)
+                            {
+                                weekly.spans.push(Span::raw(format!(" ({fable}%)")));
+                            }
                             let five_hour = five_hour_quota_bar(quota);
                             let weekly_chart = !weekly.spans.is_empty();
                             let five_hour_chart = !five_hour.spans.is_empty();

@@ -90,7 +90,6 @@ global task-type sub-agent model or effort that no enabled profile offers.
 | `401` | No bearer token and no valid viewer cookie. |
 | `404` | No such session, or no transcript recorded for it. |
 | `409` | The session cannot do this now: no prompt capability, no live target, a turn still running, no commits to bundle, no recorded base for a diff, no push remote configured. |
-| `429` | Concurrent action limit: retry after the running action finishes. |
 | `500` | The operation was attempted and failed. The message says what failed. |
 | `503` | The daemon is shutting down, or the controller is not accepting actions. |
 
@@ -364,9 +363,11 @@ form) remember choices. `mj acp`, sub-agents and archive restores do not.
 
 When `model` is supplied without `profile_id`, Mjolnir checks every enabled,
 usable profile and chooses the one offering the exact model and, when named,
-the exact effort. It ranks by remaining quota, using the saved default profile
-to break ties. If no configured profile supports that selection, the request
-fails without changing the requested model or effort. Supplying both
+the exact effort. It ranks by quota headroom paced against each window's reset,
+using the saved default profile to break ties. Usage-priced (API key) profiles
+come after every subscription profile that has or may have quota left. If no configured profile
+supports that selection, the request fails without changing the requested
+model or effort. Supplying both
 `profile_id` and `model` pins the profile and validates the model and effort on
 it.
 
@@ -529,9 +530,12 @@ the viewer's create form selects: the size last chosen for that host, else
 ```
 
 A size above the host's reported totals answers `400`, and so does either
-field on a target that is not a container target. The daemon also refuses a
-launch that would exceed the host's aggregate committed CPU or hard RAM
-budget. `remember_container_size` (boolean, default `false`) saves the selected
+field on a target that is not a container target. CPU overcommit is admitted
+with a warning. RAM overcommit is also admitted for Docker and Podman,
+including on macOS. Only Apple `container` targets refuse aggregate RAM
+overcommit or an unavailable or incomplete RAM budget: their VMs do not
+return freed memory to macOS. Create, resume, and move share this policy.
+A creation warning is returned in the optional `notice` field. `remember_container_size` (boolean, default `false`) saves the selected
 size as the default for that physical host without changing the saved profile,
 target, recent-launch, or sub-agent defaults.
 
@@ -1121,7 +1125,9 @@ about the settings they actually accept.
 `effort` before bundling or provisioning. An unknown selector returns `400` with
 available values, after refreshing cached choices. With an omitted `profile_id`,
 the daemon uses the saved default profile as the eligibility anchor and ranks
-profiles that offer the requested selection by quota. Settings are applied
+profiles that offer the requested selection by quota headroom paced against
+window reset times, with usage-priced (API key) profiles after every
+subscription profile that has or may have quota left. Settings are applied
 model first, then effort using the model's updated choices. A later target-side
 configuration failure leaves the session available for repair and is reported
 by `wait`. It does not consume a prompt turn.

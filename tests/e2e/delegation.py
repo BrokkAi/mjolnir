@@ -112,7 +112,11 @@ def main():
         )
         script = script.replace(
             '        report_execution("running")',
-            '        report_execution("running")\n        with open(os.path.join(os.environ["CODEX_HOME"], "fixture-prompt.txt"), "a") as marker:\n            marker.write(text + "\\n")',
+            '        report_execution("running")\n'
+            '        with open(os.path.join(os.environ["CODEX_HOME"], "fixture-prompt.jsonl"), "a") as marker:\n'
+            '            marker.write(json.dumps(blocks) + "\\n")\n'
+            '        with open(os.path.join(os.environ["CODEX_HOME"], "fixture-prompt.txt"), "a") as marker:\n'
+            '            marker.write(text + "\\n")',
         )
         # A held prompt ends with end_turn once `release` writes its file into
         # the session's private CODEX_HOME, or as cancelled on session/cancel.
@@ -139,6 +143,19 @@ def main():
         )
         assert script.count("def wait_for_prompt_cancel():\n") == 1
         script = script.replace("def wait_for_prompt_cancel():\n", held)
+        model_gate = lab.runtime_root / "hold-startup-model"
+        script = script.replace(
+            '        params = message["params"]\n',
+            '        params = message["params"]\n'
+            f'        gate = {str(model_gate)!r}\n'
+            '        if params["configId"] == "model" and os.path.exists(gate):\n'
+            '            open(os.path.join(os.environ["CODEX_HOME"], "fixture-model-pending"), "w").close()\n'
+            '            deadline = time.monotonic() + 120\n'
+            '            while os.path.exists(gate):\n'
+            '                if time.monotonic() >= deadline:\n'
+            '                    raise RuntimeError("startup model response was not released")\n'
+            '                time.sleep(0.05)\n',
+        )
         compile(script, str(bridge), "exec")
         bridge.write_text(script)
         env = lab.environment()
@@ -335,6 +352,7 @@ def main():
         cli("daemon", "restart")
         assert "disabled" in cli("daemon", "status").lower()
         tool(parent, "list_agents")
+        model_gate.touch()
         spawned = tool(
             parent,
             "spawn",
@@ -395,7 +413,66 @@ def main():
                 time.sleep(0.1)
             raise RuntimeError(f"report was not acknowledged in the outbox: {session}, {finished_child}, {rows}")
 
-        wait_prompt(child, "Return a short fixture report.")
+        # Hard-won: #1394: a parent message started the child between model and effort, before its brief.
+        deadline = time.monotonic() + WAIT_SECONDS
+        while not any(
+            child in marker.parts
+            for marker in lab.runtime_root.rglob("fixture-model-pending")
+        ):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("child never reached the held startup configuration")
+            time.sleep(0.05)
+        early_message = tool(parent, "send_message", {
+            "child_session_id": child, "message": "Follow-up after the original brief.",
+        })
+        with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+            key, payload = database.execute(
+                "SELECT event_key, event_json FROM mailbox_outbox WHERE target_session_id=?",
+                (child,),
+            ).fetchone()
+            initial_prompt_id = database.execute(
+                "SELECT command_id FROM startup_steps WHERE session_id=? "
+                "AND json_type(step_json, '$.ApiPrompt')='object' ORDER BY sequence LIMIT 1",
+                (child,),
+            ).fetchone()[0]
+        # Force a delivery attempt through the normal serialized actor instead
+        # of relying on the scheduling of the background outbox sweep.
+        lab.daemon_request({
+            "action": "submit_session_command",
+            "arguments": {"session_id": child, "command_id": "early-child-mailbox-regression",
+                          "command": {"type": "deliver_mailbox_event", "data": {"event": json.loads(payload)}}},
+        }, timeout=WAIT_SECONDS)
+        held_status = worker_status(child)
+        assert held_status["active_prompt"] is None, held_status
+        assert any(
+            queued["command_id"] == initial_prompt_id
+            for queued in held_status["queued_prompts"]
+        ), "the worker FIFO does not contain the original brief before accepting messages"
+        model_gate.unlink()
+        prompt_marker = wait_prompt(child, "Return a short fixture report.")
+        first_prompt = prompt_marker.read_text()
+        assert "You are a Mjolnir sub-agent" in first_prompt, first_prompt
+        assert worker_status(child)["config"]["effort"] == "high"
+        deadline = time.monotonic() + WAIT_SECONDS
+        while True:
+            with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                accepted = database.execute(
+                    "SELECT accepted_at FROM mailbox_outbox WHERE event_key=?", (key,),
+                ).fetchone()[0]
+            if accepted is not None:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("parent message stayed queued after the initial prompt")
+            time.sleep(0.05)
+        hook = run_mailbox_hook(child)
+        # Pending mail may join the original prompt's hidden context or arrive
+        # at its next tool boundary. In either case the brief starts the turn.
+        first_blocks = prompt_marker.with_name("fixture-prompt.jsonl").read_text().splitlines()[0]
+        delivered = first_blocks + hook.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert delivered.count("Follow-up after the original brief.") == 1, delivered
+        hook = run_mailbox_hook(child)
+        assert "Follow-up after the original brief." not in hook.get("hookSpecificOutput", {}).get("additionalContext", ""), hook
+        assert early_message["status"] == "queued", early_message
         # Hard-won: 8ba3d377e: queued settings prevented steering a parent's user input.
         # Drive the real daemon and worker; the child must retain its own turn.
         def submit_parent(command_id, command):
@@ -618,6 +695,64 @@ def main():
         refused = fetch("/etc/passwd")
         assert refused.returncode != 0, refused.stdout
         assert "outside the directories a session shares" in refused.stderr, refused.stderr
+
+        # Fetch is available through the real MCP server with delegation off
+        # or native. The reply stays small even at the full 16 MiB file limit.
+        binary = bytes(range(256)) * (16 * 1024 * 1024 // 256)
+        large_source = source.with_name("fetch binary λ.dat")
+        large_source.write_bytes(binary)
+        for policy in ["none", "native"]:
+            receiver = json.loads(cli(
+                "new", "--workspace", "Delegation test", "--profile", "fake",
+                "--target", "localhost", "--project-directory", str(lab.project),
+                "--subagents", policy, "--json",
+            ))["session_id"]
+            receiver_socket = endpoint(receiver)
+
+            def mcp_fetch(path, ls=False):
+                requests = [
+                    {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                        "name": "fetch", "arguments": {
+                            "session_id": parent, "path": path, "ls": ls,
+                        },
+                    }},
+                ]
+                response = subprocess.run(
+                    [str(args.worker.resolve()), "worker", "subagent-mcp",
+                     "--socket", str(receiver_socket), "--role", "message_only"],
+                    env=env, input="".join(json.dumps(r) + "\n" for r in requests),
+                    capture_output=True, text=True, timeout=WAIT_SECONDS,
+                )
+                assert response.returncode == 0, response.stderr
+                replies = {r["id"]: r for r in map(json.loads, response.stdout.splitlines())}
+                assert {t["name"] for t in replies[1]["result"]["tools"]} == {"send_message", "fetch"}
+                assert "error" not in replies[2], replies[2]
+                return replies[2]["result"]
+
+            copied = mcp_fetch(large_source.name)
+            assert not copied["isError"], copied
+            saved = copied["structuredContent"]
+            assert saved["bytes"] == len(binary) and saved["kind"] == "file", saved
+            assert Path(saved["path"]).read_bytes() == binary
+            assert Path(saved["path"]) != large_source
+            assert len(json.dumps(copied)) < 2048
+            Path(saved["path"]).unlink()
+            archived = mcp_fetch(str(report_dir / "probes"))
+            assert not archived["isError"], archived
+            saved_zip = archived["structuredContent"]
+            assert saved_zip["kind"] == "directory" and saved_zip["path"].endswith(".zip")
+            with zipfile.ZipFile(saved_zip["path"]) as archive:
+                assert archive.read("probes/probe.log") == b"probe\n" * 20000
+            Path(saved_zip["path"]).unlink()
+            listing = mcp_fetch(str(report_dir / "probes"), ls=True)
+            assert not listing["isError"], listing
+            assert listing["structuredContent"]["entries"] == entries
+            refused = mcp_fetch("/etc/passwd")
+            assert refused["isError"] and "outside the directories a session shares" in json.dumps(refused)
+            cli("destroy", "--session", receiver)
+        large_source.unlink()
+
         legacy = tool(parent, "spawn", {
             "task_name": "legacy-accepted",
             "instructions": "Return the legacy attachment evidence.",

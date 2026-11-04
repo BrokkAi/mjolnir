@@ -53,6 +53,7 @@ pub(crate) struct SessionRestartIntent {
     pub operation_id: String,
     pub phase: SessionRestartPhase,
     pub checkpoint_sha256: Option<String>,
+    pub handoff: Option<CheckpointMetadata>,
     pub checkpoint_started: bool,
     pub container_recreation_acknowledged: bool,
     /// Historical automatic recreation intent. New daemons never create one;
@@ -122,6 +123,7 @@ fn begin_session_restart_with(
             operation_id,
             phase: SessionRestartPhase::Stopping,
             checkpoint_sha256: None,
+            handoff: None,
             checkpoint_started: false,
             container_recreation_acknowledged: false,
             automatic: false,
@@ -133,7 +135,7 @@ fn begin_session_restart_with(
 pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
-        "SELECT session_id, operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged, automatic, container_upgrade_json
+        "SELECT session_id, operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged, automatic, container_upgrade_json, handoff_json
          FROM session_restart_intents ORDER BY session_id",
     )?;
     statement
@@ -147,6 +149,7 @@ pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
                 row.get::<_, bool>(5)?,
                 row.get::<_, bool>(6)?,
                 row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
             ))
         })?
         .map(|row| {
@@ -159,12 +162,16 @@ pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
                 container_recreation_acknowledged,
                 automatic,
                 container_upgrade_json,
+                handoff_json,
             ) = row?;
             Ok(SessionRestartIntent {
                 session_id,
                 operation_id,
                 phase: SessionRestartPhase::parse(&phase)?,
                 checkpoint_sha256,
+                handoff: handoff_json
+                    .map(|json| serde_json::from_str(&json))
+                    .transpose()?,
                 checkpoint_started,
                 container_recreation_acknowledged,
                 automatic,
@@ -369,13 +376,13 @@ pub(crate) fn cancel_session_restart(session_id: &str) -> Result<()> {
     })
 }
 
-fn load_session_restart_with(
+pub(super) fn load_session_restart_with(
     connection: &Connection,
     session_id: &str,
 ) -> Result<Option<SessionRestartIntent>> {
     let row = connection
         .query_row(
-            "SELECT operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged, automatic, container_upgrade_json
+            "SELECT operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged, automatic, container_upgrade_json, handoff_json
          FROM session_restart_intents WHERE session_id=?1",
             [session_id],
             |row| {
@@ -387,6 +394,7 @@ fn load_session_restart_with(
                     row.get::<_, bool>(4)?,
                     row.get::<_, bool>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             },
         )
@@ -400,12 +408,16 @@ fn load_session_restart_with(
             container_recreation_acknowledged,
             automatic,
             container_upgrade_json,
+            handoff_json,
         )| {
             Ok(SessionRestartIntent {
                 session_id: session_id.to_owned(),
                 operation_id,
                 phase: SessionRestartPhase::parse(&phase)?,
                 checkpoint_sha256,
+                handoff: handoff_json
+                    .map(|json| serde_json::from_str(&json))
+                    .transpose()?,
                 checkpoint_started,
                 container_recreation_acknowledged,
                 automatic,
@@ -494,4 +506,32 @@ pub(super) fn container_upgrade_owns_target_with(
     session_id: &str,
 ) -> Result<bool> {
     Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM session_restart_intents WHERE session_id=?1 AND container_upgrade_json IS NOT NULL)", [session_id], |row| row.get(0))?)
+}
+
+/// The Restart owns its handoff before the relay can be sealed. Its digest and
+/// archive reference change in one database-writer decision.
+pub(crate) fn record_session_restart_handoff(
+    session_id: &str,
+    operation_id: &str,
+    handoff: &CheckpointMetadata,
+) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let operation_id = operation_id.to_owned();
+    let handoff = handoff.clone();
+    submit_database_write("record_session_restart_handoff", move |connection| {
+        let changed = connection.execute(
+            "UPDATE session_restart_intents SET handoff_json=?3, checkpoint_sha256=?4, updated_at=?5 WHERE session_id=?1 AND operation_id=?2",
+            params![session_id, operation_id, serde_json::to_string(&handoff)?, handoff.sha256, Utc::now().to_rfc3339()],
+        )?;
+        ensure!(
+            changed == 1,
+            "Restart ownership changed before its handoff was recorded"
+        );
+        Ok(())
+    })
+}
+
+pub(crate) fn load_session_restart(session_id: &str) -> Result<Option<SessionRestartIntent>> {
+    let connection = open_reader(&database_path())?;
+    load_session_restart_with(&connection, session_id)
 }

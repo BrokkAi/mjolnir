@@ -38,6 +38,11 @@ usage by model and estimated API cost, including its Mjolnir sub-agents. Rows
 are sorted by total cost, highest first. Accounting retained for destroyed
 sub-agents still contributes to their parent.
 
+Claude's native sub-agent usage also contributes when the bridge reports a
+per-model breakdown. These counts include internal calls such as compaction.
+Earlier recorded turns that discarded this breakdown cannot be split by model
+retroactively.
+
 The profile dropdown starts on **All**. Choosing a profile counts only the
 turns that ran on that profile, wherever they are in a parent's sub-agent
 tree, and still shows them under the parent. For example, a Claude session
@@ -58,6 +63,67 @@ region, or long-context premiums. Only completed turns with complete usage
 reports enter the estimates. A **+** marks partial accounting, and **unpriced**
 marks models or counters that cannot be priced from the recorded information.
 
+## Quota history
+
+While the daemon is running, it records each quota refresh result in the
+`quota_history` table of its `mj.sqlite3` database. Profiles normally refresh
+every ten minutes; provider rate limits can extend the interval. Manual and
+other requested probes also contribute. History starts with the first refresh
+after upgrading; earlier cached reports are not backfilled. Startup reuses of
+the cache do not add samples. History has no automatic expiry and survives
+session or profile removal.
+
+Each row has an `id`, a `profile_id`, a `harness`, a
+`sampled_at_epoch_seconds` timestamp (UTC Unix seconds, at refresh start), a
+hashed configuration `identity`, and a JSON `body` containing the complete
+quota report. The identity distinguishes changes to a profile's quota source;
+it does not identify the subscription account. Profiles sharing an account
+may report the same allowance. Multiple probes can share a timestamp; `id`
+distinguishes them.
+
+The report retains every window, including model-specific allowances, remaining
+percentages, reported usage and limits, reset times, and banked resets when
+available. These are the normalized quota readings, before filling missing
+reset data from the cache or substituting previous windows after a failed
+probe. Unchanged readings and failures are retained too. Missing values remain
+unknown; API-billed and non-reporting profiles have no quota windows. A quota
+reader may reuse its own recent provider response; sampling is not a guarantee
+of a new provider measurement.
+
+For example, open the database with `sqlite3 -readonly /path/to/mj.sqlite3`
+and list windows for one profile:
+
+```sql
+SELECT h.id, datetime(h.sampled_at_epoch_seconds, 'unixepoch') AS sampled_utc,
+       h.identity, w.value ->> '$.label' AS window,
+       w.value ->> '$.model_scope' AS model_scope,
+       w.value ->> '$.remaining_percent' AS remaining_percent,
+       w.value ->> '$.used' AS used, w.value ->> '$.limit' AS allowance,
+       w.value ->> '$.duration_seconds' AS duration_seconds,
+       w.value ->> '$.resets_at_epoch_seconds' AS resets_at_epoch_seconds,
+       h.body ->> '$.banked_resets' AS banked_resets,
+       h.body ->> '$.error' AS error,
+       h.body ->> '$.extra' AS note,
+       h.body ->> '$.rate_limited_until_epoch_seconds' AS probe_held_until
+FROM quota_history h
+LEFT JOIN json_each(h.body, '$.windows') w ON true
+WHERE h.profile_id = 'codex'
+ORDER BY h.sampled_at_epoch_seconds, h.id, w.key;
+```
+
+The left join includes failed probes and reports without windows. For cost
+analysis, compare decreases within the same configuration identity, window,
+model scope, and reset period with the **Usage by session** API cost estimates
+for that profile and period. Short and weekly allowances overlap; do not add
+them together. Resets, banked-reset use, rounded percentages, gaps between
+samples, incomplete token reports, and account usage outside Mjolnir limit
+precision. A reset between probes can hide consumption. History does not record
+the subscription price or plan changes, so supply those separately. Given a
+comparable period, the effective discount is
+`1 - subscription cost / estimated API cost` when the estimated API cost is
+positive. Estimating a fully used plan from a partially used quota also assumes
+the model mix and quota charging stay comparable.
+
 ## Supported harnesses
 
 | Harness | `kind` | Home variable | Conventional home | Authentication marker | Guardian approvals on a raw target |
@@ -69,7 +135,7 @@ marks models or counters that cannot be priced from the recorded information.
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
 | OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | no |
 | MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` (stock XDG config and login when unset) | `data/auth.json`, or `~/.local/share/mimocode/auth.json` for the stock install | no |
-| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh` | `DEEPSEEK_API_KEY` in the environment (no file) | no |
+| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh` | `DEEPSEEK_API_KEY` saved in DSH, or in the environment | no |
 
 There are eight harness kinds. Codex can use its built-in Amazon Bedrock
 providers; see [Codex on Amazon Bedrock](#codex-on-amazon-bedrock). It can also
@@ -390,6 +456,15 @@ A disabled profile is omitted from new, resume, move, review, login, import,
 Quota, and utility-model choices. Sessions already running under that profile
 continue to operate. Re-enable it before starting new work with it.
 
+The new-session and resume pickers also leave out a profile that is not there:
+one a harness cannot start from (for example, its API key is not set), or one
+whose agent is gone, meaning its home directory no longer exists and its
+command is not on `PATH`. The picker names it under the list with the reason
+and the fix. Mjolnir checks when the dashboard starts and each time a picker
+opens, and the profile returns as soon as a check finds it again. Each check
+also adds a profile for an agent installed since the configuration was
+written.
+
 Optional environment and compaction controls are useful for nonstandard target
 installs:
 
@@ -530,10 +605,17 @@ container storage notes, and sub-agent instructions when sub-agent delegation
 applies. On a bare local or SSH target with none of these, it is the profile's
 file unchanged.
 
-DSH authenticates with an API key in `DEEPSEEK_API_KEY`. As with a
-[Codex custom provider](#codex-with-a-custom-provider), Mjolnir takes the key
-from the environment it started with unless the profile's `environment` sets
-it, for example from `secrets.toml`:
+DSH authenticates with a DeepSeek API key, `DEEPSEEK_API_KEY`. Mjolnir uses
+the first of these that holds one:
+
+1. The key saved in DSH itself, under `refs` in `.credentials.yaml` in the
+   profile home (DSH's own home, `~/.dsh` by default), as DSH's Models
+   settings write it. DSH refuses that file when any other user can read it,
+   so Mjolnir skips its key then, moves on to the next source, and names the
+   file (`chmod 600` it) when no source has a key.
+2. `DEEPSEEK_API_KEY` in the environment Mjolnir started with.
+3. `DEEPSEEK_API_KEY` in `.env` in the profile home.
+4. The profile's `environment`, for example from `secrets.toml`:
 
 ```toml
 [profiles.dsh]
@@ -546,6 +628,10 @@ DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
 
 When detection adds a DSH profile and `secrets.toml` beside `config.toml`
 defines `DEEPSEEK_API_KEY`, it writes that `environment` entry for you.
+
+The first three are the places DSH reads, so a session uses the key `dsh`
+itself uses. A DeepSeek account sign-in is not an API key: dsh-acp cannot send
+it, so a DSH that is signed in but holds no key is refused with that reason.
 
 There is no interactive login, and `mj login` refuses the profile. A profile
 without the key cannot start; the refused session and `mj doctor` say how to
@@ -763,9 +849,9 @@ session, that copy can become canonical and then propagate to sibling sessions.
 Several sessions of one profile therefore hold copies of one rotating grant,
 just as container sessions do.
 
-Codex logins are refreshed ahead of expiry when possible. For Claude, prefer the
-long-lived setup token above. A reconciliation failure is surfaced rather than
-silently discarded.
+Codex, Kimi Code, and Muse Code logins are refreshed ahead of expiry when
+possible. For Claude, prefer the long-lived setup token above. A
+reconciliation failure is surfaced rather than silently discarded.
 
 GitHub authentication is separate from harness authentication. Mjolnir reads
 `GH_TOKEN`, then `GITHUB_TOKEN`, then `gh auth token --hostname github.com`. It
@@ -886,7 +972,7 @@ Mjolnir release into `$XDG_CACHE_HOME/mjolnir/harnesses`, or
 only the resulting absolute path—never an arbitrary compatible executable from
 `PATH`. DSH is the exception and is never installed; see below.
 
-For Codex, Claude, Muse, MiMo, and DSH's npx fallback, Mjolnir uses Node.js 22
+For Codex, Claude, Muse, and DSH's npx fallback, Mjolnir uses Node.js 22
 or newer with npm and npx when the session `PATH` already provides that stack.
 Otherwise it downloads the pinned Node.js 24.22.1 distribution with its internal
 HTTPS client, verifies its published SHA-256 checksum, and installs it under
@@ -906,11 +992,13 @@ OpenCode downloads the pinned OpenCode 2 package for the platform from npm
 and verifies it in-process. Linux and macOS, on x86-64 and ARM64, are supported.
 The pinned installation disables OpenCode's self-update so a running session
 never replaces its own binary.
-MiMo Code installs from the pinned `@mimo-ai/cli` npm package. Its managed
-launch disables automatic updates so a running session never replaces its own
-binary.
+MiMo Code installs from its pinned native release archive on GitHub, with
+Xiaomi's download mirror as a fallback, and verifies its pinned SHA-256
+checksum; it needs no Node.js runtime. Linux and macOS, on x86-64 and ARM64,
+are supported. Its managed launch disables automatic updates so a running
+session never replaces its own binary.
 DSH is never installed. A launch uses the target's own `dsh-acp` on `PATH` when
-it is 0.4.0 or newer, or fetches the pinned `@brokkai/dsh-acp@0.4.0` package
+it is 0.5.0 or newer, or fetches the pinned `@brokkai/dsh-acp@0.5.0` package
 through `npx`, using the compatible system runtime or the managed Node
 described above; the npm package bundles the release binaries. An older
 `dsh-acp` on `PATH` is not used: Mjolnir falls back to `npx` when Node.js, npm,
@@ -943,9 +1031,9 @@ while the pane has focus. **Refresh** runs the same refresh as
 | Claude Code | Five-hour and weekly subscription windows when reported. |
 | Kimi Code | Usage windows returned by the configured Kimi service. |
 | Grok Build | The harness's ACP billing extension. |
-| Muse Code | Native subscription usage windows and reset times, when reported. |
+| Muse Code | Native subscription usage windows and reset times, when reported. The daemon refreshes the Muse login itself, so the reading does not depend on Muse having run. |
 | OpenCode | No published quota endpoint; the profile shows an unavailable reading. |
-| MiMo Code | No published quota endpoint; the profile shows an unavailable reading. |
+| MiMo Code | Xiaomi publishes no quota endpoint for Token Plan API keys, so the profile shows an unavailable reading. Remaining credits appear only in the Xiaomi console at `platform.xiaomimimo.com/console/plan-manage`. |
 | DSH | No quota endpoint; DeepSeek bills by usage, so the profile shows `API`. |
 
 A Codex profile on a provider that publishes no quota endpoint, and a DSH
@@ -973,10 +1061,12 @@ approvals, and turns on muse-acp's auto-review for every session: a second,
 read-only Muse model reviews each approval request with a Codex-style safety
 policy, and a failed or unusable review denies the action. Muse's own
 `:auto-review` profile is never staged, because `muse serve` refuses it.
-Unconstrained sessions stage `:ask-me` as well, keep `promptUnmatched`
-approvals and auto-review on, and disable only the sandbox
-(`--disable-sandbox`): `allowAll` would emit no permission requests, leaving
-the reviewer nothing to decide.
+Unconstrained sessions stage `:ask-me` as well, but select `allowAll`
+approvals with auto-review off and disable only the sandbox
+(`--disable-sandbox`), so they run without permission checks like OpenCode.
+A Muse profile with `muse_auto_review = true` keeps the reviewer on in
+unconstrained targets too (`promptUnmatched` approvals with auto-review on
+inside the container boundary).
 
 Muse accepts one workspace root, without attached directories. Native import
 and checkpoint restore can relocate that workspace while retaining the session
@@ -1005,8 +1095,9 @@ handoffs; see
   reads permission rules from `opencode.json`. Its sessions live in a SQLite
   database, so native import and SessionWiki search do not list them, and it
   never serves Mjolnir's delegation or utility inference.
-- MiMo Code also publishes no quota endpoint, accepts one workspace root, and
-  keeps native sessions in a SQLite database. Native import and SessionWiki
+- MiMo Code has no quota reading, because Xiaomi exposes Token Plan usage only
+  to a logged-in console session and not to the API key. It accepts one
+  workspace root and keeps native sessions in a SQLite database. Native import and SessionWiki
   search do not list them yet, and it does not serve Mjolnir's delegation or
   utility inference.
 - DSH has no sandbox: commands run directly on the host, and only its file

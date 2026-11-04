@@ -10,7 +10,9 @@
 mod active;
 mod attachments;
 mod autocomplete;
+mod composer;
 mod config_picker;
+pub use composer::{LiveComposer, StartupPrompt};
 mod earlier;
 mod elicitation;
 mod feedback;
@@ -32,7 +34,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AvailableCommand, ContentBlock, SessionConfigOption, SessionModeState, SessionUpdate,
 };
 use crossterm::event::{
@@ -146,6 +148,11 @@ pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) ->
         Some(model) => format!("{armed}, model {model:?}"),
         None => armed,
     };
+    let count = review.count.get();
+    let armed = format!(
+        "{armed}; {count} reviewer{}",
+        if count == 1 { "" } else { "s" }
+    );
     if open {
         format!("{armed}. A review is open now.")
     } else {
@@ -245,6 +252,13 @@ pub enum ChatEventOutcome {
         reverse: bool,
     },
     OpenSubagents,
+    /// The host decides whether the durable startup queue or the worker owns this ID.
+    RecallQueuedPrompt {
+        session_id: String,
+        id: String,
+        text: String,
+        kind: QueuedCommandKind,
+    },
     /// Put `text` on the clipboard and then show `notice`. The host owns the
     /// clipboard, including the terminal clipboard used over SSH.
     CopyText {
@@ -479,6 +493,8 @@ pub struct ChatState {
     /// while no session is live, and no command completion is offered because
     /// no session can answer commands.
     standby: bool,
+    composer_forward: Option<tokio::sync::mpsc::UnboundedSender<composer::ComposerIoUpdate>>,
+    composer_runtime: composer::ComposerRuntime,
     input: String,
     input_cursor: usize,
     /// Image bytes belong to tracked marker ranges in the composer text.
@@ -541,6 +557,9 @@ pub struct ChatState {
     review_config: mj_core::config::ReviewConfig,
     /// This session's own review choice, applied over `review_config`.
     session_review: Option<mj_core::config::SessionReview>,
+    /// Why review cannot run for this session, which `/review status` says
+    /// instead of describing `[review]`.
+    review_unavailable: Option<&'static str>,
     /// Whether the dialog on screen belongs to the reviewer rather than the
     /// primary, so its answer is routed to the harness that asked.
     elicitation_is_reviewers: bool,
@@ -693,6 +712,8 @@ impl ChatState {
             prefix_seam: None,
             transcript_loading: false,
             standby: false,
+            composer_forward: None,
+            composer_runtime: composer::ComposerRuntime::default(),
             input: String::new(),
             input_cursor: 0,
             input_images: Vec::new(),
@@ -730,6 +751,7 @@ impl ChatState {
             turn_review_action_areas: Vec::new(),
             review_config: mj_core::config::ReviewConfig::default(),
             session_review: None,
+            review_unavailable: None,
             elicitation_is_reviewers: false,
             elicitation_role: None,
             goal_state: mj_core::goal::GoalState::from_configuration(&snapshot.config)
@@ -856,6 +878,7 @@ impl ChatState {
         let mut state = Self::new(&snapshot, &[]);
         state.notices = notices;
         state.standby = true;
+        state.bind_composer_session(Some(session_id));
         state.set_subagent_count(header.subagent_count);
         state.set_header_summary(header.target, header.profile, header.title);
         if let Some(harness_kind) = header.harness_kind {
@@ -1015,6 +1038,11 @@ impl ChatState {
         self.latest_seq = session.applied_event_ordinal;
         self.sync_elicitation(&session.pending_elicitations);
         if rebuild_projection {
+            // Entries can move when the canonical window slides or history is
+            // rewritten. Preserve identity, including a deferred restoration.
+            // Bottom needs no remapping and keeps its pending opening reveal.
+            let position =
+                (self.anchor != TranscriptAnchor::Bottom).then(|| self.transcript_position());
             // While a prefix conversion is in flight the entries stand for the
             // tail only, so the rebuild has to line up with the same tail.
             // Compaction can shrink the transcript under the recorded prefix;
@@ -1035,6 +1063,9 @@ impl ChatState {
             // recomputed. A tool can become completed without changing the
             // transcript length, joining or splitting a collapsed streak.
             self.invalidate_render_cache();
+            if let Some(position) = position {
+                self.restore_transcript_position(position);
+            }
             // Re-read the seam from the projection that produced this tail, so
             // a prefix converted against replaced history is refused.
             self.prefix_seam = self

@@ -28,7 +28,7 @@
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 matching paths: [["targets", "podman", "memory"]]
 
 === memory result focuses its inline field (140x30) ===
@@ -39,16 +39,16 @@ matching paths: [["targets", "podman", "memory"]]
 │ Create   Open   Fi  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                     │
 │hel ───────────────  │                                                                                              │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │ Type                              Podman ▾                                          Remove   │                     │
-│  │ No messages yet  │ Machine                           local ▾                                                    │                     │
-│  │                  │ Container image                   ubuntu:24.04                                               │                     │
+│  Stopped  podman    │ ☒ Enabled                                                                           Remove   │                     │
+│  │ No messages yet  │ Type                              Podman ▾                                                   │                     │
+│  │                  │ Machine                           local ▾                                                    │                     │
+│                     │ Container image                   ubuntu:24.04                                               │                     │
 │                     │ Download image policy             Pull if missing ▾                                          │                     │
 │                     │ CPU platform                      Default                                                    │                     │
 │                     │ CPU limit                         Default                                                    │                     │
 │                     │ Memory limit                      Default                                                    │                     │
-│                     │   Environment variables           0 settings  ›                                              │                     │
-│                     │   Workspace storage               1 setting  ›                                               │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
+│                     │   Environment variables           0 settings  ›                                              │  ───────────────────╯
+│                     │   Workspace storage               1 setting  ›                                               │  ───────────────────╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
@@ -61,7 +61,7 @@ matching paths: [["targets", "podman", "memory"]]
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 landed page and focused setting: ["targets", "podman"] / Some(["targets", "podman", "memory"])
 
 === help text finds context budget by compaction (140x30) ===
@@ -94,21 +94,21 @@ landed page and focused setting: ["targets", "podman"] / Some(["targets", "podma
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
+Enter open · / searc                                                                                                     : / ? palette
 matching paths: [["profiles", "claude-1", "context_window_bytes"], ["profiles", "codex-1", "context_window_bytes"], ["profiles", "codex-2", "context_window_bytes"]]
 
 === search result includes its section, label, and current value (140x30) ===
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
-╰───────────────────  ╭ × Settings ────────────────────────────────────────────────────────────────────── 2 settings ╮                     │
+╰───────────────────  ╭ × Settings ────────────────────────────────────────────────────────────────────── 4 settings ╮                     │
 ╭ Sessions ─────────  │ Search every setting by name, by what it does, or by its value. Esc returns to the list.     │                     │
 │ Create   Open   Fi  │                                                                                              │                     │
 │hel ───────────────  │ image                                                                                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │ Container image                 Runtimes › podman               ubuntu:24.04                 │                     │
 │  │ No messages yet  │ Download image policy           Runtimes › podman               Pull if missing ▾            │                     │
-│  │                  │                                                                                              │                     │
-│                     │                                                                                              │                     │
+│  │                  │ Container image                 Daemon                          Not set                      │                     │
+│                     │ Quota checks                                                    Auto · container when avail… │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -127,5 +127,5 @@ matching paths: [["profiles", "claude-1", "context_window_bytes"], ["profiles", 
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
-Enter open · / searc                                                                                                     : palette · ? keys
-matching paths: [["targets", "podman", "image"], ["targets", "podman", "pull_policy"]]
+Enter open · / searc                                                                                                     : / ? palette
+matching paths: [["targets", "podman", "image"], ["targets", "podman", "pull_policy"], ["daemon", "image"], ["quota"]]

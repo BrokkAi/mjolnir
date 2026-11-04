@@ -25,6 +25,7 @@
     <header id="shell-header">
       <button id="back" class="icon-button hidden" aria-label="Back">&#8592;</button>
       <h1 id="shell-title">MJ</h1>
+      <button id="operator-away-indicator" class="operator-away hidden" type="button" aria-label="End AFK">AFK</button>
       <button
         id="menu-button"
         class="icon-button hidden"
@@ -38,11 +39,14 @@
         <nav class="menu-items" role="menu" aria-label="Mjolnir">
           <button role="menuitem" data-route="targets">Targets</button>
           <button role="menuitem" data-route="quota">Quota</button>
+          <button role="menuitem" data-route="settings" id="menu-settings">Settings</button>
+          <button role="menuitem" id="operator-away-toggle">Go AFK</button>
           <button role="menuitem" id="logout">Sign out</button>
         </nav>
         <p id="menu-version" class="menu-version">Mjolnir</p>
       </div>
     </header>
+    <p id="operator-away-error" class="operator-away-error hidden" role="status" aria-live="polite"></p>
 
     <main id="boot-status" class="card" role="status" aria-live="polite">
       <h2>Connecting to Mjolnir</h2>
@@ -143,6 +147,24 @@
       <section id="quota-page" class="page hidden">
         <h2>Quota</h2>
         <div id="quota"></div>
+      </section>
+
+      <!-- The daemon renders every settings page; this only draws it. -->
+      <section id="settings-page" class="page hidden">
+        <nav id="settings-trail" class="settings-trail" aria-label="Settings pages"></nav>
+        <h2 id="settings-heading">Settings</h2>
+        <p id="settings-help" class="dim"></p>
+        <div id="settings-notices"></div>
+        <div id="settings"></div>
+        <div id="settings-entry-actions" class="row"></div>
+        <p id="settings-error" role="alert"></p>
+        <div id="settings-savebar" class="settings-savebar hidden" role="region" aria-label="Unsaved settings">
+          <p id="settings-status" class="dim" role="status"></p>
+          <div class="row">
+            <button type="button" id="settings-discard" class="secondary">Discard</button>
+            <button type="button" id="settings-save">Save</button>
+          </div>
+        </div>
       </section>
 
       <section id="conversation" class="page conversation hidden">

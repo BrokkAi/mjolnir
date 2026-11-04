@@ -6,14 +6,14 @@
   │Profile   Auto ▾                                                                              │
   │Model     Auto policy ▾                                                                       │
   │Effort    Auto policy ▾                                                                       │
+  │Reviewers 2                                                                                   │
   │                                                                                              │
   │                                                                                              │
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
-  │Auto prefers another provider, then another profile, then the primary.                        │
-  │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
-  │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
-  │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
+  │1–3 reviewers are reasonable; more have diminishing returns.                                  │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -62,7 +62,7 @@ selected session: None
 │             │  Run                                                                 │             │
 │             ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ───────────────╯             │
 ╰───────────                                                                            ───────────╯
-/ search (fi                                                                             ? keys
+/ search (fi                                                                            / ? palette
 Setup command available: true
 
 === global review form (100x30) ===
@@ -73,14 +73,14 @@ Setup command available: true
   │Profile   Auto ▾                                                                              │
   │Model     Auto policy ▾                                                                       │
   │Effort    Auto policy ▾                                                                       │
+  │Reviewers 2                                                                                   │
   │                                                                                              │
   │                                                                                              │
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
-  │Auto prefers another provider, then another profile, then the primary.                        │
-  │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
-  │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
-  │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
+  │1–3 reviewers are reasonable; more have diminishing returns.                                  │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -98,6 +98,38 @@ Setup command available: true
 
 action: None
 
+=== four reviewers remain selectable (100x30) ===
+
+
+  ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
+  │Trigger   Off ▾                                                                               │
+  │Profile   Auto ▾                                                                              │
+  │Model     Auto policy ▾                                                                       │
+  │Effort    Auto policy ▾                                                                       │
+  │Reviewers 4                                                                                   │
+  │                                                                                              │
+  │                                                                                              │
+  │Changes stay in the Settings draft until you save Settings.                                   │
+  │Auto resolves a reviewer when review starts                                                   │
+  │1–3 reviewers are reasonable; more have diminishing returns.                                  │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │Tab moves · Enter opens choices · Esc goes back                                               │
+  │  Cancel     Back     Refresh choices     Save Settings                                       │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
 === save applies only global review values (100x30) ===
 
 
@@ -110,11 +142,13 @@ action: None
   │   Projects                        hel                                                        │
   │   Runtimes                        podman                                                     │
   │   Machines                        local                                                      │
+  │   Daemon                          Host                                                       │
   │                                                                                              │
   │   Sessions                                                                                   │
   │   Code Review                     Off                                                        │
   │   Continuation                    On · 3 continuations plus quota recovery                   │
   │   Sub-agents                      Up to 6 at once                                            │
+  │   Quota checks                    Auto · container when available                            │
   │   SessionWiki                     Keeps every session                                        │
   │   Web Access                      On · 127.0.0.1:3765                                        │
   │                                                                                              │
@@ -122,15 +156,13 @@ action: None
   │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │
   │   Notifications                   Terminal                                                   │
   │   Advanced                        All off                                                    │
-  │                                                                                              │
-  │   Privacy                                                                                    │
   │ Saving settings…                                                                             │
   │   Saving…                                                                                    │
   ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
 
 discovery action: DiscoverReviewSettings { generation: 1, profile_id: "claude-1", model: None }
-saved global review: {"trigger":"off","profile":"claude-1"}
+saved global review: {"trigger":"off","count":4,"profile":"claude-1"}
 
 === Auto profile leaves manual overrides disabled (100x30) ===
 
@@ -140,14 +172,14 @@ saved global review: {"trigger":"off","profile":"claude-1"}
   │Profile   Auto ▾                                                                              │
   │Model     Auto policy ▾                                                                       │
   │Effort    Auto policy ▾                                                                       │
+  │Reviewers 2                                                                                   │
   │                                                                                              │
   │                                                                                              │
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
-  │Auto prefers another provider, then another profile, then the primary.                        │
-  │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
-  │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
-  │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
+  │1–3 reviewers are reasonable; more have diminishing returns.                                  │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -173,14 +205,14 @@ profile: Auto; model enabled: false; effort enabled: false; save enabled: true
   │Profile   ╭ values · ↑/↓ select · Tab/Enter accept ╮                                          │
   │Model     │Off                                     │                                          │
   │Effort    │End of turn                             │                                          │
-  │          │Before push                             │                                          │
+  │Reviewers │Before push                             │                                          │
   │          ╰────────────────────────────────────────╯                                          │
+  │                                                                                              │
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
-  │Auto prefers another provider, then another profile, then the primary.                        │
-  │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
-  │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
-  │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
+  │1–3 reviewers are reasonable; more have diminishing returns.                                  │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -205,14 +237,14 @@ profile: Auto; model enabled: false; effort enabled: false; save enabled: true
   │Profile   Auto ▾                                                                              │
   │Model     Auto policy ▾                                                                       │
   │Effort    Auto policy ▾                                                                       │
+  │Reviewers 2                                                                                   │
   │                                                                                              │
   │                                                                                              │
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
-  │Auto prefers another provider, then another profile, then the primary.                        │
-  │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
-  │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
-  │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
+  │1–3 reviewers are reasonable; more have diminishing returns.                                  │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │

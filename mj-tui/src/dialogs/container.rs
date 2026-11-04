@@ -759,7 +759,8 @@ impl crate::wizards::CompletesPaths for ContainerEditor {
 mod tests {
     use super::*;
     use crate::test_support::{
-        buffer_lines, dashboard_with_session, key, mouse_at, point, running_session,
+        buffer_lines, dashboard_with_session, key, mouse_at, point, prefix_key, route,
+        running_session,
     };
     use crossterm::event::{MouseButton, MouseEventKind};
     use ratatui::{Terminal, backend::TestBackend};
@@ -841,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn small_form_scrolls_to_field_and_help_restores_its_focus() {
+    fn small_form_scrolls_to_field_and_palette_chord_keeps_its_draft() {
         let mut dashboard = open();
         dashboard.handle_key(key(KeyCode::Tab));
         dashboard.handle_key(key(KeyCode::Tab));
@@ -856,8 +857,7 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Attach host directory:"))
         );
-        dashboard.begin_help();
-        dashboard.handle_key(key(KeyCode::Esc));
+        route(&mut dashboard, &[prefix_key(), key(KeyCode::Char('?'))]);
         let Mode::EditContainer(editor) = &dashboard.mode else {
             panic!("help did not restore editor")
         };

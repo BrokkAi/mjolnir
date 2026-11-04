@@ -431,6 +431,8 @@ mod assets;
 use assets::*;
 mod config_view;
 pub use config_view::*;
+mod settings;
+use settings::*;
 
 #[cfg(test)]
 mod tests;

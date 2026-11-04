@@ -110,8 +110,12 @@ impl DurableRelay {
             controls.message = Some("Interrupting…".into());
             return controls;
         }
-        let interrupt = RelayCommand::CancelTurnFor {
-            active_prompt_id: active.command_id.clone(),
+        let interrupt = if self.has_held_claude_turn() {
+            RelayCommand::CancelTurn
+        } else {
+            RelayCommand::CancelTurnFor {
+                active_prompt_id: active.command_id.clone(),
+            }
         };
         controls.interrupt = Some(interrupt.clone());
         if let Some(steering) = self.snapshot.steering.as_ref().filter(|s| s.holds_queue()) {
@@ -132,6 +136,10 @@ impl DurableRelay {
             kind: TurnControlKind::Interrupt,
             command: interrupt,
         };
+        if self.has_held_claude_turn() {
+            controls.primary = Some(primary);
+            return controls;
+        }
         if let Some(head) = self.snapshot.queued_prompts.first() {
             let can_steer = match &head.payload {
                 StoredQueuedRelayPayload::Prompt { prompt } => {
@@ -198,6 +206,17 @@ impl DurableRelay {
 
     fn validate_turn_control(&self, command: &RelayCommand) -> Result<(), String> {
         match command {
+            RelayCommand::DismissQuestion { question } => {
+                if self.snapshot.assessment.as_ref().and_then(|a| a.inferred_question()).as_ref()
+                    != Some(question)
+                    || self.snapshot.active_prompt.is_some()
+                    || self.snapshot.harness_turn.is_some()
+                    || !self.snapshot.queued_prompts.is_empty()
+                    || !self.snapshot.assessment_questions.is_empty()
+                {
+                    return Err("The prose question is no longer active".into());
+                }
+            }
             RelayCommand::BeginCheckpoint { .. } if self.snapshot.steering.as_ref().is_some_and(|s| s.holds_queue()) => return Err("Resolve uncertain steering delivery before checkpointing or moving this session".into()),
             RelayCommand::Steer { .. }
             | RelayCommand::ApplyQueuedFor { .. }
@@ -297,7 +316,7 @@ impl DurableRelay {
                     RelayCommand::ClearContext
                 } else {
                     RelayCommand::Prompt {
-                        prompt: vec![agent_client_protocol::schema::v1::ContentBlock::from(
+                        prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from(
                             if args.is_empty() {
                                 "/compact".to_owned()
                             } else {
@@ -994,6 +1013,7 @@ impl DurableRelay {
             | RelayCommand::SetSubagentWait { .. }
             | RelayCommand::SetQuotaRecovery { .. }
             | RelayCommand::SeedAssessmentContext { .. }
+            | RelayCommand::DismissQuestion { .. }
             | RelayCommand::InstallPromptContext { .. }
             | RelayCommand::DeliverMailboxEvent { .. }
             | RelayCommand::ResolveSteering { .. } => RelayCommandOutcome::NoticeRecorded,
@@ -1284,7 +1304,7 @@ impl DurableRelay {
     /// bridge advertises steering and nothing is waiting for the running turn
     /// to end. The bridge queues the steer to its next safe boundary.
     fn automatic_steer_target(&self) -> Option<(String, String)> {
-        if !self.automatic_steering || self.checkpoint_only {
+        if !self.automatic_steering || self.checkpoint_only || self.has_held_claude_turn() {
             return None;
         }
         if self.steering_delivery_mode == SteeringDeliveryMode::ClaudeTurnEnd {
@@ -1655,7 +1675,7 @@ impl DurableRelay {
         }
         let id = retry.command_id.clone();
         let prompt = vec![ContentBlock::Text(
-            agent_client_protocol::schema::v1::TextContent::new("Continue"),
+            agent_client_protocol::v1::schema::TextContent::new("Continue"),
         )];
         self.submit_command(&id, RelayCommand::Prompt { prompt })?
             .map_err(|error| anyhow!("submit capacity retry: {error:?}"))?;
@@ -1748,6 +1768,7 @@ impl DurableRelay {
         }
         if finishes_turn {
             self.return_boundary_steer_after_turn_end(command_id)?;
+            self.promote_held_claude_turn()?;
         }
         self.promote_next_queued_command()?;
         Ok(ordinal)
@@ -1770,9 +1791,11 @@ impl DurableRelay {
                 message: message.into(),
             },
         )?;
+        self.ensure_initial_commands_succeeded()?;
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
             self.return_boundary_steer_after_turn_end(command_id)?;
+            self.promote_held_claude_turn()?;
         }
         self.settle_held_writes()?;
         self.promote_next_queued_command()?;
@@ -1796,9 +1819,11 @@ impl DurableRelay {
                 message: message.into(),
             },
         )?;
+        self.ensure_initial_commands_succeeded()?;
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
             self.return_boundary_steer_after_turn_end(command_id)?;
+            self.promote_held_claude_turn()?;
         }
         self.settle_held_writes()?;
         self.promote_next_queued_command()?;
@@ -2024,6 +2049,8 @@ impl DurableRelay {
     fn pending_hook_steering(&self, hook_event: &str) -> Option<(MailboxHookSteering, &str)> {
         if hook_event != "PostToolBatch"
             || self.steering_delivery_mode != SteeringDeliveryMode::ClaudePostToolBatch
+            // A turn being interrupted discards its input; the prompt runs next.
+            || self.turn_cancellation_pending()
         {
             return None;
         }

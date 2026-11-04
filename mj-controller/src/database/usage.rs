@@ -444,6 +444,8 @@ mod tests {
             )?;
         }
         super::super::schema::restore_github_v84_schema(&connection);
+        super::super::schema::restore_pre101_subagent_preference(&connection);
+        super::super::schema::restore_review_state_schema(&connection, 81);
         connection.execute_batch("ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE session_turn_selections DROP COLUMN profile; DELETE FROM schema_migrations WHERE version>=82; UPDATE schema_compatibility SET minimum_compatible_version=81; PRAGMA user_version=81;")?;
         drop(connection);
         super::super::schema::forget_verified_schema(&path);
@@ -583,6 +585,7 @@ mod tests {
                 .sessions
                 .insert(id.into(), super::super::tests::session(id, "project"));
         }
+        save_state_to(&path, &state)?;
         {
             let (child, parent) = ("child", "root");
             let relation: SubagentRecord = serde_json::from_value(serde_json::json!({
@@ -590,7 +593,8 @@ mod tests {
                 "profile_id":"codex","working_directory":"","initial_prompt":"probe",
                 "request_key":child,"created_at":"2026-09-30T00:00:00Z"
             }))?;
-            state.subagents.insert(child.into(), relation);
+            super::super::tests::register_test_subagent(&path, &state.sessions[child], &relation)?;
+            state.subagents.insert(child.into(), relation.into());
         }
         save_state_to(&path, &state)?;
         // Operational children cannot delegate today; retained accounting

@@ -79,13 +79,13 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
 
     let (context, notice) = super::load_in_place_subagent_prompt_data(parent_id).unwrap();
     assert!(context.unwrap().contains("fresh-child; running"));
-    assert!(notice.unwrap().contains("fresh-child; running"));
+    assert!(notice.unwrap().contains("kept 1 sub-agent attached"));
 
     child.state = SessionState::Parked;
     crate::database::save_session(&child).unwrap();
     let (context, notice) = super::load_in_place_subagent_prompt_data(parent_id).unwrap();
     assert!(context.unwrap().contains("fresh-child; parked"));
-    assert!(notice.unwrap().contains("fresh-child; parked"));
+    assert!(notice.unwrap().contains("kept 1 sub-agent attached"));
 }
 
 #[tokio::test]
@@ -280,6 +280,7 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     let mut controller = Controller {
@@ -777,6 +778,7 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     config
@@ -1351,6 +1353,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     config.bundles.insert(
@@ -1508,6 +1511,7 @@ fn failed_resume_retires_a_checkout_it_recreated() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     let mut controller = Controller {
@@ -1722,6 +1726,7 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     config.save().unwrap();
@@ -1900,7 +1905,7 @@ fn fresh_native_resume(
     };
     use crate::controller::test_support::write_checkpoint_gate_archive_for_harness;
     use crate::session_manager::StandaloneSession;
-    use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+    use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 
     let _writer = crate::database::install_isolated_test_writer();
     let session_id = LATCH_RELAY_SESSION;
@@ -1984,6 +1989,7 @@ exit 0
                 legacy_subagents: None,
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
             },
         );
         config

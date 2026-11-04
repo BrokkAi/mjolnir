@@ -41,6 +41,8 @@ pub fn format_turn_clock(now_epoch_seconds: u64, current_turn_started_at: Option
 /// activity facts from this, so they agree on what "idle" means.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionActivity {
+    /// Whether the worker can durably dismiss an inferred question.
+    pub dismiss_question_supported: bool,
     pub pursuing_goal: bool,
     pub checking_response: bool,
     pub capacity_retry: Option<mj_core::relay::CapacityRetry>,
@@ -78,6 +80,9 @@ impl SessionActivity {
     /// Read the activity out of what a session's relay last reported.
     pub fn of(operational: &mj_core::relay::RelayOperationalState) -> Self {
         Self {
+            dismiss_question_supported: operational
+                .relay_protocol_version
+                .is_some_and(|version| version >= mj_core::relay::RELAY_DISMISS_QUESTION_PROTOCOL),
             pursuing_goal: operational.goal.active(),
             // The control flag also holds waits open after a failed request.
             // Only pending assessments belong in the activity display.
@@ -378,7 +383,7 @@ impl SessionActivity {
                 .map(|started_at_ms| mj_core::activity::InFlightToolCall {
                     tool_call_id: String::new(),
                     title: None,
-                    status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
+                    status: agent_client_protocol::v1::schema::ToolCallStatus::InProgress,
                     started_at_ms,
                 })
                 .into_iter()
@@ -679,6 +684,7 @@ mod tests {
 
     fn background(started_at_ms: i64, command: &str) -> SessionActivity {
         SessionActivity {
+            dismiss_question_supported: false,
             pursuing_goal: false,
             checking_response: false,
             quota_recovery: None,
@@ -1022,12 +1028,16 @@ mod tests {
             "1.0.0",
         )
         .unwrap();
-        relay.set_background_work_policy(mj_worker::relay::BackgroundWorkPolicy::ClaudeTasks);
+        relay.set_background_work_policy(mj_worker::relay::BackgroundWorkPolicy::AirTasks);
         relay
-            .claude_background_tasks_changed(vec![mj_core::acp::ClaudeBackgroundTask {
-                task_id: "design-review".into(),
-                description: "Design simplification and cleanup review".into(),
-            }])
+            .air_task_changed(
+                "root".into(),
+                mj_core::acp::AirTaskUpdate::Spawned {
+                    task_id: "design-review".into(),
+                    description: "Design simplification and cleanup review".into(),
+                    can_stop: true,
+                },
+            )
             .unwrap();
         let state = relay.operational_state();
         let now = (state.background_commands[0].started_at_ms / 1_000) as u64 + 60;
@@ -1041,7 +1051,15 @@ mod tests {
             &activity,
         );
         writeln!(out, "idle: {}", activity.is_idle(None)).unwrap();
-        relay.claude_background_tasks_changed(Vec::new()).unwrap();
+        relay
+            .air_task_changed(
+                "root".into(),
+                mj_core::acp::AirTaskUpdate::Finished {
+                    task_id: "design-review".into(),
+                    settled: false,
+                },
+            )
+            .unwrap();
         let activity = SessionActivity::of(&relay.operational_state());
         row(
             &mut out,

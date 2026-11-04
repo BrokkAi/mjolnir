@@ -63,7 +63,8 @@ first interactive startup. It detects installed harnesses and home-directory
 overrides, adds profiles and a bundle for the current GitHub origin, and
 preserves existing entries and preferences. Matching entries are reused;
 identifier collisions get separate names. It also probes every SSH or EC2
-machine that has no runtime yet and adds the runtimes it can run. It saves
+machine and adds each runtime kind it newly runs; a runtime switched off with
+`enabled = false` is never added back. It saves
 additions without questions and reports actionable doctor errors. Container
 downloads remain background
 daemon work. Configure container options, SSH hosts, and AWS targets in Settings;
@@ -145,14 +146,15 @@ DSH sessions are not importable yet either.
 | `--profile <id>` | Profile whose home holds the session. Needed only when several enabled profiles run this harness. |
 | `--bundle <id>` | Associate an existing configured repository bundle. |
 | `--title <text>` | Set the title displayed in the dashboard. |
-| `--allow-dirty` | Acknowledge that dirty Git roots will be archived in their complete current state. |
+| `--allow-dirty` | Proceed when the source Git checkouts have uncommitted changes. |
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
 | `--review <off\|turn\|push>` | Set the imported session's review trigger, overriding `[review]`. |
-| `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Set the reviewer model or effort. Without `--review`, these options select `turn`. The deprecated tier option still accepts either value but ignores it. |
+| `--review-count <count>` | Independent reviewer sessions, overriding the configured count (default 2). 1–3 is reasonable; more has diminishing returns. Used alone selects turn review. |
+| `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Set the reviewer model or a named profile's effort. Auto always uses High. Without `--review`, these options select `turn`. The deprecated tier option still accepts either value but ignores it. |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
-Import never edits the harness's source transcript. It builds and verifies a Mjolnir recovery archive, creates a suspended session record, and makes that record available through `prefix+g`.
+Import leaves the source checkout and the harness's source transcript unchanged. The imported session starts suspended and is available through `prefix+g`.
 
 Examples:
 
@@ -288,7 +290,7 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--model <name>] [--effort <name>] [--subagents native|mjolnir|none]
        [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
        [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
-       [--review <off|turn|push>] [--review-model <name>] [--review-effort <name>]
+       [--review <off|turn|push>] [--review-count <count>] [--review-model <name>] [--review-effort <name>]
        [--review-tier quick|extended] [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>]
@@ -354,8 +356,9 @@ mj new --workspace eval --bundle product --target builder \
   what the dashboard's next new-session form preselects. Only interactive
   launches (the dashboard, `mj go`, `mj simple`, and the web or phone form)
   do.
-- `mj new --model <name>` chooses the highest-quota enabled, usable profile
-  offering that exact model and starts the session on it. It conflicts with
+- `mj new --model <name>` chooses the enabled, usable profile offering that
+  exact model with the strongest quota headroom relative to its reset times,
+  then starts the session on it. It conflicts with
   `--profile`; the saved default profile breaks quota ties. If `--effort` is
   supplied, the selected profile must offer that exact effort for the model or
   the request fails.
@@ -381,7 +384,9 @@ mj new --workspace eval --bundle product --target builder \
 - `mj new --review off|turn|push` sets the session's trigger, overriding
   `[review]`. `mj import <harness>` takes the same option for the session it
   adopts. `--review-model <name>` and `--review-effort <name>` set reviewer
-  choices; without `--review`, either option selects `turn`. The deprecated
+  choices; Auto always uses High effort. `--review-count <count>` selects the
+  number of independent reviewers (default 2). 1–3 is reasonable; more has
+  diminishing returns. Without `--review`, any of these options selects `turn`. The deprecated
   `--review-tier quick|extended` also selects `turn` when used alone, but its
   value is ignored. See
   [per-session settings](/turn-review/#per-session-settings).
@@ -398,8 +403,10 @@ mj new --workspace eval --bundle product --target builder \
 - On a container target, `mj new` gives the session the same CPU and memory
   limit that the dashboard and the web viewer select: the size last chosen for
   that host, else 4 CPUs and 8 GiB. New containers need at least 2 CPUs and
-  4 GiB, and the host's live container commitments must leave enough CPU and
-  RAM for the chosen size.
+  4 GiB. CPU overcommit produces a warning on stderr and the launch proceeds.
+  RAM overcommit also proceeds with a warning for Docker and Podman, including
+  on macOS. Only Apple `container` targets refuse RAM overcommit, because their
+  VMs do not return freed memory to macOS. Resume and move share this policy.
   `--cpus <count>` and `--memory-gib <GiB>` override either one. Other targets
   refuse both options.
 - `--return-on-input` makes `mj prompt` and `mj wait` return as soon as
@@ -420,7 +427,8 @@ mj new --workspace eval --bundle product --target builder \
 - `mj fetch` copies a file, or a directory as a zip archive, from a session's
   target to this machine and prints where it landed. See below.
 - `mj models` lists the models and efforts a profile offers.
-- `mj set-config` applies one session setting, such as the model or effort.
+- `mj set-config` applies any selectable session setting the harness advertises,
+  such as the model, effort, approval mode, or collaboration mode.
   Without `--key` and `--value` it lists the settings the session's agent
   offers, with their choices.
 
@@ -678,9 +686,10 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `GROK_HOME` | Grok Build home used by setup discovery and native import. |
 | `MIMOCODE_HOME` | MiMo Code profile root used by setup discovery; contains `config/` and `data/`. A profile at the conventional `~/.mimocode` home uses the stock `~/.config/mimocode` and `~/.local/share/mimocode` trees instead. |
 | `DSH_ACP_DATA_DIR` | DSH home used by setup discovery. |
-| `DEEPSEEK_API_KEY` | DSH's API key, passed to DSH sessions when the profile's `environment` does not set it. |
+| `DEEPSEEK_API_KEY` | DSH's API key, passed to DSH sessions when DSH's own credentials hold none. It outranks the profile's `environment`. |
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | Muse configuration and external native session storage roots, respectively. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | GitHub token available for syncing into every live target except a bare runtime on this machine. |
+| `SLOPCOP_TOKEN` / `SLOPCOP_SERVICE` | slopcop login synced into every live target except a bare runtime on this machine. They outrank the login `slopcop login` stored, as they do for slopcop itself. |
 | `GIT_SSH_COMMAND` | SSH command used by checkpoint/archive Git operations. |
 | `RUST_LOG` | Controller logging filter. |
 

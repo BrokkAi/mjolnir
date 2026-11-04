@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 anvil-client.workspace = true
-bytes = "1"
+bytes.workspace = true
 cpal = "0.16"
 serde.workspace = true
 serde_json.workspace = true

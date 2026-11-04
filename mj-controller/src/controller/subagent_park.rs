@@ -291,7 +291,7 @@ impl Controller {
                     desired_build: String::new(),
                 },
             )?;
-            start_worker_durably(&owner, target, executor, &backend, &worker_root)
+            start_worker_durably(&owner, target, executor, &backend, &worker_root, &self.config.github)
                 .context(RESTART_FROM_PARKED.start)
                 .map_err(|error| explain_process_exhaustion(error, &backend, session_id))?;
             // The active record and boot intent are durable. Handoff may cancel
@@ -321,7 +321,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use agent_client_protocol::schema::v1::ContentBlock;
+    use agent_client_protocol::v1::schema::ContentBlock;
     use mj_core::relay::RelayCommand;
     use mj_core::state::TargetLocator;
 
@@ -568,6 +568,7 @@ mod tests {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
             },
         );
         controller

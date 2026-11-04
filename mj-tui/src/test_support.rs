@@ -226,6 +226,7 @@ pub(crate) fn config() -> Config {
     Config {
         keys: Default::default(),
         jev: Default::default(),
+        quota: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -234,12 +235,14 @@ pub(crate) fn config() -> Config {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        daemon: Default::default(),
         github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
         default_targets: Default::default(),
+        disabled_targets: Default::default(),
         machines: Default::default(),
         profiles: BTreeMap::from([
             (
@@ -249,6 +252,7 @@ pub(crate) fn config() -> Config {
                     context_window_bytes: None,
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
+                    muse_auto_review: None,
                     codex_profile: None,
                     kind: HarnessKind::Claude,
                     home: PathBuf::from("/profiles/claude"),
@@ -262,6 +266,7 @@ pub(crate) fn config() -> Config {
                     context_window_bytes: None,
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
+                    muse_auto_review: None,
                     codex_profile: None,
                     kind: HarnessKind::Codex,
                     home: PathBuf::from("/profiles/codex"),
@@ -275,6 +280,7 @@ pub(crate) fn config() -> Config {
                     context_window_bytes: None,
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
+                    muse_auto_review: None,
                     codex_profile: None,
                     kind: HarnessKind::Codex,
                     home: PathBuf::from("/profiles/codex-two"),
@@ -473,7 +479,8 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
     let mut dashboard = DashboardState::new(
         config(),
         State {
-            last_subagent_policy: Default::default(),
+            operator_presence: Default::default(),
+            last_subagent_policies: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions: [(session.id.clone(), session)].into_iter().collect(),
@@ -504,9 +511,8 @@ pub(crate) fn dashboard_with_one_subagent() -> (DashboardState, String) {
     let parent = running_session();
     let mut child = running_session();
     child.id = "child-session".into();
-    let relation = mj_core::subagent::SubagentRecord {
+    let relation = mj_core::subagent::SubagentMetadata {
         kind: mj_core::subagent::SubagentKind::Worker,
-        reviewer_launch: None,
         child_session_id: child.id.clone(),
         parent_session_id: parent.id.clone(),
         task_name: "Inspect parser".into(),
@@ -514,7 +520,6 @@ pub(crate) fn dashboard_with_one_subagent() -> (DashboardState, String) {
         model: None,
         effort: None,
         working_directory: Default::default(),
-        initial_prompt: "Inspect the parser".into(),
         request_key: "request-1".into(),
         created_at: child.created_at.clone(),
         noticed_turn: None,
@@ -759,4 +764,81 @@ pub(crate) fn operation(
         active_stages,
         resume_destination: None,
     }
+}
+
+/// The availability answer for every profile and runtime `dashboard`
+/// configures: everything is there except the local engines of the targets
+/// in `uninstalled`, which were never installed, and the machines in
+/// `unreachable`, which did not answer.
+pub(crate) fn availability_answer(
+    dashboard: &DashboardState,
+    uninstalled: &[&str],
+    unreachable: &[&str],
+) -> crate::AvailabilityChecked {
+    let config = &dashboard.config;
+    let missing_kinds: Vec<&str> = uninstalled
+        .iter()
+        .map(|id| mj_core::config::runtime_kind_name(&config.targets[*id]))
+        .collect();
+    let local = ["podman", "docker", "apple-container"]
+        .into_iter()
+        .map(|kind| {
+            let gone = missing_kinds.contains(&kind);
+            (
+                kind.to_owned(),
+                crate::LocalEngine {
+                    missing: gone.then(|| format!("{kind} is not installed here.")),
+                    installed: !gone,
+                },
+            )
+        })
+        .collect();
+    let machines = config
+        .machines
+        .iter()
+        .filter(|(_, machine)| !matches!(machine, mj_core::config::Machine::Local { .. }))
+        .map(|(id, machine)| crate::MachineRuntimeProbe {
+            machine_id: id.clone(),
+            machine: machine.clone(),
+            finding: if unreachable.contains(&id.as_str()) {
+                crate::MachineFinding::Unreachable {
+                    detail: format!("`ssh {id} true` failed: Connection timed out"),
+                    remediation: format!("Check that {id} is up."),
+                }
+            } else {
+                crate::MachineFinding::Answered {
+                    runtimes: config
+                        .machine_runtimes(id)
+                        .map(|(id, target)| (id.to_owned(), target.clone()))
+                        .collect(),
+                    rejected: Vec::new(),
+                }
+            },
+        })
+        .collect();
+    crate::AvailabilityChecked {
+        profiles: config
+            .profiles
+            .iter()
+            .map(|(id, profile)| (id.clone(), (profile.clone(), None)))
+            .collect(),
+        local,
+        machines,
+        added_profiles: Vec::new(),
+        added_runtimes: BTreeMap::new(),
+    }
+}
+
+/// Answers the availability check the dashboard asks for, as its loop would.
+pub(crate) fn answer_availability(
+    dashboard: &mut DashboardState,
+    answer: impl FnOnce(&DashboardState) -> crate::AvailabilityChecked,
+) {
+    let Some(DashboardAction::CheckAvailability { generation }) =
+        dashboard.take_availability_check()
+    else {
+        panic!("a check of what is there is due");
+    };
+    let answer = answer(dashboard);
+    dashboard.apply_availability_check(generation, Ok(answer));
 }

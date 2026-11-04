@@ -90,7 +90,7 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
     reply.closed().await;
 }
 #[cfg(unix)]
-use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use sha2::Digest;
 
 fn ordering_request(session_id: &str, command_id: &str) -> RemoteSessionRequest {
@@ -440,6 +440,103 @@ async fn recovery_reports_a_missing_bare_workspace_without_restarting() {
         !restarted.exists(),
         "a missing workspace must not be restarted"
     );
+}
+
+#[cfg(unix)]
+// Hard-won: #1444: a missing workspace kept producing alternating relay errors.
+#[tokio::test]
+async fn missing_workspace_actor_parks_until_its_target_changes() {
+    const CHILD: &str = "MJ_TEST_MISSING_WORKSPACE_ACTOR_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "missing_workspace_actor_parks_until_its_target_changes",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let mut record = crate::database::load_session_record(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    record.target = Some(recovery_source_target());
+    crate::database::save_session(&record).unwrap();
+
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("worktree");
+    let restarted = directory.path().join("worker-restarted");
+    let mut target = RelaySessionTarget {
+        session_id: LEASED_RELAY_SESSION.into(),
+        spec: CommandSpec::new("sh", ["-c", "exit 1"]),
+        worker_recovery: Some(WorkerRecoveryPlan {
+            source_target: recovery_source_target(),
+            target: None,
+            workspace: Some(WorkerWorkspace {
+                target: mj_core::state::ManagedWorktreeTarget::Local,
+                directory: missing.clone(),
+            }),
+            exit_record: None,
+            liveness_probe: CommandSpec::new("printf", ["dead\n"]),
+            binary_refresh: None,
+            launch_refresh: None,
+            restart: CommandPlan {
+                description: "restart after workspace restore".into(),
+                commands: vec![CommandSpec::new(
+                    "touch",
+                    [restarted.to_string_lossy().into_owned()],
+                )],
+            },
+        }),
+        project_memory: None,
+    };
+    let manager = spawn_session_manager().unwrap();
+    manager.targets.send_replace(vec![target.clone()]);
+    let handle = manager
+        .control
+        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let mut view = handle.view.clone();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            view.changed().await.unwrap();
+            if matches!(
+                view.borrow_and_update().error.as_ref(),
+                Some(ViewError::TargetMissing(_))
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("missing workspace was not reported");
+    assert!(
+        handle
+            .sync_now()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("working directory"),
+        "a parked actor must reject new relay work with its definitive cause"
+    );
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(35)).await;
+    assert!(!view.has_changed().unwrap(), "definitive view was replaced");
+    std::fs::create_dir(&missing).unwrap();
+    tokio::time::advance(Duration::from_secs(35)).await;
+    assert!(!restarted.exists(), "parked actor restarted the worker");
+    tokio::time::resume();
+
+    target.spec = CommandSpec::new("sh", ["-c", "exit 1 # revised target"]);
+    manager.targets.send_replace(vec![target]);
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !restarted.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("new target did not resume recovery");
+    manager.shutdown.shutdown().await.unwrap();
 }
 
 /// precision-3260: the worker stopped with "No space left on device", and
@@ -1515,6 +1612,21 @@ fn leased_relay_child_serves_stdio() {
                             payload: mj_core::relay::RelayResponsePayload::ReviewBaselineAdvanced,
                         },
                     }
+                } else if let RelayRequest::SetOperatorAway { away, revision } = &request.request {
+                    use std::io::Write as _;
+                    let mut log = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(PathBuf::from(&root).join("operator-presence.log"))
+                        .unwrap();
+                    writeln!(log, "{revision} {away}").unwrap();
+                    mj_core::relay::RelayResponseEnvelope {
+                        request_id: request.request_id,
+                        protocol_version: request.protocol_version,
+                        body: RelayResponseBody::Ok {
+                            payload: RelayResponsePayload::Status(relay.operational_state()),
+                        },
+                    }
                 } else {
                     relay.handle(request)
                 };
@@ -1764,12 +1876,64 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn installed_prompt_handoff_is_journaled_and_persisted_without_a_user_turn() {
+    const CHILD: &str = "MJ_TEST_PROMPT_HANDOFF_PERSISTENCE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "installed_prompt_handoff_is_journaled_and_persisted_without_a_user_turn",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let relay_root = tempfile::tempdir().unwrap();
+    let mut connection = StandaloneSession::connect(&leased_relay_target(relay_root.path()))
+        .await
+        .unwrap();
+    let source =
+        mj_transcript::projection::canonical_session_from_materialized(&connection.materialized)
+            .unwrap();
+    let text = format!(
+        "{}verified model handoff\n\n<retained_recent_context>\nrecent work</retained_recent_context>",
+        mj_transcript::handoff::MODEL_HANDOFF_OPENING
+    );
+    let marked = mj_transcript::handoff::encode_handoff(&source, &text).unwrap();
+
+    connection.install_prompt_context(marked).await.unwrap();
+
+    let canonical =
+        mj_transcript::projection::canonical_session_from_materialized(&connection.materialized)
+            .unwrap();
+    let reusable = mj_transcript::handoff::reusable_handoff(&canonical).unwrap();
+    assert_eq!(
+        reusable.summary,
+        "verified model handoff\n\n<retained_recent_context>\nrecent work</retained_recent_context>"
+    );
+    assert!(canonical.transcript.is_empty());
+    let requests = std::fs::read_to_string(relay_root.path().join(RELAY_REQUEST_LOG)).unwrap();
+    assert!(
+        requests.lines().any(|request| request == "submit"),
+        "{requests}"
+    );
+    assert!(
+        !requests
+            .lines()
+            .any(|request| request == "install_prompt_context"),
+        "{requests}"
+    );
+    connection.detach().await.unwrap();
+}
+
 /// Catching the local projection up to an accepted command is the
 /// expensive half of a submit, and a caller waiting to hear that the relay
 /// took the command should not wait for it. The two are separate calls, so
 /// the cheap one can answer first.
 #[cfg(unix)]
 // Hard-won: 0db1a867: Relay acceptance must not wait on catch-up and invite retrying an accepted command.
+// Hard-won: 1d746fab4: every empty catch-up deeply copied unchanged operational JSON.
 #[tokio::test]
 async fn submitting_does_not_catch_the_projection_up_until_asked() {
     if std::env::var_os(SUBMIT_WITHOUT_SYNC_TEST_CHILD).is_none() {
@@ -1808,6 +1972,14 @@ async fn submitting_does_not_catch_the_projection_up_until_asked() {
         connection.materialized.applied_event_ordinal > before,
         "the catch-up is what advances the projection"
     );
+    let held = connection.operational.clone();
+    for _ in 0..3 {
+        connection.sync_in_place().await.unwrap();
+        assert!(
+            held.ptr_eq(&connection.operational),
+            "an empty catch-up must retain its operational publication"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -2630,6 +2802,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
 }
 
 #[cfg(unix)]
+// Hard-won: AFK review #1/#2: equal availability hid missed transitions on reconnect.
 #[tokio::test]
 async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
     if std::env::var_os("MJ_TEST_SUBAGENT_ADMISSION_RECONNECT_CHILD").is_none() {
@@ -2657,6 +2830,7 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
 
     let relay_root = tempfile::tempdir().unwrap();
     let target = leased_relay_target(relay_root.path());
+    crate::database::set_operator_away(true).unwrap();
     let mut connection = None;
     let first = sync_actor_connection(&target, &mut connection).await;
     assert!(first.is_err(), "the first worker lost the open reply");
@@ -2671,9 +2845,23 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
             .exists()
     );
 
+    // The worker misses off/on. Reconnect must deliver revision3 although
+    // the last availability value it received was already true.
+    crate::database::set_operator_away(false).unwrap();
+    crate::database::set_operator_away(true).unwrap();
     sync_actor_connection(&target, &mut connection)
         .await
         .expect("the next relay connection repairs the gate");
+    // A still-connected actor must also send a new revision with the same bool.
+    crate::database::set_operator_away(false).unwrap();
+    crate::database::set_operator_away(true).unwrap();
+    sync_actor_connection(&target, &mut connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(relay_root.path().join("operator-presence.log")).unwrap(),
+        "1 true\n3 true\n5 true\n"
+    );
     assert!(connection.is_some());
     let state: serde_json::Value = serde_json::from_slice(
         &std::fs::read(relay_root.path().join("subagent-admission.json")).unwrap(),

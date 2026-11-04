@@ -85,7 +85,19 @@ pub const RELAY_SUBAGENT_FINISHED_PROTOCOL: u32 = 41;
 pub const RELAY_REVIEW_ATTRIBUTION_PROTOCOL: u32 = 42;
 /// 43 adds push-scoped review capture, reviewed-tree recording and verdict mailboxes.
 pub const RELAY_PUSH_REVIEW_PROTOCOL: u32 = 43;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_PUSH_REVIEW_PROTOCOL;
+/// 44 compresses project-memory trees with gzip, retaining plain-tree decoding.
+pub const RELAY_COMPRESSED_PROJECT_MEMORY_PROTOCOL: u32 = 44;
+/// 45 adds operator-away mode: SetOperatorAway and the OperatorAway mailbox body.
+pub const RELAY_OPERATOR_AWAY_PROTOCOL: u32 = 45;
+/// 46 adds connection-only AWS credential provisioning and renewal.
+pub const RELAY_AWS_CREDENTIALS_PROTOCOL: u32 = 46;
+/// 47 adds connection-only sync of the host's slopcop login.
+pub const RELAY_SLOPCOP_LOGIN_PROTOCOL: u32 = 47;
+/// 48 adds durable dismissal of an inferred question for an exact completed turn.
+pub const RELAY_DISMISS_QUESTION_PROTOCOL: u32 = 48;
+/// 49 adds repository-scoped review capture for linked worktrees.
+pub const RELAY_WORKTREE_REVIEW_PROTOCOL: u32 = 49;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_WORKTREE_REVIEW_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -118,7 +130,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 18 is breaking: revision-17 readers cannot preserve session-message sender bodies.
 // Revision 19 is breaking: revision-18 readers cannot replay a hook lease carrying a Claude steer.
 // Revision 20 is breaking: terminal receipts no longer carry execution payloads.
-pub const RELAY_STATE_VERSION: u32 = 20;
+// Revision 21 is breaking: older readers cannot preserve DismissQuestion commands.
+pub const RELAY_STATE_VERSION: u32 = 21;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";

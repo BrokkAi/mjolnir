@@ -11,7 +11,9 @@ pub(crate) fn is_turn_control_command(command: &mj_core::relay::RelayCommand) ->
 }
 
 /// The complete set of operations a phone may ask the controller to perform.
-/// Secret/config editing is intentionally not representable here, and the one
+/// Secret/config editing is intentionally not representable here: the
+/// signed-in viewer edits configuration through its own Settings routes
+/// (`settings.rs`), which never send a literal secret to the browser. The one
 /// destructive variant, `ForceClose`, is not representable on the wire: it is
 /// `#[serde(skip)]` so only in-process callers such as the HTTP API can build
 /// it.
@@ -21,6 +23,10 @@ pub(crate) fn is_turn_control_command(command: &mj_core::relay::RelayCommand) ->
 // this public action's Rust construction shape inline; boxing would change it.
 #[allow(clippy::large_enum_variant)]
 pub enum ControllerAction {
+    RecordOperatorActivity,
+    SetOperatorAway {
+        away: bool,
+    },
     TurnControl {
         session_id: String,
         command: mj_core::relay::RelayCommand,
@@ -279,12 +285,13 @@ pub enum ActionOutcome {
     /// Admitted and now running; watch the snapshot for what happens next.
     ///
     /// A `new` action carries the published session id, which is the only way
-    /// its caller learns what it just created.
-    Accepted { session_id: Option<String> },
-    /// The controller already runs as many phone actions as it allows.
-    /// `running` is the admission control's own count of in-flight actions and
-    /// `limit` the most it admits, so the message never keeps a second copy.
-    Busy { running: usize, limit: usize },
+    /// its caller learns what it just created. `notice` is something the
+    /// caller should tell the person about what was created, such as review
+    /// being turned off for it.
+    Accepted {
+        session_id: Option<String>,
+        notice: Option<String>,
+    },
     /// This session already has an operation running.
     SessionBusy,
     /// A cancel found no operation to cancel.
@@ -301,13 +308,16 @@ pub enum ActionOutcome {
 impl ActionOutcome {
     /// Admitted, with no session id to report.
     pub const fn accepted() -> Self {
-        Self::Accepted { session_id: None }
+        Self::Accepted {
+            session_id: None,
+            notice: None,
+        }
     }
 
     /// The published session id, when this outcome carries one.
     pub fn session_id(&self) -> Option<&str> {
         match self {
-            Self::Accepted { session_id } => session_id.as_deref(),
+            Self::Accepted { session_id, .. } => session_id.as_deref(),
             _ => None,
         }
     }
@@ -316,15 +326,6 @@ impl ActionOutcome {
     pub(super) fn rejection(&self) -> Option<ApiError> {
         match self {
             Self::Accepted { .. } => None,
-            Self::Busy { running, limit } => Some(
-                ApiError::new(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    format!(
-                        "the daemon is at its limit of {limit} concurrent actions ({running} running; a session that is still starting holds one until it is ready); retry shortly"
-                    ),
-                )
-                .with_busy(*running, *limit),
-            ),
             Self::SessionBusy => Some(ApiError::new(
                 StatusCode::CONFLICT,
                 "another operation is already running for this session",
@@ -535,6 +536,9 @@ pub struct PreflightNew {
     #[serde(default)]
     pub remote_repositories: Vec<PreflightRepository>,
     pub local_changes_excluded: bool,
+    /// Why creating this session turns its review off, when it will.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_notice: Option<String>,
 }
 
 /// What a phone asks about, or stores against, its own identity.

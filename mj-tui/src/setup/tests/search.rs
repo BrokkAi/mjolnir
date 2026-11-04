@@ -26,6 +26,46 @@ fn search_selects_a_switch_without_flipping_it() {
 }
 
 #[test]
+fn global_subagent_search_targets_inline_controls_and_hides_unavailable_effort() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    search(&mut dashboard, "straightforward model");
+    let paths = result_paths(&mut dashboard);
+    let model = vec!["subagents", "straightforward", "model"];
+    assert!(
+        paths
+            .iter()
+            .any(|path| path.iter().map(String::as_str).eq(model.iter().copied()))
+    );
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path == &["subagents", "straightforward"])
+    );
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path == &["subagents", "straightforward", "effort"])
+    );
+    dashboard.handle_key(key(KeyCode::Enter));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(dialog.path, ["subagents"]);
+    assert_eq!(dialog.focused_path().unwrap(), model);
+
+    let mut configured = dashboard_with_session(stopped_session());
+    configured.begin_setup();
+    setup_dialog_mut(&mut configured.mode).unwrap().draft["subagents"]["straightforward"]["model"] =
+        json!("model-x");
+    search(&mut configured, "straightforward effort");
+    let paths = result_paths(&mut configured);
+    assert!(
+        paths
+            .iter()
+            .any(|path| path == &["subagents", "straightforward", "effort"])
+    );
+}
+
+#[test]
 fn typing_in_the_search_does_not_reach_the_page_shortcuts() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_settings_section("profiles", None);

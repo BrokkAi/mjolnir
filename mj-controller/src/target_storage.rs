@@ -66,6 +66,7 @@ impl HostEntry {
 
 struct Board {
     hosts: Mutex<BTreeMap<String, HostEntry>>,
+    publication: Mutex<Option<mj_core::snapshot_map::SharedSnapshot<Vec<TargetStorageView>>>>,
     refresh: Mutex<Option<tokio::sync::mpsc::Sender<()>>>,
     /// Advances whenever a filesystem's verdict or free space changes.
     generation: tokio::sync::watch::Sender<u64>,
@@ -75,6 +76,7 @@ impl Default for Board {
     fn default() -> Self {
         Self {
             hosts: Mutex::default(),
+            publication: Mutex::default(),
             refresh: Mutex::default(),
             generation: tokio::sync::watch::channel(0).0,
         }
@@ -164,6 +166,10 @@ pub(crate) fn record_samples(samples: &[HostStorageSample], sampled_at: u64) {
             changed |= before.filesystems != after.filesystems
                 || before.unattributed_no_space != after.unattributed_no_space;
         }
+        *board
+            .publication
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
     }
     if changed {
         board.changed();
@@ -203,7 +209,14 @@ pub(crate) fn observe_no_space_at(host: &str, path: Option<&str>, detail: &str, 
             }
             None => entry.unattributed = Some((at, detail.to_owned())),
         }
-        before != entry.view(host)
+        let changed = before != entry.view(host);
+        if changed {
+            *board
+                .publication
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = None;
+        }
+        changed
     };
     tracing::warn!(%host, ?path, %detail, "a write failed because the target's disk is full");
     if changed {
@@ -219,11 +232,27 @@ pub fn view(host: &str) -> Option<TargetStorageView> {
 
 /// Every host the board knows, for publication.
 pub fn views() -> Vec<TargetStorageView> {
-    board()
-        .hosts()
-        .iter()
-        .map(|(host, entry)| entry.view(host))
-        .collect()
+    views_snapshot().into_inner()
+}
+
+/// Readers share the board's publication until a measurement or disk failure
+/// changes it. Both replacement and reads hold the host lock.
+pub(crate) fn views_snapshot() -> mj_core::snapshot_map::SharedSnapshot<Vec<TargetStorageView>> {
+    let board = board();
+    let hosts = board.hosts();
+    let mut publication = board
+        .publication
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    publication
+        .get_or_insert_with(|| {
+            hosts
+                .iter()
+                .map(|(host, entry)| entry.view(host))
+                .collect::<Vec<_>>()
+                .into()
+        })
+        .clone()
 }
 
 /// Wakes whenever a filesystem's verdict or free space changes.

@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use mj_core::config::is_bare_project_target;
 use mj_core::state::{MoveSelection, MoveSessionRequest};
 
-use mj_controller::controller::{Controller, ResumeRepositorySourceReceipt};
+use mj_controller::controller::ResumeRepositorySourceReceipt;
 use mj_controller::review_settings::ReviewDiscoveryRequest;
 use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::WebViewerAccess;
@@ -19,14 +19,13 @@ use mj_tui::{DashboardAction, SessionOperationKind};
 use crate::daemon;
 use crate::dashboard::io::{
     ConfigRenameRequest, ContainerSettingsRequest, DashboardIoUpdate, LifecycleOperationRequest,
-    ResumeRepositoryPreflightApply, config_only_controller, report, spawn_cancellable_io,
-    spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
-    spawn_create_bundle, spawn_dashboard_change_workspace, spawn_dashboard_container_settings,
-    spawn_dashboard_create_session, spawn_dashboard_rename, spawn_lifecycle_operation,
-    spawn_remove_bundle, spawn_review_settings_discovery, spawn_startup_prompt,
-    spawn_withdraw_startup_prompt, spawn_workspace_close, spawn_workspace_close_cancel,
-    spawn_workspace_create, spawn_workspace_draft_recovery, spawn_workspace_management_load,
-    spawn_workspace_rename,
+    ResumeRepositoryPreflightApply, config_only_controller, report, spawn_async_job,
+    spawn_cancellable_io, spawn_cancellable_io_with_token, spawn_clipboard_read,
+    spawn_config_rename, spawn_create_bundle, spawn_dashboard_change_workspace,
+    spawn_dashboard_container_settings, spawn_dashboard_create_session, spawn_dashboard_rename,
+    spawn_lifecycle_operation, spawn_remove_bundle, spawn_review_settings_discovery,
+    spawn_workspace_close, spawn_workspace_close_cancel, spawn_workspace_create,
+    spawn_workspace_draft_recovery, spawn_workspace_management_load, spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -76,6 +75,39 @@ pub(crate) fn copied_session_id_notice(session_id: &str) -> String {
     format!("Copied session ID {}", short_id(session_id))
 }
 
+fn start_suspension(
+    context: &mut DashboardContext,
+    session_id: String,
+    acknowledge_unpublished_work: bool,
+    ignore_nested_repositories: bool,
+) {
+    context.dashboard.set_notice(format!(
+        "Suspending {}…",
+        context.session_notice_name(&session_id)
+    ));
+    let request = context.begin_lifecycle_operation(&session_id, SessionOperationKind::Suspending);
+    mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
+    spawn_lifecycle_operation(
+        request,
+        context.critical_operations.clone(),
+        move |_cancelled| {
+            mj_core::runtime::block_on(async {
+                let mut client = daemon::connect_or_start().await?;
+                if ignore_nested_repositories {
+                    client
+                        .ignore_nested_repositories_and_suspend(session_id)
+                        .await
+                } else {
+                    client
+                        .suspend_session_with_ack(session_id, acknowledge_unpublished_work)
+                        .await
+                }
+            })??;
+            Ok(LifecycleSuccess::Closed)
+        },
+    );
+}
+
 /// Carries out one dashboard action.
 pub(crate) async fn apply_dashboard_action(
     context: &mut DashboardContext,
@@ -91,6 +123,30 @@ pub(crate) async fn apply_dashboard_action(
         action => action,
     };
     match action {
+        DashboardAction::SetOperatorAway { away } => {
+            let revision = context.dashboard.operator_presence_revision();
+            crate::dashboard::io::spawn_critical_async(
+                context.critical_operations.clone(),
+                "changing operator presence",
+                context.dashboard_io_tx.clone(),
+                std::time::Duration::from_secs(30),
+                async move {
+                    let mut client = daemon::connect_or_start().await?;
+                    match client
+                        .request(daemon::DaemonAction::SetOperatorAway { away })
+                        .await?
+                    {
+                        daemon::DaemonReply::Done => Ok(()),
+                        reply => bail!("unexpected operator-presence reply {reply:?}"),
+                    }
+                },
+                move |result| DashboardIoUpdate::OperatorAway {
+                    away,
+                    revision,
+                    result,
+                },
+            );
+        }
         DashboardAction::None => {}
         DashboardAction::CheckGitIdentity => {
             // The daemon reads Git in the environment its sessions inherit.
@@ -193,11 +249,12 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             let updates = context.dashboard_io_tx.clone();
             tokio::spawn(async move {
-                let result = mj_controller::pollers::load_native_agent_history(
-                    owner.clone(),
-                    child.clone(),
-                    before,
-                )
+                let result = async {
+                    daemon::connect_or_start()
+                        .await?
+                        .native_agent_history(owner.clone(), child.clone(), before)
+                        .await
+                }
                 .await
                 .map_err(|error: anyhow::Error| format!("{error:#}"));
                 if let Err(error) = updates.send(DashboardIoUpdate::NativeAgentHistory {
@@ -230,6 +287,35 @@ pub(crate) async fn apply_dashboard_action(
             });
         }
         DashboardAction::OpenSubagents { parent_id } => context.open_subagents(parent_id),
+        DashboardAction::DismissQuestion {
+            session_id,
+            question,
+        } => {
+            let result_session = session_id.clone();
+            let result_question = question.clone();
+            spawn_async_job(
+                Some(context.critical_operations.clone()),
+                "question dismissal",
+                context.dashboard_io_tx.clone(),
+                std::time::Duration::from_secs(30),
+                async move {
+                    let mut client = daemon::connect_existing().await?;
+                    client
+                        .submit_session_command(
+                            session_id,
+                            format!("dismiss-question-{}", question.completed_ordinal),
+                            mj_core::relay::RelayCommand::DismissQuestion { question },
+                            None,
+                        )
+                        .await
+                },
+                move |result| DashboardIoUpdate::QuestionDismissed {
+                    session_id: result_session,
+                    question: result_question,
+                    result,
+                },
+            );
+        }
         DashboardAction::InterruptAll { targets } => {
             let updates = context.dashboard_io_tx.clone();
             tokio::spawn(async move {
@@ -322,13 +408,9 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
             );
         }
-        DashboardAction::CheckMachineRuntimes {
-            generation,
-            machines,
-        } => {
-            super::io::spawn_machine_runtime_check(
+        DashboardAction::CheckAvailability { generation } => {
+            super::io::spawn_availability_check(
                 generation,
-                machines,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );
@@ -535,7 +617,12 @@ pub(crate) async fn apply_dashboard_action(
                 "estimating archive space",
                 context.dashboard_io_tx.clone(),
                 move |_cancelled| {
-                    mj_controller::sessionwiki::archive_space_preview(older_than_days)
+                    mj_core::runtime::block_on(async {
+                        daemon::connect_or_start()
+                            .await?
+                            .archive_space_preview(older_than_days)
+                            .await
+                    })?
                 },
                 move |result| DashboardIoUpdate::ArchiveSpacePreviewed {
                     generation,
@@ -663,11 +750,21 @@ pub(crate) async fn apply_dashboard_action(
                 context.dashboard_io_tx.clone(),
                 std::time::Duration::from_secs(125),
                 async move {
-                    let history =
-                        tokio::task::spawn_blocking(mj_controller::database::load_mount_history)
+                    let history = async {
+                        daemon::connect_or_start()
+                            .await?
+                            .stored_session_metadata()
                             .await
-                            .context("recent project history task failed")?
-                            .map_err(|error| format!("{error:#}"));
+                    }
+                    .await
+                    .map(|metadata| {
+                        metadata
+                            .mount_history
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect()
+                    })
+                    .map_err(|error| format!("{error:#}"));
                     // Publish the history before requesting discovery. A late
                     // history snapshot cannot erase locations discovery adds.
                     history_tx
@@ -692,68 +789,6 @@ pub(crate) async fn apply_dashboard_action(
                     result,
                 },
             );
-        }
-        DashboardAction::CheckTargetReadiness {
-            generation,
-            target_ids,
-        } => {
-            for target_id in target_ids {
-                let template = context.controller.config.targets.get(&target_id).cloned();
-                // A local engine found not installed is not checked, or
-                // logged, on every poll (launch finding R8-6).
-                if let Some(message) = context.absent_engines.answer(
-                    &target_id,
-                    template.as_ref(),
-                    std::env::var_os("PATH").as_deref(),
-                ) {
-                    context
-                        .dashboard
-                        .apply_target_runtime_missing(generation, target_id, message);
-                    continue;
-                }
-                let checked_template = template.clone();
-                let config = context.controller.config.clone();
-                let reported_id = target_id.clone();
-                spawn_cancellable_io(
-                    context.critical_operations.clone(),
-                    format!("checking target {target_id}"),
-                    context.dashboard_io_tx.clone(),
-                    move |cancelled| {
-                        let executor = CancellableProcessExecutor::new(cancelled)
-                            .with_deadline(std::time::Duration::from_secs(15));
-                        // An engine that is not installed is an answer, not a
-                        // failure of the check, so it is not logged as one.
-                        match config_only_controller(config)
-                            .check_target_readiness(&target_id, &executor)
-                        {
-                            Ok(()) => Ok((Ok(()), false)),
-                            Err(error)
-                                if checked_template.as_ref().is_some_and(|template| {
-                                    crate::dashboard::absent_engines::engine_absent(
-                                        template,
-                                        std::env::var_os("PATH").as_deref(),
-                                    )
-                                }) =>
-                            {
-                                Ok((Err(format!("{error:#}")), true))
-                            }
-                            Err(error) => Err(error),
-                        }
-                    },
-                    move |checked| {
-                        let (result, engine_absent) = match checked {
-                            Ok(checked) => checked,
-                            Err(error) => (Err(error), false),
-                        };
-                        DashboardIoUpdate::TargetReadiness {
-                            generation,
-                            target_id: reported_id,
-                            result,
-                            absent_engine: template.filter(|_| engine_absent),
-                        }
-                    },
-                );
-            }
         }
         DashboardAction::CheckProjectDirectories { paths } => {
             for path in paths {
@@ -815,8 +850,6 @@ pub(crate) async fn apply_dashboard_action(
                     old_id,
                     new_id,
                     profile: true,
-                    workspace_id: context.workspace_id.clone(),
-                    client_id: context.client_id.clone(),
                 },
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
@@ -830,8 +863,6 @@ pub(crate) async fn apply_dashboard_action(
                     old_id,
                     new_id,
                     profile: false,
-                    workspace_id: context.workspace_id.clone(),
-                    client_id: context.client_id.clone(),
                 },
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
@@ -841,7 +872,10 @@ pub(crate) async fn apply_dashboard_action(
             if !context.clipboard_read_in_flight {
                 context.clipboard_read_in_flight = true;
                 context.dashboard.set_notice("Reading clipboard…");
-                spawn_clipboard_read(context.dashboard_io_tx.clone());
+                spawn_clipboard_read(
+                    context.dashboard.paste_target(),
+                    context.dashboard_io_tx.clone(),
+                );
             }
         }
         DashboardAction::MarkAllRead { receipts } => {
@@ -915,7 +949,6 @@ pub(crate) async fn apply_dashboard_action(
                     DashboardImportSafety {
                         create_managed_worktree: None,
                         accepted: false,
-                        include_untracked: true,
                     },
                 );
             }
@@ -932,7 +965,6 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::ConfirmImportBundle {
             create_managed_worktree,
             accepted,
-            include_untracked,
         } => {
             let Some(pending) = context.pending_import.take() else {
                 context.dashboard.finish_import();
@@ -951,7 +983,6 @@ pub(crate) async fn apply_dashboard_action(
                         DashboardImportSafety {
                             create_managed_worktree,
                             accepted: true,
-                            include_untracked,
                         },
                     );
                 }
@@ -962,7 +993,7 @@ pub(crate) async fn apply_dashboard_action(
                     .set_notice("Import cancelled; no Mjolnir files were changed.");
             }
         }
-        DashboardAction::QueueStartupPrompt { session_id, text } => {
+        DashboardAction::QueueStartupPrompt { session_id, prompt } => {
             // The daemon clears the saved draft only when it still holds the
             // text this prompt was typed from; anything else stays put.
             let inherited_draft = context
@@ -970,20 +1001,20 @@ pub(crate) async fn apply_dashboard_action(
                 .state
                 .sessions
                 .get(&session_id)
-                .filter(|session| session.draft_input == text)
+                .filter(|session| session.draft_input == prompt.payload.encode_draft())
                 .map(|session| session.draft_input.clone());
-            spawn_startup_prompt(
+            context.startup_prompts.enqueue(
                 session_id,
-                text,
+                prompt,
                 inherited_draft,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );
         }
-        DashboardAction::WithdrawStartupPrompt { session_id, text } => {
-            spawn_withdraw_startup_prompt(
+        DashboardAction::WithdrawStartupPrompt { session_id, prompt } => {
+            context.startup_prompts.withdraw(
                 session_id,
-                text,
+                prompt,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );
@@ -1028,8 +1059,6 @@ pub(crate) async fn apply_dashboard_action(
                     memory,
                     additional_mounts,
                     mount_history,
-                    workspace_id: context.workspace_id.clone(),
-                    client_id: context.client_id.clone(),
                 },
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
@@ -1173,16 +1202,17 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 format!("updating repository for {}", short_id(&session_id)),
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled);
-                    let mut controller = Controller::load()?;
-                    let preflight =
-                        mj_core::runtime::block_on(controller.replace_resume_repository_origin(
-                            &session_id,
-                            &repository_id,
-                            &replacement,
-                            &executor,
-                        ))??;
+                move |_cancelled| {
+                    let preflight = mj_core::runtime::block_on(async {
+                        daemon::connect_or_start()
+                            .await?
+                            .replace_resume_repository_origin(
+                                session_id,
+                                repository_id,
+                                replacement,
+                            )
+                            .await
+                    })??;
                     Ok(ResumeRepositoryPreflightApply { preflight })
                 },
                 move |result| DashboardIoUpdate::ResumeRepositoryPreflight {
@@ -1220,6 +1250,7 @@ pub(crate) async fn apply_dashboard_action(
                             .project_directory
                             .context("bare preflight returned no directory")?,
                         result.managed_worktree,
+                        result.review_turns_off,
                     ))
                 },
                 move |result| DashboardIoUpdate::ProjectValidation {
@@ -1324,7 +1355,7 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_controller, _cancelled| {
+                move |_cancelled| {
                     mj_core::runtime::block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
                         dispatch_restart(&mut daemon, session_id, acknowledge_container_recreation)
@@ -1391,12 +1422,19 @@ pub(crate) async fn apply_dashboard_action(
                 "Moving {}…",
                 context.session_notice_name(&session_id)
             ));
+            context
+                .startup_prompts
+                .begin_move(&session_id, Some(preparation.operation_id.clone()));
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Moving);
+            context.dashboard.set_standby_move_origin(
+                &session_id,
+                context.startup_prompts.move_origin(&session_id),
+            );
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_controller, cancelled| {
+                move |cancelled| {
                     mj_core::runtime::block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
                         let operation = daemon.move_session(MoveSessionRequest {
@@ -1457,12 +1495,18 @@ pub(crate) async fn apply_dashboard_action(
                 "Retrying move for {}…",
                 context.session_notice_name(&session_id)
             ));
+            context.startup_prompts.begin_move(&session_id, None);
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Moving);
+            context.dashboard.set_standby_move_origin(
+                &session_id,
+                context.startup_prompts.move_origin(&session_id),
+            );
+            let prepared_updates = context.dashboard_io_tx.clone();
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_controller, cancelled| {
+                move |cancelled| {
                     let selection = operation.selection.clone();
                     let queue = Some(operation.queue);
                     let operation_id = operation.operation_id.clone();
@@ -1470,6 +1514,15 @@ pub(crate) async fn apply_dashboard_action(
                     mj_core::runtime::block_on(async move {
                         let mut daemon = daemon::connect_or_start().await?;
                         let preparation = daemon.prepare_move_session(selection).await?;
+                        report(
+                            "binding move prompt origin",
+                            &prepared_updates,
+                            DashboardIoUpdate::MoveOriginPrepared {
+                                session_id: session_id.clone(),
+                                move_operation_id: preparation.operation_id.clone(),
+                                operation: cancelled.clone(),
+                            },
+                        );
                         let request = MoveSessionRequest {
                             preparation,
                             queue,
@@ -1532,27 +1585,9 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::Suspend {
             session_id,
             acknowledge_unpublished_work,
-        } => {
-            context.dashboard.set_notice(format!(
-                "Suspending {}…",
-                context.session_notice_name(&session_id)
-            ));
-            let request =
-                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Suspending);
-            mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
-            spawn_lifecycle_operation(
-                request,
-                context.critical_operations.clone(),
-                move |_controller, _cancelled| {
-                    mj_core::runtime::block_on(async {
-                        daemon::connect_or_start()
-                            .await?
-                            .suspend_session_with_ack(session_id, acknowledge_unpublished_work)
-                            .await
-                    })??;
-                    Ok(LifecycleSuccess::Closed)
-                },
-            );
+        } => start_suspension(context, session_id, acknowledge_unpublished_work, false),
+        DashboardAction::IgnoreNestedRepositoriesAndSuspend { session_id } => {
+            start_suspension(context, session_id, true, true);
         }
         DashboardAction::ResolveAwsResourceOptions {
             target_template_ids,
@@ -1582,7 +1617,7 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_controller, _cancelled| {
+                move |_cancelled| {
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
@@ -1603,7 +1638,7 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_controller, _cancelled| {
+                move |_cancelled| {
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
@@ -1624,7 +1659,7 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_controller, _cancelled| {
+                move |_cancelled| {
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
@@ -1743,12 +1778,13 @@ pub(crate) fn start_resume_repository_preflight(
         context.critical_operations.clone(),
         format!("checking repositories for {}", short_id(&session_id)),
         context.dashboard_io_tx.clone(),
-        move |cancelled| {
-            let executor = CancellableProcessExecutor::new(cancelled);
-            let controller = Controller::load()?;
-            let preflight = mj_core::runtime::block_on(
-                controller.preflight_resume_repository_sources(&session_id, &target_id, &executor),
-            )??;
+        move |_cancelled| {
+            let preflight = mj_core::runtime::block_on(async {
+                daemon::connect_or_start()
+                    .await?
+                    .resume_repository_preflight(session_id, target_id)
+                    .await
+            })??;
             Ok(ResumeRepositoryPreflightApply { preflight })
         },
         move |result| DashboardIoUpdate::ResumeRepositoryPreflight {
@@ -1839,41 +1875,6 @@ pub(crate) fn start_preflighted_session_launch(
     start_session_launch_with_repository_preflight(context, action, Some(repository_preflight));
 }
 
-/// Opens the composer that catches typing while a creation runs. Registration
-/// is several seconds of work away — loading the controller, probing Git
-/// remotes, registering with the daemon — and until it lands there is no
-/// session id to key a standby composer by, so the launch standby holds the
-/// text and the new session's standby adopts it.
-fn begin_launch_standby(context: &mut DashboardContext, action: &DashboardAction) {
-    let DashboardAction::CreateSession {
-        profile_id,
-        bundle_id,
-        project_directory,
-        ..
-    } = action
-    else {
-        return;
-    };
-    let target = project_directory
-        .as_ref()
-        .map(|directory| directory.display().to_string())
-        .unwrap_or_else(|| bundle_id.clone());
-    context
-        .dashboard
-        .begin_launch_standby(mj_chat::chat::SessionHeaderIdentity {
-            target,
-            profile: profile_id.clone(),
-            title: String::new(),
-            harness_kind: context
-                .controller
-                .config
-                .profiles
-                .get(profile_id)
-                .map(|profile| profile.kind),
-            subagent_count: 0,
-        });
-}
-
 fn start_session_launch_with_repository_preflight(
     context: &mut DashboardContext,
     action: DashboardAction,
@@ -1894,7 +1895,6 @@ fn start_session_launch_with_repository_preflight(
         action @ DashboardAction::CreateSession { .. } => {
             debug_assert!(repository_preflight.is_none());
             context.dashboard.set_notice("Preparing session launch…");
-            begin_launch_standby(context, &action);
             let go_save = context.dashboard.remember_go_launch(&action);
             spawn_dashboard_create_session(
                 action,
@@ -1930,7 +1930,7 @@ fn start_session_launch_with_repository_preflight(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_controller, _cancelled| {
+                move |_cancelled| {
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
@@ -1980,19 +1980,28 @@ impl DashboardContext {
         self.cancel_chat_open_for(session_id);
         self.dashboard
             .begin_session_operation(session_id.to_owned(), kind, None);
-        // A restart or resume parks the conversation behind the standby
-        // composer. Select the session coming back so that composer is the
-        // one on screen, seed it with the warm chat's text so nothing typed
-        // is lost, and put the keyboard where the typing happens.
+        // Park this session's composer without changing navigation. A Move
+        // can belong to an unfocused pane; its draft must stay with it.
         if matches!(
             kind,
-            SessionOperationKind::Launching | SessionOperationKind::Resuming
+            SessionOperationKind::Launching
+                | SessionOperationKind::Resuming
+                | SessionOperationKind::Moving
         ) {
-            self.dashboard.select_active_session(session_id);
-            if let Some(text) = self.chats.get(session_id).map(|chat| chat.draft()) {
-                self.dashboard.seed_standby_prompt(session_id, text);
+            if !self.dashboard.has_standby_composer(session_id)
+                && let Some(chat) = self.chats.get_mut(session_id)
+                && let Some(composer) = chat.take_live_composer()
+            {
+                self.dashboard.adopt_standby_composer(session_id, composer);
             }
-            self.dashboard.focus_prompt();
+            if kind != SessionOperationKind::Moving {
+                self.dashboard.set_standby_move_origin(session_id, None);
+            }
+            // Resume is an explicit request to open a suspended conversation.
+            if kind == SessionOperationKind::Resuming {
+                self.dashboard.select_active_session(session_id);
+                self.dashboard.focus_prompt();
+            }
         }
         let cancelled = Arc::new(AtomicBool::new(false));
         let notice_name = self.session_notice_name(session_id);
@@ -2067,6 +2076,31 @@ fn spawn_daemon_restart(context: &mut DashboardContext) {
         );
         if let Err(error) = updates.send(DashboardIoUpdate::DaemonRestarted(result)) {
             tracing::warn!(%error, "daemon restart outcome dropped because the surface closed");
+        }
+        drop(guard);
+    });
+}
+
+/// Move the daemon where a saved `[daemon]` setting says, off the event loop.
+///
+/// Startup owns that decision: it compares where the daemon runs with the
+/// configuration and hands off to a daemon launched in the right place, so
+/// workers keep running. This only asks it now rather than at the next start.
+pub(super) fn spawn_daemon_placement(context: &mut DashboardContext) {
+    let updates = context.dashboard_io_tx.clone();
+    let guard = context
+        .critical_operations
+        .begin("moving the Mjolnir daemon");
+    context
+        .dashboard
+        .set_notice("Moving the Mjolnir daemon where Settings say...");
+    tokio::spawn(async move {
+        let result = daemon::connect_or_start().await.map_or_else(
+            |error| Err(format!("Could not move the Mjolnir daemon: {error:#}")),
+            |_| Ok("The Mjolnir daemon runs where Settings say.".to_owned()),
+        );
+        if let Err(error) = updates.send(DashboardIoUpdate::DaemonRestarted(result)) {
+            tracing::warn!(%error, "daemon move outcome dropped because the surface closed");
         }
         drop(guard);
     });

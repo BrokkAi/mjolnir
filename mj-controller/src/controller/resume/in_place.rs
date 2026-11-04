@@ -6,6 +6,8 @@
 //! with its target), and this module then takes the old harness out of that
 //! target and puts the new one in. The container or worker root, the
 //! workspace, untracked files, and any build caches survive.
+//! A compatible profile switch also keeps its executable and native home;
+//! only profile configuration and the relay continuation seed are replaced.
 
 use anyhow::{Context, Result, ensure};
 use tokio_util::sync::CancellationToken;
@@ -14,9 +16,10 @@ use mj_core::state::{MaterializedSession, SessionState};
 use mj_transcript::projection::materialized_session_from_canonical;
 
 use super::{
-    Controller, RestoreIntoTarget, WorkerRootReset, backend_locator, now,
-    projection_rebuild_required, restore_projection_after_failed_resume,
-    utility_handoff_while_cancellable, verify_resume_checkpoint,
+    Controller, RestoreIntoTarget, WorkerRootReset, backend_locator,
+    native_prior_while_cancellable, now, projection_rebuild_required,
+    restore_projection_after_failed_resume, utility_handoff_while_cancellable,
+    verify_resume_checkpoint,
 };
 use crate::controller::removable_profile_root;
 use crate::targets::CommandExecutor;
@@ -26,6 +29,7 @@ struct InPlaceRestorePlan {
     verified_archive: super::VerifiedResumeArchive,
     profile: mj_core::config::HarnessProfile,
     native_continuity: bool,
+    retain_native: bool,
     target_template: mj_core::config::TargetTemplate,
     previous_profile_root: String,
 }
@@ -242,6 +246,7 @@ impl Controller {
                 verified_archive,
                 profile,
                 native_continuity,
+                retain_native,
                 target_template,
                 previous_profile_root,
             } = plan;
@@ -266,6 +271,11 @@ impl Controller {
             };
             let context_bytes = crate::handoff::profile_handoff_bytes(Some(&profile));
             let utility_config = (!native_continuity).then(|| self.config.clone());
+            let native_prior = if utility_config.is_some() {
+                native_prior_while_cancellable(session_id, &verified_archive, executor).await?
+            } else {
+                None
+            };
             let stored_frontier = crate::database::materialized_event_frontier(session_id)
             .unwrap_or_else(|error| {
                 tracing::warn!(
@@ -341,6 +351,7 @@ impl Controller {
                             session_id,
                             config,
                             &canonical_session,
+                            native_prior.as_ref(),
                             context_bytes,
                             executor,
                             CancellationToken::new(),
@@ -389,6 +400,7 @@ impl Controller {
                         } else {
                             WorkerRootReset::InPlace {
                                 previous_profile_root,
+                                retain_native,
                             }
                         },
                         retire_after_ready: None,
@@ -446,8 +458,16 @@ impl Controller {
             .target
             .as_ref()
             .context("an in-place harness replacement has no target to replace it in")?;
+        let restart_intent = if mode == InPlaceRestoreMode::Restart {
+            crate::database::load_session_restart(session_id)?
+        } else {
+            None
+        };
         let checkpoint = move_operation
             .and_then(|op| op.handoff.as_ref())
+            .or(restart_intent
+                .as_ref()
+                .and_then(|intent| intent.handoff.as_ref()))
             .or(previous.checkpoint.as_ref())
             .context("session has no checkpoint")?;
         let verified_archive = verify_resume_checkpoint(session_id, checkpoint)?;
@@ -473,10 +493,20 @@ impl Controller {
             "{} ACP supports one workspace root; attached directories are unsupported",
             profile.kind.display_name()
         );
-        // Resolving the worker binary is local and costs microseconds. A swap
-        // that could never install a worker fails before the old harness is
-        // removed from the target.
-        crate::controller::worker_binary::preflight_worker_binary(&target_template, executor)?;
+        let native_continuity = self.config.native_continuity(
+            verified_archive.manifest.session.harness_kind,
+            &verified_archive.manifest.session.profile_id,
+            profile_id,
+        )?;
+        // A failed/older swap may already have removed native files. Explicit
+        // recovery reconstructs them; a freshly sealed source still owns them.
+        let retain_native = matches!(mode, InPlaceRestoreMode::Move | InPlaceRestoreMode::Restart)
+            && native_continuity
+            && previous.state == SessionState::Closing
+            && super::super::local_profile_homes::session_has_a_staged_home_of_its_own(previous);
+        if !retain_native {
+            crate::controller::worker_binary::preflight_worker_binary(&target_template, executor)?;
+        }
         // The directory the *source* profile owns inside the target. It is
         // read from the record's own profile, before the record names the
         // destination one.
@@ -528,15 +558,11 @@ impl Controller {
                 )
             })?;
         let previous_profile_root = removable_profile_root(&backend, session_id, source_profile);
-        let native_continuity = self.config.native_continuity(
-            verified_archive.manifest.session.harness_kind,
-            &verified_archive.manifest.session.profile_id,
-            profile_id,
-        )?;
         Ok(InPlaceRestorePlan {
             verified_archive,
             profile,
             native_continuity,
+            retain_native,
             target_template,
             previous_profile_root,
         })

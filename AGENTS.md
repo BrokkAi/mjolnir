@@ -63,15 +63,13 @@ Do not add a new pre-tag checklist or repeat registry authorization audits.
 # Git / version control
 
 After completing and validating requested implementation changes, commit them
-to the current branch without waiting for a separate request to commit. For a
-larger task, also commit each logically distinct, validated set of changes when
-it forms a coherent checkpoint. Treat committing as part of finishing the task
-unless the user explicitly says not to commit. Do not push unless the user
-explicitly asks. Release requests are explicit push authorization as defined
-under Releases above.
+to the current branch and push them to `origin/master` without waiting for a
+separate request. For a larger task, also commit each logically distinct,
+validated set of changes when it forms a coherent checkpoint. Treat committing
+and pushing as part of finishing the task unless the user says not to commit,
+not to push, or to push somewhere else.
 
 Commit directly to the current branch. This rule also applies when the current branch is `master`.
-When explicitly asked to push, push to upstream, even when upstream is `master`.
 
 Do not create a branch, change branches, rebase, or open a pull request unless the user gives an explicit instruction.
 
@@ -236,14 +234,10 @@ Unit tests are colocated in module-level `#[cfg(test)]` blocks. `mj-cli/tests/` 
 
 ## macOS and Windows CI
 
-On check-ins, the macOS and Windows runners start only for changes sensitive
-to that platform; both also run nightly and on every release tag. The
-maintained lists are `.github/macos-ci-paths.txt` and
-`.github/windows-ci-paths.txt`; files with that platform's cfg gate, such as
-`target_os = "macos"` or `cfg(windows)`, match automatically (each list's
-header names every gate). When you add a macOS or Windows wrapper or
-platform-specific module without such a gate, add its path to that list in
-the same change.
+Check-ins run CI on Linux only. The macOS and Windows lanes run nightly, on
+manual dispatch of `nightly.yml`, and on every release tag. After a
+platform-sensitive change, dispatch `nightly.yml` on master to check it before
+the next night's run.
 
 ## Harness pins
 
@@ -251,25 +245,28 @@ Harness versions are pinned in `mj-core/src/harness_runtime.rs`. When you
 change a pin, update the agent-dev container image in the same commit, so
 container sessions run the same harness versions as managed bare workers:
 
-- Codex and Claude bridges: update the `npm install --global` line in
+- Codex and Claude bridges, Kimi Code, Grok, and OpenCode: update the
+  `npm install --global` line in
   `containers/Containerfile.agent-dev`, as well as the package files in
   `mj-core/assets/harnesses/`. The test
   `bridge_fallback_pins_match_the_agent_dev_containerfile` fails if the
   Containerfile and the pins disagree.
 - Muse: update `mj-core/assets/muse/runtime.json`. The image installs Muse
   from that file.
-- dsh-acp: update `DSH_ACP_VERSION` in `mj-core/src/harness_runtime.rs`. DSH
-  has no managed installation and is not in the image; sessions and the model
-  discovery probe launch it through `npx -y @brokkai/dsh-acp@<version>`, so
-  the version in `dsh_acp_launch_script()` is the whole pin. The test
-  `bridge_fallback_pins_match_the_agent_dev_containerfile` asserts the launch
-  names the pinned version.
+- dsh-acp: update `DSH_ACP_VERSION` in `mj-core/src/harness_runtime.rs` and
+  the `npm install --global` line in `containers/Containerfile.agent-dev`. DSH
+  has no managed installation; outside the image, sessions and the model
+  discovery probe launch it through `npx -y @brokkai/dsh-acp@<version>` from
+  `dsh_acp_launch_script()`. The test
+  `bridge_fallback_pins_match_the_agent_dev_containerfile` asserts both name
+  the pinned version.
 - OpenCode: regenerate `mj-core/assets/opencode-provider-environment.txt`
   with `scripts/generate-opencode-provider-environment.py` from a checkout of
   the new tag. The test
   `opencode_provider_environment_was_generated_from_the_pinned_opencode`
   fails until you do.
-- Grok and Kimi are not in the image. They install on demand.
+- MiMo Code: update `mj-core/assets/mimo/runtime.json`. The image installs
+  MiMo Code from that file.
 
 Pushing the commit to master runs `publish-agent-dev-image.yml`, which
 publishes `ghcr.io/brokkai/mjolnir/agent-dev:latest`. Check that the run

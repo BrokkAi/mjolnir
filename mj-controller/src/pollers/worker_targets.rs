@@ -127,19 +127,26 @@ pub(crate) fn credential_sync_targets_from_sources(
                     return None;
                 }
             };
-            let sync_github_token = target_syncs_github_token(session.target.as_ref());
+            let aws_credentials = match controller.aws_credential_source(&session.id) {
+                Ok(source) => source,
+                Err(error) => {
+                    tracing::warn!(session_id = %session.id, "could not select AWS credential sync source: {error:#}");
+                    return None;
+                }
+            };
             Some(CredentialSyncTarget {
                 session_id: session.id.clone(),
                 profile_id: session.last_profile.clone(),
                 harness: profile.kind,
                 profile_home: profile.home.clone(),
+                aws_credentials,
                 skips_login_file_sync: *schemes.get(&session.last_profile)?
                     || crate::controller::local_profile_homes::session_shares_profile_login(
                         session,
                         profile.kind,
                     ),
-                sync_github_token,
-                github_app_configured: controller.config.github.app.is_some(),
+                github: controller.config.github.clone(),
+                sync_github_token: target_syncs_github_token(session.target.as_ref()),
                 skills_scope: session.target.as_ref()?.skills_scope(),
                 spec,
             })
@@ -149,10 +156,6 @@ pub(crate) fn credential_sync_targets_from_sources(
 
 pub(super) fn target_syncs_github_token(target: Option<&mj_core::state::TargetLocator>) -> bool {
     target.is_some()
-        && !matches!(
-            target,
-            Some(mj_core::state::TargetLocator::LocalBare { .. })
-        )
 }
 
 /// Revalidate a copied target while holding background admission: a lifecycle

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(unix)]
-use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 // `anyhow::Error::context` is inherent; only the Unix-only `Option`/`Result`
 // calls need the trait in scope.
 #[cfg(unix)]
@@ -216,7 +216,7 @@ fn startup_reconciliation_only_removes_unreferenced_controller_checkpoints() {
     state.sessions.insert(session_id.into(), session);
 
     assert_eq!(
-        reconcile_managed_checkpoint_archives_in(directory.path(), &state, &[]).unwrap(),
+        reconcile_managed_checkpoint_archives_in(directory.path(), &state, &[], &[]).unwrap(),
         1
     );
     assert!(directory.path().join(referenced_name).exists());
@@ -432,6 +432,7 @@ fn exported_checkpoint_json() -> Vec<u8> {
 }
 fn export_spec_fixture() -> CheckpointExportSpec {
     CheckpointExportSpec {
+        ignore_nested_repositories: false,
         report_directories: None,
         protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
         session: mj_checkpoint::archive::SessionManifest {
@@ -613,66 +614,71 @@ fn an_export_with_no_native_history_tells_the_caller_why() {
 /// current spec before it can apply obsolete path or collection behavior.
 #[test]
 fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
-    let locator = targets::TargetLocator::LocalPodman {
-        borrowed_from: None,
-        container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
-        workspace_storage: Default::default(),
-    };
-    let spec = export_spec_fixture();
-    let executor = ExportExecutor::new(
-        1,
-        "Error: parse checkpoint export spec from standard input\n\nCaused by:\n    \
-             unknown field `protocol_version`, expected `session` at line 1 column 20\n",
-    )
-    .retry_stdin_after_failure();
-    let directory = tempfile::tempdir().unwrap();
-    let worker_binary = directory.path().join("hel-test-worker");
-    std::fs::write(&worker_binary, mj_core::worker_build::WORKER_BUILD_STAMP).unwrap();
+    for (ignore_nested_repositories, field) in [
+        (false, "protocol_version"),
+        (true, "ignore_nested_repositories"),
+    ] {
+        let locator = targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
+            workspace_storage: Default::default(),
+        };
+        let mut spec = export_spec_fixture();
+        spec.ignore_nested_repositories = ignore_nested_repositories;
+        let failure = format!(
+            "Error: parse checkpoint export spec from standard input\n\nCaused by:\n    unknown field `{field}`, expected `session` at line 1 column 20\n"
+        );
+        let executor = ExportExecutor::new(1, &failure).retry_stdin_after_failure();
+        let directory = tempfile::tempdir().unwrap();
+        let worker_binary = directory.path().join("hel-test-worker");
+        std::fs::write(&worker_binary, mj_core::worker_build::WORKER_BUILD_STAMP).unwrap();
 
-    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
-        LATCH_RELAY_SESSION,
-        "test legacy export",
-    )
-    .unwrap()
-    .unwrap();
-    let output = owner
-        .scope_blocking(|| {
-            run_checkpoint_staging_command(
-                &executor,
-                &locator,
-                LATCH_RELAY_SESSION,
-                &spec,
-                export_stdin_command,
-                "export target checkpoint",
-                Some(&worker_binary),
-            )
-        })
+        let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+            LATCH_RELAY_SESSION,
+            "test legacy export",
+        )
+        .unwrap()
         .unwrap();
+        let output = owner
+            .scope_blocking(|| {
+                run_checkpoint_staging_command(
+                    &executor,
+                    &locator,
+                    LATCH_RELAY_SESSION,
+                    &spec,
+                    export_stdin_command,
+                    "export target checkpoint",
+                    Some(&worker_binary),
+                )
+            })
+            .unwrap();
 
-    assert_eq!(output.stdout, exported_checkpoint_json());
-    assert_eq!(
-        serde_json::from_slice::<CheckpointExportSpec>(&executor.streamed_spec.borrow()).unwrap(),
-        spec
-    );
-    assert_eq!(
-        executor.purposes.into_inner(),
-        vec![
-            "export target checkpoint".to_owned(),
-            "remove stale private worker staging".to_owned(),
-            "collect unused Mjolnir worker binaries".to_owned(),
-            "verify shared Mjolnir worker".to_owned(),
-            "create private worker store upload".to_owned(),
-            "stage replacement Mjolnir worker".to_owned(),
-            "match replacement worker to the worker directory owner".to_owned(),
-            "replace installed Mjolnir worker".to_owned(),
-            "make replaced Mjolnir worker executable".to_owned(),
-            "verify uploaded Mjolnir worker".to_owned(),
-            "publish shared Mjolnir worker".to_owned(),
-            "discard private worker store upload".to_owned(),
-            "link shared Mjolnir worker into session".to_owned(),
-            "export target checkpoint".to_owned(),
-        ]
-    );
+        assert_eq!(output.stdout, exported_checkpoint_json());
+        assert_eq!(
+            serde_json::from_slice::<CheckpointExportSpec>(&executor.streamed_spec.borrow())
+                .unwrap(),
+            spec
+        );
+        assert_eq!(
+            executor.purposes.into_inner(),
+            vec![
+                "export target checkpoint".to_owned(),
+                "remove stale private worker staging".to_owned(),
+                "collect unused Mjolnir worker binaries".to_owned(),
+                "verify shared Mjolnir worker".to_owned(),
+                "create private worker store upload".to_owned(),
+                "stage replacement Mjolnir worker".to_owned(),
+                "match replacement worker to the worker directory owner".to_owned(),
+                "replace installed Mjolnir worker".to_owned(),
+                "make replaced Mjolnir worker executable".to_owned(),
+                "verify uploaded Mjolnir worker".to_owned(),
+                "publish shared Mjolnir worker".to_owned(),
+                "discard private worker store upload".to_owned(),
+                "link shared Mjolnir worker into session".to_owned(),
+                "export target checkpoint".to_owned(),
+            ]
+        );
+    }
 }
 /// A session that is working is busy, not wedged. A copy that can run
 /// again later leaves at once instead of waiting out the deadline, which
@@ -750,7 +756,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
     snapshot.operational.tools_in_flight = vec![mj_core::activity::InFlightToolCall {
         title: None,
         tool_call_id: "bash-1".into(),
-        status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
+        status: agent_client_protocol::v1::schema::ToolCallStatus::InProgress,
         started_at_ms: 1,
     }];
     let tool_deferred = checkpoint_barrier_wait_ended(
@@ -1256,6 +1262,19 @@ fn latch_relay_child_serves_stdio() {
         }
         let response = if reject_release && requests_checkpoint_release(&request) {
             unparseable_request_response(&request)
+        } else if matches!(
+            request.request,
+            mj_core::relay::RelayRequest::SetOperatorAway { .. }
+        ) {
+            mj_core::relay::RelayResponseEnvelope {
+                request_id: request.request_id.clone(),
+                protocol_version: request.protocol_version,
+                body: mj_core::relay::RelayResponseBody::Ok {
+                    payload: mj_core::relay::RelayResponsePayload::Status(
+                        relay.operational_state(),
+                    ),
+                },
+            }
         } else if let Some(response) = subagent_connection_response(&request) {
             response
         } else {
@@ -2438,6 +2457,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     // Checkpoint export must continue after its original template is removed.
@@ -2769,6 +2789,7 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     config.bundles.insert(
@@ -3211,6 +3232,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
             },
         );
         config
@@ -3254,6 +3276,8 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         resource_allocation: None,
     };
     let mut operation = mj_core::state::MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
@@ -3565,6 +3589,7 @@ async fn close_cut_controller_with(
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     config.bundles.insert(
@@ -3640,6 +3665,7 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
             &SucceedingExecutor,
             &channels.control,
             true,
+            false,
             None,
         )
         .await;
@@ -3654,6 +3680,63 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
     }
     assert_eq!(record.state, SessionState::Stopped);
     assert_eq!(record.last_error, None);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ignoring_nested_repositories_requires_a_fresh_checkpoint_before_teardown() {
+    const NAME: &str = "ignoring_nested_repositories_requires_a_fresh_checkpoint_before_teardown";
+    if !in_close_cut_child(NAME, LATE_HARNESS_NOTIFICATION) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (mut controller, channels, _handle) = close_cut_controller(SessionState::Closing).await;
+    let original = controller.state.sessions[LATCH_RELAY_SESSION]
+        .checkpoint
+        .clone();
+    #[derive(Default)]
+    struct RefuseExport(std::sync::Mutex<Option<bool>>);
+    impl CommandExecutor for RefuseExport {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            SucceedingExecutor.execute(command)
+        }
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            assert_eq!(command.purpose, "export target checkpoint");
+            let spec: CheckpointExportSpec = serde_json::from_reader(input)?;
+            *self.0.lock().unwrap() = Some(spec.ignore_nested_repositories);
+            Ok(CommandOutput {
+                status: 1,
+                stdout: Vec::new(),
+                stderr: b"disk full while writing checkpoint".to_vec(),
+            })
+        }
+    }
+    let executor = RefuseExport::default();
+    let error = controller
+        .recover_interrupted_close_managed(
+            LATCH_RELAY_SESSION,
+            &executor,
+            &channels.control,
+            true,
+            true,
+            None,
+        )
+        .await
+        .unwrap_err();
+    channels.shutdown.shutdown().await.unwrap();
+    assert!(
+        format!("{error:#}").contains("disk full while writing checkpoint"),
+        "{error:#}"
+    );
+    assert_eq!(*executor.0.lock().unwrap(), Some(true));
+    let record = &controller.state.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(record.state, SessionState::Running);
+    assert!(record.target.is_some());
+    assert_eq!(record.checkpoint, original);
 }
 
 /// The container recreation an upgrade starts on its own may never cancel
@@ -3883,6 +3966,13 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     record.last_checkpoint_error = Some("worker process is gone".into());
     let target = record.target.clone().expect("retained target");
     let old_checkpoint = record.checkpoint.clone().expect("previous checkpoint");
+    crate::database::begin_session_restart(
+        LATCH_RELAY_SESSION,
+        "restart-recapture",
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        false,
+    )
+    .unwrap();
     let worker_root = match &target {
         TargetLocator::LocalBare { worker_root } => worker_root.clone(),
         other => panic!("expected the retained local target, got {other:?}"),
@@ -3950,7 +4040,15 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     assert_eq!(sealed.target, Some(target));
     assert_eq!(sealed.last_error, None);
     assert!(sealed.last_checkpoint_error.is_none());
-    assert_ne!(sealed.checkpoint.as_ref(), Some(&old_checkpoint));
+    assert_eq!(sealed.checkpoint.as_ref(), Some(&old_checkpoint));
+    let intent = crate::database::load_session_restart(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert!(intent.handoff.is_some());
+    assert_eq!(
+        intent.checkpoint_sha256.as_ref(),
+        intent.handoff.as_ref().map(|handoff| &handoff.sha256)
+    );
     assert_eq!(
         std::fs::read(workspace_marker).unwrap(),
         b"workspace survives"
@@ -4009,6 +4107,7 @@ async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier
             &SucceedingExecutor,
             &channels.control,
             true,
+            false,
             None,
         )
         .await;

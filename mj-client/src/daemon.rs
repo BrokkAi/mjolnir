@@ -1,6 +1,8 @@
 //! Authenticated local daemon protocol and client transport.
+mod chunk_bytes;
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
+use agent_client_protocol::v1::schema::ContentBlock;
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::{Config, data_dir};
 use mj_core::credentials::CredentialSyncSignal;
@@ -17,6 +19,18 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+/// Durable terminal results for caller-owned startup prompt identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum StartupPromptOutcome {
+    Accepted,
+    Withdrawn,
+    Refused {
+        encoded_draft: String,
+        reason: String,
+    },
+}
+
 pub fn metadata_path() -> PathBuf {
     data_dir().join("daemon.json")
 }
@@ -102,9 +116,10 @@ pub enum WikiIndexState {
     /// sessions that exist. This is the state a fresh index starts in.
     #[default]
     Indexing,
-    /// The index file on disk was written by a different SessionWiki schema
-    /// version. Mjolnir will not open it, because opening it would drop and
-    /// rebuild the user's whole cache.
+    /// The index file on disk was written by a newer SessionWiki schema
+    /// version. Mjolnir will not open it, because rebuilding it down would only
+    /// make the newer program rebuild it back. An older index is not this
+    /// state: the daemon rebuilds it, and it reads as `Indexing` meanwhile.
     VersionMismatch,
 }
 
@@ -237,6 +252,38 @@ pub struct WikiRestoreRequest {
     pub resource_allocation: Option<SessionResourceAllocation>,
 }
 
+/// What the terminal dashboard reads from the store before it takes the
+/// terminal. The daemon assembles it, so a client never opens the store, which
+/// may live in a container volume the client cannot reach.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DashboardStartup {
+    /// The snapshot and cursor from which the runtime feed continues.
+    pub runtime: crate::runtime_feed::RuntimeBootstrap,
+    pub metadata: StoredSessionMetadata,
+    pub pane_sizes: std::collections::BTreeMap<String, mj_core::workspace::PaneSizes>,
+    pub conversation_layouts:
+        std::collections::BTreeMap<String, mj_core::workspace::ConversationLayout>,
+    pub queued_prompts: std::collections::BTreeMap<String, Vec<mj_core::relay::QueuedPrompt>>,
+}
+
+/// Stored per-workspace layouts, keyed by workspace id.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceLayouts {
+    pub pane_sizes: std::collections::BTreeMap<String, mj_core::workspace::PaneSizes>,
+    pub conversation_layouts:
+        std::collections::BTreeMap<String, mj_core::workspace::ConversationLayout>,
+}
+
+/// The store-wide metadata the dashboard keeps beside its session rows.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredSessionMetadata {
+    pub mount_history: mj_core::snapshot_map::SnapshotMap<String, Vec<PathBuf>>,
+    pub container_sizes: mj_core::snapshot_map::SnapshotMap<String, HostContainerSize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSnapshot {
@@ -315,6 +362,8 @@ pub enum RuntimeLifecycleKind {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeLifecycleView {
     pub operation_id: String,
+    #[serde(default)]
+    pub move_operation_id: Option<String>,
     pub cancellable: bool,
     pub session_id: String,
     pub kind: RuntimeLifecycleKind,
@@ -451,6 +500,10 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
+    RecordOperatorActivity,
+    SetOperatorAway {
+        away: bool,
+    },
     NativeAgentHistory {
         owner: String,
         child: String,
@@ -500,9 +553,15 @@ pub enum DaemonAction {
     DeleteWorkspace {
         workspace_id: String,
     },
+    /// Turn this connection into a node connection (`mj_core::node`). After
+    /// the `Done` reply the daemon speaks HTTP/2 on it as the client and the
+    /// node serves.
+    NodeConnect {
+        node_id: String,
+    },
+    /// Take or renew a client's attachment lease.
     Attach {
         client_id: String,
-        pid: u32,
     },
     Detach {
         client_id: String,
@@ -552,10 +611,6 @@ pub enum DaemonAction {
         mounts: Vec<AdditionalMount>,
         mount_history: Vec<PathBuf>,
     },
-    SetSessionAcpTitle {
-        session_id: String,
-        title: Option<String>,
-    },
     MarkSessionTargetMissing {
         session_id: String,
         detail: String,
@@ -572,6 +627,9 @@ pub enum DaemonAction {
     },
     CreateProject {
         sources: Vec<String>,
+    },
+    RemoveProject {
+        bundle_id: String,
     },
     WikiSearch {
         query: String,
@@ -619,9 +677,54 @@ pub enum DaemonAction {
     Snapshot {
         workspace_id: String,
     },
+    /// Everything the terminal dashboard reads from the store at startup.
+    DashboardStartup {
+        client_id: String,
+        workspace_id: String,
+    },
+    /// Stored pane sizes and conversation layouts of these workspaces.
+    WorkspaceLayouts {
+        workspace_ids: Vec<String>,
+    },
+    /// Mount history and remembered container sizes.
+    StoredSessionMetadata,
+    /// The stored tail of a session's projection, at most `items` transcript
+    /// entries, or `None` when the session has no stored projection.
+    StoredProjectionTail {
+        session_id: String,
+        items: usize,
+    },
+    /// The stored projection summary of one session.
+    StoredSessionSummary {
+        session_id: String,
+    },
+    /// Check that a stopped session's checkpointed repositories can be
+    /// fetched again before it resumes on `target_id`.
+    ResumeRepositoryPreflight {
+        session_id: String,
+        target_id: String,
+    },
+    /// Point one of a stopped session's repositories at a new origin, then
+    /// check the sources again.
+    ReplaceResumeRepositoryOrigin {
+        session_id: String,
+        repository_id: String,
+        replacement: String,
+    },
+    /// How much session storage an archive age would free.
+    ArchiveSpacePreview {
+        older_than_days: Option<u32>,
+    },
+    /// Save the terminal Setup editor's configuration, checked against the
+    /// stored sessions it would disturb. Both are configuration JSON.
+    SaveSetup {
+        original: String,
+        updated: String,
+    },
     RuntimeChanges {
         cursor: Option<crate::runtime_feed::RuntimeCursor>,
         wait: bool,
+        subagent_parents: std::collections::BTreeSet<String>,
     },
     /// One live session's transcript tail as it was at `cursor`, so the
     /// deltas after that cursor apply to it exactly.
@@ -682,7 +785,12 @@ pub enum DaemonAction {
     /// running or still showing that session.
     QueueStartupPrompt {
         session_id: String,
+        command_id: String,
         text: String,
+        prompt: Vec<ContentBlock>,
+        encoded_draft: String,
+        #[serde(default)]
+        move_operation_id: Option<String>,
         /// The saved draft text this prompt was typed from, if the client
         /// also persisted it. Cleared after a successful submit so the
         /// delivered prompt does not reappear as a draft.
@@ -691,12 +799,16 @@ pub enum DaemonAction {
     },
     /// Take back a prompt queued with `QueueStartupPrompt` that the daemon has
     /// not started delivering, so the person can edit it. The daemon cancels
-    /// the newest queued prompt with this exact text and replies
+    /// the prompt with this caller-owned command ID and replies
     /// `PromptWithdrawn(true)`, or `PromptWithdrawn(false)` when none is
     /// waiting because delivery already started.
     WithdrawStartupPrompt {
         session_id: String,
-        text: String,
+        command_id: String,
+    },
+    StartupPromptOutcomes {
+        session_id: String,
+        command_ids: Vec<String>,
     },
     SyncSession {
         session_id: String,
@@ -723,6 +835,10 @@ pub enum DaemonAction {
         session_id: String,
         #[serde(default)]
         acknowledge_unpublished_work: bool,
+    },
+    /// Explicitly omit untracked nested Git repositories from this suspension.
+    IgnoreNestedRepositoriesAndSuspend {
+        session_id: String,
     },
     RestartSession {
         session_id: String,
@@ -795,6 +911,19 @@ impl std::fmt::Display for DaemonRefusal {
 
 impl std::error::Error for DaemonRefusal {}
 
+/// An existing startup ID belongs to another immutable request. Its original
+/// work may already be accepted, so this never proves that work was refused.
+#[derive(Debug)]
+pub struct StartupPromptIdentityConflict;
+
+impl std::fmt::Display for StartupPromptIdentityConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("startup command ID was reused with a different payload")
+    }
+}
+
+impl std::error::Error for StartupPromptIdentityConflict {}
+
 impl DaemonRefusal {
     /// Whether the daemon itself could not confirm delivery. Its message is
     /// then led by `session::DeliveryUnconfirmed`.
@@ -830,6 +959,14 @@ pub enum DaemonReply {
     Workspaces(Vec<WorkspaceListing>),
     Workspace(WorkspaceRecord),
     Snapshot(WorkspaceSnapshot),
+    DashboardStartup(Box<DashboardStartup>),
+    WorkspaceLayouts(WorkspaceLayouts),
+    StoredSessionMetadata(StoredSessionMetadata),
+    StoredProjectionTail(Option<Box<MaterializedSession>>),
+    StoredSessionSummary(Option<Box<MaterializedSessionSummary>>),
+    SavedSetup(Box<Config>),
+    ArchiveSpacePreview(ArchiveSpacePreview),
+    ResumeRepositoryPreflight(Box<ResumeRepositorySourcePreflight>),
     RuntimeChanges(Box<crate::runtime_feed::RuntimeFrame>),
     SessionTail(Box<crate::runtime_feed::SessionTailReply>),
     ResumeCandidates(Box<ResumeCandidates>),
@@ -838,6 +975,7 @@ pub enum DaemonReply {
     /// Transport fragments of one chunked reply (see
     /// [`DaemonReply::is_chunked`]); never exposed to consumers.
     ReplyChunk {
+        #[serde(with = "chunk_bytes")]
         bytes: Vec<u8>,
         finished: bool,
     },
@@ -859,6 +997,8 @@ pub enum DaemonReply {
     WikiSession(Option<Box<WikiSessionInfo>>),
     /// Whether a queued startup prompt was withdrawn before delivery.
     PromptWithdrawn(bool),
+    StartupPromptIdentityConflict,
+    StartupPromptOutcomes(std::collections::BTreeMap<String, StartupPromptOutcome>),
     Done,
 }
 
@@ -868,7 +1008,10 @@ impl DaemonReply {
     pub fn is_chunked(&self) -> bool {
         matches!(
             self,
-            Self::RuntimeChanges(_) | Self::SessionTail(_) | Self::ResumeCandidates(_)
+            Self::DashboardStartup(_)
+                | Self::RuntimeChanges(_)
+                | Self::SessionTail(_)
+                | Self::ResumeCandidates(_)
         )
     }
 }
@@ -1590,11 +1733,8 @@ impl DaemonClient {
         }
     }
 
-    pub async fn attach(&mut self, client_id: String, pid: u32) -> Result<()> {
-        match self
-            .request(DaemonAction::Attach { client_id, pid })
-            .await?
-        {
+    pub async fn attach(&mut self, client_id: String) -> Result<()> {
+        match self.request(DaemonAction::Attach { client_id }).await? {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected attach reply {reply:?}"),
         }
@@ -1769,20 +1909,6 @@ impl DaemonClient {
         }
     }
 
-    pub async fn set_session_acp_title(
-        &mut self,
-        session_id: String,
-        title: Option<String>,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::SetSessionAcpTitle { session_id, title })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected ACP-title reply {reply:?}"),
-        }
-    }
-
     pub async fn mark_session_target_missing(
         &mut self,
         session_id: String,
@@ -1843,6 +1969,16 @@ impl DaemonClient {
         {
             DaemonReply::ProjectCreated(project) => Ok(project),
             other => bail!("unexpected project creation reply: {other:?}"),
+        }
+    }
+
+    pub async fn remove_project(&mut self, bundle_id: String) -> Result<()> {
+        match self
+            .request(DaemonAction::RemoveProject { bundle_id })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            other => bail!("unexpected project removal reply: {other:?}"),
         }
     }
 
@@ -1991,13 +2127,150 @@ impl DaemonClient {
         }
     }
 
+    pub async fn dashboard_startup(
+        &mut self,
+        client_id: String,
+        workspace_id: String,
+    ) -> Result<DashboardStartup> {
+        match self
+            .request(DaemonAction::DashboardStartup {
+                client_id,
+                workspace_id,
+            })
+            .await?
+        {
+            DaemonReply::DashboardStartup(startup) => Ok(*startup),
+            reply => bail!("unexpected dashboard startup reply {reply:?}"),
+        }
+    }
+
+    pub async fn workspace_layouts(
+        &mut self,
+        workspace_ids: Vec<String>,
+    ) -> Result<WorkspaceLayouts> {
+        match self
+            .request(DaemonAction::WorkspaceLayouts { workspace_ids })
+            .await?
+        {
+            DaemonReply::WorkspaceLayouts(layouts) => Ok(layouts),
+            reply => bail!("unexpected workspace layouts reply {reply:?}"),
+        }
+    }
+
+    pub async fn stored_session_metadata(&mut self) -> Result<StoredSessionMetadata> {
+        match self.request(DaemonAction::StoredSessionMetadata).await? {
+            DaemonReply::StoredSessionMetadata(metadata) => Ok(metadata),
+            reply => bail!("unexpected stored session metadata reply {reply:?}"),
+        }
+    }
+
+    pub async fn stored_projection_tail(
+        &mut self,
+        session_id: String,
+        items: usize,
+    ) -> Result<Option<MaterializedSession>> {
+        match self
+            .request(DaemonAction::StoredProjectionTail { session_id, items })
+            .await?
+        {
+            DaemonReply::StoredProjectionTail(tail) => Ok(tail.map(|tail| *tail)),
+            reply => bail!("unexpected stored projection tail reply {reply:?}"),
+        }
+    }
+
+    pub async fn stored_session_summary(
+        &mut self,
+        session_id: String,
+    ) -> Result<Option<MaterializedSessionSummary>> {
+        match self
+            .request(DaemonAction::StoredSessionSummary { session_id })
+            .await?
+        {
+            DaemonReply::StoredSessionSummary(summary) => Ok(summary.map(|summary| *summary)),
+            reply => bail!("unexpected stored session summary reply {reply:?}"),
+        }
+    }
+
+    pub async fn resume_repository_preflight(
+        &mut self,
+        session_id: String,
+        target_id: String,
+    ) -> Result<ResumeRepositorySourcePreflight> {
+        match self
+            .request(DaemonAction::ResumeRepositoryPreflight {
+                session_id,
+                target_id,
+            })
+            .await?
+        {
+            DaemonReply::ResumeRepositoryPreflight(preflight) => Ok(*preflight),
+            reply => bail!("unexpected resume repository preflight reply {reply:?}"),
+        }
+    }
+
+    pub async fn replace_resume_repository_origin(
+        &mut self,
+        session_id: String,
+        repository_id: String,
+        replacement: String,
+    ) -> Result<ResumeRepositorySourcePreflight> {
+        match self
+            .request(DaemonAction::ReplaceResumeRepositoryOrigin {
+                session_id,
+                repository_id,
+                replacement,
+            })
+            .await?
+        {
+            DaemonReply::ResumeRepositoryPreflight(preflight) => Ok(*preflight),
+            reply => bail!("unexpected repository origin replacement reply {reply:?}"),
+        }
+    }
+
+    pub async fn archive_space_preview(
+        &mut self,
+        older_than_days: Option<u32>,
+    ) -> Result<ArchiveSpacePreview> {
+        match self
+            .request(DaemonAction::ArchiveSpacePreview { older_than_days })
+            .await?
+        {
+            DaemonReply::ArchiveSpacePreview(preview) => Ok(preview),
+            reply => bail!("unexpected archive space preview reply {reply:?}"),
+        }
+    }
+
+    pub async fn save_setup(&mut self, original: String, updated: String) -> Result<Config> {
+        match self
+            .request(DaemonAction::SaveSetup { original, updated })
+            .await?
+        {
+            DaemonReply::SavedSetup(config) => Ok(*config),
+            reply => bail!("unexpected setup save reply {reply:?}"),
+        }
+    }
+
     pub async fn runtime_changes(
         &mut self,
         cursor: Option<crate::runtime_feed::RuntimeCursor>,
         wait: bool,
     ) -> Result<crate::runtime_feed::RuntimeFrame> {
+        self.runtime_changes_for_subagent_parents(cursor, wait, Default::default())
+            .await
+    }
+
+    pub async fn runtime_changes_for_subagent_parents(
+        &mut self,
+        cursor: Option<crate::runtime_feed::RuntimeCursor>,
+        wait: bool,
+        subagent_parents: std::collections::BTreeSet<String>,
+    ) -> Result<crate::runtime_feed::RuntimeFrame> {
         match self
-            .request(DaemonAction::RuntimeChanges { cursor, wait })
+            .request(DaemonAction::RuntimeChanges {
+                cursor,
+                wait,
+                subagent_parents,
+            })
             .await?
         {
             DaemonReply::RuntimeChanges(frame) => Ok(*frame),
@@ -2077,21 +2350,31 @@ impl DaemonClient {
     /// Hand the daemon a prompt for a session that is still starting. The
     /// daemon replies as soon as the prompt is queued, not when it is
     /// delivered; delivery failures come back as a session notice.
+    #[allow(clippy::too_many_arguments)] // Mirrors the structured durable startup action.
     pub async fn queue_startup_prompt(
         &mut self,
         session_id: String,
+        command_id: String,
         text: String,
+        prompt: Vec<ContentBlock>,
         inherited_draft: Option<String>,
+        encoded_draft: String,
+        move_operation_id: Option<String>,
     ) -> Result<()> {
         match self
             .request(DaemonAction::QueueStartupPrompt {
                 session_id,
+                command_id,
                 text,
+                prompt,
+                encoded_draft,
+                move_operation_id,
                 inherited_draft,
             })
             .await?
         {
             DaemonReply::Done => Ok(()),
+            DaemonReply::StartupPromptIdentityConflict => Err(StartupPromptIdentityConflict.into()),
             reply => bail!("unexpected startup prompt reply {reply:?}"),
         }
     }
@@ -2103,14 +2386,35 @@ impl DaemonClient {
     pub async fn withdraw_startup_prompt(
         &mut self,
         session_id: String,
-        text: String,
+        command_id: String,
     ) -> Result<bool> {
         match self
-            .request(DaemonAction::WithdrawStartupPrompt { session_id, text })
+            .request(DaemonAction::WithdrawStartupPrompt {
+                session_id,
+                command_id,
+            })
             .await?
         {
             DaemonReply::PromptWithdrawn(withdrawn) => Ok(withdrawn),
             reply => bail!("unexpected startup prompt withdrawal reply {reply:?}"),
+        }
+    }
+
+    /// Read only the requested durable terminal receipts (at most 128 IDs).
+    pub async fn startup_prompt_outcomes(
+        &mut self,
+        session_id: String,
+        command_ids: Vec<String>,
+    ) -> Result<std::collections::BTreeMap<String, StartupPromptOutcome>> {
+        match self
+            .request(DaemonAction::StartupPromptOutcomes {
+                session_id,
+                command_ids,
+            })
+            .await?
+        {
+            DaemonReply::StartupPromptOutcomes(outcomes) => Ok(outcomes),
+            reply => bail!("unexpected startup prompt outcomes reply {reply:?}"),
         }
     }
 
@@ -2213,6 +2517,19 @@ impl DaemonClient {
 
     pub async fn suspend_session(&mut self, session_id: String) -> Result<()> {
         self.suspend_session_with_ack(session_id, false).await
+    }
+
+    pub async fn ignore_nested_repositories_and_suspend(
+        &mut self,
+        session_id: String,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::IgnoreNestedRepositoriesAndSuspend { session_id })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected ignore-and-suspend reply {reply:?}"),
+        }
     }
 
     pub async fn suspend_session_with_ack(
@@ -2468,8 +2785,23 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Creation and runtime metadata carry interactive launch-choice provenance.
 // New-session creation independently controls whether its container size
 // becomes the host's saved default.
+// Operator-away action and runtime metadata.
+// Structured startup prompts, caller-owned command IDs, and ID withdrawal.
+// Terminals no longer save harness titles; the daemon alone projects them.
+// Human interface activity can reset the daemon's automatic AFK clock.
+// Project removal runs through the daemon-owned database writer.
+// Per-profile remembered subagent preferences change runtime metadata shape.
+// Explicit Ignore and Suspend preserves checkpoint verification while omitting nested repositories.
+// Web viewer access includes the bound local connection address.
+// Review role rows carry their child session IDs; older strict clients reject them.
+// Dashboards read stored state through the daemon instead of opening the store,
+// and client attachments are renewable leases rather than client process IDs.
+// Nodes connect with NodeConnect and then speak the node protocol.
+// Dashboard startup uses chunked replies, which older clients reject for this reply type.
+// Shared state publishes child metadata; launch intent remains in the daemon store.
+// Startup seeds runtime cursors with family scope; reply chunks use base64 bytes.
 // Clients read and set the daemon host's Git commit author.
-pub const PROTOCOL_VERSION: u32 = 63;
+pub const PROTOCOL_VERSION: u32 = 75;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

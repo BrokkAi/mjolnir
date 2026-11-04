@@ -16,13 +16,13 @@
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
 │                                                                              │
+│                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 action: OpenLink("https://example.com/inline")
 
 === fenced code URL (80x24) ===
@@ -43,13 +43,13 @@ action: OpenLink("https://example.com/inline")
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
 │                                                                              │
+│                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 action: OpenLink("https://example.com/block")
 
 === ordinary code text (80x24) ===
@@ -70,13 +70,13 @@ action: OpenLink("https://example.com/block")
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
 │                                                                              │
+│                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 action: None
 
 === wide table link (80x24) ===
@@ -97,13 +97,13 @@ action: None
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
 │                                                                              │
+│                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 action: OpenLink("https://example.com/1")
 
 === wide table URL (80x24) ===
@@ -124,13 +124,13 @@ action: OpenLink("https://example.com/1")
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
 │                                                                              │
+│                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 action: OpenLink("https://example.com/2")
 
 === wide table plain cell (80x24) ===
@@ -151,13 +151,13 @@ action: OpenLink("https://example.com/2")
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
 │                                                                              │
+│                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 action: None
 
 === narrow table link (30x24) ===
@@ -178,13 +178,13 @@ action: None
 │                           ▐│
 │                           ▐│
 │                           ▐│
-│                           ▐│
 ╰────────────────────────────╯
 ╭  mic ──────────────────────╮
 │> Message the agent, or /   │
 │  for commands              │
+│                            │
 ╰────────────────────────────╯
-ctrl+b then : palette · ? keys
+q detach · : / ? palette
 action: OpenLink("https://example.com/1")
 
 === narrow table label (30x24) ===
@@ -205,11 +205,11 @@ action: OpenLink("https://example.com/1")
 │                           ▐│
 │                           ▐│
 │                           ▐│
-│                           ▐│
 ╰────────────────────────────╯
 ╭  mic ──────────────────────╮
 │> Message the agent, or /   │
 │  for commands              │
+│                            │
 ╰────────────────────────────╯
-ctrl+b then : palette · ? keys
+q detach · : / ? palette
 action: None

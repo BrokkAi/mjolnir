@@ -4,14 +4,17 @@ pub struct StandaloneSession {
     pub(super) client: RelayClient,
     pub(super) materialized: MaterializedSession,
     pub(super) window: mj_core::state::ProjectionWindow,
-    pub(super) operational: RelayOperationalState,
+    pub(super) operational: mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>,
     pub(super) latest_credential_sync_signal: Option<CredentialSyncSignal>,
     pub(super) project_memory: Option<ProjectMemorySyncTarget>,
-    pub(super) subagent_requests: Vec<mj_core::subagent::SubagentToolRequest>,
-    pub(super) subagent_completions: Vec<mj_core::subagent::SubagentCompletion>,
+    pub(super) subagent_requests:
+        mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentToolRequest>>,
+    pub(super) subagent_completions:
+        mj_core::snapshot_map::SharedSnapshot<Vec<mj_core::subagent::SubagentCompletion>>,
     subagent_queue: super::subagent_queue::SubagentQueueObserver,
     subagent_queue_error: Option<String>,
     history_jobs: tokio::task::JoinSet<mj_core::history::HistoryResult>,
+    operator_presence_revision: Option<u64>,
     history_active: std::collections::BTreeSet<String>,
 }
 
@@ -31,20 +34,28 @@ impl StandaloneSession {
         // be tens of megabytes, and the reconnect loop would otherwise pay that
         // whole synchronous read on every attempt against a worker that is down.
         let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;
+        let session = target.session_id.clone();
+        let protocol = client.protocol_version();
+        tokio::task::spawn_blocking(move || {
+            crate::database::record_operator_away_worker_protocol(session, protocol)
+        })
+        .await
+        .context("record negotiated worker protocol")??;
         let operational = client.status().await?;
         let (materialized, window) = load_projection(&target.session_id).await?;
         let mut connection = Self {
             client,
             materialized,
             window,
-            operational,
+            operational: operational.into(),
             latest_credential_sync_signal: None,
             project_memory: target.project_memory.clone(),
-            subagent_requests: Vec::new(),
-            subagent_completions: Vec::new(),
+            subagent_requests: Default::default(),
+            subagent_completions: Default::default(),
             subagent_queue: super::subagent_queue::SubagentQueueObserver::spawn(target),
             subagent_queue_error: None,
             history_jobs: tokio::task::JoinSet::new(),
+            operator_presence_revision: None,
             history_active: Default::default(),
         };
         connection.sync_in_place().await?;
@@ -107,6 +118,15 @@ impl StandaloneSession {
     }
 
     pub(super) async fn sync_in_place(&mut self) -> Result<bool> {
+        if self.protocol_version() >= mj_core::relay::RELAY_OPERATOR_AWAY_PROTOCOL {
+            let presence = tokio::task::spawn_blocking(crate::database::load_operator_presence)
+                .await
+                .context("read operator away setting")??;
+            if self.operator_presence_revision != Some(presence.revision) {
+                self.client.set_operator_away(presence).await?;
+                self.operator_presence_revision = Some(presence.revision);
+            }
+        }
         self.sync_history().await?;
         let original_ordinal = self.materialized.applied_event_ordinal;
         let original_digest = self.materialized.applied_event_digest.clone();
@@ -257,7 +277,9 @@ impl StandaloneSession {
         let mut operational = catch_up.state;
         operational.acknowledged_through = cursor.ordinal;
         operational.acknowledged_digest = cursor.digest;
-        self.operational = operational;
+        if *self.operational != operational {
+            self.operational = operational.into();
+        }
         Ok(())
     }
 
@@ -339,11 +361,11 @@ impl StandaloneSession {
         ManagedSessionSnapshot {
             window: self.window.clone(),
             materialized: self.materialized.clone(),
-            operational: self.operational.clone(),
+            operational: self.operational.clone().into_inner(),
             latest_credential_sync_signal: self.latest_credential_sync_signal.clone(),
             worker_build: self.client.worker_build().map(str::to_owned),
-            subagent_requests: self.subagent_requests.clone(),
-            subagent_completions: self.subagent_completions.clone(),
+            subagent_requests: self.subagent_requests.clone().into_inner(),
+            subagent_completions: self.subagent_completions.clone().into_inner(),
             subagent_queue_error: self.subagent_queue_error.clone(),
         }
     }
@@ -399,10 +421,12 @@ impl StandaloneSession {
         Ok(())
     }
 
-    /// Persist relay-private context for the next real prompt. It never
-    /// contributes an event to the canonical projection.
+    /// Persist relay-private context for the next real prompt through the
+    /// journaled command stream, then catch the projection up to its receipt.
     pub async fn install_prompt_context(&mut self, text: String) -> Result<()> {
-        self.client.install_prompt_context(text).await
+        self.client.install_prompt_context(text).await?;
+        self.sync_in_place().await?;
+        Ok(())
     }
 
     /// Apply one relay transport page in bounded durable chunks. A transport

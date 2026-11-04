@@ -65,7 +65,7 @@ mod tests {
     use serde_json::json;
 
     fn standard() -> TokenUsage {
-        let mut report = agent_client_protocol::schema::v1::Usage::new(130, 100, 30);
+        let mut report = agent_client_protocol::v1::schema::Usage::new(130, 100, 30);
         report.meta = Some(meta(json!({"mjolnir.dev/usage-scope": "turn"})));
         TokenUsage::from_acp(HarnessKind::Muse, report)
     }

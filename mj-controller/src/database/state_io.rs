@@ -16,18 +16,33 @@ pub fn load_state_from(path: &Path) -> Result<State> {
 }
 
 pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
-    let mut state = State::default();
-    let remembered: Option<String> = connection
-        .query_row(
-            "SELECT policy FROM subagent_preference WHERE singleton = 1",
+    let mut state = State {
+        operator_presence: connection.query_row(
+            "SELECT away,revision FROM operator_away WHERE singleton=1",
             [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    state.last_subagent_policy = remembered
-        .map(|json| mj_core::subagent::parse_stored_policy(&json))
-        .transpose()?
-        .unwrap_or_default();
+            |row| {
+                Ok(OperatorPresence {
+                    away: row.get(0)?,
+                    revision: row.get(1)?,
+                })
+            },
+        )?,
+        ..Default::default()
+    };
+    let mut statement = connection
+        .prepare("SELECT profile_id, policy FROM subagent_preference ORDER BY profile_id")?;
+    let rows = statement.query_map([], |row| {
+        let profile_id = row.get::<_, String>(0)?;
+        let json = row.get::<_, String>(1)?;
+        let policy = mj_core::subagent::parse_stored_policy(&json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+        })?;
+        Ok((profile_id, policy))
+    })?;
+    for row in rows {
+        let (profile_id, policy) = row?;
+        state.last_subagent_policies.insert(profile_id, policy);
+    }
     let mut statement = connection.prepare(&format!("{SESSION_QUERY} ORDER BY s.session_id"))?;
     let rows = statement.query_map([], decode_session)?;
     for row in rows {
@@ -74,7 +89,7 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
             );
             continue;
         }
-        state.subagents.insert(child_id, record);
+        state.subagents.insert(child_id, (&record).into());
     }
     load_targets(connection, &mut state)?;
     load_mounts(connection, &mut state)?;
@@ -211,8 +226,24 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
         insert_session(&tx, session)?;
     }
     for subagent in state.subagents.values() {
-        super::usage::record_child_accounting(&tx, subagent)?;
-        let record_json = serde_json::to_string(subagent)?;
+        // State contains metadata only. New launches must be registered with
+        // their complete intent; metadata saves preserve those stored fields.
+        let stored_json: String = tx
+            .query_row(
+                "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+                [&subagent.child_session_id],
+                |row| row.get(0),
+            )
+            .with_context(|| {
+                format!(
+                    "sub-agent {} must be registered with its launch intent before saving metadata",
+                    subagent.child_session_id
+                )
+            })?;
+        let mut stored: SubagentRecord = serde_json::from_str(&stored_json)?;
+        subagent.apply_to(&mut stored);
+        super::usage::record_child_accounting(&tx, &stored)?;
+        let record_json = serde_json::to_string(&stored)?;
         tx.execute(
             "INSERT INTO subagent_sessions(
                  child_session_id, parent_session_id, request_key, record_json
@@ -1359,6 +1390,45 @@ pub(super) fn load_session_with(
     load_checkpoints_selected(connection, &mut state, Some(id))?;
     state.validate()?;
     Ok(state.sessions.remove(id))
+}
+
+/// Read the daemon-owned setting without loading all session records.
+pub fn load_operator_presence() -> Result<OperatorPresence> {
+    if let Some(committed) = committed_state()? {
+        return Ok(committed.state.operator_presence);
+    }
+    open_reader(&database_path())?
+        .query_row(
+            "SELECT away,revision FROM operator_away WHERE singleton=1",
+            [],
+            |row| {
+                Ok(OperatorPresence {
+                    away: row.get(0)?,
+                    revision: row.get(1)?,
+                })
+            },
+        )
+        .map_err(Into::into)
+}
+
+/// The shared database writer owns transition and no-op decisions.
+pub fn set_operator_away(away: bool) -> Result<bool> {
+    let changed = submit_database_write("operator away setting", move |connection| {
+        super::operator_away::set_with(connection, away)
+    })?;
+    if changed {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
+    Ok(changed)
+}
+
+/// Persist the last negotiated worker protocol so AFK-off remains correct
+/// before the daemon has reattached every worker after a restart.
+pub fn record_operator_away_worker_protocol(session: String, protocol: u32) -> Result<()> {
+    submit_database_write("operator away worker protocol", move |connection| {
+        connection.execute("INSERT INTO operator_away_workers(session_id,protocol) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET protocol=excluded.protocol WHERE protocol != excluded.protocol", params![session,protocol])?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]

@@ -109,27 +109,21 @@ mv -f -- "$temporary" "$1"
     Ok(())
 }
 
-/// Options for every Move rsync. `--protect-args` sends paths inside the rsync
-/// protocol, so the namespace wrapper passes paths with spaces unchanged. The
-/// preflight probes these options, so an rsync that rejects one blocks Move.
-const RSYNC_TRANSFER_OPTIONS: [&str; 6] = [
+/// Options shared by GNU rsync, openrsync and older macOS rsync.
+/// Preflight checks every option before interrupting the session.
+const RSYNC_TRANSFER_OPTIONS: [&str; 5] = [
     "--recursive",
     "--times",
     "--perms",
-    "--protect-args",
     "--partial",
     "--partial-dir=.move-partial",
 ];
 
-/// Why an rsync failed the probe. macOS ships openrsync, or rsync 2.6.9 on
-/// older releases, and neither accepts `--protect-args`.
-const RSYNC_REQUIREMENT: &str = "Move needs rsync 3.0 or newer, which accepts --protect-args; \
-the rsync that ships with macOS does not (install one with `brew install rsync`)";
+const RSYNC_REQUIREMENT: &str = "Move needs rsync with support for recursive transfers, \
+permissions, timestamps and partial files (including --partial-dir); install rsync";
 
-/// Why an rsync inside a container failed the probe. The container image
-/// supplies that rsync, so the macOS advice does not apply.
-const CONTAINER_RSYNC_REQUIREMENT: &str = "Move needs rsync 3.0 or newer, which accepts --protect-args; \
-the container image must provide it (add rsync to the image)";
+const CONTAINER_RSYNC_REQUIREMENT: &str = "Move needs rsync with support for recursive transfers, \
+permissions, timestamps and partial files (including --partial-dir); add rsync to the container image";
 
 /// Rsync arguments that succeed only if rsync accepts every transfer option.
 /// `--version` makes rsync exit once it has parsed them.
@@ -157,22 +151,26 @@ fn copy_workspace(
     upload: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(local)?;
-    let source = format!("{}/", if upload { local } else { remote }.display());
-    let destination = format!("{}/", if upload { remote } else { local }.display());
+    let local_path = format!("{}/", local.display());
     let mut args: Vec<String> = RSYNC_TRANSFER_OPTIONS.map(String::from).into();
-    let base = targets::locator_command(backend, vec!["rsync".into()]);
+    let base = targets::locator_command(backend, rsync_remote_arguments(remote));
     let lease = base.open_ssh_session(executor)?;
     let wrapper = if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
-        args.extend([source, destination]);
+        let remote_path = format!("{}/", remote.display());
+        args.extend(if upload {
+            [local_path, remote_path]
+        } else {
+            [remote_path, local_path]
+        });
         None
     } else {
         let directory = rsync_shell(lease.command())?;
         let path = directory.path().join("move-rsync-shell");
         args.extend(["--rsh".into(), path.to_string_lossy().into_owned()]);
         args.extend(if upload {
-            [source, format!("move:{destination}")]
+            [local_path, "move:./".into()]
         } else {
-            [format!("move:{source}"), destination]
+            ["move:./".into(), local_path]
         });
         Some(directory)
     };
@@ -183,6 +181,19 @@ fn copy_workspace(
     drop(wrapper);
     drop(lease);
     result.map(|_| ())
+}
+
+/// Keep the staging path in the locator's quoted argv, never in rsync's
+/// remote command suffix. SSH parses that suffix as shell text; container
+/// exec uses argv directly. Both receive only rsync's flags and `./` there.
+fn rsync_remote_arguments(remote: &Path) -> Vec<String> {
+    vec![
+        "sh".into(),
+        "-c".into(),
+        "cd -- \"$1\" && shift && exec rsync \"$@\"".into(),
+        "move-rsync".into(),
+        remote.to_string_lossy().into_owned(),
+    ]
 }
 
 fn rsync_shell(command: &CommandSpec) -> Result<tempfile::TempDir> {
@@ -1396,44 +1407,68 @@ mod tests {
     }
 
     // Needs a POSIX shell and rsync.
+    // Hard-won: #1383: stock macOS rsync rejects --protect-args.
     #[cfg(unix)]
     #[test]
     fn rsync_namespace_adapter_streams_large_files_with_spaces_in_paths() {
         let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("source with spaces");
-        let destination = directory.path().join("destination");
+        let source = directory
+            .path()
+            .join("source with spaces, 'quotes', $(exit 91); &");
+        let destination = directory
+            .path()
+            .join("destination with spaces and 'quotes'");
         std::fs::create_dir(&source).unwrap();
         std::fs::create_dir(&destination).unwrap();
         let payload = vec![0x71; 256 * 1024 + 13];
         std::fs::write(source.join("large file"), &payload).unwrap();
-        let wrapper = rsync_shell(&CommandSpec::new(
-            "sh",
-            ["-c", "exec \"$@\"", "namespace", "rsync"],
-        ))
-        .unwrap();
-        super::super::super::execute_checked(
-            &targets::ProcessExecutor,
-            CommandSpec::new(
-                "rsync",
-                vec![
-                    "--recursive".into(),
-                    "--protect-args".into(),
+        for shell_boundary in [false, true] {
+            for upload in [false, true] {
+                let remote = if upload { &destination } else { &source };
+                let remote_args = rsync_remote_arguments(remote);
+                let command = if shell_boundary {
+                    // OpenSSH joins its command arguments with spaces before
+                    // the remote login shell interprets them. Model that here.
+                    CommandSpec::new(
+                        "sh",
+                        vec![
+                            "-c".into(),
+                            "exec sh -c \"$*\"".into(),
+                            "ssh".into(),
+                            targets::remote_command_line(&remote_args),
+                        ],
+                    )
+                } else {
+                    let mut args = remote_args.into_iter();
+                    CommandSpec::new(args.next().unwrap(), args)
+                };
+                let wrapper = rsync_shell(&command).unwrap();
+                let mut args: Vec<String> = RSYNC_TRANSFER_OPTIONS.map(String::from).into();
+                args.extend([
                     "--rsh".into(),
                     wrapper
                         .path()
                         .join("move-rsync-shell")
                         .display()
                         .to_string(),
-                    format!("move:{}/", source.display()),
-                    format!("{}/", destination.display()),
-                ],
-            ),
-        )
-        .unwrap();
-        assert_eq!(
-            std::fs::read(destination.join("large file")).unwrap(),
-            payload
-        );
+                ]);
+                args.extend(if upload {
+                    [format!("{}/", source.display()), "move:./".into()]
+                } else {
+                    ["move:./".into(), format!("{}/", destination.display())]
+                });
+                super::super::super::execute_checked(
+                    &targets::ProcessExecutor,
+                    CommandSpec::new("rsync", args),
+                )
+                .unwrap();
+                assert_eq!(
+                    std::fs::read(destination.join("large file")).unwrap(),
+                    payload
+                );
+                std::fs::remove_file(destination.join("large file")).unwrap();
+            }
+        }
     }
 
     // Needs a POSIX shell and rsync.

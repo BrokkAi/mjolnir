@@ -2,7 +2,7 @@ use super::*;
 use crate::pollers::QUOTA_REFRESH_INTERVAL;
 use std::collections::BTreeMap;
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     SessionConfigSelectOptions,
 };
@@ -12,23 +12,39 @@ use mj_core::config::{
 use mj_core::state::SessionState;
 
 #[test]
-fn web_restart_uses_the_lifecycle_cancellation_control() {
-    let action = ControllerAction::Restart {
-        session_id: "restart-web-session".into(),
-        acknowledge_container_recreation: false,
-    };
-    let control = PhoneActionControl::for_action(&action);
-    let lifecycle_control = control
-        .create
-        .as_ref()
-        .expect("web Restart is admitted as a cancellable daemon lifecycle");
-    assert!(Arc::ptr_eq(
-        &control.cancelled,
-        &lifecycle_control.cancelled
-    ));
-    assert!(control.request_cancel());
-    assert!(control.cancelled.load(Ordering::Acquire));
-    assert!(lifecycle_control.cancelled.load(Ordering::Acquire));
+fn web_restart_and_move_use_the_lifecycle_cancellation_control() {
+    let move_request = serde_json::from_value(serde_json::json!({
+        "preparation": {
+            "selection": {"session_id": "move-web-session"},
+            "source_profile_id": "codex", "source_target_template_id": "podman",
+            "cross_harness": false, "active": false, "queued_commands": [],
+            "fingerprint": "prepared", "operation_id": "move-operation"
+        },
+        "queue": null, "acknowledge_interruption": true
+    }))
+    .unwrap();
+    for action in [
+        ControllerAction::Restart {
+            session_id: "restart-web-session".into(),
+            acknowledge_container_recreation: false,
+        },
+        ControllerAction::Move {
+            request: Box::new(move_request),
+        },
+    ] {
+        let control = PhoneActionControl::for_action(&action);
+        let lifecycle_control = control
+            .lifecycle
+            .as_ref()
+            .expect("web Restart and Move share their lifecycle cancellation control");
+        assert!(Arc::ptr_eq(
+            &control.cancelled,
+            &lifecycle_control.cancelled
+        ));
+        assert!(control.request_cancel());
+        assert!(control.cancelled.load(Ordering::Acquire));
+        assert!(lifecycle_control.cancelled.load(Ordering::Acquire));
+    }
 }
 
 #[test]
@@ -180,6 +196,8 @@ fn bare_preflight_config() -> Config {
 #[test]
 fn move_recovery_projection_exposes_safe_retry_settings_only() {
     let operation = mj_core::state::MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
@@ -293,6 +311,41 @@ fn golden_phone_new_session_preflight() {
         serde_json::to_string_pretty(&stable_review).unwrap()
     )
     .unwrap();
+
+    // Review is on, but the folder has no Git commits: the review step must
+    // say the session will be created with review off.
+    let folder = tempfile::tempdir().unwrap();
+    let mut config = bare_preflight_config();
+    config.profiles.insert(
+        "codex".into(),
+        mj_core::config::HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Codex,
+            home: PathBuf::from("/home/dev/.codex"),
+            environment: Default::default(),
+            context_window_bytes: None,
+            legacy_subagents: Default::default(),
+            guardian_review_model: None,
+            codex_profile: None,
+            muse_auto_review: None,
+        },
+    );
+    config.review.trigger = mj_core::config::ReviewTrigger::Turn;
+    config.review.profile = Some("codex".into());
+    let mut plain = run_new_preflight(
+        config,
+        "hel".into(),
+        "raw".into(),
+        Some(folder.path().to_path_buf()),
+    )
+    .expect("a folder without Git commits is a valid local project");
+    plain.project_directory = Some(PathBuf::from("<folder>"));
+    writeln!(
+        out,
+        "=== folder without Git commits accepted with review off (1 preflight review) ==="
+    )
+    .unwrap();
+    writeln!(out, "{}", serde_json::to_string_pretty(&plain).unwrap()).unwrap();
 
     let mut config = Config::default();
     config.targets.insert(
@@ -459,7 +512,7 @@ fn a_session_whose_turn_outlives_the_daemon_is_not_reported_idle() {
 
 #[test]
 fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         AvailableCommand, AvailableCommandInput, SessionMode, SessionModeState,
         UnstructuredCommandInput,
     };
@@ -665,6 +718,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         (vec![model_option(), fast_option(&["on", "off"])], true),
         (Vec::new(), false),
     ] {
+        let offers_config = !options.is_empty();
         operational.get_mut("session-1").unwrap().config_options = options;
         let names = project(&operational).sessions[0]
             .available_commands
@@ -672,6 +726,11 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
             .map(|command| command.name.clone())
             .collect::<Vec<_>>();
         assert_eq!(names.contains(&"fast".to_owned()), offers_fast, "{names:?}");
+        assert_eq!(
+            names.contains(&"config".to_owned()),
+            offers_config,
+            "{names:?}"
+        );
     }
 
     assert!(session.is_idle);
@@ -821,7 +880,8 @@ fn golden_phone_session_snapshot() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-        },
+        }
+        .into(),
     );
     let workspace = |id: &str| mj_core::workspace::WorkspaceRecord {
         id: id.into(),
@@ -1169,6 +1229,113 @@ fn golden_phone_session_snapshot() {
         }),
     );
 
+    let mut quota_controller = controller_with_profiles(&["claude", "claude-unknown", "codex"]);
+    quota_controller
+        .config
+        .profiles
+        .get_mut("claude")
+        .unwrap()
+        .kind = HarnessKind::Claude;
+    quota_controller
+        .config
+        .profiles
+        .get_mut("claude-unknown")
+        .unwrap()
+        .kind = HarnessKind::Claude;
+    let quota_window = |label: &str,
+                        remaining_percent: Option<u8>,
+                        model_scope: Option<&str>,
+                        duration_seconds: i64| crate::quota::QuotaWindow {
+        label: label.into(),
+        remaining_percent,
+        duration_seconds: Some(duration_seconds),
+        model_scope: model_scope.map(str::to_owned),
+        used: None,
+        limit: None,
+        resets: None,
+        resets_at_epoch_seconds: Some(2_000_000_000),
+    };
+    let quota_report = |profile_id: &str, harness: HarnessKind, windows| ProfileQuota {
+        banked_resets: None,
+        profile_id: profile_id.into(),
+        harness,
+        windows,
+        extra: None,
+        error: None,
+        refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
+    };
+    let quota_reports = BTreeMap::from([
+        (
+            "claude".into(),
+            quota_report(
+                "claude",
+                HarnessKind::Claude,
+                vec![
+                    quota_window("Week", Some(21), None, 7 * 24 * 60 * 60),
+                    quota_window("Week (Fable)", Some(17), Some("fable"), 7 * 24 * 60 * 60),
+                    quota_window("5H", Some(63), None, 5 * 60 * 60),
+                ],
+            ),
+        ),
+        (
+            "claude-unknown".into(),
+            quota_report(
+                "claude-unknown",
+                HarnessKind::Claude,
+                vec![
+                    quota_window("Week", None, None, 7 * 24 * 60 * 60),
+                    quota_window("Week (Fable)", Some(17), Some("fable"), 7 * 24 * 60 * 60),
+                    quota_window("5H", Some(63), None, 5 * 60 * 60),
+                ],
+            ),
+        ),
+        (
+            "codex".into(),
+            quota_report(
+                "codex",
+                HarnessKind::Codex,
+                vec![
+                    quota_window("Week", Some(70), None, 7 * 24 * 60 * 60),
+                    quota_window("5H", Some(80), None, 5 * 60 * 60),
+                ],
+            ),
+        ),
+    ]);
+    let quota_snapshot = viewer_snapshot(
+        &quota_controller,
+        &[],
+        &quota_reports,
+        &PhoneSessionViews {
+            native_agents: &Default::default(),
+            conversations: &Default::default(),
+            queued_prompts: &Default::default(),
+            active_user_shells: &Default::default(),
+            pending_elicitations: &Default::default(),
+            prompt_images: &Default::default(),
+            operational: &Default::default(),
+            materialized_activity: &Default::default(),
+            project_sources: &PhoneProjectSources::default(),
+            operations: &Default::default(),
+            move_recoveries: &Default::default(),
+            capacity: &[],
+            launch_failures: &[],
+            reviews: &Default::default(),
+        },
+        1,
+    );
+    section(
+        &mut out,
+        "viewer quota windows",
+        "Claude, unknown Claude, and Codex profiles",
+        &serde_json::json!({
+            "profiles": quota_snapshot.profiles.iter().map(|profile| serde_json::json!({
+                "id": profile.id,
+                "quota": profile.quota,
+            })).collect::<Vec<_>>(),
+        }),
+    );
+
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "phone-session-snapshot", &out);
 }
 
@@ -1177,6 +1344,7 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
         config: Config {
             keys: Default::default(),
             jev: Default::default(),
+            quota: Default::default(),
             subagents: Default::default(),
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
@@ -1185,12 +1353,14 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
             spinner: Default::default(),
             theme: Default::default(),
             phone: Default::default(),
+            daemon: Default::default(),
             github: Default::default(),
             continuation: Default::default(),
             review: Default::default(),
             sessionwiki: Default::default(),
             legacy_startup: (),
             default_targets: Default::default(),
+            disabled_targets: Default::default(),
             machines: Default::default(),
             profiles: ids
                 .iter()
@@ -1203,6 +1373,7 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
                             legacy_subagents: Default::default(),
                             guardian_review_model: None,
                             codex_profile: None,
+                            muse_auto_review: None,
                             kind: HarnessKind::Codex,
                             home: PathBuf::from("/home/agent").join(id),
                             environment: Default::default(),
@@ -1464,7 +1635,8 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: true,
-        },
+        }
+        .into(),
     );
     controller.state.sessions.insert(parent.id.clone(), parent);
     controller.state.sessions.insert(child.id.clone(), child);
@@ -1772,10 +1944,10 @@ fn force_close_is_admitted_like_close() {
         session_id: "session-1".into(),
         delete_branch: false,
     };
-    // A full action pool and a session already busy with a stuck close
-    // are both exactly when a force close has to get through.
+    // A session already busy with a stuck close is exactly when a force
+    // close has to get through.
     assert_eq!(
-        admit_phone_action(&force_close, MAX_CONCURRENT_PHONE_ACTIONS, &mut active),
+        admit_phone_action(&force_close, &mut active),
         Ok(Some("session-1".into()))
     );
     assert_eq!(
@@ -1784,19 +1956,37 @@ fn force_close_is_admitted_like_close() {
     );
 }
 
+// Hard-won: 6c53a7462: the shared action cap let unrelated provisioning block session controls.
 #[test]
-fn close_is_admitted_while_provisioning_occupies_a_full_action_pool() {
-    let mut active = std::collections::BTreeSet::from(["session-1".to_owned()]);
+fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do() {
+    let mut active = std::collections::BTreeSet::new();
+    for index in 1..=8 {
+        let session_id = format!("session-{index}");
+        let action = ControllerAction::Prompt {
+            session_id: session_id.clone(),
+            text: "continue".into(),
+            images: Vec::new(),
+            command_id: None,
+        };
+        assert_eq!(
+            admit_phone_action(&action, &mut active),
+            Ok(Some(session_id))
+        );
+    }
+    assert_eq!(
+        admit_phone_action(&prompt_action(), &mut active),
+        Err(ActionOutcome::SessionBusy)
+    );
     let close = ControllerAction::Suspend {
         session_id: "session-1".into(),
         acknowledge_unpublished_work: false,
     };
     assert_eq!(
-        admit_phone_action(&close, MAX_CONCURRENT_PHONE_ACTIONS, &mut active),
+        admit_phone_action(&close, &mut active),
         Ok(Some("session-1".into()))
     );
     assert_eq!(
-        admit_phone_action(&prompt_action(), 0, &mut active),
+        admit_phone_action(&prompt_action(), &mut active),
         Err(ActionOutcome::SessionBusy)
     );
 }
@@ -1873,6 +2063,8 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
                     .map(|label| crate::quota::QuotaWindow {
                         label: label.into(),
                         remaining_percent: Some(70),
+                        duration_seconds: None,
+                        model_scope: None,
                         used: None,
                         limit: None,
                         resets: Some("legacy time".into()),
@@ -2066,11 +2258,11 @@ fn a_later_successful_action_clears_a_session_s_recorded_failure() {
 fn phone_cancel_targets_the_matching_background_action() {
     let first = PhoneActionControl {
         cancelled: Arc::new(AtomicBool::new(false)),
-        create: None,
+        lifecycle: None,
     };
     let second = PhoneActionControl {
         cancelled: Arc::new(AtomicBool::new(false)),
-        create: None,
+        lifecycle: None,
     };
     let action_sessions =
         std::collections::BTreeMap::from([(1, "session-1".into()), (2, "session-2".into())]);
@@ -2096,7 +2288,7 @@ fn phone_new_cancel_and_running_commit_have_one_atomic_winner() {
         let create = LifecycleControl::default();
         let control = PhoneActionControl {
             cancelled: create.cancelled.clone(),
-            create: Some(create),
+            lifecycle: Some(create),
         };
         let cancelling = control.clone();
         let committing = control.clone();

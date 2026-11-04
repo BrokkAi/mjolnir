@@ -120,6 +120,8 @@ impl DashboardState {
 
     /// Whether a modal dialog or wizard owns the keyboard.
     pub fn modal_open(&self) -> bool {
-        self.pane_menu.is_some() || !matches!(self.mode, Mode::Dashboard)
+        self.away_dialog().is_some()
+            || self.pane_menu.is_some()
+            || !matches!(self.mode, Mode::Dashboard)
     }
 }

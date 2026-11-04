@@ -176,25 +176,7 @@ impl ChatState {
                     .and_then(|controls| controls.interrupt.clone())
                     .map_or(ChatAction::None, ChatAction::TurnControl);
             }
-            if self.steering.as_ref().is_some_and(|s| s.holds_queue()) {
-                if self
-                    .steering
-                    .as_ref()
-                    .is_some_and(|s| s.status == mj_core::relay::SteeringStatus::Unconfirmed)
-                {
-                    self.turn_control_dialog_open = true;
-                }
-                return ChatAction::None;
-            }
-            let available = self.turn_controls.as_ref().map_or_else(
-                || self.turn_interruptible(),
-                |controls| controls.primary.is_some() || !self.active_user_shells.is_empty(),
-            );
-            return if available {
-                ChatAction::Cancel
-            } else {
-                ChatAction::None
-            };
+            return self.interrupt_action();
         }
         // With Num Lock off, the keypad's corner keys are transcript
         // navigation. Enhanced keyboard reporting distinguishes them from the

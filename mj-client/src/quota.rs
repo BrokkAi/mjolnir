@@ -9,16 +9,41 @@ use mj_core::config::HarnessKind;
 /// Label used when a harness is billed by API usage rather than a subscription.
 pub const API_LABEL: &str = "API";
 
+/// Label used when a harness never shares its quota with any client, so there
+/// is no reading to take and none is missing.
+pub const NOT_REPORTED_LABEL: &str = "n/a";
+
 /// A quota window reported by a harness.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuotaWindow {
     pub label: String,
     pub remaining_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_scope: Option<String>,
     pub used: Option<i64>,
     pub limit: Option<i64>,
     pub resets: Option<String>,
     #[serde(default)]
     pub resets_at_epoch_seconds: Option<i64>,
+}
+
+impl QuotaWindow {
+    /// Whether this allowance spans a week or longer, including model-scoped labels.
+    pub fn is_weekly_or_longer(&self) -> bool {
+        let label = if self.model_scope.is_some() {
+            self.label
+                .split_once(" (")
+                .map_or(self.label.as_str(), |(label, _)| label)
+        } else {
+            &self.label
+        };
+        is_weekly_quota_window(label)
+            || self
+                .duration_seconds
+                .is_some_and(|seconds| seconds >= 7 * 24 * 60 * 60)
+    }
 }
 
 /// What the daemon publishes about quota. The daemon is the only process that
@@ -70,13 +95,25 @@ impl ProfileQuota {
     pub fn weekly_window(&self) -> Option<&QuotaWindow> {
         self.windows
             .iter()
-            .find(|window| is_weekly_quota_window(&window.label))
+            .find(|window| window.model_scope.is_none() && is_weekly_quota_window(&window.label))
     }
 
     pub fn five_hour_window(&self) -> Option<&QuotaWindow> {
         self.windows
             .iter()
-            .find(|window| is_short_quota_window(&window.label))
+            .find(|window| window.model_scope.is_none() && is_short_quota_window(&window.label))
+    }
+
+    /// Claude's model-specific Fable weekly allowance, when the provider
+    /// reports the canonical seven-day scoped window.
+    pub fn fable_weekly_window(&self) -> Option<&QuotaWindow> {
+        if self.harness != HarnessKind::Claude {
+            return None;
+        }
+        self.windows.iter().find(|window| {
+            window.model_scope.as_deref() == Some("fable")
+                && window.duration_seconds == Some(7 * 24 * 60 * 60)
+        })
     }
 
     /// The window that best represents this profile at a glance. Prefer a
@@ -86,7 +123,11 @@ impl ProfileQuota {
     pub fn summary_window(&self) -> Option<&QuotaWindow> {
         self.weekly_window()
             .or_else(|| self.five_hour_window())
-            .or_else(|| self.windows.first())
+            .or_else(|| {
+                self.windows
+                    .iter()
+                    .find(|window| window.model_scope.is_none())
+            })
     }
 
     /// Whether the report says the profile is usage-priced: an API-billed
@@ -94,6 +135,27 @@ impl ProfileQuota {
     /// in place of one rather than inventing a percentage.
     pub fn is_usage_priced(&self) -> bool {
         self.error.is_none() && self.windows.is_empty() && self.extra.as_deref() == Some(API_LABEL)
+    }
+
+    /// Whether the report says the harness never shares its quota. MiMo Code
+    /// and OpenCode neither publish an allowance nor read one from their
+    /// providers, so the profile reads `n/a` rather than as a failed probe.
+    pub fn is_not_reported(&self) -> bool {
+        self.error.is_none()
+            && self.windows.is_empty()
+            && self.extra.as_deref() == Some(NOT_REPORTED_LABEL)
+    }
+
+    /// What a report without windows shows in place of a reading: `API` for a
+    /// usage-priced profile, `n/a` for a harness that never shares its quota.
+    pub fn windowless_label(&self) -> Option<&'static str> {
+        if self.is_usage_priced() {
+            Some(API_LABEL)
+        } else if self.is_not_reported() {
+            Some(NOT_REPORTED_LABEL)
+        } else {
+            None
+        }
     }
 
     pub fn five_hour_projects_exhaustion(&self) -> bool {
@@ -387,11 +449,16 @@ mod tests {
     #[test]
     fn old_quota_reports_decode_without_a_banked_balance() {
         let quota: ProfileQuota = serde_json::from_value(serde_json::json!({
-            "profile_id": "claude", "harness": "claude", "windows": [],
+            "profile_id": "claude", "harness": "claude", "windows": [{
+                "label": "Week", "remaining_percent": 75, "used": null,
+                "limit": null, "resets": null, "resets_at_epoch_seconds": null
+            }],
             "extra": null, "error": null, "refreshed_at_epoch_seconds": 0
         }))
         .unwrap();
         assert_eq!(quota.banked_resets, None);
+        assert_eq!(quota.windows[0].duration_seconds, None);
+        assert_eq!(quota.windows[0].model_scope, None);
         assert!(
             serde_json::to_value(&quota)
                 .unwrap()

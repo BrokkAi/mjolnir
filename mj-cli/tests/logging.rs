@@ -27,10 +27,12 @@ fn top_level_failure_is_written_to_a_private_per_run_log() {
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect::<Vec<_>>();
-    assert_eq!(
-        logs.len(),
-        2,
-        "checkpoint starts the database-owning daemon"
+    // The daemon's host node writes its own log too. Check the process we
+    // started rather than pinning the number of supporting processes.
+    let daemon_start = format!("process_id={daemon_pid} command=\"daemon-run\"");
+    assert!(
+        logs.iter()
+            .any(|path| { fs::read_to_string(path).unwrap().contains(&daemon_start) })
     );
     assert!(logs.iter().all(|path| {
         path.file_name()

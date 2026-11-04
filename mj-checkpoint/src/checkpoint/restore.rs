@@ -10,6 +10,39 @@ pub enum QueueRestorePolicy {
     Defer,
 }
 
+/// The relay metadata needed to continue a verified canonical session. An
+/// in-place native Move already has its history and attachments on the target.
+pub fn relay_seed_for_restore(
+    canonical: &CanonicalSessionSnapshot,
+    native_continuity: bool,
+    queue_policy: QueueRestorePolicy,
+) -> Result<mj_core::relay::RestoredRelaySeed> {
+    let seed = mj_core::relay::RestoredRelaySeed {
+        command_ledger: None,
+        assessment_state: native_continuity
+            .then(|| canonical.assessment_state.clone())
+            .flatten(),
+        event_frontier: canonical.event_frontier,
+        event_frontier_digest: canonical.event_frontier_digest.clone(),
+        queued_prompts: if queue_policy == QueueRestorePolicy::Restore {
+            canonical.queued_prompts.clone()
+        } else {
+            Vec::new()
+        },
+        accepted_config: if native_continuity {
+            mj_core::acp::AcceptedSessionConfig::from_archived_values(
+                &canonical.session.configuration.values,
+            )
+        } else {
+            Default::default()
+        },
+        native_session_unused: native_continuity
+            && !current_native_session_received_prompt(canonical),
+    };
+    seed.validate()?;
+    Ok(seed)
+}
+
 fn deserialize_queue_policy<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<QueueRestorePolicy, D::Error> {
@@ -77,38 +110,10 @@ pub fn restore_checkpoint_with_native_state(
     // Deserialize and validate the schema-2 canonical projection before any
     // repository, relay, or native-session state can be mutated.
     let canonical_session = archive.canonical_session()?;
-    // The archive carries no relay journal, so this is the restored worker's
-    // only evidence about the native session it continues.
-    let native_session_unused =
-        spec.restore_native && !current_native_session_received_prompt(&canonical_session);
     // The relay that opens next needs the frontier it continues from and the
     // commands still queued, and nothing else. The transcript stays in the
     // archive; the controller already holds it as the durable projection.
-    let mut seed = mj_core::relay::RestoredRelaySeed {
-        command_ledger: None,
-        assessment_state: if spec.restore_native {
-            canonical_session.assessment_state.clone()
-        } else {
-            None
-        },
-        event_frontier: canonical_session.event_frontier,
-        event_frontier_digest: canonical_session.event_frontier_digest,
-        queued_prompts: canonical_session.queued_prompts,
-        // Selector values name one harness's catalogue, so they carry over
-        // only when the same native conversation continues.
-        accepted_config: if spec.restore_native {
-            mj_core::acp::AcceptedSessionConfig::from_archived_values(
-                &canonical_session.session.configuration.values,
-            )
-        } else {
-            Default::default()
-        },
-        native_session_unused,
-    };
-    if spec.queue_policy != QueueRestorePolicy::Restore {
-        seed.queued_prompts.clear();
-    }
-    seed.validate()?;
+    let seed = relay_seed_for_restore(&canonical_session, spec.restore_native, spec.queue_policy)?;
     if spec.restore_repositories {
         restore_repositories_from_archive(&archive, &spec.workspace_root, git, true)?;
     } else {
@@ -133,7 +138,7 @@ pub fn restore_checkpoint_with_native_state(
     };
     restore_subagent_reports(&archive, &spec.workspace_root, &report_root)?;
     for queued in &seed.queued_prompts {
-        let blocks: Vec<agent_client_protocol::schema::v1::ContentBlock> = queued
+        let blocks: Vec<agent_client_protocol::v1::schema::ContentBlock> = queued
             .content
             .iter()
             .cloned()
@@ -210,10 +215,6 @@ pub fn restore_checkpoint_with_native_state(
                 &spec.harness_home,
             )?;
             validate_relative_path(&relative_path)?;
-            ensure!(
-                !is_secret_like_path(&relative_path),
-                "native artifact path is secret-like"
-            );
             write_private_file(
                 &spec.harness_home,
                 &relative_path,

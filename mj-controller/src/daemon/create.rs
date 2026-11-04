@@ -8,8 +8,13 @@ impl RuntimeState {
         self: &Arc<Self>,
         request: CreateSessionRequest,
     ) -> Result<RegisteredSession> {
-        self.start_create_session_inner(request, LifecycleControl::default(), None)
-            .await
+        let (registered, _, warning) = self
+            .start_create_session_inner(request, LifecycleControl::default(), None)
+            .await?;
+        if let Some(warning) = warning {
+            self.push_notice(&registered.session.id, warning);
+        }
+        Ok(registered)
     }
 
     /// Register and start a child worker on its parent's existing target.
@@ -31,6 +36,12 @@ impl RuntimeState {
                     .is_some_and(|record| {
                         record.state == mj_core::state::SessionState::Provisioning
                     });
+                if needs_provisioning {
+                    crate::controller::recover_registered_subagent_startup(
+                        &existing,
+                        request.fast_mode,
+                    )?;
+                }
                 return Ok((existing, needs_provisioning));
             }
             let mut request = request;
@@ -50,6 +61,15 @@ impl RuntimeState {
                 .map(|relation| (relation, true))
         })
         .await?;
+        self.reload_controller().await?;
+        if relation.kind == mj_core::subagent::SubagentKind::Worker {
+            let id = relation.child_session_id.clone();
+            if let Some(delivery) =
+                blocking(move || crate::database::next_startup_delivery(&id)).await?
+            {
+                self.start_persisted_startup_delivery(delivery, &CancellationToken::new());
+            }
+        }
         if !needs_provisioning {
             return Ok(relation);
         }
@@ -143,6 +163,7 @@ impl RuntimeState {
             profile_id: relation.profile_id.clone(),
             model: relation.model.clone(),
             effort: relation.effort.clone(),
+            fast_mode: launch.fast_mode.unwrap_or(false),
             working_directory: relation.working_directory.clone(),
             initial_prompt: relation.initial_prompt.clone(),
             request_key: relation.request_key.clone(),
@@ -226,7 +247,7 @@ impl RuntimeState {
         request: CreateSessionRequest,
         control: LifecycleControl,
         publication: tokio::sync::oneshot::Receiver<std::result::Result<(), String>>,
-    ) -> Result<RegisteredSession> {
+    ) -> Result<(RegisteredSession, bool, Option<String>)> {
         self.start_create_session_inner(request, control, Some(publication))
             .await
     }
@@ -236,7 +257,7 @@ impl RuntimeState {
         request: CreateSessionRequest,
         control: LifecycleControl,
         publication: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
-    ) -> Result<RegisteredSession> {
+    ) -> Result<(RegisteredSession, bool, Option<String>)> {
         let mut request = request;
         let parent = request.profile_id.clone();
         let supplied = request.subagents.clone();
@@ -257,39 +278,8 @@ impl RuntimeState {
             &policy,
         )
         .await?;
-        let container_target = config
-            .targets
-            .get(&request.target_template_id)
-            .is_some_and(mj_core::config::is_container_target);
         if let Some(allocation) = request.resource_allocation.as_ref() {
             validate_minimum_container_allocation(allocation)?;
-        }
-        let container_capacity = if container_target {
-            let input = self
-                .container_capacity_input(&request.target_template_id)
-                .await
-                .context(mj_core::refusal::Refusal::precondition(
-                    "Mjolnir could not read this host's CPU and RAM capacity; check the target and retry",
-                ))?;
-            if input.is_none() && self.capacity_feed().is_some() {
-                return Err(anyhow::Error::new(
-                    mj_core::refusal::Refusal::precondition(
-                        "this target's host capacity is not ready yet; refresh the target and retry",
-                    )
-                    .with_code("container-capacity-unavailable"),
-                ));
-            }
-            input
-        } else {
-            None
-        };
-        if container_capacity.is_some() && request.resource_allocation.is_none() {
-            return Err(anyhow::Error::new(
-                mj_core::refusal::Refusal::unusable(
-                    "container sessions require an explicit CPU and RAM allocation; retry from a current client or pass `cpus` and `memory_bytes`",
-                )
-                .with_code("container-size-required"),
-            ));
         }
         if !request.bundle_id.is_empty() {
             crate::controller::config_only_controller(config.clone())
@@ -297,34 +287,23 @@ impl RuntimeState {
                 .await
                 .map_err(crate::controller::GithubBundleSelectionError::into_anyhow)?;
         }
-        // The reservation and the durable session record must be one
-        // serialized decision. If the lock covered only the check, two
-        // concurrent creates could observe the same committed total.
-        let _container_admission = if container_capacity.is_some() {
-            Some(self.container_admission.lock().await)
-        } else {
-            None
-        };
+        let _container_admission = self
+            .admit_container_launch(
+                &request.target_template_id,
+                request.resource_allocation.clone(),
+                None,
+                BTreeSet::new(),
+                None,
+            )
+            .await?;
         // Discovery is restartable preparation, not admitted lifecycle work.
         let _upgrade_work = crate::upgrade::activity("session admission")?;
         request.subagents = Some(policy);
         let path_cancelled = control.cancelled.clone();
         let remember_launch_choices = request.remember_launch_choices;
         let preferences_owner = self.clone();
-        let admission_state = self.clone();
-        let registered = blocking(move || {
+        let (registered, review_turned_off) = blocking(move || {
             let mut controller = Controller::load()?;
-            if let (Some(input), Some(allocation)) =
-                (container_capacity, request.resource_allocation.as_ref())
-            {
-                validate_minimum_container_allocation(allocation)?;
-                let capacity = admission_state
-                    .capacity_with_reservations(&input, controller.state.sessions.values());
-                ensure!(
-                    capacity.fits(allocation),
-                    capacity_refusal(capacity, allocation)
-                );
-            }
             let path_executor = crate::targets::CancellableProcessExecutor::new(path_cancelled)
                 .with_deadline(Duration::from_secs(30));
             let project_directory = request
@@ -338,7 +317,7 @@ impl RuntimeState {
                     )
                 })
                 .transpose()?;
-            let session_id = controller.register_session_with_resources(
+            let registration = controller.register_session_reporting_review(
                 &request.profile_id,
                 &request.bundle_id,
                 &request.target_template_id,
@@ -363,6 +342,7 @@ impl RuntimeState {
                     session_title_override: request.session_title_override,
                 },
             )?;
+            let session_id = registration.id;
             // Only interactive launches seed defaults. A failed preference write
             // does not undo a session that was created.
             if request.remember_launch_choices
@@ -415,12 +395,16 @@ impl RuntimeState {
                         .copied()
                         .map(|size| (host.to_owned(), size))
                 });
-            Ok(RegisteredSession {
-                session,
-                remembered_container_size,
-            })
+            Ok((
+                RegisteredSession {
+                    session,
+                    remembered_container_size,
+                },
+                registration.review_turned_off,
+            ))
         })
         .await?;
+        let capacity_warning = _container_admission.warning.clone();
         drop(_container_admission);
         let session_id = registered.session.id.clone();
         self.start_or_join_lifecycle_controlled(
@@ -482,7 +466,7 @@ impl RuntimeState {
             },
         )?;
         self.reload_controller().await?;
-        Ok(registered)
+        Ok((registered, review_turned_off, capacity_warning))
     }
 
     pub async fn wait_create_session(&self, session_id: &str) -> Result<()> {
@@ -526,84 +510,9 @@ fn validate_minimum_container_allocation(
         })
 }
 
-pub(super) fn capacity_refusal(
-    capacity: mj_core::state::HostContainerCapacity,
-    allocation: &mj_core::state::SessionResourceAllocation,
-) -> anyhow::Error {
-    use anyhow::Error;
-    use mj_core::refusal::Refusal;
-    use mj_core::state::SessionResourceAllocation;
-
-    let SessionResourceAllocation::Container {
-        cpus: requested_cpus,
-        memory_bytes: requested_memory,
-    } = allocation
-    else {
-        return Error::new(Refusal::unusable(
-            "container capacity admission received a non-container allocation",
-        ));
-    };
-    if !capacity.complete {
-        return Error::new(
-            Refusal::unusable(
-                "a live container on this host has no recorded CPU and RAM sizing, so Mjolnir cannot safely calculate the RAM left; stop that session or restart it with an explicit size",
-            )
-            .with_code("container-capacity-unknown"),
-        );
-    }
-    let gib = mj_core::state::floor_gib_tenths;
-    Error::new(
-        Refusal::unusable(format!(
-            "this launch requests {requested_cpus} CPUs and {} GiB of RAM, but the host has {} CPUs and {} GiB of RAM left after its system reserve and live container commitments. Suspend or stop a session, or choose a smaller allocation. Mjolnir does not stop sessions automatically.",
-            gib(*requested_memory),
-            capacity.remaining.cpus,
-            gib(capacity.remaining.memory_bytes),
-        ))
-        .with_code("container-capacity-exceeded"),
-    )
-}
-
 #[cfg(test)]
 mod capacity_admission_tests {
     use super::*;
-
-    #[test]
-    fn capacity_refusal_names_remaining_ram_and_never_promises_automatic_stop() {
-        let capacity = mj_core::state::HostContainerCapacity {
-            total: mj_core::state::HostContainerSize {
-                cpus: 24,
-                memory_bytes: 64 << 30,
-            },
-            reserved: mj_core::state::HostContainerSize {
-                cpus: 0,
-                memory_bytes: 12 << 30,
-            },
-            committed: mj_core::state::HostContainerSize {
-                cpus: 20,
-                memory_bytes: 44 << 30,
-            },
-            remaining: mj_core::state::HostContainerSize {
-                cpus: 4,
-                memory_bytes: (8 << 30) - 1,
-            },
-            complete: true,
-        };
-        let allocation = mj_core::state::SessionResourceAllocation::Container {
-            cpus: 4,
-            memory_bytes: 16 << 30,
-        };
-
-        let error = capacity_refusal(capacity, &allocation);
-        let refusal = mj_core::refusal::Refusal::of(&error).expect("user-facing refusal");
-
-        assert_eq!(refusal.code(), Some("container-capacity-exceeded"));
-        assert!(refusal.message().contains("4 CPUs and 7.9 GiB of RAM left"));
-        assert!(
-            refusal
-                .message()
-                .contains("does not stop sessions automatically")
-        );
-    }
 
     #[test]
     fn undersized_container_is_a_user_facing_refusal() {
@@ -658,6 +567,7 @@ mod delegation_replay_tests {
                 context_window_bytes: None,
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
                 legacy_subagents: None,
             },
         );
@@ -667,9 +577,6 @@ mod delegation_replay_tests {
         );
         config.save().unwrap();
         let workspace = crate::database::create_workspace("launch choices").unwrap();
-        let mut state = crate::database::load_state().unwrap();
-        state.last_subagent_policy = SubagentPolicy::None;
-        crate::database::save_state(&state).unwrap();
         let runtime = crate::daemon::tests::test_runtime_state();
         let path = GoPreferences::path();
         for remember in [false, true, false] {
@@ -679,7 +586,9 @@ mod delegation_replay_tests {
                 .unwrap()
                 .metadata
                 .recent_launch;
-            let policy_before = crate::database::load_state().unwrap().last_subagent_policy;
+            let policy_before = crate::database::load_state()
+                .unwrap()
+                .last_subagent_policy_for("codex");
             let request = mj_client::daemon::CreateSessionRequest {
                 remember_launch_choices: remember,
                 remember_container_size: false,
@@ -707,7 +616,7 @@ mod delegation_replay_tests {
             };
             let (publish, publication) = tokio::sync::oneshot::channel();
             let control = super::LifecycleControl::default();
-            let registered = runtime
+            let (registered, _, _) = runtime
                 .start_create_session_controlled(request, control.clone(), publication)
                 .await
                 .unwrap();
@@ -728,7 +637,9 @@ mod delegation_replay_tests {
                     })
                 );
                 assert_eq!(
-                    crate::database::load_state().unwrap().last_subagent_policy,
+                    crate::database::load_state()
+                        .unwrap()
+                        .last_subagent_policy_for("codex"),
                     SubagentPolicy::Native
                 );
                 assert_eq!(
@@ -750,7 +661,9 @@ mod delegation_replay_tests {
                     recent_before
                 );
                 assert_eq!(
-                    crate::database::load_state().unwrap().last_subagent_policy,
+                    crate::database::load_state()
+                        .unwrap()
+                        .last_subagent_policy_for("codex"),
                     policy_before
                 );
             }
@@ -792,6 +705,7 @@ mod delegation_replay_tests {
                 context_window_bytes: None,
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
                 legacy_subagents: None,
             },
         );
@@ -897,6 +811,7 @@ mod delegation_replay_tests {
                     profile_id: "missing-profile".into(),
                     model: None,
                     effort: None,
+                    fast_mode: false,
                     working_directory: Default::default(),
                     initial_prompt: "must not resend".into(),
                     request_key: relation.request_key.clone(),

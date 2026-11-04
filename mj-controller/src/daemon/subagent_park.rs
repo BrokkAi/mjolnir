@@ -22,6 +22,12 @@ impl RuntimeState {
         );
     }
 
+    pub(crate) fn quota_report_backend(
+        &self,
+    ) -> Option<Arc<crate::server_runtime::api::ApiBackend>> {
+        self.report_backend.get().and_then(std::sync::Weak::upgrade)
+    }
+
     pub(crate) async fn reconcile_parent_reports(&self, parent_id: &str) -> Result<()> {
         if let Some(backend) = self.report_backend.get().and_then(std::sync::Weak::upgrade) {
             backend.reconcile_parent_reports(parent_id).await?;

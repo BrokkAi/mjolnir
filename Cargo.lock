@@ -10,12 +10,13 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-client-protocol"
-version = "2.0.0"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d87bc7769eba641753ba5dc52f73ec3765d51022c6753bf040967125ddc86a8"
+checksum = "80ce60ce096020c2d0aa10445bc27b8856109e288abaf564ab517031ae819d69"
 dependencies = [
  "agent-client-protocol-derive",
  "agent-client-protocol-schema",
+ "anyhow",
  "async-io",
  "async-process",
  "blocking",
@@ -23,7 +24,6 @@ dependencies = [
  "futures-concurrency",
  "rustc-hash",
  "rustix",
- "schemars 1.2.1",
  "serde",
  "serde_json",
  "shell-words",
@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "agent-client-protocol-derive"
-version = "2.0.0"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3abd4080f51e4f24f5042beb7fb7a66ede29a2dc1c2582c329532e1c27264ddc"
+checksum = "a12951a4e9a163a9384dec4e5681bd774c0fdb3871c5ed1deb7b44bc630df17a"
 dependencies = [
  "quote",
  "syn 3.0.4",
@@ -44,18 +44,16 @@ dependencies = [
 
 [[package]]
 name = "agent-client-protocol-schema"
-version = "1.5.0"
+version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5c231915b4ab578c722eca2d1bd7df4d300bfd6cac3b8e9f0d1e3ddc95b187c"
+checksum = "1b2316d2cd561917bc2c16e3c64771c77e24363b56d40b58fdad091d02059992"
 dependencies = [
  "anyhow",
  "derive_more",
- "schemars 1.2.1",
  "serde",
  "serde_json",
  "serde_with",
  "strum 0.28.0",
- "tracing",
 ]
 
 [[package]]
@@ -233,6 +231,12 @@ name = "archery"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33ca55ee147b1926dbea904f50fe4902494e97bc742205abbbf10c709e43815f"
+
+[[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
 name = "arrayref"
@@ -582,9 +586,9 @@ dependencies = [
 
 [[package]]
 name = "blocking"
-version = "1.6.2"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e83f8d02be6967315521be875afa792a316e28d57b5a2d401897e2a7921b7f21"
+checksum = "a70e4329df6cb94385eed412ec92375c3cdd8a6e502493d1229b6414e4036dfa"
 dependencies = [
  "async-channel",
  "async-task",
@@ -631,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-chat"
-version = "2.56.1"
+version = "2.65.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -661,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-checkpoint"
-version = "2.56.1"
+version = "2.65.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -686,10 +690,11 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-client"
-version = "2.56.1"
+version = "2.65.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "base64",
  "brokk-anvil-client",
  "brokk-mj-core",
  "brokk-mj-transcript",
@@ -710,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-controller"
-version = "2.56.1"
+version = "2.65.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -724,6 +729,7 @@ dependencies = [
  "brokk-mj-review",
  "brokk-mj-transcript",
  "brokk-mj-worker",
+ "bytes",
  "chrono",
  "chrono-tz",
  "dirs 6.0.0",
@@ -763,16 +769,19 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-core"
-version = "2.56.1"
+version = "2.65.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
  "base64",
+ "bytes",
  "bytesize",
  "chrono",
  "dirs 6.0.0",
  "flate2",
  "getrandom 0.3.4",
+ "h2",
+ "http",
  "imbl",
  "jsonc-parser",
  "libc",
@@ -789,16 +798,19 @@ dependencies = [
  "tempfile",
  "tiny_http",
  "tokio",
+ "tokio-util",
  "toml",
  "toml_edit 0.20.2",
  "tracing",
  "url",
  "windows-sys 0.61.2",
+ "yaml-rust2",
+ "zip",
 ]
 
 [[package]]
 name = "brokk-mj-desktop"
-version = "2.56.1"
+version = "2.65.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -830,16 +842,15 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-review"
-version = "2.56.1"
+version = "2.65.0"
 dependencies = [
  "brokk-mj-core",
- "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "brokk-mj-transcript"
-version = "2.56.1"
+version = "2.65.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -855,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-tui"
-version = "2.56.1"
+version = "2.65.0"
 dependencies = [
  "anyhow",
  "brokk-mj-chat",
@@ -874,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-voice-worker"
-version = "2.56.1"
+version = "2.65.0"
 dependencies = [
  "anyhow",
  "brokk-anvil-client",
@@ -891,7 +902,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-worker"
-version = "2.56.1"
+version = "2.65.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -905,6 +916,7 @@ dependencies = [
  "clap",
  "flate2",
  "getrandom 0.3.4",
+ "jsonc-parser",
  "libc",
  "mach2",
  "mimalloc",
@@ -922,11 +934,13 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-bash",
 ]
 
 [[package]]
 name = "brokk-mjolnir"
-version = "2.56.1"
+version = "2.65.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -943,6 +957,7 @@ dependencies = [
  "clap",
  "crossterm",
  "futures",
+ "getrandom 0.3.4",
  "libc",
  "portable-pty",
  "ratatui",
@@ -952,6 +967,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sysinfo",
  "tempfile",
  "tokio",
@@ -959,6 +975,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "url",
  "vte",
  "windows-sys 0.61.2",
 ]
@@ -1889,11 +1906,10 @@ dependencies = [
 
 [[package]]
 name = "event-listener"
-version = "5.4.1"
+version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
 dependencies = [
- "concurrent-queue",
  "parking",
  "pin-project-lite",
 ]
@@ -2652,9 +2668,9 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hermit-abi"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
+checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hex"
@@ -5260,21 +5276,8 @@ checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
 dependencies = [
  "dyn-clone",
  "ref-cast",
- "schemars_derive",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "schemars_derive"
-version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d115b50f4aaeea07e79c1912f645c7513d81715d0420f8bc77a18c6260b307f"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde_derive_internals",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -5359,17 +5362,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.4",
-]
-
-[[package]]
-name = "serde_derive_internals"
-version = "0.29.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18d26a20a969b9e3fdf2fc2d9f21eda6c40e2de84c9408bb5d3b05d499aae711"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -7771,6 +7763,16 @@ checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
  "rustix",
+]
+
+[[package]]
+name = "yaml-rust2"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57e5b818a27a4cd30884ea380857a5e56f7ec3ba24a3990a3cc0b95af3238e18"
+dependencies = [
+ "arraydeque",
+ "hashlink",
 ]
 
 [[package]]

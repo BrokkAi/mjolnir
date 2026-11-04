@@ -135,6 +135,8 @@ function fixture(taskCount = 1, options = {}) {
       targets: [],
       bundles: [],
       review_config: { trigger: "off", profile: null },
+      operator_away: options.operatorAway === true,
+      auto_afk_minutes: options.autoAfkMinutes ?? 0,
     },
     actions: [],
     snapshots: 0,
@@ -179,7 +181,9 @@ async function mount(page, taskCount = 1, options = {}) {
       });
     }
     if (pathname === '/api/actions') {
-      state.actions.push(route.request().postDataJSON());
+      const action = route.request().postDataJSON();
+      state.actions.push(action);
+      if (action.action === 'set-operator-away') state.snapshot.operator_away = action.away;
       return route.fulfill({ status: 202, body: '' });
     }
     if (pathname.startsWith('/api/conversations/')) {
@@ -206,6 +210,98 @@ async function mount(page, taskCount = 1, options = {}) {
   await expect(page.locator('#conversation-feed')).toContainText('Conversation entry 16');
   return state;
 }
+
+test('phone header menu toggles AFK and the snapshot indicator ends it', async ({ page }) => {
+  const state = await mount(page);
+  const indicator = page.locator('#operator-away-indicator');
+  await expect(indicator).toBeHidden();
+
+  await page.locator('#menu-button').tap();
+  await page.getByRole('menuitem', { name: 'Go AFK' }).tap();
+  await expect(indicator).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'End AFK' })).toBeVisible();
+  expect(state.actions[0]).toEqual({ action: 'set-operator-away', away: true });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+
+  await indicator.tap();
+  await expect(indicator).toBeHidden();
+  expect(state.actions[1]).toEqual({ action: 'set-operator-away', away: false });
+});
+
+test('phone AFK action shows its pending state and reports a failure', async ({ page }) => {
+  await mount(page);
+  let releaseAction;
+  let actionReached;
+  const blockedAction = new Promise(resolve => { releaseAction = resolve; });
+  const reachedAction = new Promise(resolve => { actionReached = resolve; });
+  await page.route('**/api/actions', async route => {
+    actionReached();
+    await blockedAction;
+    await route.fulfill({
+      status: 500,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'operator action failed' }),
+    });
+  });
+
+  await page.locator('#menu-button').tap();
+  await page.getByRole('menuitem', { name: 'Go AFK' }).tap();
+  await reachedAction;
+  await expect(page.locator('#operator-away-indicator')).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'Going AFK…' })).toBeDisabled();
+  releaseAction();
+  await expect(page.locator('#operator-away-error')).toHaveText('Could not go AFK: operator action failed');
+  await expect(page.locator('#operator-away-indicator')).toBeHidden();
+});
+
+test('operator activity reporting stays off when disabled or already AFK', async ({ page }) => {
+  for (const options of [{ autoAfkMinutes: 0 }, { autoAfkMinutes: 5, operatorAway: true }]) {
+    const state = await mount(page, 1, options);
+    state.actions.length = 0;
+    await page.mouse.move(12, 12);
+    await page.keyboard.press('Tab');
+    await page.waitForTimeout(1100);
+    expect(state.actions).toEqual([]);
+  }
+});
+
+test('trusted global input signals activity immediately and coalesces while a request is pending', async ({ page }) => {
+  const state = await mount(page, 1, { autoAfkMinutes: 5 });
+  state.actions.length = 0;
+
+  await page.evaluate(() => {
+    for (const type of ['keydown', 'paste', 'input', 'pointermove', 'pointerdown', 'pointerup', 'pointercancel', 'wheel']) {
+      document.dispatchEvent(new Event(type, { bubbles: true }));
+    }
+  });
+  expect(state.actions).toEqual([]);
+
+  let releaseFirst;
+  let signalReached;
+  const blockedSignal = new Promise(resolve => { releaseFirst = resolve; });
+  const reachedSignal = new Promise(resolve => { signalReached = resolve; });
+  await page.route('**/api/actions', async route => {
+    const action = route.request().postDataJSON();
+    state.actions.push(action);
+    if (action.action === 'record-operator-activity' && state.actions.filter(item => item.action === action.action).length === 1) {
+      signalReached();
+      await blockedSignal;
+    }
+    await route.fulfill({ status: 202, body: '' });
+  });
+
+  await page.mouse.move(15, 15);
+  await reachedSignal;
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('ArrowDown');
+  await page.mouse.move(30, 30);
+  expect(state.actions).toEqual([{ action: 'record-operator-activity' }]);
+
+  releaseFirst();
+  await expect.poll(() => state.actions.filter(item => item.action === 'record-operator-activity').length).toBe(2);
+  await page.waitForTimeout(1100);
+  expect(state.actions.filter(item => item.action === 'record-operator-activity')).toHaveLength(2);
+});
 
 async function settleLayout(page) {
   await page.evaluate(() => new Promise(resolve => {

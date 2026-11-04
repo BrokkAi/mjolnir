@@ -1,8 +1,8 @@
 //! Versioned, verified checkpoint archives for Hel sessions.
 //!
 //! This module deliberately accepts native harness artifacts one file at a
-//! time.  Harness adapters must use a versioned allowlist; recursively copying
-//! a profile home would risk archiving credentials and configuration.
+//! time. Harness adapters select the session's artifacts; the archive preserves
+//! their contents and filenames without guessing which names belong.
 
 use mj_core::hex::lower_hex;
 use std::borrow::Cow;
@@ -492,6 +492,53 @@ pub fn read_checkpoint_manifest(path: &Path) -> Result<ArchiveManifest> {
     read_checkpoint_manifest_from(&mut archive)
 }
 
+/// Read one payload from an archive whose manifest was already verified.
+///
+/// The limit is checked before allocating or reading payload data. The entry
+/// sizes and the complete payload digest are checked again against the
+/// descriptor so a changed archive cannot rely on the earlier verification.
+pub fn read_verified_checkpoint_payload(
+    path: &Path,
+    descriptor: &PayloadDescriptor,
+    max_bytes: u64,
+) -> Result<Vec<u8>> {
+    ensure!(
+        descriptor.size <= max_bytes,
+        "payload '{}' exceeds read limit of {max_bytes} bytes",
+        descriptor.path
+    );
+    if !descriptor.parts.is_empty() {
+        let mut covered = 0u64;
+        for part in &descriptor.parts {
+            ensure!(
+                part.size <= max_bytes,
+                "payload part '{}' exceeds read limit of {max_bytes} bytes",
+                part.path
+            );
+            covered = covered
+                .checked_add(part.size)
+                .context("payload part sizes overflow")?;
+            ensure!(
+                covered <= descriptor.size,
+                "payload parts exceed declared size"
+            );
+        }
+        ensure!(
+            covered == descriptor.size,
+            "payload parts do not cover declared size"
+        );
+    }
+
+    let mut archive = open_archive(path)?;
+    let bytes = read_checkpoint_payload(&mut archive, descriptor)?;
+    ensure!(
+        digest_bytes(&bytes) == descriptor.sha256,
+        "SHA-256 mismatch for payload '{}'",
+        descriptor.path
+    );
+    Ok(bytes)
+}
+
 fn read_checkpoint_manifest_from(archive: &mut zip::ZipArchive<File>) -> Result<ArchiveManifest> {
     let manifest_bytes = {
         let mut entry = archive
@@ -613,7 +660,6 @@ fn prepare_archive_view_with_part_size(
 
     for artifact in input.native_artifacts {
         validate_archive_relative_path(&artifact.relative_path)?;
-        ensure_not_secret_path(&artifact.relative_path)?;
         let archive_path = format!("native/{}", slash_path(&artifact.relative_path)?);
         push_payload(
             &mut payloads,
@@ -1555,7 +1601,6 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         validate_payload_parts(descriptor, &mut paths)?;
         if let PayloadRole::NativeArtifact { relative_path } = &descriptor.role {
             validate_archive_relative_path(relative_path)?;
-            ensure_not_secret_path(relative_path)?;
             ensure!(
                 descriptor.path == format!("native/{}", slash_path(relative_path)?),
                 "native artifact path does not match its role"
@@ -1903,62 +1948,6 @@ pub fn validate_component(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
-/// The single interpretation of "this name holds credentials or harness
-/// configuration". Everything that decides whether a path may be archived,
-/// collected, or restored asks this, so a name blocked in one place is blocked
-/// everywhere.
-fn is_secret_like_component(component: &str) -> bool {
-    let component = component.to_ascii_lowercase();
-    component == ".env"
-        || component.starts_with(".env.")
-        || matches!(
-            component.as_str(),
-            ".git-credentials"
-                | "auth.json"
-                | "auth.toml"
-                | "config.json"
-                | "config.toml"
-                | "credentials"
-                | "settings.json"
-                | "token"
-                | "token.json"
-        )
-        || is_credentials_json(&component)
-}
-
-/// `credentials.json` on its own, or carrying that name behind a separator:
-/// `.credentials.json` (Claude's canonical credential file), and the
-/// `<vendor>_credentials.json` / `<vendor>-credentials.json` conventions.
-fn is_credentials_json(component: &str) -> bool {
-    component
-        .strip_suffix("credentials.json")
-        .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with(['.', '-', '_']))
-}
-
-/// A path is secret-like when any component is. A component that is not a
-/// plain name (`..`, a root, a prefix) cannot be interpreted, so it counts as
-/// secret-like and every caller refuses it.
-pub fn is_secret_like_path(path: &Path) -> bool {
-    path.components().any(|component| match component {
-        Component::Normal(component) => is_secret_like_component(&component.to_string_lossy()),
-        _ => true,
-    })
-}
-
-fn ensure_not_secret_path(path: &Path) -> Result<()> {
-    for component in path.components() {
-        let Component::Normal(component) = component else {
-            bail!("unsafe artifact path '{}'", path.display());
-        };
-        ensure!(
-            !is_secret_like_component(&component.to_string_lossy()),
-            "refusing to archive credential/config path '{}'",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
 fn validate_secret_free_map(map: &BTreeMap<String, String>) -> Result<()> {
     for key in map.keys() {
         let key_lower = key.to_ascii_lowercase();
@@ -2058,7 +2047,7 @@ pub fn read_session_file(root: &Path, relative: &Path) -> Result<Vec<u8>, Sessio
 mod fetch;
 pub use fetch::{
     FetchMode, FetchedKind, FetchedPath, ListedEntry, ListedKind, MAX_FETCHED_DIRECTORY_BYTES,
-    SessionListing, fetch_session_path,
+    SavedFetch, SessionListing, fetch_session_path,
 };
 mod file_input;
 pub use file_input::{read_session_file_input, write_session_file};
@@ -2070,13 +2059,13 @@ pub use git::{
     GitOutput, GitSnapshotProgress, MergeConflicts, NON_INTERACTIVE_GIT_ENV,
     NON_INTERACTIVE_GIT_SSH_COMMAND, PushBranchError, PushedBranch, REVIEW_BASELINE_REF,
     ReflogAnchor, ReflogEntry, ReviewPoint, SessionDiff, SessionExportError, SystemGit,
-    capture_paths, capture_worktree_tree, collect_git_metadata_snapshot, collect_git_snapshot,
-    collect_git_snapshot_with_progress, collect_plain_directory_snapshot, diff_between_trees,
-    empty_tree_id, has_origin_refs, merge_trees, migrate_review_ref, numstat_between_trees,
-    pin_review_tree, push_branch, read_head_reflog, read_review_point, record_review_point,
-    record_reviewed_tree, remote_workspace_base, remove_departed_worktree_pins,
-    restore_git_snapshot, review_baseline_ref, session_diff, session_diff_details,
-    validate_symlink_target,
+    UntrackedFiles, capture_paths, capture_worktree_tree, collect_git_metadata_snapshot,
+    collect_git_snapshot, collect_git_snapshot_with_progress, collect_plain_directory_snapshot,
+    diff_between_trees, empty_tree_id, has_origin_refs, merge_trees, migrate_review_ref,
+    numstat_between_trees, pin_review_tree, push_branch, read_head_reflog, read_review_point,
+    record_review_point, record_reviewed_tree, remote_workspace_base,
+    remove_departed_worktree_pins, restore_git_snapshot, review_baseline_ref, session_diff,
+    session_diff_details, validate_symlink_target,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};

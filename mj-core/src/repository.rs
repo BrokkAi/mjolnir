@@ -289,6 +289,7 @@ fn resolve_directory_roots(
             "-C".to_owned(),
             directory.to_string_lossy().into_owned(),
             "rev-parse".into(),
+            "--path-format=absolute".into(),
             "--show-toplevel".into(),
             "--git-common-dir".into(),
         ],
@@ -712,24 +713,14 @@ mod tests {
         }
     }
 
-    struct OldGit {
+    struct GitRootsExecutor {
         roots: &'static str,
     }
 
-    impl CommandExecutor for OldGit {
+    impl CommandExecutor for GitRootsExecutor {
         fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
             let stdout = if command.args.iter().any(|argument| argument == "rev-parse") {
-                // Git 2.25 prints unsupported options as results and exits zero.
-                let echoed = if command
-                    .args
-                    .iter()
-                    .any(|argument| argument == "--path-format=absolute")
-                {
-                    "--path-format=absolute\n"
-                } else {
-                    ""
-                };
-                format!("{echoed}{}", self.roots)
+                self.roots.to_owned()
             } else {
                 String::new()
             };
@@ -742,11 +733,11 @@ mod tests {
     }
 
     #[test]
-    fn remote_directory_resolution_supports_old_git_and_linked_checkouts() {
+    fn remote_directory_resolution_supports_subdirectories_and_linked_checkouts() {
         for (selected, output, checkout, repository) in [
             (
                 "/projects/app/subdir",
-                "/projects/app\n../.git\n",
+                "/projects/app\n/projects/app/.git\n",
                 "/projects/app",
                 "/projects/app",
             ),
@@ -759,8 +750,8 @@ mod tests {
         ] {
             let resolved = resolve_directory(
                 Path::new(selected),
-                Some("old-git-host"),
-                &OldGit { roots: output },
+                Some("remote-host"),
+                &GitRootsExecutor { roots: output },
             )
             .unwrap();
             assert_eq!(resolved.checkout_root, Path::new(checkout));
@@ -768,7 +759,7 @@ mod tests {
             assert_eq!(
                 resolved.identity,
                 RepositoryIdentity::RemoteDirectory {
-                    host: "old-git-host".into(),
+                    host: "remote-host".into(),
                     root: repository.into()
                 }
             );
@@ -785,8 +776,12 @@ mod tests {
             "\n.git\n",
         ] {
             assert!(
-                resolve_directory(Path::new("/projects/app"), Some("host"), &OldGit { roots })
-                    .is_err(),
+                resolve_directory(
+                    Path::new("/projects/app"),
+                    Some("host"),
+                    &GitRootsExecutor { roots }
+                )
+                .is_err(),
                 "accepted {roots:?}"
             );
         }

@@ -12,6 +12,7 @@ use mj_core::config::{
 };
 use mj_core::state::State;
 
+use crate::targets::tests::unwrapped_remote_line;
 use crate::targets::{
     self, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate, ImageHost, RefreshWhen,
 };
@@ -524,7 +525,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
             .contains(&"dev@builder.example.test".to_owned())
     );
     assert_eq!(
-        ssh.pull.args.last().map(String::as_str),
+        ssh.pull.args.last().map(|arg| unwrapped_remote_line(arg)),
         Some("'podman' 'pull' '--platform=linux/amd64' 'ghcr.io/example/dev:latest'")
     );
     assert_eq!(
@@ -533,7 +534,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
             .expect("podman prunes")
             .args
             .last()
-            .map(String::as_str),
+            .map(|arg| unwrapped_remote_line(arg)),
         Some("'podman' 'image' 'prune' '-f'")
     );
 }
@@ -576,7 +577,11 @@ fn ssh_docker_image_refresh_runs_docker_on_the_configured_host() {
     );
     assert_eq!(refresh.pull.program, "ssh");
     assert_eq!(
-        refresh.pull.args.last().map(String::as_str),
+        refresh
+            .pull
+            .args
+            .last()
+            .map(|arg| unwrapped_remote_line(arg)),
         Some("'docker' 'pull' '--platform=linux/amd64' 'ghcr.io/example/dev:latest'")
     );
     assert_eq!(
@@ -586,7 +591,7 @@ fn ssh_docker_image_refresh_runs_docker_on_the_configured_host() {
             .expect("docker prunes")
             .args
             .last()
-            .map(String::as_str),
+            .map(|arg| unwrapped_remote_line(arg)),
         Some("'docker' 'image' 'prune' '-f'")
     );
     assert_eq!(refresh.when, RefreshWhen::Always);
@@ -657,6 +662,7 @@ fn deployment_capacity_groups_local_and_same_host_targets() {
     let config = Config {
         keys: Default::default(),
         jev: Default::default(),
+        quota: Default::default(),
         subagents: Default::default(),
         version: mj_core::config::CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -665,12 +671,14 @@ fn deployment_capacity_groups_local_and_same_host_targets() {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        daemon: Default::default(),
         github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
         default_targets: Default::default(),
+        disabled_targets: Default::default(),
         machines: Default::default(),
         profiles: BTreeMap::new(),
         bundles: BTreeMap::new(),

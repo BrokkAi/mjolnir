@@ -141,6 +141,61 @@ fn a_new_ssh_machine_keeps_workspaces_under_the_mjolnir_directory() {
 }
 
 #[test]
+fn removing_a_machine_removes_the_runtimes_that_named_it() {
+    use mj_core::config::{
+        DEFAULT_WORKSPACE_PREFIX, Machine, PermissionMode, SshConnection, TargetTemplate,
+    };
+
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let mut config = (*dashboard.config).clone();
+    let ssh = SshConnection {
+        host: "builder.example.test".into(),
+        user: Some("dev".into()),
+        identity_file: None,
+        extra_args: vec![],
+    };
+    config.machines.insert(
+        "builder".into(),
+        Machine::Ssh {
+            ssh: ssh.clone(),
+            workspace_prefix: DEFAULT_WORKSPACE_PREFIX.into(),
+            build_cache: None,
+        },
+    );
+    config.targets.insert(
+        "builder-bare".into(),
+        TargetTemplate::SshBare {
+            ssh,
+            permissions: PermissionMode::Guardian,
+            workspace_prefix: DEFAULT_WORKSPACE_PREFIX.into(),
+        },
+    );
+    dashboard.set_config(config);
+    dashboard.begin_settings_section("machines", Some("builder"));
+    click(&mut dashboard, "Remove");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert!(dialog.draft["machines"].get("builder").is_none());
+    assert!(
+        dialog.draft["targets"].get("builder-bare").is_none(),
+        "a runtime goes with the machine it names: {}",
+        dialog.draft["targets"]
+    );
+    assert!(
+        dialog
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("builder-bare")),
+        "the removal must say what went with the machine: {:?}",
+        dialog.notice
+    );
+    // The save the removal feeds must accept the draft, rather than failing
+    // on a runtime that names a machine it no longer defines.
+    let saved = saved_config(dialog);
+    assert!(!saved.machines.contains_key("builder"));
+    assert!(!saved.targets.contains_key("builder-bare"));
+}
+
+#[test]
 fn remove_targets_the_collection_entry_detail_page() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_settings_section("profiles", Some("codex-1"));

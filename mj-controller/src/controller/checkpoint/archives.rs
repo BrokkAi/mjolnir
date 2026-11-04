@@ -6,7 +6,9 @@ use super::*;
 pub fn reconcile_managed_checkpoint_archives() -> Result<usize> {
     let state = crate::database::load_state()?;
     let operations = crate::database::load_move_operations()?;
-    let removed = reconcile_managed_checkpoint_archives_in(&sessions_dir(), &state, &operations)?;
+    let restarts = crate::database::load_session_restarts()?;
+    let removed =
+        reconcile_managed_checkpoint_archives_in(&sessions_dir(), &state, &operations, &restarts)?;
     // An archive a Move refers to can still be missing (removed by hand, or
     // by a daemon that predates this sweep keeping Move handoffs). The Move
     // record owns that fact; record it before anything reads the Move.
@@ -18,13 +20,14 @@ pub fn reconcile_managed_checkpoint_archives() -> Result<usize> {
     Ok(removed)
 }
 
-/// Every archive a session record or an unfinished Move refers to is kept.
-/// The Move's references come from [`MoveOperation::retained_archives`], the
+/// Every archive a session record or an unfinished Move or Restart refers to
+/// is kept. Move references come from [`MoveOperation::retained_archives`], the
 /// same answer the superseded-checkpoint prune reads.
 pub(super) fn reconcile_managed_checkpoint_archives_in(
     directory: &Path,
     state: &State,
     operations: &[mj_core::state::MoveOperation],
+    restarts: &[crate::database::SessionRestartIntent],
 ) -> Result<usize> {
     if !directory.exists() {
         return Ok(0);
@@ -38,6 +41,7 @@ pub(super) fn reconcile_managed_checkpoint_archives_in(
                 .iter()
                 .flat_map(mj_core::state::MoveOperation::retained_archives),
         )
+        .chain(restarts.iter().filter_map(|intent| intent.handoff.as_ref()))
         .filter_map(|checkpoint| checkpoint.archive_path.file_name())
         .map(ToOwned::to_owned)
         .collect::<BTreeSet<_>>();

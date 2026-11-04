@@ -3,6 +3,7 @@
 !containers/Containerfile.agent-dev
 !scripts/
 !scripts/install-muse.py
+!scripts/install-mimo.py
 # The image's worker stage compiles mj-worker, and Cargo resolves the whole
 # workspace, so it needs every member. Keep this list equal to the workspace
 # members in Cargo.toml and the worker stage's COPY lines in

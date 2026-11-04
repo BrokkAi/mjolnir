@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::v1::SessionUpdate;
+use agent_client_protocol::v1::schema::SessionUpdate;
 use anyhow::{Context, Result, bail};
 use mj_core::local_sockets::{bind_unix_listener, connect_unix_stream};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -35,7 +35,7 @@ use crate::relay::{
     RelayResponseEnvelope, RelayResponsePayload, invalid_relay_request_response,
     unsupported_relay_method_response,
 };
-use mj_core::config::HarnessKind;
+use mj_core::config::{ExecutionPolicy, HarnessKind};
 use mj_core::subprocess::terminate_process_group;
 use mj_core::worker_protocol::{DecodedRelayRequest, decode_relay_request};
 
@@ -317,6 +317,11 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     );
     let managed_subagent = config.is_managed_subagent();
     let acp_spec = LaunchSpec {
+        operator_away: relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .operator_away
+            .clone(),
         imported_logins: None,
         clear_context_request: None,
         context_restore: None,
@@ -772,7 +777,7 @@ pub async fn run_daemon_owned(
             .map(|endpoint| endpoint.home.clone())
             .map_err(Clone::clone)
     });
-    std::fs::create_dir_all(&root)
+    mj_core::config::create_owner_only_directory(&root)
         .with_context(|| format!("create worker root {}", root.display()))?;
     let socket = root.join("control.sock");
     // Refuse a second daemon before touching durable state: opening the
@@ -802,6 +807,7 @@ pub async fn run_daemon_owned(
             &config.session_id,
             env!("CARGO_PKG_VERSION"),
             config.harness,
+            &config.initial_commands,
         )?
     };
     // Only Claude Code's adapter marks the end of a turn it started on its
@@ -817,11 +823,9 @@ pub async fn run_daemon_owned(
         HarnessKind::Codex => crate::relay::HarnessTurnPolicy::CodexAdapter,
         _ => crate::relay::HarnessTurnPolicy::Disabled,
     });
-    // Codex runs its own shells instead of asking Hel for a terminal, so the
-    // only evidence of a command it left running is a card with no exit code.
+    // Both adapters publish their background command lifecycle through AIR.
     durable_relay.set_background_work_policy(match config.harness {
-        HarnessKind::Codex => crate::relay::BackgroundWorkPolicy::CodexExecCards,
-        HarnessKind::Claude => crate::relay::BackgroundWorkPolicy::ClaudeTasks,
+        HarnessKind::Claude | HarnessKind::Codex => crate::relay::BackgroundWorkPolicy::AirTasks,
         HarnessKind::Kimi => crate::relay::BackgroundWorkPolicy::KimiTasks,
         _ => crate::relay::BackgroundWorkPolicy::HostedTerminals,
     });
@@ -1397,6 +1401,21 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+fn reuse_review_baselines(
+    relay_state_exists: bool,
+    recorded: &std::collections::BTreeMap<PathBuf, Vec<crate::review::capture::UntrackedEntry>>,
+    git: &dyn mj_checkpoint::archive::GitCommandRunner,
+    session: &str,
+) -> bool {
+    relay_state_exists
+        || (!recorded.is_empty()
+            && crate::review::capture::session_holds_review_baselines(
+                git,
+                &recorded.keys().cloned().collect::<Vec<_>>(),
+                session,
+            ))
+}
+
 async fn prepare_and_start_harness(
     setup: HarnessPreparationSetup,
     dispatch_wake_rx: &mut Option<mpsc::Receiver<()>>,
@@ -1422,8 +1441,8 @@ async fn prepare_and_start_harness(
     let subagent_role = config.subagent_mcp_role();
     let root = root_path.as_path();
     // The first capture must precede the primary harness, so pre-existing
-    // edits are not reported as this session's turn. A restart retains its
-    // original baseline and untracked list.
+    // edits are not reported as this session's turn. Restarts and in-place moves
+    // retain their original baseline and untracked list.
     if config.review_capture {
         let budget = preparation_step(
             root,
@@ -1437,7 +1456,7 @@ async fn prepare_and_start_harness(
         let recorded: std::collections::BTreeMap<
             PathBuf,
             Vec<crate::review::capture::UntrackedEntry>,
-        > = if relay_state_exists {
+        > = {
             let read_record = record.clone();
             bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                 if step_cancel.is_cancelled() {
@@ -1449,7 +1468,8 @@ async fn prepare_and_start_harness(
                     .unwrap_or_default())
             })
             .await?
-        } else {
+        };
+        let recorded = {
             let mut workspace_roots = vec![config.cwd.clone()];
             workspace_roots.extend(reviewer_workspace_directories(&config));
             let session_id = config.session_id.clone();
@@ -1459,6 +1479,9 @@ async fn prepare_and_start_harness(
                 );
                 let _cancel_git = git.cancellation_guard();
                 tokio::task::spawn_blocking(move || {
+                    if reuse_review_baselines(relay_state_exists, &recorded, &git, &session_id) {
+                        return Ok(recorded);
+                    }
                     let repositories =
                         crate::review::capture::discover_repositories(&git, &workspace_roots);
                     crate::review::capture::initialize_review_baselines(
@@ -1524,6 +1547,9 @@ async fn prepare_and_start_harness(
     explicit_environment.remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
     explicit_environment.remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
     let base_environment_for_filter = base_environment.clone();
+    // Credential sync installs the session's slopcop login in its harness home.
+    let slopcop_login = super::credential_endpoint(&config)
+        .map(|endpoint| endpoint.home.join(mj_core::slopcop::LOGIN_FILE));
     session_environment =
         bounded_blocking_preparation_step(&login_budget, cancel, move |step_cancel| {
             if step_cancel.is_cancelled() {
@@ -1535,6 +1561,12 @@ async fn prepare_and_start_harness(
                 github_home.as_deref(),
                 git_config_include.as_deref(),
             )?;
+            match &slopcop_login {
+                Ok(login) => configure_slopcop_cli(&github_root, login)?,
+                Err(error) => {
+                    tracing::warn!("slopcop wrapper not installed: {error}");
+                }
+            }
             session_environment.retain(|name, value| {
                 explicit_environment.contains_key(name)
                     || base_environment_for_filter.get(name) != Some(value)
@@ -1544,6 +1576,66 @@ async fn prepare_and_start_harness(
         .await?;
     // Persist only explicit and Mjolnir-generated overrides, never shell exports.
     config.environment = session_environment.clone();
+
+    if config.execution_policy == ExecutionPolicy::ConfiguredApprovals
+        && matches!(
+            config.harness,
+            HarnessKind::Kimi
+                | HarnessKind::Grok
+                | HarnessKind::OpenCode
+                | HarnessKind::Mimo
+                | HarnessKind::Muse
+        )
+    {
+        let budget = preparation_step(
+            root,
+            status,
+            "command-permissions",
+            LOCAL_PREPARATION_STEP_TIMEOUT,
+            cancel,
+        )
+        .await?;
+        let home = credentials
+            .as_ref()
+            .map_err(|message| anyhow::anyhow!("{message}"))?
+            .home
+            .clone();
+        let root = root.to_owned();
+        let session_id = config.session_id.clone();
+        let harness = config.harness;
+        let policy = config.execution_policy;
+        let native_base_environment = base_environment.clone();
+        let native_explicit_environment = config.environment.clone();
+        let mut environment = native_base_environment.clone();
+        environment.extend(native_explicit_environment.clone());
+        config.environment =
+            bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
+                if step_cancel.is_cancelled() {
+                    bail!("preparation cancelled before configuring command permissions");
+                }
+                super::gh_rules::configure_toml_gh_rules(
+                    &root,
+                    &session_id,
+                    &home,
+                    harness,
+                    policy,
+                )?;
+                super::json_gh_rules::configure_json_gh_rules(
+                    &root,
+                    &session_id,
+                    &home,
+                    harness,
+                    policy,
+                    &mut environment,
+                )?;
+                environment.retain(|name, value| {
+                    native_explicit_environment.contains_key(name)
+                        || native_base_environment.get(name) != Some(value)
+                });
+                Ok(environment)
+            })
+            .await?;
+    }
 
     let mut claude_mailbox_hook_available = false;
     let profile_registration = match config.harness {
@@ -1562,6 +1654,7 @@ async fn prepare_and_start_harness(
                 .home
                 .clone();
             let root = root.to_owned();
+            let session_id = config.session_id.clone();
             let mut environment = config.environment.clone();
             let role = subagent_role;
             let policy = config.execution_policy;
@@ -1574,6 +1667,7 @@ async fn prepare_and_start_harness(
                     }
                     let registered = super::subagents::configure_codex_profile(
                         &root,
+                        &session_id,
                         &home,
                         &mut environment,
                         role,
@@ -1631,7 +1725,7 @@ async fn prepare_and_start_harness(
             claude_mailbox_hook_available = mailbox_hook_available;
             registered
         }
-        HarnessKind::Kimi if config.reviewer_launch.is_some() => {
+        HarnessKind::Kimi if subagent_role.is_some() => {
             let budget = preparation_step(
                 root,
                 status,
@@ -1647,7 +1741,7 @@ async fn prepare_and_start_harness(
                 .clone();
             let root = root.to_owned();
             let session_id = config.session_id.clone();
-            let role = subagent_role.context("reviewer child has no handback MCP role")?;
+            let role = subagent_role.context("Kimi session has no MCP role")?;
             bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                 if step_cancel.is_cancelled() {
                     bail!("preparation cancelled before configuring the Kimi profile");
@@ -2045,6 +2139,20 @@ pub(super) async fn serve_client_with_memory(
                 .as_ref()
                 .and_then(|services| services.subagents.clone())
                 .or_else(|| subagents.clone());
+            if let RelayRequest::SetOperatorAway { away, revision } = &envelope.request {
+                let state = {
+                    let relay = relay.lock().expect("relay state lock poisoned");
+                    relay.operator_away.set(mj_core::state::OperatorPresence { away: *away, revision: *revision });
+                    relay.operational_state()
+                };
+                let response = RelayResponseEnvelope {
+                    protocol_version: envelope.protocol_version,
+                    request_id: envelope.request_id,
+                    body: RelayResponseBody::Ok { payload: RelayResponsePayload::Status(state) },
+                };
+                write_logged_response(&mut writer, &response, &session_id, "set_operator_away").await?;
+                continue;
+            }
             if matches!(
                 &envelope.request,
                 RelayRequest::AttachmentPresent { .. }
@@ -2121,6 +2229,11 @@ pub(super) async fn serve_client_with_memory(
             if matches!(
                 &envelope.request,
                 RelayRequest::CredentialState
+                    | RelayRequest::AwsCredentialsState
+                    | RelayRequest::InstallAwsCredentials { .. }
+                    | RelayRequest::SlopcopLoginState
+                    | RelayRequest::InstallSlopcopLogin { .. }
+                    | RelayRequest::RemoveSlopcopLogin
                     | RelayRequest::ReadCredentials
                     | RelayRequest::InstallCredentials { .. }
                     | RelayRequest::SkillsState
@@ -2434,11 +2547,48 @@ pub(super) async fn serve_client_with_memory(
 #[cfg(test)]
 mod preparation_tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+    use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
     use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayCursor, RelayVersionRange};
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+
+    // Hard-won: c29b1379c: an in-place Move's relay reset made review rescan the checkout and refuse it.
+    #[test]
+    fn review_baseline_reuse_survives_relay_reset_only_with_a_record_and_owned_pins() {
+        use crate::test_support::git;
+        use mj_checkpoint::archive::SystemGit;
+
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.name", "Review Test"]);
+        git(root, &["config", "user.email", "review@example.test"]);
+        git(root, &["commit", "--allow-empty", "-qm", "base"]);
+        let empty = std::collections::BTreeMap::new();
+        assert!(reuse_review_baselines(true, &empty, &SystemGit, "session"));
+        assert!(!reuse_review_baselines(
+            false, &empty, &SystemGit, "session"
+        ));
+        let recorded = crate::review::capture::initialize_review_baselines(
+            &SystemGit,
+            &[root.to_path_buf()],
+            "session",
+        )
+        .unwrap();
+        assert!(reuse_review_baselines(
+            false, &recorded, &SystemGit, "session"
+        ));
+        assert!(!reuse_review_baselines(
+            false, &recorded, &SystemGit, "other"
+        ));
+        assert!(reuse_review_baselines(true, &recorded, &SystemGit, "other"));
+        let reference = mj_checkpoint::archive::review_baseline_ref(&SystemGit, root).unwrap();
+        git(root, &["update-ref", "-d", &reference]);
+        assert!(!reuse_review_baselines(
+            false, &recorded, &SystemGit, "session"
+        ));
+    }
 
     type TestReader = BufReader<OwnedReadHalf>;
 

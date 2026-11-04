@@ -1,6 +1,5 @@
 use super::*;
 
-pub(super) const MAX_CONCURRENT_PHONE_ACTIONS: usize = 4;
 pub(super) const MAX_CONCURRENT_BUNDLE_CREATIONS: usize = 4;
 pub(super) const MAX_CONCURRENT_PREFLIGHTS: usize = 4;
 
@@ -64,6 +63,9 @@ pub(super) fn action_reference(action_id: u64) -> String {
 pub(super) struct PhoneActionStarted {
     pub(super) action_id: u64,
     pub(super) session: SessionRecord,
+    /// Registration turned review off because the folder has no Git commits.
+    pub(super) review_turned_off: bool,
+    pub(super) capacity_warning: Option<String>,
     pub(super) published: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
 }
 
@@ -134,19 +136,12 @@ impl PendingActionReplies {
 /// the action occupies, or the outcome that refuses it.
 pub(super) fn admit_phone_action(
     action: &ControllerAction,
-    running_actions: usize,
     active_sessions: &mut std::collections::BTreeSet<String>,
 ) -> std::result::Result<Option<String>, ActionOutcome> {
     let closing = matches!(
         action,
         ControllerAction::Suspend { .. } | ControllerAction::Destroy { .. }
     );
-    if !closing && !phone_action_capacity_available(running_actions) {
-        return Err(ActionOutcome::Busy {
-            running: running_actions,
-            limit: MAX_CONCURRENT_PHONE_ACTIONS,
-        });
-    }
     let session_id = controller_action_session_id(action);
     if let Some(session_id) = &session_id
         && !active_sessions.insert(session_id.clone())
@@ -291,25 +286,30 @@ pub(super) fn apply_read_receipt(state: &mut State, session_id: &str, receipt: u
 #[derive(Clone)]
 pub(super) struct PhoneActionControl {
     pub(super) cancelled: Arc<AtomicBool>,
-    pub(super) create: Option<LifecycleControl>,
+    pub(super) lifecycle: Option<LifecycleControl>,
 }
 
 impl PhoneActionControl {
     pub(super) fn for_action(action: &ControllerAction) -> Self {
-        let create = matches!(
+        let lifecycle = matches!(
             action,
-            ControllerAction::New { .. } | ControllerAction::Restart { .. }
+            ControllerAction::New { .. }
+                | ControllerAction::Restart { .. }
+                | ControllerAction::Move { .. }
         )
         .then(LifecycleControl::default);
-        let cancelled = create.as_ref().map_or_else(
+        let cancelled = lifecycle.as_ref().map_or_else(
             || Arc::new(AtomicBool::new(false)),
             |control| control.cancelled.clone(),
         );
-        Self { cancelled, create }
+        Self {
+            cancelled,
+            lifecycle,
+        }
     }
 
     pub(super) fn request_cancel(&self) -> bool {
-        let accepted = self.create.as_ref().map_or_else(
+        let accepted = self.lifecycle.as_ref().map_or_else(
             || {
                 self.cancelled
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -325,7 +325,7 @@ impl PhoneActionControl {
 
     #[cfg(test)]
     pub(super) fn grant_new_commit(&self) -> bool {
-        self.create
+        self.lifecycle
             .as_ref()
             .is_some_and(|control| control.grant_commit())
     }

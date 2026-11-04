@@ -112,6 +112,7 @@ fn restart_recovery_requires_the_checkpoint_bound_to_its_intent() {
         session_id: "session-1".into(),
         operation_id: "restart-1".into(),
         phase: crate::database::SessionRestartPhase::Stopping,
+        handoff: None,
         checkpoint_sha256: None,
         checkpoint_started: true,
         container_recreation_acknowledged: true,
@@ -123,6 +124,13 @@ fn restart_recovery_requires_the_checkpoint_bound_to_its_intent() {
     intent.checkpoint_sha256 = Some("older-checkpoint".into());
     assert!(!restart::restart_checkpoint_matches(&record, &intent));
     intent.checkpoint_sha256 = Some("fresh-checkpoint".into());
+    assert!(restart::restart_checkpoint_matches(&record, &intent));
+    intent.handoff = record.checkpoint.clone();
+    intent.handoff.as_mut().unwrap().sha256 = "handoff".into();
+    assert!(!restart::restart_checkpoint_matches(&record, &intent));
+    intent.checkpoint_sha256 = Some("handoff".into());
+    assert!(restart::restart_checkpoint_matches(&record, &intent));
+    record.checkpoint = None;
     assert!(restart::restart_checkpoint_matches(&record, &intent));
 }
 
@@ -393,7 +401,7 @@ async fn a_cancel_after_the_close_commits_is_refused_and_the_teardown_finishes()
     }
     let refusal = cancel.expect_err("a cancel after the commit is refused");
     assert!(
-        format!("{refusal:#}").contains("has passed its verified checkpoint"),
+        format!("{refusal:#}").contains("has begun closing and cannot be cancelled"),
         "{refusal:#}"
     );
     let stored = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
@@ -574,14 +582,25 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
         close_route(Some(&failed_with_target), false),
         CloseRoute::Graceful
     );
-    // A failed sub-agent's worker is stopped and a child keeps no archive,
-    // so its close settles without a checkpoint even with its target (I1-2).
+    // Every child takes the ownership-aware close, including recovery of an
+    // interrupted teardown; none needs its parent's workspace checkpoint.
     assert_eq!(
         close_route(Some(&failed_with_target), true),
-        CloseRoute::SettleWithoutCheckpoint
+        CloseRoute::Subagent
     );
-    // A running child still takes the graceful close.
-    assert_eq!(close_route(Some(&running), true), CloseRoute::Graceful);
+    for state in [
+        SessionState::Running,
+        SessionState::Disconnected,
+        SessionState::Checkpointing,
+        SessionState::Closing,
+        SessionState::Destroying,
+        SessionState::Parked,
+        SessionState::Stopped,
+    ] {
+        let mut child = running.clone();
+        child.state = state;
+        assert_eq!(close_route(Some(&child), true), CloseRoute::Subagent);
+    }
 
     let mut stopped = runtime_test_session("session", "workspace", SessionState::Stopped);
     assert_eq!(close_route(Some(&stopped), false), CloseRoute::Done);
@@ -647,6 +666,145 @@ fn attachment_liveness_probe_does_not_reap_children() {
     assert!(status.success());
 }
 
+// Hard-won: live AFK test: AFK off reported success without persisting.
+#[tokio::test]
+async fn operator_away_off_action_persists_and_notifies_only_unblocked_sessions() {
+    use mj_client::runtime_feed::RuntimeReplica;
+    use mj_core::elicitation::ElicitationRequest;
+    use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
+    use mj_core::relay::{RelayEvent, RelayObservation, relay_event_digest};
+    const CHILD: &str = "MJ_OPERATOR_AWAY_ACTION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "operator_away_off_action_persists_and_notifies_only_unblocked_sessions",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    for id in ["blocked", "unblocked"] {
+        crate::database::save_session(&runtime_test_session(id, "default", SessionState::Running))
+            .unwrap();
+    }
+    let mut state = test_runtime_state();
+    Arc::get_mut(&mut state).unwrap().committed =
+        Some(crate::database::subscribe_committed_state().unwrap());
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    assert!(matches!(
+        handle_action(
+            DaemonAction::SetOperatorAway { away: true },
+            &metadata,
+            &state,
+            &cancellation
+        )
+        .await
+        .unwrap(),
+        DaemonReply::Done
+    ));
+    let mut replica = RuntimeReplica::default();
+    replica
+        .apply(state.runtime_changes(None, false).await.unwrap())
+        .unwrap();
+    assert!(replica.projection.metadata.operator_presence.away);
+    // Worker-target projections deliberately omit global preferences. Prime
+    // their cache just as ordinary worker polling does before AFK-off.
+    let _worker_inputs = state.worker_controller_projection();
+    let request = ElicitationRequest::from_acp_params(
+        "permission-1",
+        serde_json::json!({
+            "mode":"form", "sessionId":"afk-test", "message":"Claude Code requests permission:\ntouch afk-created.txt",
+            "requestedSchema":{"type":"object","properties":{"answer":{"type":"string"}}}
+        }),
+    )
+    .unwrap();
+    for id in ["blocked", "unblocked"] {
+        let mut current = crate::database::load_materialized_session(id)
+            .unwrap()
+            .unwrap();
+        let mut observations = vec![
+            RelayObservation::ElicitationRequested {
+                request: request.clone(),
+            },
+            RelayObservation::ElicitationResolved {
+                elicitation_id: request.id.clone(),
+                action: mj_core::elicitation::OPERATOR_AWAY_ACTION.into(),
+                reply: None,
+            },
+        ];
+        if id == "blocked" {
+            observations.push(RelayObservation::ElicitationRequested {
+                request: request.clone(),
+            });
+        }
+        crate::database::apply_projection_page(id, move |page| {
+            for observation in observations {
+                let mut event = RelayEvent {
+                    format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
+                    ordinal: current.applied_event_ordinal + 1,
+                    previous_digest: current.applied_event_digest.clone(),
+                    digest: String::new(),
+                    recorded_at_ms: 100,
+                    command_id: None,
+                    observation,
+                };
+                event.digest = relay_event_digest(&event)?;
+                let mutation =
+                    mj_transcript::projection::project_relay_event(&current, &event)?.mutation;
+                page.apply(
+                    event.ordinal,
+                    &event.previous_digest,
+                    &event.digest,
+                    &mutation,
+                )?;
+                mj_transcript::projection::apply_committed_projection_event(
+                    &mut current,
+                    &event,
+                    mutation,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+    assert!(matches!(
+        handle_action(
+            DaemonAction::SetOperatorAway { away: false },
+            &metadata,
+            &state,
+            &cancellation
+        )
+        .await
+        .unwrap(),
+        DaemonReply::Done
+    ));
+    let reloaded = crate::database::load_state_from(&crate::database::database_path()).unwrap();
+    assert!(!reloaded.operator_presence.away);
+    replica
+        .apply(state.runtime_changes(None, false).await.unwrap())
+        .unwrap();
+    assert_eq!(
+        replica.projection.metadata.operator_presence,
+        reloaded.operator_presence
+    );
+    let returned = crate::database::pending_mailbox_events(100)
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| {
+            let event: MailboxEvent = serde_json::from_str(&entry.event_json).unwrap();
+            matches!(event.body, MailboxEventBody::OperatorBack { .. })
+                .then_some((entry.target_session_id, event.wake))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(returned, vec![("unblocked".into(), true)]);
+}
+
 #[tokio::test]
 async fn client_presence_is_global_and_detach_and_prune_remove_it() {
     let state = test_runtime_state();
@@ -656,7 +814,6 @@ async fn client_presence_is_global_and_detach_and_prune_remove_it() {
     handle_action(
         DaemonAction::Attach {
             client_id: "client-a".into(),
-            pid: std::process::id(),
         },
         &metadata,
         &state,
@@ -664,9 +821,12 @@ async fn client_presence_is_global_and_detach_and_prune_remove_it() {
     )
     .await
     .expect("attach presence");
-    state
-        .attachments()
-        .insert("dead-client".into(), Attachment { pid: u32::MAX });
+    state.attachments().insert(
+        "dead-client".into(),
+        Attachment {
+            renewed: std::time::Instant::now() - ATTACHMENT_LEASE,
+        },
+    );
 
     let DaemonReply::Status(status) =
         handle_action(DaemonAction::Status, &metadata, &state, &cancellation)
@@ -740,7 +900,10 @@ async fn published_quota_reaches_an_attached_client_through_the_runtime_feed() {
     replica
         .apply(state.runtime_changes(None, false).await.unwrap())
         .unwrap();
-    assert_eq!(replica.projection.metadata.quotas, QuotaSnapshot::default());
+    assert_eq!(
+        *replica.projection.metadata.quotas,
+        QuotaSnapshot::default()
+    );
 
     let snapshot = QuotaSnapshot {
         probing: ["claude".to_owned()].into(),
@@ -753,7 +916,7 @@ async fn published_quota_reaches_an_attached_client_through_the_runtime_feed() {
         .await
         .unwrap();
     replica.apply(frame).unwrap();
-    assert_eq!(replica.projection.metadata.quotas, snapshot);
+    assert_eq!(*replica.projection.metadata.quotas, snapshot);
 
     // Publishing what is already published wakes nobody.
     let before = state.revisions().borrow().to_owned();
@@ -767,7 +930,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
     state.attachments().insert(
         "client-a".into(),
         Attachment {
-            pid: std::process::id(),
+            renewed: std::time::Instant::now(),
         },
     );
     assert!(!state.workspace_has_active_resume("workspace-a"));
@@ -776,6 +939,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
     state.owner().lifecycle.insert(
         "session-a".into(),
         ActiveLifecycle {
+            move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
@@ -803,6 +967,7 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
     state.owner().lifecycle.insert(
         "session-b".into(),
         ActiveLifecycle {
+            move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
@@ -1123,6 +1288,7 @@ async fn in_process_reviewer_forwarding_stops_when_the_caller_goes_away() {
             session_id: "session-1".into(),
             role: None,
             action: crate::session_manager::ReviewerAction::CaptureDelta {
+                repositories: None,
                 scope: Default::default(),
                 baselines: Default::default(),
             },
@@ -1286,7 +1452,7 @@ fn active_child_session_ids_skips_children_that_already_stopped() {
         runtime_test_subagent(&stopped_child.id, &parent.id),
     ]
     .into_iter()
-    .map(|subagent| (subagent.child_session_id.clone(), subagent))
+    .map(|subagent| (subagent.child_session_id.clone(), subagent.into()))
     .collect();
 
     let children = active_child_session_ids(&state, &parent.id);
@@ -1328,6 +1494,70 @@ async fn daemon_records_definitive_missing_workspaces_without_an_attached_surfac
         sessions.get_mut(&session.id).unwrap().state = SessionState::Error;
     });
     assert!(state.missing_target_record(&session.id, &view).is_none());
+}
+
+#[cfg(unix)]
+// Hard-won: #1444: a committed missing-target write lost its notice when the following reload failed.
+#[tokio::test]
+async fn missing_target_retry_completes_a_committed_transition() {
+    const CHILD: &str = "MJ_TEST_MISSING_TARGET_RETRY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "missing_target_retry_completes_a_committed_transition",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Missing target retry").unwrap();
+    let mut session = runtime_test_session("missing", &workspace.id, SessionState::Running);
+    session.checkpoint = Some(mj_core::state::CheckpointMetadata {
+        archive_path: "/isolated/recovery.zip".into(),
+        sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        created_at: "2026-09-03T00:00:00Z".into(),
+        event_frontier: 1,
+    });
+    crate::database::save_session(&session).unwrap();
+    static RELOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn fail_first_reload() -> Result<Controller> {
+        if RELOADS.fetch_add(1, Ordering::SeqCst) == 0 {
+            bail!("simulated controller reload failure after commit");
+        }
+        Controller::load()
+    }
+    RELOADS.store(0, Ordering::SeqCst);
+    let remote = spawn_remote_session_manager().unwrap();
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        remote.control.clone(),
+        &recovery.observer(),
+    );
+    let state = Arc::new(RuntimeState::new_with_controller_loader(
+        remote.control,
+        Controller::load().unwrap(),
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        fail_first_reload,
+    ));
+    let detail = "the worker working directory is missing";
+
+    state
+        .persist_missing_target(&session.id, detail.into(), session.updated_at.clone())
+        .await;
+    let stored = state.owner().controller().state.sessions[&session.id].clone();
+    assert_eq!(stored.state, SessionState::Error);
+    assert_eq!(stored.last_error.as_deref(), Some(detail));
+    let notices = state.notices.lock().unwrap();
+    assert_eq!(notices.len(), 2);
+    assert!(notices.front().unwrap().text.contains("retrying"));
+    assert_eq!(notices.back().unwrap().text, detail);
 }
 
 #[test]
@@ -1805,7 +2035,161 @@ fn released_protocol_transcripts() -> Vec<ProtocolTranscript> {
                 r#"{"protocol_version":62,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
             ],
         },
+        ProtocolTranscript {
+            protocol_version: 63,
+            daemon_build: "2.58.0",
+            expected_requests: requests(63),
+            responses: [
+                r#"{"protocol_version":63,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-10-27T00:00:00Z","build_version":"2.58.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                r#"{"protocol_version":63,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+            ],
+        },
+        ProtocolTranscript {
+            protocol_version: 64,
+            daemon_build: "2.59.1",
+            expected_requests: requests(64),
+            responses: [
+                r#"{"protocol_version":64,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-10-27T00:00:00Z","build_version":"2.59.1","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                r#"{"protocol_version":64,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+            ],
+        },
+        ProtocolTranscript {
+            protocol_version: 65,
+            daemon_build: "2.59.1",
+            expected_requests: requests(65),
+            responses: [
+                r#"{"protocol_version":65,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-10-27T00:00:00Z","build_version":"2.59.1","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                r#"{"protocol_version":65,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+            ],
+        },
     ]
+}
+
+// Hard-won: 848b4781f: direct CLI removal saved config before failing without the daemon database writer.
+#[cfg(unix)]
+#[tokio::test]
+async fn remove_project_rpc_removes_missing_directory_from_config_and_runtime_feed() {
+    const NAME: &str = "remove_project_rpc_removes_missing_directory_from_config_and_runtime_feed";
+    const CHILD: &str = "MJ_TEST_REMOVE_MISSING_PROJECT_RPC";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+
+    let writer = crate::database::install_isolated_test_writer();
+    let data_dir = std::env::var_os("MJ_DATA_DIR").unwrap();
+    let missing = PathBuf::from(data_dir).join("missing-project-checkout");
+    assert!(!missing.exists());
+    let bundle_id = "missingpath";
+    let bundle = mj_core::config::ProjectBundle {
+        primary_repo: bundle_id.into(),
+        repositories: vec![mj_core::config::ProjectRepository {
+            id: bundle_id.into(),
+            github: None,
+            local: Some(missing.clone()),
+            destination: PathBuf::from(bundle_id),
+            git_ref: None,
+        }],
+    };
+    mj_core::config::Config::update(|config| {
+        config.bundles.insert(bundle_id.into(), bundle.clone());
+        config.validate()
+    })
+    .unwrap();
+    crate::database::store_catalog_project(
+        bundle_id,
+        &mj_core::repository::ProjectBundleSnapshot {
+            bundle,
+            identities: BTreeMap::from([(
+                bundle_id.into(),
+                mj_core::repository::RepositoryIdentity::Local(missing),
+            )]),
+            network_sources: BTreeMap::new(),
+            plain_directories: BTreeSet::new(),
+        },
+        true,
+    )
+    .unwrap();
+
+    drop(writer);
+    let error = crate::controller::remove_bundle(bundle_id).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("database writer is not available"),
+        "unexpected removal failure: {error:#}"
+    );
+    assert!(
+        mj_core::config::Config::load()
+            .unwrap()
+            .bundles
+            .contains_key(bundle_id)
+    );
+    let _writer = crate::database::install_isolated_test_writer();
+
+    let state = test_runtime_state_loading_the_store();
+    let mut replica = mj_client::runtime_feed::RuntimeReplica::default();
+    replica
+        .apply(state.runtime_changes(None, false).await.unwrap())
+        .unwrap();
+    assert!(
+        replica
+            .projection
+            .metadata
+            .config
+            .bundles
+            .contains_key(bundle_id)
+    );
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_state = state.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(
+            stream,
+            test_metadata(address),
+            server_state,
+            CancellationToken::new(),
+        )
+        .await
+    });
+    let mut client = mj_client::daemon::DaemonClient::connect(test_metadata(address))
+        .await
+        .unwrap();
+    client.remove_project(bundle_id.into()).await.unwrap();
+    drop(client);
+    server.await.unwrap().unwrap();
+
+    let cursor = replica.cursor.clone();
+    replica
+        .apply(state.runtime_changes(cursor, false).await.unwrap())
+        .unwrap();
+    assert!(
+        !replica
+            .projection
+            .metadata
+            .config
+            .bundles
+            .contains_key(bundle_id)
+    );
+    assert!(
+        !mj_core::config::Config::load()
+            .unwrap()
+            .bundles
+            .contains_key(bundle_id)
+    );
+    assert!(
+        crate::database::read_project_catalog()
+            .unwrap()
+            .projects
+            .iter()
+            .all(|project| project.bundle_id != bundle_id)
+    );
 }
 
 #[tokio::test]
@@ -2145,6 +2529,7 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
     let operation = |kind: LifecycleKind, control: LifecycleControl| {
         let (_completed, result) = tokio::sync::watch::channel(None);
         ActiveLifecycle {
+            move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
@@ -2195,6 +2580,7 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
     state.owner().lifecycle.insert(
         "cleanup-gap".into(),
         ActiveLifecycle {
+            move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
@@ -2314,6 +2700,74 @@ async fn lifecycle_identity_survives_join_but_changes_for_next_operation() {
     state.remove_completed_lifecycle(&first);
     assert_eq!(state.active_lifecycles()[0].operation_id, second_id);
     release.notify_one();
+    RuntimeState::wait_lifecycle_result(second).await.unwrap();
+}
+
+// Hard-won: #1384: an abandoned failed close blocked a fresh request with a different key.
+#[cfg(unix)]
+#[tokio::test]
+async fn completed_close_allows_a_fresh_request_after_its_caller_disconnects() {
+    if !in_isolated_parked_test(
+        "completed_close_allows_a_fresh_request_after_its_caller_disconnects",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let state = test_runtime_state();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let first = state
+        .start_or_join_lifecycle_with_key(
+            "child-close".into(),
+            LifecycleKind::Suspend,
+            None,
+            Some("first-request".into()),
+            {
+                let release = release.clone();
+                move |_, _, _| async move {
+                    release.notified().await;
+                    bail!("injected close failure")
+                }
+            },
+        )
+        .unwrap();
+    let first_result = first.clone();
+    drop(first);
+    let fresh_request = || {
+        state.start_or_join_lifecycle_with_key(
+            "child-close".into(),
+            LifecycleKind::Suspend,
+            None,
+            Some("fresh-request".into()),
+            |_, _, _| async { Ok(DaemonLifecycleResult::Done) },
+        )
+    };
+    assert!(
+        fresh_request().is_err(),
+        "a running close still owns the child"
+    );
+    release.notify_one();
+    let error = RuntimeState::wait_lifecycle_result(first_result.clone())
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("injected close failure"));
+    // Replay after completion, while the result is retained independently
+    // of the original caller, must still return that same result.
+    let replay = state
+        .start_or_join_lifecycle_with_key(
+            "child-close".into(),
+            LifecycleKind::Suspend,
+            None,
+            Some("first-request".into()),
+            |_, _, _| async { panic!("replaying a request must not run it twice") },
+        )
+        .unwrap();
+    let error = RuntimeState::wait_lifecycle_result(replay)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("injected close failure"));
+    // No caller removes the first operation's retained result.
+    let second = fresh_request().expect("a completed close must not reserve the child");
+    state.remove_completed_lifecycle(&first_result);
     RuntimeState::wait_lifecycle_result(second).await.unwrap();
 }
 
@@ -2629,7 +3083,7 @@ async fn a_close_removing_the_target_stops_offering_cancellation() {
     assert!(
         error
             .to_string()
-            .contains("has passed its verified checkpoint and is removing the target"),
+            .contains("has begun closing and cannot be cancelled"),
         "unexpected error: {error:#}"
     );
     assert!(
@@ -3073,6 +3527,191 @@ fn startup_prompt_test_store(name: &str) -> Option<crate::database::DatabaseWrit
         return None;
     }
     Some(crate::database::install_isolated_test_writer())
+}
+
+// Hard-won: 89a44ed8c: a failed Move remained visible after turns started outside phone actions.
+#[tokio::test]
+async fn relay_turn_start_retires_only_the_recorded_public_lifecycle_failure() {
+    const NAME: &str = "relay_turn_start_retires_only_the_recorded_public_lifecycle_failure";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    use mj_core::relay::{RelayEvent, RelayObservation, relay_event_digest};
+    use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
+
+    fn observe(view: &mut ManagedSessionView, observation: RelayObservation) {
+        let snapshot = view.snapshot.as_mut().unwrap();
+        let materialized = &mut snapshot.materialized;
+        let mut event = RelayEvent {
+            format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
+            ordinal: materialized.applied_event_ordinal + 1,
+            previous_digest: materialized.applied_event_digest.clone(),
+            digest: String::new(),
+            recorded_at_ms: 100,
+            command_id: None,
+            observation,
+        };
+        event.digest = relay_event_digest(&event).unwrap();
+        let projected = project_relay_event(materialized, &event).unwrap();
+        apply_committed_projection_event(materialized, &event, projected.mutation).unwrap();
+        snapshot.window = mj_core::state::ProjectionWindow::of(materialized);
+    }
+
+    let mut session = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    session.last_error = Some(format!(
+        "{} while checkpointing",
+        mj_core::state::MOVE_FAILURE_PREFIX
+    ));
+    crate::database::save_session(&session).unwrap();
+    let mut state = test_runtime_state();
+    Arc::get_mut(&mut state).unwrap().committed =
+        Some(crate::database::subscribe_committed_state().unwrap());
+    state
+        .owner()
+        .install_relay_sessions([session.id.clone()].into());
+
+    // Reattachment to a turn already running when the failure was recorded
+    // establishes a frontier. Neither replay nor its completion is recovery.
+    let mut view = ready_startup_view();
+    observe(
+        &mut view,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 100 },
+    );
+    state
+        .publish_session(session.id.clone(), view.clone())
+        .await
+        .unwrap();
+    observe(
+        &mut view,
+        RelayObservation::HarnessTurnSettled {
+            origin: None,
+            prompt_in_flight: false,
+        },
+    );
+    state
+        .publish_session(session.id.clone(), view.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        state.session_record(&session.id).unwrap().last_error,
+        session.last_error
+    );
+
+    // A mailbox/event wake has no ControllerAction. Coalesce its whole turn
+    // to ensure recovery is based on the start, even if it already ended.
+    observe(
+        &mut view,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 200 },
+    );
+    observe(
+        &mut view,
+        RelayObservation::HarnessTurnSettled {
+            origin: None,
+            prompt_in_flight: false,
+        },
+    );
+    state
+        .publish_session(session.id.clone(), view.clone())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while state
+            .session_record(&session.id)
+            .unwrap()
+            .last_error
+            .is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the new relay turn clears the public failure");
+    assert!(
+        crate::database::load_session_record(&session.id)
+            .unwrap()
+            .unwrap()
+            .last_error
+            .is_none()
+    );
+
+    let raw_error = "ssh host private-worker: connection refused";
+    session.last_error = Some(raw_error.into());
+    session.updated_at = "2026-10-26T12:00:00Z".into();
+    crate::database::save_session(&session).unwrap();
+    observe(
+        &mut view,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 300 },
+    );
+    state
+        .publish_session(session.id.clone(), view.clone())
+        .await
+        .unwrap();
+    state
+        .clear_recorded_lifecycle_failure(&session.id, raw_error)
+        .await;
+    assert_eq!(
+        crate::database::load_session_record(&session.id)
+            .unwrap()
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some(raw_error)
+    );
+
+    // A background clear may run after another lifecycle failure was written.
+    session.last_error = Some(format!("{} again", mj_core::state::MOVE_FAILURE_PREFIX));
+    crate::database::save_session(&session).unwrap();
+    let observed_error = session.last_error.clone().unwrap();
+    let mut controller = Controller::load().unwrap();
+    // A different failure must survive even when the timestamp is unchanged.
+    session.last_error = Some(format!(
+        "{} a later operation",
+        mj_core::state::MOVE_FAILURE_PREFIX
+    ));
+    crate::database::save_session(&session).unwrap();
+    state
+        .clear_recorded_lifecycle_failure(&session.id, &observed_error)
+        .await;
+    assert_eq!(
+        crate::database::load_session_record(&session.id)
+            .unwrap()
+            .unwrap()
+            .last_error,
+        session.last_error
+    );
+    assert!(
+        !controller
+            .clear_recorded_lifecycle_failure(&session.id, &observed_error)
+            .unwrap()
+    );
+
+    // Unrelated writes can bump updated_at while a clear waits to run.
+    // Exercise both the daemon entry and a controller loaded before the write.
+    let observed_error = session.last_error.clone().unwrap();
+    let mut controller = Controller::load().unwrap();
+    session.updated_at = "2026-10-26T12:00:01Z".into();
+    crate::database::save_session(&session).unwrap();
+    assert!(
+        controller
+            .clear_recorded_lifecycle_failure(&session.id, &observed_error)
+            .unwrap()
+    );
+    session.updated_at = "2026-10-26T12:00:02Z".into();
+    crate::database::save_session(&session).unwrap();
+    state
+        .clear_recorded_lifecycle_failure(&session.id, &observed_error)
+        .await;
+    assert!(
+        crate::database::load_session_record(&session.id)
+            .unwrap()
+            .unwrap()
+            .last_error
+            .is_none()
+    );
 }
 
 // Hard-won: #1326: image maintenance recreated an otherwise current session container.
@@ -3858,10 +4497,25 @@ fn empty_archive_snapshot() -> mj_core::archive::CanonicalSessionSnapshot {
 
 fn queued_prompt_action(text: &str) -> DaemonAction {
     DaemonAction::QueueStartupPrompt {
+        move_operation_id: None,
         session_id: "session-1".into(),
+        command_id: format!("startup-{text}"),
         text: text.into(),
+        prompt: vec![ContentBlock::Text(TextContent::new(text))],
+        encoded_draft: text.into(),
         inherited_draft: None,
     }
+}
+
+fn queued_move_prompt_action(text: &str, origin: &str) -> DaemonAction {
+    let mut action = queued_prompt_action(text);
+    if let DaemonAction::QueueStartupPrompt {
+        move_operation_id, ..
+    } = &mut action
+    {
+        *move_operation_id = Some(origin.to_owned());
+    }
+    action
 }
 
 fn submitted_prompt_text(command: &RelayCommand) -> String {
@@ -3871,7 +4525,7 @@ fn submitted_prompt_text(command: &RelayCommand) -> String {
     prompt
         .iter()
         .map(|block| match block {
-            agent_client_protocol::schema::v1::ContentBlock::Text(text) => text.text.clone(),
+            agent_client_protocol::v1::schema::ContentBlock::Text(text) => text.text.clone(),
             other => panic!("expected text content, got {other:?}"),
         })
         .collect()
@@ -4018,6 +4672,9 @@ async fn a_queued_hand_off_runs_before_the_prompt_behind_it() {
         .queue_startup_step(
             "session-1",
             StartupStep::Prompt {
+                move_operation_id: None,
+                prompt: None,
+                encoded_draft: None,
                 text: "after the hand-off".into(),
                 inherited_draft: None,
             },
@@ -4177,6 +4834,9 @@ async fn startup_restart_reuses_the_durable_command_identity_after_a_lost_reply(
         .queue_startup_step(
             "session-1",
             StartupStep::Prompt {
+                move_operation_id: None,
+                prompt: None,
+                encoded_draft: None,
                 text: "once".into(),
                 inherited_draft: None,
             },
@@ -4316,6 +4976,9 @@ async fn startup_batch_identity_rejects_changed_payload_and_keeps_order() {
             (
                 "request-first".into(),
                 StartupStep::Prompt {
+                    move_operation_id: None,
+                    prompt: None,
+                    encoded_draft: None,
                     text: "first".into(),
                     inherited_draft: None,
                 },
@@ -4323,6 +4986,9 @@ async fn startup_batch_identity_rejects_changed_payload_and_keeps_order() {
             (
                 "request-second".into(),
                 StartupStep::Prompt {
+                    move_operation_id: None,
+                    prompt: None,
+                    encoded_draft: None,
                     text: "second".into(),
                     inherited_draft: None,
                 },
@@ -4397,7 +5063,7 @@ async fn withdrawing_a_queued_startup_prompt_before_delivery_cancels_it() {
     let reply = handle_action(
         DaemonAction::WithdrawStartupPrompt {
             session_id: "session-1".into(),
-            text: "edit me".into(),
+            command_id: "startup-edit me".into(),
         },
         &metadata,
         &state,
@@ -4475,7 +5141,7 @@ async fn withdrawing_a_startup_prompt_after_delivery_started_is_refused() {
     let answer = handle_action(
         DaemonAction::WithdrawStartupPrompt {
             session_id: "session-1".into(),
-            text: "already going".into(),
+            command_id: "startup-already going".into(),
         },
         &metadata,
         &state,
@@ -4727,6 +5393,64 @@ fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
     ))
 }
 
+// Hard-won: 1d746fab4: each sweep rebuilt reports for every historical parent.
+#[cfg(unix)]
+#[tokio::test]
+async fn report_candidates_follow_committed_child_lifecycle_without_losing_failed_resumes() {
+    const CHILD: &str = "MJ_TEST_REPORT_PARENT_MEMBERSHIP";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "report_candidates_follow_committed_child_lifecycle_without_losing_failed_resumes",
+            ),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "report-parent-membership")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut parent = crate::controller::test_support::checkpoint_test_session("report-parent");
+    parent.state = SessionState::Stopped;
+    crate::database::save_session(&parent).unwrap();
+    let mut child = crate::controller::test_support::checkpoint_test_session("report-child");
+    child.state = SessionState::Stopped;
+    child.last_error = None;
+    let relation = runtime_test_subagent(&child.id, &parent.id);
+    crate::database::save_subagent_session(&child, &relation).unwrap();
+    let mut state = test_runtime_state_loading_the_store();
+    Arc::get_mut(&mut state).unwrap().committed =
+        Some(crate::database::subscribe_committed_state().unwrap());
+    assert!(state.subagent_report_parent_ids().is_empty());
+    for lifecycle in [
+        SessionState::Running,
+        SessionState::Parked,
+        SessionState::Lost,
+        SessionState::Error,
+    ] {
+        child.state = lifecycle;
+        crate::database::save_session(&child).unwrap();
+        assert_eq!(
+            state.subagent_report_parent_ids(),
+            [parent.id.clone()],
+            "a stopped parent must still get its child's report"
+        );
+    }
+    child.state = SessionState::Stopped;
+    child.last_error = Some("resume failed".into());
+    crate::database::save_session(&child).unwrap();
+    assert_eq!(state.subagent_report_parent_ids(), [parent.id.clone()]);
+    child.last_error = None;
+    crate::database::save_session(&child).unwrap();
+    assert!(state.subagent_report_parent_ids().is_empty());
+    child.state = SessionState::Provisioning;
+    crate::database::save_session(&child).unwrap();
+    assert_eq!(state.subagent_report_parent_ids(), [parent.id]);
+}
+
 #[cfg(unix)]
 // Hard-won: a5eed2e0: synchronous checkpoint database I/O blocked unrelated pings and timers.
 #[tokio::test]
@@ -4907,6 +5631,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             context_window_bytes: None,
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
             legacy_subagents: None,
         },
     );
@@ -5484,13 +6209,19 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
         let id = workspace.id.clone();
         async move { state.close_workspace(id).await }
     });
+    // Cancel only once the close has joined both stops. A cancel before that
+    // ends the close without submitting them, which is not this case.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while state.cancel_workspace_close(&workspace.id).is_err() {
+        while !["past-commit", "before-commit"]
+            .into_iter()
+            .all(|id| state.close_is_requested(id))
+        {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("the workspace close never started");
+    .expect("the workspace close never joined both stops");
+    state.cancel_workspace_close(&workspace.id).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while state
             .owner()
@@ -5528,6 +6259,89 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
             .unwrap()
             .len(),
         1
+    );
+}
+
+// Hard-won: 0bd61a289: dashboard startup failed when live session state exceeded one frame.
+#[tokio::test]
+async fn dashboard_startup_larger_than_a_frame_arrives_whole() {
+    let mut session = runtime_test_session("large-draft", "workspace", SessionState::Running);
+    session.draft_input = "draft 🙂\n".repeat(MAX_FRAME_BYTES / 8);
+    let startup = DashboardStartup {
+        runtime: mj_client::runtime_feed::RuntimeBootstrap {
+            cursor: mj_client::runtime_feed::RuntimeCursor {
+                incarnation: "startup".into(),
+                sequence: 1,
+                subagent_parents: Default::default(),
+            },
+            projection: mj_client::runtime_feed::RuntimeProjection {
+                records: [(session.id.clone(), session)].into_iter().collect(),
+                ..Default::default()
+            },
+        },
+        metadata: Default::default(),
+        pane_sizes: Default::default(),
+        conversation_layouts: Default::default(),
+        queued_prompts: Default::default(),
+    };
+    let expected = serde_json::to_value(&startup).unwrap();
+    let payload_bytes = serde_json::to_vec(&startup).unwrap().len();
+    assert!(payload_bytes > MAX_FRAME_BYTES);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        for reply in [
+            DaemonReply::DashboardStartup(Box::new(startup)),
+            DaemonReply::Pong,
+        ] {
+            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+            match &reply {
+                DaemonReply::DashboardStartup(_) => assert!(matches!(
+                    request.action,
+                    DaemonAction::DashboardStartup { client_id, workspace_id } if client_id == "large-dashboard" && workspace_id == "workspace"
+                )),
+                _ => assert!(matches!(request.action, DaemonAction::Ping)),
+            }
+            super::serve::write_response(
+                &mut stream,
+                ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(reply),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    });
+    let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let proxy_address = proxy.local_addr().unwrap();
+    let copied = tokio::spawn(async move {
+        let (mut incoming, _) = proxy.accept().await.unwrap();
+        let mut outgoing = TcpStream::connect(address).await.unwrap();
+        tokio::io::copy_bidirectional(&mut incoming, &mut outgoing)
+            .await
+            .unwrap()
+    });
+    let mut client = mj_client::daemon::DaemonClient::connect(test_metadata(proxy_address))
+        .await
+        .unwrap();
+    let received = client
+        .dashboard_startup("large-dashboard".into(), "workspace".into())
+        .await
+        .expect("load the complete dashboard startup state");
+    assert_eq!(serde_json::to_value(received).unwrap(), expected);
+    assert!(matches!(
+        client.request(DaemonAction::Ping).await.unwrap(),
+        DaemonReply::Pong
+    ));
+    drop(client);
+    server.await.unwrap();
+    let (_, response_bytes) = copied.await.unwrap();
+    assert!(
+        response_bytes < (payload_bytes * 3 / 2) as u64,
+        "base64 chunks must stay near 4/3 of JSON size: {response_bytes} wire bytes for {payload_bytes} JSON bytes"
     );
 }
 
@@ -6098,7 +6912,7 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     .unwrap();
     crate::database::record_subagent_report_dir(WORKING_CHILD, reports.to_str().unwrap()).unwrap();
 
-    let (channels, state) = serve_live_session(&relay_root).await;
+    let (channels, state) = serve_live_session(&relay_root, false).await;
     LiveParent {
         _directory: directory,
         relay_root,
@@ -6142,6 +6956,7 @@ fn seed_live_session(directory: &Path, relay_root: &Path) {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
             },
         );
         Ok(())
@@ -6154,6 +6969,7 @@ fn seed_live_session(directory: &Path, relay_root: &Path) {
 #[cfg(unix)]
 async fn serve_live_session(
     relay_root: &Path,
+    running: bool,
 ) -> (
     crate::session_manager::SessionManagerChannels,
     Arc<RuntimeState>,
@@ -6169,7 +6985,7 @@ async fn serve_live_session(
             relay_root,
             None,
             ReleaseSupport::Supported,
-            false,
+            running,
         )])
         .unwrap();
     channels
@@ -6324,7 +7140,7 @@ async fn live_clone_with_an_unpushed_commit() -> LiveClone {
     ))
     .unwrap();
 
-    let (channels, state) = serve_live_session(&relay_root).await;
+    let (channels, state) = serve_live_session(&relay_root, false).await;
     LiveClone {
         _source: source,
         _directory: directory,
@@ -6955,6 +7771,435 @@ async fn closing_a_parked_sub_agent_stops_it_without_starting_its_worker() {
     assert_eq!(stored.sessions[parent_id].state, SessionState::Running);
 }
 
+// Hard-won: #1384: closing a live child exported unrelated nested worktrees in its parent's workspace.
+#[cfg(unix)]
+#[tokio::test]
+async fn child_close_preserves_history_and_reports_without_exporting_the_workspace() {
+    const NAME: &str = "child_close_preserves_history_and_reports_without_exporting_the_workspace";
+    if !in_held_close_child(NAME, "unused") {
+        return;
+    }
+    exercise_child_close_with_a_nested_workspace(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn child_close_cancel_before_commit_leaves_it_running_and_allows_a_fresh_close() {
+    const NAME: &str =
+        "child_close_cancel_before_commit_leaves_it_running_and_allows_a_fresh_close";
+    if !in_held_close_child(NAME, "begin_checkpoint") {
+        return;
+    }
+    exercise_child_close_with_a_nested_workspace(true).await;
+}
+
+#[cfg(unix)]
+async fn exercise_child_close_with_a_nested_workspace(cancel_before_commit: bool) {
+    use crate::controller::checkpoint::tests::{LATCH_RELAY_HOLD_PATH, LATCH_RELAY_SESSION};
+    use crate::controller::test_support::{committed_repository, test_git};
+    let _writer = crate::database::install_isolated_test_writer();
+    let repository = committed_repository();
+    let nested = ".mj/csharp-parity/bin-src";
+    test_git(
+        repository.path(),
+        &["worktree", "add", "--detach", nested, "HEAD"],
+    );
+    let scratch_file = repository.path().join(nested).join("unfinished.txt");
+    std::fs::write(&scratch_file, "scratch work must survive child close").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let relay_root = root.path().join("relay");
+    seed_live_session(root.path(), &relay_root);
+    let conversation = "child conversation ".repeat(8192);
+    {
+        let mut relay =
+            mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+                .unwrap();
+        relay
+            .record_observation(mj_core::relay::RelayObservation::Warning {
+                message: conversation.clone(),
+            })
+            .unwrap();
+    }
+    let workspace = crate::database::create_workspace("Child close ownership").unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    parent.project_directory = Some(repository.path().to_owned());
+    let parent_root = root.path().join(parent_id);
+    std::fs::create_dir_all(&parent_root).unwrap();
+    std::fs::write(parent_root.join("private"), "parent worker").unwrap();
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: parent_root.clone(),
+    });
+    crate::database::save_session(&parent).unwrap();
+    let worker_root = root.path().join(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    std::fs::write(worker_root.join("private"), "child worker").unwrap();
+    let mut child = runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Running);
+    child.project_directory = parent.project_directory.clone();
+    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    });
+    crate::database::save_subagent_session(
+        &child,
+        &runtime_test_subagent(LATCH_RELAY_SESSION, parent_id),
+    )
+    .unwrap();
+    let reports = repository
+        .path()
+        .join(".mj/agents")
+        .join(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&reports).unwrap();
+    std::fs::write(reports.join("result.txt"), "child report").unwrap();
+    crate::database::record_subagent_report_dir(LATCH_RELAY_SESSION, reports.to_str().unwrap())
+        .unwrap();
+    let (channels, state) = serve_live_session(&relay_root, !cancel_before_commit).await;
+    if cancel_before_commit {
+        let closing = tokio::spawn({
+            let state = state.clone();
+            async move { state.suspend_session(LATCH_RELAY_SESSION.into()).await }
+        });
+        let hold = PathBuf::from(std::env::var_os(LATCH_RELAY_HOLD_PATH).unwrap());
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !hold.with_extension("reached").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the child close did not reach its barrier");
+        state
+            .cancel_lifecycle_with_intent(LATCH_RELAY_SESSION)
+            .await
+            .unwrap();
+        std::fs::write(hold.with_extension("release"), b"go").unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(30), closing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+        let stored = crate::database::load_state().unwrap();
+        assert_eq!(
+            stored.sessions[LATCH_RELAY_SESSION].state,
+            SessionState::Running
+        );
+        assert!(worker_root.join("private").exists());
+    }
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.close_subagent_request(
+            LATCH_RELAY_SESSION.into(),
+            parent_id.into(),
+            "close-child".into(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    channels.shutdown.shutdown().await.unwrap();
+    let stored = crate::database::load_state().unwrap();
+    let closed = &stored.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(closed.state, SessionState::Stopped);
+    assert!(closed.target.is_none() && closed.checkpoint.is_none());
+    assert!(!worker_root.exists());
+    assert_eq!(stored.sessions[parent_id], parent);
+    assert_eq!(
+        std::fs::read_to_string(parent_root.join("private")).unwrap(),
+        "parent worker"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&scratch_file).unwrap(),
+        "scratch work must survive child close"
+    );
+    assert_eq!(
+        std::fs::read_to_string(reports.join("result.txt")).unwrap(),
+        "child report"
+    );
+    let history = crate::database::load_materialized_session(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert!(
+        serde_json::to_string(&history)
+            .unwrap()
+            .contains(&conversation)
+    );
+    assert_eq!(
+        history.execution,
+        mj_core::state::MaterializedExecutionState::Closed
+    );
+    assert!(stored.subagents.contains_key(LATCH_RELAY_SESSION));
+}
+
+// Hard-won: #1444: an unreachable Closing child could lose its final journal when cleanup skipped relay recovery.
+#[cfg(unix)]
+#[tokio::test]
+async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_proven() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    const NAME: &str = "unreachable_child_keeps_its_private_journal_until_worker_death_is_proven";
+    if !in_held_close_child(NAME, "unused") {
+        return;
+    }
+
+    struct AliveWorker;
+    impl CommandExecutor for AliveWorker {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.purpose, "probe Mjolnir worker daemon liveness");
+            Ok(CommandOutput {
+                status: 0,
+                stdout: b"alive\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let child_root = root.path().join(LATCH_RELAY_SESSION);
+    seed_live_session(root.path(), &child_root);
+    use std::os::unix::fs::PermissionsExt;
+    let proxy = child_root.join("hel");
+    std::fs::write(&proxy, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let last_event = "journal-only child output ".repeat(4096);
+    let mut journal =
+        mj_worker::relay::DurableRelay::open(&child_root, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    journal
+        .record_observation(mj_core::relay::RelayObservation::Warning {
+            message: last_event,
+        })
+        .unwrap();
+    drop(journal);
+
+    let workspace = crate::database::create_workspace("Dead child close").unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let parent_dir = root.path().join("parent-workspace");
+    std::fs::create_dir(&parent_dir).unwrap();
+    std::fs::write(parent_dir.join("parent-work"), "keep").unwrap();
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    parent.project_directory = Some(parent_dir.clone());
+    crate::database::save_session(&parent).unwrap();
+    let mut child = runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Closing);
+    child.project_directory = Some(parent_dir.clone());
+    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: child_root.clone(),
+    });
+    let mut relation = runtime_test_subagent(LATCH_RELAY_SESSION, parent_id);
+    relation.working_directory = "deleted-child-cwd".into();
+    crate::database::save_subagent_session(&child, &relation).unwrap();
+    assert!(!parent_dir.join(&relation.working_directory).exists());
+
+    let mut controller = Controller::load().unwrap();
+    let error = controller
+        .suspend_subagent_controlled(LATCH_RELAY_SESSION, &AliveWorker, None, None)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("worker is not confirmed dead"),
+        "{error:#}"
+    );
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(
+        stored.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Closing
+    );
+    assert_eq!(stored.sessions[LATCH_RELAY_SESSION].target, child.target);
+    assert!(child_root.join(mj_core::relay::RELAY_STATE_FILE).exists());
+    assert_eq!(stored.sessions[parent_id], parent);
+    assert_eq!(
+        std::fs::read_to_string(parent_dir.join("parent-work")).unwrap(),
+        "keep"
+    );
+}
+
+// Hard-won: #1444: a dead child's deleted cwd blocked close while its final journal remained recoverable.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires a matching built mj-worker via MJ_WORKER_BINARY"]
+async fn dead_child_close_recovers_journal_without_recreating_its_cwd() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    const NAME: &str = "dead_child_close_recovers_journal_without_recreating_its_cwd";
+    let worker_binary = PathBuf::from(
+        std::env::var_os("MJ_WORKER_BINARY").expect("matching worker binary is required"),
+    );
+    mj_core::worker_build::verify_worker_build(&worker_binary).unwrap();
+    const CHILD: &str = "MJ_TEST_DEAD_CHILD_CLOSE";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .include_ignored()
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", &worker_binary)
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let child_root = root.path().join(LATCH_RELAY_SESSION);
+    seed_live_session(root.path(), &child_root);
+    std::fs::copy(&worker_binary, child_root.join("hel")).unwrap();
+    Config::update(|config| {
+        config
+            .targets
+            .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
+        Ok(())
+    })
+    .unwrap();
+    let final_event = "journal-only child output ".repeat(4096);
+    let mut journal =
+        mj_worker::relay::DurableRelay::open(&child_root, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    journal
+        .record_observation(mj_core::relay::RelayObservation::Warning {
+            message: final_event.clone(),
+        })
+        .unwrap();
+    drop(journal);
+
+    let workspace = crate::database::create_workspace("Recover dead child close").unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let parent_dir = root.path().join("parent-workspace");
+    std::fs::create_dir(&parent_dir).unwrap();
+    std::fs::write(parent_dir.join("parent-work"), "keep").unwrap();
+    let parent_root = root.path().join(parent_id);
+    std::fs::create_dir(&parent_root).unwrap();
+    std::fs::write(parent_root.join("private"), "parent worker").unwrap();
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    parent.project_directory = Some(parent_dir.clone());
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: parent_root.clone(),
+    });
+    crate::database::save_session(&parent).unwrap();
+    let mut child = runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Closing);
+    child.project_directory = Some(parent_dir.clone());
+    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: child_root.clone(),
+    });
+    let mut relation = runtime_test_subagent(LATCH_RELAY_SESSION, parent_id);
+    relation.working_directory = "deleted-child-cwd".into();
+    crate::database::save_subagent_session(&child, &relation).unwrap();
+    let missing_cwd = parent_dir.join(&relation.working_directory);
+    assert!(!missing_cwd.exists());
+
+    let controller = Controller::load().unwrap();
+    let backend = crate::targets::TargetLocator::LocalBare {
+        worker_root: child_root.to_string_lossy().into_owned(),
+    };
+    let reconnect = crate::targets::reconnect_plan(&backend, LATCH_RELAY_SESSION)
+        .unwrap()
+        .commands
+        .remove(0);
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![crate::session_manager::RelaySessionTarget {
+            session_id: LATCH_RELAY_SESSION.into(),
+            spec: reconnect,
+            worker_recovery: None,
+            project_memory: None,
+        }])
+        .unwrap();
+    channels
+        .control
+        .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        channels.control.clone(),
+        &recovery.observer(),
+    );
+    let state = Arc::new(RuntimeState::new_with_controller_loader(
+        channels.control.clone(),
+        controller,
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        Controller::load,
+    ));
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        state.close_subagent_request(
+            LATCH_RELAY_SESSION.into(),
+            parent_id.into(),
+            "recover-dead-child".into(),
+        ),
+    )
+    .await
+    .expect("child close timed out")
+    .unwrap();
+
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(
+        stored.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Stopped
+    );
+    assert!(stored.sessions[LATCH_RELAY_SESSION].target.is_none());
+    assert!(
+        !child_root.exists(),
+        "private root removed only after final sync"
+    );
+    assert!(!missing_cwd.exists(), "child cwd was not recreated");
+    assert_eq!(stored.sessions[parent_id], parent);
+    assert_eq!(
+        std::fs::read_to_string(parent_root.join("private")).unwrap(),
+        "parent worker"
+    );
+    assert_eq!(
+        std::fs::read_to_string(parent_dir.join("parent-work")).unwrap(),
+        "keep"
+    );
+    let history = crate::database::load_materialized_session(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        history.execution,
+        mj_core::state::MaterializedExecutionState::Closed
+    );
+    assert!(
+        serde_json::to_string(&history)
+            .unwrap()
+            .contains(&final_event)
+    );
+    channels.shutdown.shutdown().await.unwrap();
+}
+
+// Hard-won: #1384: interrupted child cleanup wrongly required a workspace checkpoint and a live worker.
+#[cfg(unix)]
+#[tokio::test]
+async fn child_close_finishes_interrupted_cleanup_without_a_worker_or_checkpoint() {
+    const NAME: &str = "child_close_finishes_interrupted_cleanup_without_a_worker_or_checkpoint";
+    if !in_isolated_parked_test(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Interrupted child close").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "55555555555555555555555555555555";
+    let parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    crate::database::save_session(&parent).unwrap();
+    let mut child = parked_child(root.path(), child_id, parent_id, &workspace.id);
+    child.state = SessionState::Destroying;
+    crate::database::save_session(&child).unwrap();
+    let state = test_runtime_state_loading_the_store();
+    state
+        .close_subagent_request(
+            child_id.into(),
+            parent_id.into(),
+            "retry-child-close".into(),
+        )
+        .await
+        .unwrap();
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(stored.sessions[child_id].state, SessionState::Stopped);
+    assert!(stored.sessions[child_id].checkpoint.is_none());
+    assert!(stored.sessions[child_id].target.is_none());
+    assert_eq!(stored.sessions[parent_id], parent);
+    assert!(!root.path().join("started").exists());
+}
+
 #[tokio::test]
 async fn late_stage_callbacks_cannot_change_a_replacement_lifecycle() {
     let state = test_runtime_state();
@@ -7112,6 +8357,7 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
     state.owner().lifecycle.insert(
         "moving".into(),
         ActiveLifecycle {
+            move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
@@ -7167,6 +8413,7 @@ async fn runtime_publication_crosses_frame_limit_atomically_and_keeps_connection
                         cursor: RuntimeCursor {
                             incarnation: "test".into(),
                             sequence: 1,
+                            subagent_parents: Default::default(),
                         },
                         projection: Box::new(projection),
                     },
@@ -7272,6 +8519,8 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
     );
     crate::database::save_session(&session).unwrap();
     let operation = mj_core::state::MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
@@ -7465,6 +8714,149 @@ async fn api_startup_persists_the_entire_ordered_followup_before_acknowledging()
 }
 
 #[tokio::test]
+async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked() {
+    const NAME: &str = "initial_worker_receipts_settle_after_the_first_turn_has_already_parked";
+    const CHILD: &str = "child-initial";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayCommand, RelayCommandOutcome};
+    use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
+    let parent = runtime_test_session(
+        "parent-initial",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    crate::database::save_session(&parent).unwrap();
+    let child = runtime_test_session(
+        CHILD,
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Parked,
+    );
+    let mut relation = runtime_test_subagent(CHILD, &parent.id);
+    relation.model = Some("chosen-model".into());
+    let group_id = format!("subagent-spawn-{}", relation.request_key);
+    let steps = super::startup_followup::api_followup_steps(
+        &group_id,
+        crate::server::api::StartFollowup {
+            model: relation.model.clone(),
+            effort: None,
+            fast_mode: false,
+            prompt: Some(relation.initial_prompt.clone()),
+        },
+    );
+    let rows = steps
+        .into_iter()
+        .map(|(command_id, step)| crate::database::StartupDelivery {
+            session_id: CHILD.into(),
+            command_id,
+            step_json: serde_json::to_string(&step).unwrap(),
+            phase: "pending".into(),
+            group_id: Some(group_id.clone()),
+            accepted_ordinal: None,
+            error: None,
+        })
+        .collect();
+    crate::database::register_subagent_with_startup(&child, &relation, rows).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let model_id = format!("{group_id}-model");
+    let prompt_id = format!("{group_id}-prompt");
+    let input = vec![
+        mj_core::worker_launch::InitialWorkerCommand {
+            command_id: model_id.clone(),
+            command: RelayCommand::SetConfig {
+                key: "model".into(),
+                value: "chosen-model".into(),
+            },
+            optional: false,
+        },
+        mj_core::worker_launch::InitialWorkerCommand {
+            command_id: prompt_id.clone(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::Text(TextContent::new(
+                    relation.initial_prompt.clone(),
+                ))],
+            },
+            optional: false,
+        },
+    ];
+    let mut relay = mj_worker::relay::DurableRelay::open_for_harness(
+        root.path(),
+        CHILD,
+        "test",
+        mj_core::config::HarnessKind::Codex,
+        &input,
+    )
+    .unwrap();
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(&model_id, RelayCommandOutcome::Configured)
+        .unwrap();
+    let prompt = relay.claim_pending_commands(true).unwrap().remove(0);
+    relay
+        .record_command_completed(
+            &prompt_id,
+            RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    // Replay the actual worker journal through the controller's storage
+    // boundary before attaching any daemon startup monitor.
+    let events = relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
+    crate::database::apply_projection_page(CHILD, move |page| {
+        let mut current = mj_core::state::MaterializedSession::empty(CHILD);
+        for event in events {
+            let mutation = project_relay_event(&current, &event)?.mutation;
+            page.apply(
+                event.ordinal,
+                &event.previous_digest,
+                &event.digest,
+                &mutation,
+            )?;
+            apply_committed_projection_event(&mut current, &event, mutation)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    let first = crate::database::next_startup_delivery(CHILD)
+        .unwrap()
+        .unwrap();
+    state.start_persisted_startup_delivery(first, &CancellationToken::new());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if crate::database::load_startup_group(CHILD, &group_id)
+                .unwrap()
+                .iter()
+                .all(|step| step.phase == "done")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("parked worker receipts must settle without reconnecting");
+    assert_eq!(
+        crate::database::load_subagent_report(CHILD)
+            .unwrap()
+            .awaited_ordinal,
+        Some(prompt.accepted_ordinal)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), manager.requests.recv())
+            .await
+            .is_err(),
+        "receipt monitoring must not contact or restart the parked worker"
+    );
+    state.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+#[tokio::test]
 async fn cancelled_api_startup_is_not_submitted_after_daemon_reconstruction() {
     let Some(_writer) = startup_prompt_test_store(
         "cancelled_api_startup_is_not_submitted_after_daemon_reconstruction",
@@ -7599,6 +8991,9 @@ async fn startup_retry_keeps_earlier_uncertain_input_ahead_of_new_input() {
         .queue_startup_step(
             "session-1",
             StartupStep::Prompt {
+                move_operation_id: None,
+                prompt: None,
+                encoded_draft: None,
                 text: "first".into(),
                 inherited_draft: None,
             },
@@ -7621,6 +9016,9 @@ async fn startup_retry_keeps_earlier_uncertain_input_ahead_of_new_input() {
         .queue_startup_step(
             "session-1",
             StartupStep::Prompt {
+                move_operation_id: None,
+                prompt: None,
+                encoded_draft: None,
                 text: "second".into(),
                 inherited_draft: None,
             },
@@ -7879,9 +9277,10 @@ async fn resume_candidates_are_inactive_top_level_sessions_with_every_adopted_na
     for record in [live, stopped, lost, child] {
         state.sessions.insert(record.id.clone(), record);
     }
-    state
-        .subagents
-        .insert("child".into(), runtime_test_subagent("child", "live"));
+    state.subagents.insert(
+        "child".into(),
+        runtime_test_subagent("child", "live").into(),
+    );
     let candidates = test_runtime_state_holding(state).resume_candidates();
     let ids = candidates
         .candidates
@@ -7926,9 +9325,10 @@ async fn go_startup_session_falls_back_when_the_remembered_session_is_archived()
             .collect(),
         ..mj_core::state::State::default()
     };
-    state
-        .subagents
-        .insert(child.id.clone(), runtime_test_subagent(&child.id, "parent"));
+    state.subagents.insert(
+        child.id.clone(),
+        runtime_test_subagent(&child.id, "parent").into(),
+    );
     let runtime = test_runtime_state_holding(state);
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -8164,4 +9564,1051 @@ async fn published_transcripts_reach_a_client_as_item_changes() {
         .apply(state.runtime_changes(Some(newest), false).await.unwrap())
         .unwrap();
     assert!(replica.projection.transcripts.is_empty());
+}
+
+/// Move admission and startup delivery share one reservation: an earlier
+/// acceptance finishes before source work, and source readiness cannot admit
+/// anything queued during Move ahead of its archived queue disposition.
+#[tokio::test]
+async fn startup_delivery_and_move_source_sealing_are_serialized() {
+    const NAME: &str = "startup_delivery_and_move_source_sealing_are_serialized";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    handle_action(
+        queued_prompt_action("before move"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    let (text, accepted) = next_submit(&mut manager).await;
+    assert_eq!(text, "before move");
+    manager
+        .publisher
+        .publish("session-1".into(), ManagedSessionView::default())
+        .await
+        .unwrap();
+    handle_action(
+        queued_prompt_action("waiting before move"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    let source_started = Arc::new(tokio::sync::Notify::new());
+    let destination_ready = Arc::new(tokio::sync::Notify::new());
+    let watch = state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Move, {
+            let source_started = source_started.clone();
+            let destination_ready = destination_ready.clone();
+            move |state, id, _| async move {
+                source_started.notify_one();
+                destination_ready.notified().await;
+                // The Move owns archive disposition while holding the reservation.
+                let handle = state.session_manager.session(&id).await?;
+                handle
+                    .submit(
+                        "archived-move-command".into(),
+                        RelayCommand::Prompt {
+                            prompt: vec![ContentBlock::Text(TextContent::new("archived queue"))],
+                        },
+                    )
+                    .await?;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    handle_action(
+        queued_prompt_action("during move"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source_started.notified())
+            .await
+            .is_err(),
+        "Move source sealing overtook an already admitted startup submit"
+    );
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    accepted.send(Ok(1)).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), source_started.notified())
+        .await
+        .unwrap();
+    // A still-ready source never receives the newly queued prompt.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err()
+    );
+    destination_ready.notify_one();
+    let (text, archived) = next_submit(&mut manager).await;
+    assert_eq!(text, "archived queue");
+    archived.send(Ok(2)).unwrap();
+    RuntimeState::wait_lifecycle_result(watch).await.unwrap();
+    let (text, delivered) = next_submit(&mut manager).await;
+    assert_eq!(text, "waiting before move");
+    delivered.send(Ok(3)).unwrap();
+    let (text, delivered) = next_submit(&mut manager).await;
+    assert_eq!(text, "during move");
+    delivered.send(Ok(4)).unwrap();
+    state.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_delivery_waits_for_durable_move_after_daemon_restart() {
+    const NAME: &str = "startup_delivery_waits_for_durable_move_after_daemon_restart";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let session = state.session_record("session-1").unwrap();
+    let mut operation = retained_startup_test_move(&session);
+    crate::database::save_move_operation(&operation).unwrap();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    handle_action(
+        queued_prompt_action("queued before move"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    handle_action(
+        queued_move_prompt_action("destination only", &operation.operation_id),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err()
+    );
+    state.cancel_and_join_startup_prompts().await.unwrap();
+    let restarted = test_runtime_state_with_manager(&manager);
+    restarted
+        .restore_startup_deliveries(&CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "restored startup work was sent before durable archived queue admission"
+    );
+    operation.destination_store_id = Some("destination-store".into());
+    operation.phase = mj_core::state::MovePhase::Completed;
+    operation.queue_admission_finished = true;
+    crate::database::save_move_operation(&operation).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "completed Move admitted a stale ready source actor"
+    );
+    let mut destination = ready_startup_view();
+    destination.snapshot.as_mut().unwrap().operational.store_id = Some("destination-store".into());
+    manager
+        .publisher
+        .publish("session-1".into(), destination.clone())
+        .await
+        .unwrap();
+    let (text, delivered) = next_submit(&mut manager).await;
+    assert_eq!(text, "queued before move");
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    delivered.send(Ok(9)).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "Move-origin input admitted a stale ready source actor"
+    );
+    manager
+        .publisher
+        .publish("session-1".into(), destination)
+        .await
+        .unwrap();
+    let (text, delivered) = next_submit(&mut manager).await;
+    assert_eq!(text, "destination only");
+    delivered.send(Ok(10)).unwrap();
+    restarted.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+fn retained_startup_test_move(
+    session: &mj_core::state::SessionRecord,
+) -> mj_core::state::MoveOperation {
+    mj_core::state::MoveOperation {
+        quota_stop_reason: None,
+        quota_continuation: None,
+        prepared_destination: None,
+        accepted_preparation: None,
+        acknowledge_interruption: false,
+        workspace_transfer: None,
+        handoff: None,
+        source_checkpoint_only: false,
+        in_place: false,
+        operation_id: "startup-durable-move".into(),
+        selection: MoveSelection {
+            subagents: None,
+            workspace: Default::default(),
+            session_id: session.id.clone(),
+            profile_id: Some(session.last_profile.clone()),
+            target_template_id: Some(session.target_template_id.clone()),
+            additional_mounts: None,
+            resource_allocation: None,
+            clear_resource_allocation: false,
+        },
+        source_profile_id: session.last_profile.clone(),
+        source_target_template_id: session.target_template_id.clone(),
+        source_target: None,
+        source_native_session_id: None,
+        source_additional_mounts: Vec::new(),
+        source_resource_allocation: None,
+        destination_target: None,
+        destination_native_session_id: None,
+        destination_store_id: None,
+        configuration_fingerprint: "test".into(),
+        checkpoint: None,
+        recovery_session: Some(session.clone()),
+        queue: mj_core::state::ResumeQueueDisposition::Start,
+        phase: mj_core::state::MovePhase::StartingQueue,
+        queue_admission_started: true,
+        queue_admission_finished: false,
+        cancellation_requested: false,
+        created_at: session.created_at.clone(),
+        updated_at: session.updated_at.clone(),
+        error: None,
+    }
+}
+
+fn startup_image_draft(label: &str, reference: &mj_core::attachment::AttachmentRef) -> String {
+    let text = format!("{label}[image 1]");
+    format!(
+        "{}{}",
+        mj_core::draft::CHAT_DRAFT_PREFIX,
+        serde_json::json!({
+            "text": text,
+            "images": [{"range": {"start": label.len(), "end": text.len()}, "number": 1,
+                "image": {"mime_type": reference.mime_type, "reference": reference}}],
+            "retained_metadata": {"revision": 1}
+        })
+    )
+}
+
+#[tokio::test]
+async fn startup_image_refusal_recovers_complete_drafts_and_invalid_merges_stay_durable() {
+    const NAME: &str =
+        "startup_image_refusal_recovers_complete_drafts_and_invalid_merges_stay_durable";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let reference =
+        mj_core::attachment::AttachmentRef::new(b"\x89PNG\r\n\x1a\n", "image/png".into(), 1, 1)
+            .unwrap();
+    let recovered = startup_image_draft("queued ", &reference);
+    let existing = startup_image_draft("existing 🐈 ", &reference);
+    let mut saved: serde_json::Value = serde_json::from_str(
+        existing
+            .strip_prefix(mj_core::draft::CHAT_DRAFT_PREFIX)
+            .unwrap(),
+    )
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(
+        recovered
+            .strip_prefix(mj_core::draft::CHAT_DRAFT_PREFIX)
+            .unwrap(),
+    )
+    .unwrap();
+    let pending = |id: &str, startup: bool| {
+        let mut submission = serde_json::json!({
+            "id": id, "kind": "Prompt", "payload": payload,
+            "status": "Delivery unconfirmed", "represented": false,
+            "finished": true, "recorded_at_ms": 1
+        });
+        if startup {
+            submission["startup_origin"] = serde_json::json!({
+                "move_operation_id": null, "inherited_draft": null
+            });
+        }
+        submission
+    };
+    saved["pending"] = serde_json::json!([
+        pending("image-startup", true),
+        pending("unrelated-native", false),
+        pending("unrelated-startup", true)
+    ]);
+    let existing = format!("{}{}", mj_core::draft::CHAT_DRAFT_PREFIX, saved);
+    crate::database::set_session_draft_input("session-1", &existing).unwrap();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    let action = DaemonAction::QueueStartupPrompt {
+        move_operation_id: None,
+        session_id: "session-1".into(),
+        command_id: "image-startup".into(),
+        text: "queued [image 1]".into(),
+        prompt: vec![reference.content_block()],
+        inherited_draft: None,
+        encoded_draft: recovered.clone(),
+    };
+    // Stable retries persist one structured row, rather than another text row.
+    for _ in 0..2 {
+        handle_action(action.clone(), &metadata, &state, &cancellation)
+            .await
+            .unwrap();
+    }
+    assert_eq!(crate::database::load_startup_deliveries().unwrap().len(), 1);
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !crate::database::load_startup_deliveries()
+            .unwrap()
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let before_retry = session_draft_input(&state);
+    handle_action(action.clone(), &metadata, &state, &cancellation)
+        .await
+        .unwrap();
+    assert_eq!(
+        session_draft_input(&state),
+        before_retry,
+        "settled enqueue retry restored input twice"
+    );
+    let mut changed = action.clone();
+    if let DaemonAction::QueueStartupPrompt { text, .. } = &mut changed {
+        text.push_str(" changed");
+    }
+    assert!(matches!(
+        handle_action(changed, &metadata, &state, &cancellation)
+            .await
+            .unwrap(),
+        DaemonReply::StartupPromptIdentityConflict
+    ));
+    let outcomes = handle_action(
+        DaemonAction::StartupPromptOutcomes {
+            session_id: "session-1".into(),
+            command_ids: vec!["image-startup".into(), "missing".into()],
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    let DaemonReply::StartupPromptOutcomes(outcomes) = outcomes else {
+        panic!("expected outcome receipts");
+    };
+    assert_eq!(outcomes.len(), 1);
+    assert!(
+        matches!(&outcomes["image-startup"], mj_client::daemon::StartupPromptOutcome::Refused { encoded_draft, reason }
+        if encoded_draft == &recovered && reason.contains("does not support image prompts"))
+    );
+    let draft = session_draft_input(&state);
+    let envelope: serde_json::Value = serde_json::from_str(
+        draft
+            .strip_prefix(mj_core::draft::CHAT_DRAFT_PREFIX)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        envelope["text"],
+        "existing 🐈 [image 1]\n\nqueued [image 2]"
+    );
+    for image in envelope["images"].as_array().unwrap() {
+        let text = envelope["text"].as_str().unwrap();
+        let start = image["range"]["start"].as_u64().unwrap() as usize;
+        let end = image["range"]["end"].as_u64().unwrap() as usize;
+        assert_eq!(&text[start..end], format!("[image {}]", image["number"]));
+        assert_eq!(
+            image["image"]["reference"],
+            serde_json::to_value(&reference).unwrap()
+        );
+    }
+    assert_eq!(
+        envelope["retained_metadata"],
+        serde_json::json!({"revision": 1})
+    );
+    assert_eq!(
+        envelope["pending"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|submission| submission["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["unrelated-native", "unrelated-startup"],
+        "reopening a recovered draft must not retry its already restored startup payload"
+    );
+    assert!(
+        notice_texts(&state)
+            .iter()
+            .any(|notice| notice.contains("does not support image prompts"))
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), manager.requests.recv())
+            .await
+            .is_err(),
+        "unsupported image reached the worker"
+    );
+    // Duplicate visible text has distinct caller identities. Recall only the
+    // chosen message, then deliver the remaining installed image unchanged.
+    manager
+        .publisher
+        .publish("session-1".into(), ManagedSessionView::default())
+        .await
+        .unwrap();
+    for command_id in ["image-keep", "image-recall"] {
+        handle_action(
+            DaemonAction::QueueStartupPrompt {
+                move_operation_id: None,
+                session_id: "session-1".into(),
+                command_id: command_id.into(),
+                text: "queued [image 1]".into(),
+                prompt: vec![reference.content_block()],
+                encoded_draft: recovered.clone(),
+                inherited_draft: None,
+            },
+            &metadata,
+            &state,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+    }
+    let withdrawn = handle_action(
+        DaemonAction::WithdrawStartupPrompt {
+            session_id: "session-1".into(),
+            command_id: "image-recall".into(),
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(withdrawn, DaemonReply::PromptWithdrawn(true)));
+    let mut supported = ready_startup_view();
+    supported
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .agent_capabilities = Some(Box::new(
+        serde_json::from_value(serde_json::json!({"promptCapabilities": {"image": true}})).unwrap(),
+    ));
+    manager
+        .publisher
+        .publish("session-1".into(), supported)
+        .await
+        .unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(10), manager.requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let RemoteSessionRequest::Submit {
+        command_id,
+        command,
+        reply,
+        ..
+    } = request
+    else {
+        panic!("expected structured prompt");
+    };
+    assert_eq!(command_id, "image-keep");
+    assert_eq!(
+        serde_json::to_value(command).unwrap(),
+        serde_json::to_value(RelayCommand::Prompt {
+            prompt: vec![reference.content_block()]
+        })
+        .unwrap()
+    );
+    reply.send(Ok(12)).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !crate::database::load_startup_deliveries()
+            .unwrap()
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    crate::database::prune_settled_startup_deliveries().unwrap();
+    let outcomes = crate::database::startup_prompt_outcomes(
+        "session-1",
+        &["image-keep".into(), "image-recall".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        outcomes["image-keep"],
+        mj_client::daemon::StartupPromptOutcome::Accepted
+    );
+    assert_eq!(
+        outcomes["image-recall"],
+        mj_client::daemon::StartupPromptOutcome::Withdrawn
+    );
+    let recovered_before_conflict = session_draft_input(&state);
+    let conflict = handle_action(
+        DaemonAction::QueueStartupPrompt {
+            move_operation_id: None,
+            session_id: "session-1".into(),
+            command_id: "image-keep".into(),
+            text: "queued [image 1]".into(),
+            prompt: vec![reference.content_block()],
+            encoded_draft: recovered.clone(),
+            inherited_draft: Some("different inherited draft".into()),
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        conflict,
+        DaemonReply::StartupPromptIdentityConflict
+    ));
+    assert_eq!(
+        crate::database::startup_prompt_outcomes("session-1", &["image-keep".into()]).unwrap()["image-keep"],
+        mj_client::daemon::StartupPromptOutcome::Accepted,
+        "a conflicting replay must retain the original accepted receipt"
+    );
+    assert_eq!(session_draft_input(&state), recovered_before_conflict);
+    // Store integration also covers plain/encoded in both directions and an
+    // invalid envelope retaining the entire refused durable payload.
+    for (left, right) in [
+        ("new typing", recovered.as_str()),
+        (recovered.as_str(), "more typing"),
+    ] {
+        crate::database::set_session_draft_input("session-1", left).unwrap();
+        state.append_draft_input("session-1", right).await.unwrap();
+        mj_core::draft::validate_reference_draft(&session_draft_input(&state)).unwrap();
+    }
+    crate::database::set_session_draft_input("session-1", "mjolnir-chat-draft-v1:broken").unwrap();
+    crate::database::enqueue_startup_deliveries(vec![crate::database::StartupDelivery {
+        session_id: "session-1".into(),
+        command_id: "recover-invalid".into(),
+        step_json: serde_json::to_string(&StartupStep::Prompt {
+            move_operation_id: None,
+            text: "queued [image 1]".into(),
+            prompt: Some(vec![reference.content_block()]),
+            encoded_draft: Some(recovered.clone()),
+            inherited_draft: None,
+        })
+        .unwrap(),
+        phase: "pending".into(),
+        group_id: None,
+        accepted_ordinal: None,
+        error: None,
+    }])
+    .unwrap();
+    crate::database::reject_startup_prompt("recover-invalid", "unsupported image").unwrap();
+    assert!(crate::database::recover_startup_prompt("recover-invalid", &recovered).is_err());
+    let rows = crate::database::load_startup_deliveries().unwrap();
+    assert_eq!(rows[0].phase, "rejecting");
+    assert!(rows[0].step_json.contains("queued [image 1]"));
+    assert_eq!(session_draft_input(&state), "mjolnir-chat-draft-v1:broken");
+    state.cancel_and_join_startup_prompts().await.unwrap();
+    crate::database::delete_session("session-1").unwrap();
+    assert!(
+        crate::database::startup_prompt_outcomes(
+            "session-1",
+            &[
+                "image-startup".into(),
+                "image-keep".into(),
+                "image-recall".into()
+            ]
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn startup_delivery_reservation_wait_does_not_prevent_move_cancellation() {
+    const NAME: &str = "startup_delivery_reservation_wait_does_not_prevent_move_cancellation";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let session_id = "session-1";
+    let reservation = state.startup_delivery_gate(session_id).lock_owned().await;
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    handle_action(
+        queued_move_prompt_action("cancelled before source", "pre-reservation-origin"),
+        &metadata,
+        &state,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let entered_source = Arc::new(AtomicBool::new(false));
+    let control = LifecycleControl::default();
+    let watch = state
+        .admit_lifecycle(
+            session_id.into(),
+            LifecycleKind::Move,
+            super::lifecycle::LifecycleStart {
+                resume_workspace_id: None,
+                request_key: None,
+                control: Some(control.clone()),
+                phase: LifecyclePhase::Executing,
+                move_operation_id: Some("pre-reservation-origin".into()),
+                deferrable_admission: None,
+            },
+            {
+                let entered_source = entered_source.clone();
+                move |_, _, _| async move {
+                    entered_source.store(true, Ordering::Release);
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        state.active_lifecycles()[0].move_operation_id.as_deref(),
+        Some("pre-reservation-origin")
+    );
+    assert!(control.request_cancel());
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        RuntimeState::wait_lifecycle_result(watch),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        !entered_source.load(Ordering::Acquire),
+        "cancelled Move started source work"
+    );
+    assert_eq!(session_draft_input(&state), "cancelled before source");
+    let outcomes = crate::database::startup_prompt_outcomes(
+        session_id,
+        &["startup-cancelled before source".into()],
+    )
+    .unwrap();
+    assert!(matches!(
+        outcomes.values().next(),
+        Some(mj_client::daemon::StartupPromptOutcome::Refused { .. })
+    ));
+    drop(reservation);
+    state.cancel_and_join_startup_prompts().await.unwrap();
+    // A stale frontend finishes enqueueing after cancellation and after the
+    // ephemeral owner has disappeared. No durable Move ever existed.
+    state.owner().lifecycle.remove(session_id);
+    assert!(
+        crate::database::load_move_operation(session_id)
+            .unwrap()
+            .is_none()
+    );
+    manager
+        .publisher
+        .publish(session_id.into(), ready_startup_view())
+        .await
+        .unwrap();
+    handle_action(
+        queued_move_prompt_action("late destination draft", "pre-reservation-origin"),
+        &metadata,
+        &state,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                crate::database::startup_prompt_outcomes(
+                    session_id,
+                    &["startup-late destination draft".into()]
+                )
+                .unwrap()
+                .values()
+                .next(),
+                Some(mj_client::daemon::StartupPromptOutcome::Refused { .. })
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(session_draft_input(&state).contains("late destination draft"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), manager.requests.recv())
+            .await
+            .is_err(),
+        "late cancelled-origin enqueue reached the ready source"
+    );
+    state.cancel_and_join_startup_prompts().await.unwrap();
+    manager
+        .publisher
+        .publish(session_id.into(), ManagedSessionView::default())
+        .await
+        .unwrap();
+    // A daemon handoff interrupts resumable work; it is not a user refusal.
+    crate::database::set_session_draft_input(session_id, "").unwrap();
+    let reservation = state.startup_delivery_gate(session_id).lock_owned().await;
+    handle_action(
+        queued_prompt_action("keep through handoff"),
+        &metadata,
+        &state,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let control = LifecycleControl::default();
+    // Clear the earlier completed operation as an ordinary caller does.
+    state.owner().lifecycle.remove(session_id);
+    let watch = state
+        .start_or_join_lifecycle_controlled(
+            session_id.into(),
+            LifecycleKind::Move,
+            None,
+            None,
+            Some(control.clone()),
+            |_, _, _| async { panic!("handoff interrupted before source work") },
+        )
+        .unwrap();
+    assert!(control.cancel_for_shutdown());
+    RuntimeState::wait_lifecycle_result(watch).await.unwrap();
+    assert_eq!(session_draft_input(&state), "");
+    assert!(
+        crate::database::load_startup_deliveries()
+            .unwrap()
+            .iter()
+            .any(
+                |step| step.command_id == "startup-keep through handoff" && step.phase == "pending"
+            )
+    );
+    drop(reservation);
+    state.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_failed_and_cancelled_moves_restore_images_instead_of_using_retained_source() {
+    const NAME: &str =
+        "startup_failed_and_cancelled_moves_restore_images_instead_of_using_retained_source";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let reference =
+        mj_core::attachment::AttachmentRef::new(b"\x89PNG\r\n\x1a\n", "image/png".into(), 1, 1)
+            .unwrap();
+    let draft = startup_image_draft("destination image ", &reference);
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    for (index, phase) in [
+        mj_core::state::MovePhase::Failed,
+        mj_core::state::MovePhase::Cancelled,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        crate::database::set_session_draft_input("session-1", "").unwrap();
+        let mut session = state.session_record("session-1").unwrap();
+        session.state = SessionState::Running;
+        crate::database::save_session(&session).unwrap();
+        let mut operation = retained_startup_test_move(&session);
+        operation.in_place = true;
+        operation.queue_admission_started = index != 0;
+        operation.phase = mj_core::state::MovePhase::Preparing;
+        crate::database::save_move_operation(&operation).unwrap();
+        manager
+            .publisher
+            .publish("session-1".into(), ready_startup_view())
+            .await
+            .unwrap();
+        let command_id = format!("failed-move-image-{index}");
+        handle_action(
+            DaemonAction::QueueStartupPrompt {
+                move_operation_id: Some(operation.operation_id.clone()),
+                session_id: "session-1".into(),
+                command_id: command_id.clone(),
+                text: "destination image [image 1]".into(),
+                prompt: vec![reference.content_block()],
+                encoded_draft: draft.clone(),
+                inherited_draft: None,
+            },
+            &metadata,
+            &state,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), manager.requests.recv())
+                .await
+                .is_err()
+        );
+        operation.phase = phase;
+        operation.error = Some("test destination failure".into());
+        crate::database::save_move_operation(&operation).unwrap();
+        assert_eq!(session_draft_input(&state), draft);
+        let outcomes =
+            crate::database::startup_prompt_outcomes("session-1", &[command_id]).unwrap();
+        assert!(
+            matches!(outcomes.values().next(), Some(mj_client::daemon::StartupPromptOutcome::Refused { encoded_draft, reason })
+            if encoded_draft == &draft && reason.contains("test destination failure"))
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+                .await
+                .is_err(),
+            "failed Move delivered destination input to source"
+        );
+    }
+    state.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_retry_exhaustion_preserves_uncertain_command_identity() {
+    const NAME: &str = "startup_retry_exhaustion_preserves_uncertain_command_identity";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    handle_action(
+        queued_prompt_action("uncertain original"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    for attempt in 0..=super::state::STARTUP_STEP_ATTEMPTS {
+        let request = tokio::time::timeout(Duration::from_secs(20), manager.requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let RemoteSessionRequest::Submit {
+            command_id, reply, ..
+        } = request
+        else {
+            panic!("expected receipt reconciliation");
+        };
+        assert_eq!(command_id, "startup-uncertain original");
+        assert_eq!(
+            session_draft_input(&state),
+            "",
+            "uncertain acceptance became editable input"
+        );
+        if attempt == super::state::STARTUP_STEP_ATTEMPTS {
+            reply.send(Ok(77)).unwrap();
+        } else {
+            reply
+                .send(Err(unconfirmed(
+                    "receipt lookup unavailable after original acceptance",
+                )))
+                .unwrap();
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !crate::database::load_startup_deliveries()
+            .unwrap()
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(session_draft_input(&state), "");
+    assert_eq!(
+        crate::database::startup_prompt_outcomes(
+            "session-1",
+            &["startup-uncertain original".into()]
+        )
+        .unwrap()["startup-uncertain original"],
+        mj_client::daemon::StartupPromptOutcome::Accepted
+    );
+    state.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_without_move_origin_ignores_historical_failed_move_after_resume() {
+    const NAME: &str = "startup_without_move_origin_ignores_historical_failed_move_after_resume";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let mut session = state.session_record("session-1").unwrap();
+    let mut historical = retained_startup_test_move(&session);
+    historical.phase = mj_core::state::MovePhase::Failed;
+    historical.queue_admission_started = false;
+    historical.queue_admission_finished = false;
+    historical.error = Some("historical destination failed".into());
+    crate::database::save_move_operation(&historical).unwrap();
+    // Ordinary Resume installs its current state without erasing old Move history.
+    session.state = SessionState::Running;
+    session.native_session_id = Some("resumed-native".into());
+    crate::database::save_session(&session).unwrap();
+    let mut ready = ready_startup_view();
+    ready
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .native_session_id = Some("resumed-native".into());
+    manager
+        .publisher
+        .publish("session-1".into(), ready)
+        .await
+        .unwrap();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    handle_action(
+        queued_prompt_action("ordinary resumed startup"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(text, "ordinary resumed startup");
+    reply.send(Ok(91)).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                crate::database::startup_prompt_outcomes(
+                    "session-1",
+                    &["startup-ordinary resumed startup".into()]
+                )
+                .unwrap()
+                .values()
+                .next(),
+                Some(mj_client::daemon::StartupPromptOutcome::Accepted)
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(session_draft_input(&state), "");
+    assert_eq!(
+        crate::database::load_move_operation("session-1")
+            .unwrap()
+            .unwrap()
+            .phase,
+        mj_core::state::MovePhase::Failed
+    );
+    // Retrying that same Move is a current owner, even while its older
+    // failure is still the committed durable snapshot.
+    let control = LifecycleControl::default();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let entered = started.clone();
+    let released = release.clone();
+    let watch = state
+        .admit_lifecycle(
+            "session-1".into(),
+            LifecycleKind::Move,
+            super::lifecycle::LifecycleStart {
+                resume_workspace_id: None,
+                request_key: None,
+                control: Some(control.clone()),
+                phase: LifecyclePhase::Executing,
+                move_operation_id: Some(historical.operation_id.clone()),
+                deferrable_admission: None,
+            },
+            move |_, _, _| async move {
+                entered.notify_one();
+                released.notified().await;
+                Err(anyhow!("matching Move retry cancelled"))
+            },
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    handle_action(
+        queued_move_prompt_action("matching active retry", &historical.operation_id),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), manager.requests.recv())
+            .await
+            .is_err()
+    );
+    assert!(
+        crate::database::startup_prompt_outcomes(
+            "session-1",
+            &["startup-matching active retry".into()]
+        )
+        .unwrap()
+        .is_empty(),
+        "old durable failure overrode the matching current Move owner"
+    );
+    assert_eq!(session_draft_input(&state), "");
+    assert!(control.request_cancel());
+    release.notify_one();
+    assert!(RuntimeState::wait_lifecycle_result(watch).await.is_err());
+    assert_eq!(session_draft_input(&state), "matching active retry");
+    state.cancel_and_join_startup_prompts().await.unwrap();
 }

@@ -89,6 +89,328 @@ fn agent(text: &str) -> CanonicalTranscriptBody {
     }
 }
 
+fn install_handoff(input: &mut CanonicalSessionSnapshot, text: &str) {
+    let state = mj_transcript::handoff::parse_handoff(text).unwrap();
+    input.session.configuration.values.insert(
+        mj_transcript::handoff::HANDOFF_STATE_KEY.into(),
+        serde_json::to_value(state).unwrap(),
+    );
+}
+
+fn seeded_snapshot(
+    bodies: Vec<CanonicalTranscriptBody>,
+    through_position: u64,
+    state: &str,
+) -> CanonicalSessionSnapshot {
+    let mut input = snapshot(bodies);
+    let mut source = input.clone();
+    source
+        .transcript
+        .retain(|item| item.position <= through_position);
+    source.event_frontier = through_position;
+    let text = encoded_handoff(&source, state, Some("earlier retained fact"), 128 * 1024).unwrap();
+    install_handoff(&mut input, &text);
+    input
+}
+
+#[tokio::test]
+async fn prior_handoff_slices_old_history_and_keeps_same_turn_work() {
+    let input = seeded_snapshot(
+        vec![
+            user("old request"),
+            agent("old answer"),
+            agent("same-turn result"),
+            user("new request"),
+            agent("new result"),
+        ],
+        2,
+        "prior state token",
+    );
+    let backend = FakeBackend::default();
+    compact_snapshot(&input, CompactionBudget::uniform(64 * 1024), &backend)
+        .await
+        .unwrap();
+    let prompts = backend.prompts.lock().unwrap().join("\n");
+    for text in [
+        "prior state token",
+        "earlier retained fact",
+        "same-turn result",
+        "new request",
+    ] {
+        assert!(prompts.contains(text), "{prompts}");
+    }
+    assert!(!prompts.contains("old request"));
+    assert!(!prompts.contains("old answer"));
+}
+
+#[tokio::test]
+async fn paged_prior_state_enters_reduction_once() {
+    let large = "delta payload".repeat(8 * 1024);
+    let input = seeded_snapshot(
+        vec![user("old request"), user("new request"), agent(&large)],
+        1,
+        "unique earlier state",
+    );
+    let backend = FakeBackend::default();
+    compact_snapshot(&input, CompactionBudget::uniform(32 * 1024), &backend)
+        .await
+        .unwrap();
+    let prompts = backend.prompts.lock().unwrap();
+    assert!(prompts.len() > 2);
+    assert_eq!(
+        prompts
+            .iter()
+            .filter(|p| p.contains("unique earlier state"))
+            .count(),
+        1
+    );
+    assert!(prompts.iter().all(|p| !p.contains("old request")));
+    assert!(prompts.iter().any(|p| p.contains("Merge these contiguous")));
+}
+
+#[tokio::test]
+async fn pasted_handoff_is_not_a_compaction_boundary() {
+    let pasted = handoff("unrelated state", Some("retained"), 64 * 1024).unwrap();
+    let input = snapshot(vec![
+        user("keep this original requirement"),
+        user(&pasted),
+        user("latest request"),
+    ]);
+    let backend = FakeBackend::default();
+    compact_snapshot(&input, CompactionBudget::uniform(64 * 1024), &backend)
+        .await
+        .unwrap();
+    let prompts = backend.prompts.lock().unwrap().join("\n");
+    assert!(prompts.contains("keep this original requirement"));
+    assert!(!prompts.contains("<previous_state_snapshot>"));
+}
+
+#[tokio::test]
+async fn zero_delta_reuses_prior_without_growing_retained_context() {
+    let mut input = seeded_snapshot(vec![user("old request")], 1, "reusable state");
+    let backend = FakeBackend::default();
+    let result = compact_snapshot(&input, CompactionBudget::uniform(64 * 1024), &backend)
+        .await
+        .unwrap();
+    install_handoff(&mut input, &result);
+    let next = compact_snapshot(&input, CompactionBudget::uniform(64 * 1024), &backend)
+        .await
+        .unwrap();
+    assert!(backend.prompts.lock().unwrap().is_empty());
+    assert!(next.contains("reusable state"));
+    assert_eq!(next.matches("<retained_recent_context>").count(), 1);
+    assert_eq!(next, result);
+}
+
+#[tokio::test]
+async fn changed_pre_boundary_tool_invalidates_previous_summary() {
+    let mut input = seeded_snapshot(
+        vec![
+            user("old request"),
+            CanonicalTranscriptBody::Tool {
+                call: tool_call("in_progress", "old output"),
+                terminal_outputs: Vec::new(),
+                terminal_refs: Vec::new(),
+                presentation: None,
+            },
+            user("new request"),
+        ],
+        2,
+        "stale state",
+    );
+    let CanonicalTranscriptBody::Tool { call, .. } = &mut input.transcript[1].body else {
+        unreachable!()
+    };
+    *call = tool_call("completed", "updated output");
+    let backend = FakeBackend::default();
+    compact_snapshot(&input, CompactionBudget::uniform(64 * 1024), &backend)
+        .await
+        .unwrap();
+    let prompts = backend.prompts.lock().unwrap().join("\n");
+    assert!(prompts.contains("old request"));
+    assert!(prompts.contains("updated output"));
+    assert!(!prompts.contains("stale state"));
+}
+
+#[tokio::test]
+async fn native_zero_delta_writes_reusable_handoff_envelope() {
+    let mut input = snapshot(vec![user("native cutoff")]);
+    let supplied = PriorCompaction {
+        through_position: 1,
+        summary: "native summary".into(),
+        retained_positions: Vec::new(),
+    };
+    let backend = FakeBackend::default();
+    let result = compact_snapshot_since(
+        &input,
+        CompactionBudget::uniform(64 * 1024),
+        &backend,
+        Some(&supplied),
+    )
+    .await
+    .unwrap();
+    assert!(backend.prompts.lock().unwrap().is_empty());
+    install_handoff(&mut input, &result);
+    assert!(
+        reusable_handoff(&input)
+            .unwrap()
+            .summary
+            .contains("native summary")
+    );
+}
+
+#[tokio::test]
+async fn oversized_zero_delta_normalizes_prior_and_reuses_it_on_next_move() {
+    let mut input = snapshot(vec![user("old raw lineage"), user("native cutoff")]);
+    let supplied = PriorCompaction {
+        through_position: 2,
+        summary: "prior fact ".repeat(10 * 1024),
+        retained_positions: Vec::new(),
+    };
+    let backend = FakeBackend::default();
+    let result = compact_snapshot_since(
+        &input,
+        CompactionBudget::uniform(32 * 1024),
+        &backend,
+        Some(&supplied),
+    )
+    .await
+    .unwrap();
+    assert!(result.len() <= 32 * 1024);
+    assert!(backend.prompts.lock().unwrap().len() > 1);
+    assert_eq!(result.matches("<retained_recent_context>").count(), 1);
+    install_handoff(&mut input, &result);
+    let mut next = snapshot(vec![
+        user("old raw lineage"),
+        user("native cutoff"),
+        user("new work"),
+    ]);
+    next.session.configuration = input.session.configuration;
+    let next_backend = FakeBackend::default();
+    compact_snapshot(&next, CompactionBudget::uniform(32 * 1024), &next_backend)
+        .await
+        .unwrap();
+    let prompts = next_backend.prompts.lock().unwrap().join("\n");
+    assert!(prompts.contains("<previous_state_snapshot>"));
+    assert!(prompts.contains("<state_snapshot>kept</state_snapshot>"));
+    assert!(prompts.contains("new work"));
+    // Bounded raw context inside the previous snapshot is intentionally kept;
+    // the new transcript must not render the old lineage again.
+    let (_, delta) = prompts.split_once("</previous_state_snapshot>").unwrap();
+    assert!(!delta.contains("<user>\nold raw lineage\n</user>"));
+}
+
+#[tokio::test]
+async fn tool_immediately_after_handoff_is_kept() {
+    let input = seeded_snapshot(
+        vec![
+            user("old request"),
+            CanonicalTranscriptBody::Tool {
+                call: tool_call("completed", "same-turn tool result"),
+                terminal_outputs: Vec::new(),
+                terminal_refs: Vec::new(),
+                presentation: None,
+            },
+        ],
+        1,
+        "prior state",
+    );
+    let backend = FakeBackend::default();
+    compact_snapshot(&input, CompactionBudget::uniform(64 * 1024), &backend)
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .prompts
+            .lock()
+            .unwrap()
+            .join("\n")
+            .contains("same-turn tool result")
+    );
+}
+
+#[tokio::test]
+async fn context_clear_excludes_prior_handoff_candidate() {
+    let mut input = seeded_snapshot(
+        vec![user("old request"), user("new request")],
+        1,
+        "old state",
+    );
+    input.transcript[0].stable_id = "context-cleared:reset".into();
+    let backend = FakeBackend::default();
+    compact_snapshot(&input, CompactionBudget::uniform(64 * 1024), &backend)
+        .await
+        .unwrap();
+    let prompts = backend.prompts.lock().unwrap().join("\n");
+    assert!(!prompts.contains("old state"));
+    assert!(prompts.contains("new request"));
+}
+
+#[tokio::test]
+async fn newer_native_summary_preserves_unproven_rows_before_its_boundary() {
+    let input = seeded_snapshot(
+        vec![
+            user("old request"),
+            CanonicalTranscriptBody::Tool {
+                call: tool_call("completed", "late terminal output"),
+                terminal_outputs: Vec::new(),
+                terminal_refs: Vec::new(),
+                presentation: None,
+            },
+            agent("old answer"),
+            user("latest request"),
+        ],
+        1,
+        "generic state",
+    );
+    let supplied = PriorCompaction {
+        through_position: 3,
+        summary: "native state".into(),
+        retained_positions: vec![2],
+    };
+    let backend = FakeBackend::default();
+    compact_snapshot_since(
+        &input,
+        CompactionBudget::uniform(64 * 1024),
+        &backend,
+        Some(&supplied),
+    )
+    .await
+    .unwrap();
+    let prompts = backend.prompts.lock().unwrap().join("\n");
+    assert!(prompts.contains("native state"));
+    assert!(prompts.contains("late terminal output"));
+    assert!(prompts.contains("latest request"));
+    assert!(!prompts.contains("old answer"));
+    assert!(!prompts.contains("generic state"));
+}
+
+#[tokio::test]
+async fn oversized_prior_is_split_within_each_page_budget() {
+    let input = snapshot(vec![user("delta request")]);
+    let supplied = PriorCompaction {
+        through_position: 0,
+        summary: "prior fact ".repeat(10 * 1024),
+        retained_positions: Vec::new(),
+    };
+    let backend = FakeBackend::default();
+    compact_snapshot_since(
+        &input,
+        CompactionBudget::uniform(32 * 1024),
+        &backend,
+        Some(&supplied),
+    )
+    .await
+    .unwrap();
+    let prompts = backend.prompts.lock().unwrap();
+    assert!(prompts.iter().all(|prompt| prompt.len() <= 32 * 1024));
+    assert!(
+        prompts
+            .iter()
+            .any(|prompt| prompt.contains("oversize turn fragment"))
+    );
+}
+
 /// A canonical tool item as `projection` writes it: a whole ACP
 /// `ToolCall`, not a `sessionUpdate`-tagged update.
 fn tool_call(status: &str, text: &str) -> Value {
@@ -112,11 +434,11 @@ fn snapshot(bodies: Vec<CanonicalTranscriptBody>) -> CanonicalSessionSnapshot {
             last_changed_at_ms: 0,
             body,
         })
-        .collect();
+        .collect::<Vec<_>>();
     CanonicalSessionSnapshot {
         command_ledger: None,
         assessment_state: None,
-        event_frontier: 0,
+        event_frontier: transcript.len() as u64,
         event_frontier_digest: "0".repeat(64),
         session: CanonicalSessionState {
             execution: CanonicalExecutionState::Idle,

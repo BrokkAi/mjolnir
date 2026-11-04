@@ -1,14 +1,14 @@
 //! Keyed runtime publications. A cursor belongs to one daemon incarnation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use mj_core::config::Config;
 use mj_core::native_agent::NativeAgentSummary;
-use mj_core::snapshot_map::SnapshotMap;
+use mj_core::snapshot_map::{SharedSnapshot, SnapshotMap};
 use mj_core::state::{MaterializedSession, MoveOperation, ProjectionWindow, SessionRecord};
-use mj_core::subagent::{SubagentPolicy, SubagentRecord};
+use mj_core::subagent::{SubagentMetadata, SubagentPolicy};
 use mj_core::transcript::TranscriptItem;
 use serde::{Deserialize, Serialize};
 
@@ -19,14 +19,36 @@ use crate::review::RuntimeReviewView;
 pub struct RuntimeCursor {
     pub incarnation: String,
     pub sequence: u64,
+    /// Families whose historical session rows belong to this cursor's view.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub subagent_parents: BTreeSet<String>,
+}
+
+/// One atomic runtime snapshot used to start a replica without another download.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeBootstrap {
+    pub cursor: RuntimeCursor,
+    pub projection: RuntimeProjection,
+}
+
+impl RuntimeBootstrap {
+    pub fn into_replica(self) -> RuntimeReplica {
+        RuntimeReplica {
+            cursor: Some(self.cursor),
+            projection: self.projection,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeProjection {
+    #[serde(default)]
+    pub subagent_parents: BTreeSet<String>,
     /// Legacy ordering shared with one-shot management responses.
     pub revision: u64,
     pub records: SnapshotMap<String, SessionRecord>,
-    pub subagents: SnapshotMap<String, SubagentRecord>,
+    pub subagents: SnapshotMap<String, SubagentMetadata>,
     pub sessions: SnapshotMap<String, RuntimeSessionView>,
     pub moves: SnapshotMap<String, MoveOperation>,
     pub native_agents: SnapshotMap<String, NativeAgentSummary>,
@@ -40,6 +62,70 @@ pub struct RuntimeProjection {
     pub transcripts: SnapshotMap<String, SessionTail>,
 }
 
+impl RuntimeProjection {
+    /// Publish row detail for live work and the families the client has opened.
+    /// Compact relationship metadata remains available for counts/navigation.
+    pub fn for_subagent_parents(&self, parents: &BTreeSet<String>) -> Self {
+        let operations = self
+            .metadata
+            .lifecycles
+            .iter()
+            .map(|operation| operation.session_id.clone())
+            .chain(
+                self.moves
+                    .iter()
+                    .filter(|(_, operation)| operation.is_active())
+                    .map(|(id, _)| id.clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        let mut ancestors = parents.clone();
+        for parent in parents {
+            let mut id = parent.as_str();
+            let mut seen = BTreeSet::new();
+            while seen.insert(id.to_owned()) {
+                let Some(relation) = self.subagents.get(id) else {
+                    break;
+                };
+                ancestors.insert(relation.parent_session_id.clone());
+                id = &relation.parent_session_id;
+            }
+        }
+        let mut result = self.clone();
+        result.subagent_parents = parents.clone();
+        result.records = self.records.filtered(|id, record| {
+            let relation = self.subagents.get(id);
+            let in_family =
+                relation.is_some_and(|relation| parents.contains(&relation.parent_session_id));
+            let live = match relation {
+                None => record.state != mj_core::state::SessionState::Stopped,
+                Some(_) => !matches!(
+                    record.state,
+                    mj_core::state::SessionState::Stopped | mj_core::state::SessionState::Parked
+                ),
+            };
+            operations.contains(id)
+                || (!record.archived && (live || in_family || ancestors.contains(id)))
+        });
+        result
+            .subagents
+            .retain(|id, _| self.records.get(id).is_some_and(|record| !record.archived));
+        result
+            .sessions
+            .retain(|id, _| result.records.contains_key(id));
+        result.moves.retain(|id, _| result.records.contains_key(id));
+        result
+            .session_cpu
+            .retain(|id, _| result.records.contains_key(id));
+        result
+            .transcripts
+            .retain(|id, _| result.records.contains_key(id));
+        result
+            .native_agents
+            .retain(|_, agent| result.records.contains_key(&agent.agent.owner_session_id));
+        result
+    }
+}
+
 /// The daemon's hard container budget for one probed deployment host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeContainerCapacity {
@@ -51,8 +137,11 @@ pub struct RuntimeContainerCapacity {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeMetadata {
     #[serde(default)]
-    pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
-    pub config: Config,
+    pub operator_presence: mj_core::state::OperatorPresence,
+    #[serde(default)]
+    pub profile_capabilities:
+        SharedSnapshot<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>,
+    pub config: SharedSnapshot<Config>,
     /// The ids in `config.targets` that the daemon supplied as default
     /// candidates rather than the user's file naming them. `Config` never
     /// serializes this set (it is not file content), so the feed carries it
@@ -64,30 +153,31 @@ pub struct RuntimeMetadata {
     pub default_targets: std::collections::BTreeSet<String>,
     #[serde(
         default,
-        deserialize_with = "mj_core::subagent::deserialize_launch_policy"
+        alias = "last_subagent_policy",
+        deserialize_with = "mj_core::subagent::deserialize_policy_map"
     )]
-    pub last_subagent_policy: SubagentPolicy,
+    pub last_subagent_policies: BTreeMap<String, SubagentPolicy>,
     pub workspace_names: BTreeMap<String, String>,
     pub lifecycles: Vec<RuntimeLifecycleView>,
     pub reviews: Vec<RuntimeReviewView>,
     pub notices: Vec<RuntimeNotice>,
     /// The daemon's quota reports. The daemon is the only prober.
     #[serde(default)]
-    pub quotas: crate::quota::QuotaSnapshot,
+    pub quotas: SharedSnapshot<crate::quota::QuotaSnapshot>,
     /// Free space on each target host, and whether it is full. The daemon's
     /// storage board is the only judge; a daemon that predates the field
     /// sends none.
     #[serde(default)]
-    pub storage: Vec<mj_core::targets::storage::TargetStorageView>,
+    pub storage: SharedSnapshot<Vec<mj_core::targets::storage::TargetStorageView>>,
     /// Hard container headroom for each probed deployment host. The daemon
     /// includes in-memory resume and move reservations; terminal surfaces
     /// must not recompute this from records they happen to have loaded.
     #[serde(default)]
-    pub container_capacities: BTreeMap<String, RuntimeContainerCapacity>,
+    pub container_capacities: SharedSnapshot<BTreeMap<String, RuntimeContainerCapacity>>,
     /// What new-session defaults are chosen from. The feed carries only live
     /// sessions, but the defaults follow every session, stopped ones too.
     #[serde(default)]
-    pub launch_recency: Vec<LaunchRecency>,
+    pub launch_recency: SharedSnapshot<Vec<LaunchRecency>>,
     /// Latest interactive launch on the daemon host, independent of session history.
     #[serde(default)]
     pub recent_launch: Option<mj_core::go::RecentLaunch>,
@@ -100,7 +190,7 @@ impl RuntimeMetadata {
     /// The configuration a client installs: the published config with the
     /// daemon's default-candidate set.
     pub fn installed_config(&self) -> Config {
-        let mut config = self.config.clone();
+        let mut config = (*self.config).clone();
         config.default_targets = self.default_targets.clone();
         config
     }
@@ -433,7 +523,7 @@ pub type KeyChanges<T> = Vec<(String, Option<T>)>;
 pub struct RuntimeDelta {
     pub revision: Option<u64>,
     pub records: KeyChanges<SessionRecord>,
-    pub subagents: KeyChanges<SubagentRecord>,
+    pub subagents: KeyChanges<SubagentMetadata>,
     pub sessions: KeyChanges<RuntimeSessionView>,
     pub moves: KeyChanges<MoveOperation>,
     pub native_agents: KeyChanges<NativeAgentSummary>,
@@ -599,6 +689,7 @@ mod tests {
         RuntimeCursor {
             incarnation: incarnation.into(),
             sequence,
+            subagent_parents: Default::default(),
         }
     }
 
@@ -614,11 +705,18 @@ mod tests {
         }
     }
 
+    // Hard-won: AFK review #3: a coalesced feed hid transitions with equal availability.
     #[test]
     fn replica_applies_add_update_delete_atomically_and_ignores_duplicates() {
         let mut first = RuntimeProjection::default();
+        first.metadata.operator_presence = mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        };
         first.sessions.insert("old".into(), session("old"));
         let mut next = first.clone();
+        // The intermediate here revision2 was coalesced away by the watch feed.
+        next.metadata.operator_presence.revision = 3;
         next.sessions.remove("old");
         next.sessions.insert("new".into(), session("new"));
         let initial = RuntimeFrame::Snapshot {
@@ -630,6 +728,8 @@ mod tests {
             cursor: cursor("a", 2),
             changes: Box::new(RuntimeDelta::between(&first, &next)),
         };
+        let delta: RuntimeFrame =
+            serde_json::from_value(serde_json::to_value(delta).unwrap()).unwrap();
         let mut replica = RuntimeReplica::default();
         replica.apply(initial).unwrap();
         let retained = replica.projection.clone();
@@ -651,7 +751,7 @@ mod tests {
     #[test]
     fn default_target_origin_survives_the_wire_and_an_older_daemon_sends_none() {
         let mut metadata = RuntimeMetadata {
-            config: Config::default().with_local_targets(),
+            config: Config::default().with_local_targets().into(),
             ..Default::default()
         };
         metadata.default_targets = metadata.config.default_targets.clone();
@@ -664,6 +764,27 @@ mod tests {
         value.as_object_mut().unwrap().remove("default_targets");
         let older: RuntimeMetadata = serde_json::from_value(value).unwrap();
         assert!(!older.installed_config().is_default_target("docker"));
+        let held = metadata.clone();
+        metadata.config.advanced.auto_afk_minutes = 3;
+        assert_eq!(held.config.advanced.auto_afk_minutes, 0);
+        assert_eq!(metadata.config.advanced.auto_afk_minutes, 3);
+    }
+
+    #[test]
+    fn remembered_subagent_policies_accept_old_scalar_and_new_profile_map() {
+        let mut old_value = serde_json::to_value(RuntimeMetadata::default()).unwrap();
+        old_value
+            .as_object_mut()
+            .unwrap()
+            .remove("last_subagent_policies");
+        old_value["last_subagent_policy"] = serde_json::json!({"mode": "mjolnir"});
+        let old: RuntimeMetadata = serde_json::from_value(old_value).unwrap();
+        assert!(old.last_subagent_policies[""].uses_mjolnir());
+
+        let mut new_value = serde_json::to_value(RuntimeMetadata::default()).unwrap();
+        new_value["last_subagent_policies"] = serde_json::json!({"mode": {"mode": "none"}});
+        let new: RuntimeMetadata = serde_json::from_value(new_value).unwrap();
+        assert_eq!(new.last_subagent_policies["mode"], SubagentPolicy::None);
     }
 
     #[test]

@@ -791,10 +791,48 @@ impl RetainedContainer {
         if !self.network_mode.is_empty() {
             args.extend(["--network".into(), self.network_mode.clone()]);
         }
-        if self.memory > 0 {
+        // The source's limits were enforceable when it was created; the host
+        // may have stopped delegating their controllers since.
+        let unenforceable = match &host {
+            ImageHost::LocalPodman | ImageHost::SshPodman(_)
+                if self.memory > 0 || self.nano_cpus > 0 =>
+            {
+                let ssh = match &host {
+                    ImageHost::SshPodman(ssh) => Some(ssh),
+                    _ => None,
+                };
+                match probe_podman_unenforceable_limits(ssh, executor) {
+                    Ok(limits) => limits,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = format!("{error:#}"),
+                            "could not read Podman's cgroup controllers; keeping container limits"
+                        );
+                        Vec::new()
+                    }
+                }
+            }
+            _ => Vec::new(),
+        };
+        let dropped = [
+            (CgroupLimit::Memory, self.memory > 0),
+            (CgroupLimit::Cpu, self.nano_cpus > 0),
+        ]
+        .into_iter()
+        .filter(|(limit, set)| *set && unenforceable.contains(limit))
+        .map(|(limit, _)| limit)
+        .collect::<Vec<_>>();
+        if !dropped.is_empty() {
+            executor.notify_notice(&format!(
+                "{} {}",
+                unenforceable_limits_detail(&dropped),
+                CGROUP_DELEGATION_REMEDIATION
+            ));
+        }
+        if self.memory > 0 && !dropped.contains(&CgroupLimit::Memory) {
             args.extend(["--memory".into(), self.memory.to_string()]);
         }
-        if self.nano_cpus > 0 {
+        if self.nano_cpus > 0 && !dropped.contains(&CgroupLimit::Cpu) {
             args.extend(["--cpus".into(), (self.nano_cpus as f64 / 1e9).to_string()]);
         }
         args.extend(["--pids-limit".into(), self.pids_limit.to_string()]);

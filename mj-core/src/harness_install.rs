@@ -9,6 +9,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::config::{ExecutionPolicy, HarnessKind};
+use crate::file_lock::FileLock;
 use crate::harness_runtime::{
     GROK_VERSION, HarnessPin, KIMI_VERSION, LEASE_FILE, MANIFEST_FILE, ManagedHarnessManifest,
     NODE_VERSION, harness_uses_node_runtime, managed_harness_cache_root,
@@ -32,8 +33,6 @@ const CODEX_PACKAGE_JSON: &[u8] = include_bytes!("../assets/harnesses/codex/pack
 const CODEX_PACKAGE_LOCK: &[u8] = include_bytes!("../assets/harnesses/codex/package-lock.json");
 const CLAUDE_PACKAGE_JSON: &[u8] = include_bytes!("../assets/harnesses/claude/package.json");
 const CLAUDE_PACKAGE_LOCK: &[u8] = include_bytes!("../assets/harnesses/claude/package-lock.json");
-const MIMO_PACKAGE_JSON: &[u8] = include_bytes!("../assets/harnesses/mimo/package.json");
-const MIMO_PACKAGE_LOCK: &[u8] = include_bytes!("../assets/harnesses/mimo/package-lock.json");
 
 #[derive(Debug)]
 pub struct ManagedHarness {
@@ -48,7 +47,7 @@ pub struct ManagedHarness {
     pub cli_entrypoint: PathBuf,
     pub lease_path: PathBuf,
     pub cache_root: PathBuf,
-    _lease: File,
+    _lease: FileLock,
     _managed_node: Option<ManagedNodeRuntime>,
 }
 
@@ -59,7 +58,7 @@ pub struct ManagedHarness {
 pub struct ManagedNodeRuntime {
     path: PathBuf,
     lease_path: PathBuf,
-    _lease: File,
+    _lease: FileLock,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,15 +221,15 @@ async fn resolve_at_async(
     std::fs::create_dir_all(&harness_root)
         .with_context(|| format!("create managed {} cache", harness.display_name()))?;
     let install_lock = open_lock(&harness_root.join(INSTALL_LOCK_FILE))?;
-    lock_file(&install_lock, false, "managed harness installer").await?;
+    let install_lock = lock_file(install_lock, false, "managed harness installer").await?;
     remove_abandoned_staging(&harness_root)?;
 
     let install = managed_harness_install_dir(root, harness);
     if !complete_install(&install, harness, selected)? {
         if install.exists() {
             let lease = open_lock(&install.join(LEASE_FILE))?;
-            match lease.try_lock() {
-                Ok(()) => {}
+            let _lease = match lease.try_lock() {
+                Ok(()) => FileLock::new(lease),
                 Err(std::fs::TryLockError::WouldBlock) => bail!(
                     "managed harness repair deferred: {} is still in use",
                     install.display()
@@ -238,7 +237,7 @@ async fn resolve_at_async(
                 Err(std::fs::TryLockError::Error(error)) => {
                     return Err(error).context("lock invalid managed harness for repair");
                 }
-            }
+            };
             std::fs::remove_dir_all(&install).with_context(|| {
                 format!("remove incomplete managed harness {}", install.display())
             })?;
@@ -249,7 +248,7 @@ async fn resolve_at_async(
 
     let lease_path = install.join(LEASE_FILE);
     let lease = open_lock(&lease_path)?;
-    lock_file(&lease, true, "managed harness lease").await?;
+    let lease = lock_file(lease, true, "managed harness lease").await?;
     drop(install_lock);
 
     let mut launch_environment = BTreeMap::new();
@@ -346,7 +345,7 @@ async fn resolve_at_async(
     })
 }
 
-async fn lock_file(file: &File, shared: bool, purpose: &str) -> Result<()> {
+async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> {
     let started = Instant::now();
     loop {
         let result = if shared {
@@ -355,7 +354,7 @@ async fn lock_file(file: &File, shared: bool, purpose: &str) -> Result<()> {
             file.try_lock()
         };
         match result {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(FileLock::new(file)),
             Err(std::fs::TryLockError::Error(error)) => {
                 return Err(error).with_context(|| format!("lock {purpose}"));
             }
@@ -428,16 +427,7 @@ async fn install_into(
         HarnessKind::Grok => install_grok(staging.path(), environment).await?,
         HarnessKind::Muse => install_muse_native(staging.path(), environment).await?,
         HarnessKind::OpenCode => install_opencode(staging.path(), environment).await?,
-        HarnessKind::Mimo => {
-            install_npm(
-                staging.path(),
-                MIMO_PACKAGE_JSON,
-                MIMO_PACKAGE_LOCK,
-                harness,
-                environment,
-            )
-            .await?
-        }
+        HarnessKind::Mimo => install_mimo(staging.path(), environment).await?,
         HarnessKind::Dsh => {
             unreachable!("DSH has no managed installation; resolve returns before installing")
         }
@@ -679,6 +669,80 @@ async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>
     Ok(())
 }
 
+/// Install the pinned MiMo Code release from its native archive. The npm
+/// package is only a launcher that downloads this archive on first run and
+/// skips verification when no checksum is published (none is), so the archive
+/// is fetched here against the pinned digest instead. Each archive holds the
+/// executable `mimo` at its root: a gzipped tarball on Linux, a zip on macOS.
+async fn install_mimo(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+    use crate::harness_runtime::MIMO_VERSION;
+    let metadata: serde_json::Value =
+        serde_json::from_str(include_str!("../assets/mimo/runtime.json"))?;
+    anyhow::ensure!(
+        metadata["version"] == MIMO_VERSION,
+        "MiMo Code download metadata does not match the managed runtime pin"
+    );
+    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let platform = metadata["platforms"]
+        .get(&key)
+        .with_context(|| format!("MiMo Code does not have a managed runtime for {key}"))?;
+    let field = |name: &str| {
+        platform[name]
+            .as_str()
+            .with_context(|| format!("missing MiMo Code artifact field {name}"))
+    };
+    let file = field("archive")?;
+    let destinations = [
+        format!("https://github.com/XiaomiMiMo/MiMo-Code/releases/download/v{MIMO_VERSION}/{file}"),
+        format!(
+            "https://mimocode.cnbj1.mi-fds.com/mimocode/mimocode/releases/v{MIMO_VERSION}/{file}"
+        ),
+    ];
+    let archive = staging.join(file);
+    download_verified_first_async(&destinations, &archive, field("sha256")?, environment).await?;
+    let bin = staging.join("bin");
+    std::fs::create_dir_all(&bin)?;
+    let entrypoint = bin.join("mimo");
+    let archive_for_extract = archive.clone();
+    let entrypoint_for_extract = entrypoint.clone();
+    tokio::task::spawn_blocking(move || {
+        if archive_for_extract.extension() == Some(OsStr::new("zip")) {
+            extract_zip_file(&archive_for_extract, "mimo", &entrypoint_for_extract)
+        } else {
+            extract_archive_file(
+                &archive_for_extract,
+                Path::new("mimo"),
+                &entrypoint_for_extract,
+            )
+        }
+    })
+    .await
+    .context("MiMo Code extraction task failed")??;
+    std::fs::remove_file(&archive)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+fn extract_zip_file(archive: &Path, wanted: &str, destination: &Path) -> Result<()> {
+    let archive_file =
+        File::open(archive).with_context(|| format!("open archive {}", archive.display()))?;
+    let mut zip_archive = zip::ZipArchive::new(archive_file)
+        .with_context(|| format!("read archive {}", archive.display()))?;
+    let mut entry = zip_archive
+        .by_name(wanted)
+        .with_context(|| format!("archive {} did not contain {wanted}", archive.display()))?;
+    anyhow::ensure!(
+        entry.is_file(),
+        "archive entry {wanted} is not a regular file"
+    );
+    let mut output =
+        File::create(destination).with_context(|| format!("create {}", destination.display()))?;
+    std::io::copy(&mut entry, &mut output)
+        .with_context(|| format!("extract {wanted} to {}", destination.display()))?;
+    Ok(())
+}
+
 fn extract_archive_file(archive: &Path, wanted: &Path, destination: &Path) -> Result<()> {
     let archive_file =
         File::open(archive).with_context(|| format!("open archive {}", archive.display()))?;
@@ -899,15 +963,15 @@ async fn install_managed_node(
     std::fs::create_dir_all(root)
         .with_context(|| format!("create managed Node.js cache {}", root.display()))?;
     let install_lock = open_lock(&root.join(INSTALL_LOCK_FILE))?;
-    lock_file(&install_lock, false, "managed Node.js installer").await?;
+    let install_lock = lock_file(install_lock, false, "managed Node.js installer").await?;
     remove_abandoned_staging(root)?;
 
     let cached = managed_node_health(&install, environment).await?;
     if cached != ManagedNodeHealth::Usable {
         if install.exists() {
             let lease = open_lock(&install.join(LEASE_FILE))?;
-            match lease.try_lock() {
-                Ok(()) => {}
+            let _lease = match lease.try_lock() {
+                Ok(()) => FileLock::new(lease),
                 Err(std::fs::TryLockError::WouldBlock) => bail!(
                     "managed Node.js repair deferred: {} is still in use; the cached installation is unusable: {}",
                     install.display(),
@@ -918,7 +982,7 @@ async fn install_managed_node(
                 Err(std::fs::TryLockError::Error(error)) => {
                     return Err(error).context("lock invalid managed Node.js for repair");
                 }
-            }
+            };
             std::fs::remove_dir_all(&install).with_context(|| {
                 format!("remove incomplete managed Node.js {}", install.display())
             })?;
@@ -971,7 +1035,7 @@ async fn install_managed_node(
     }
     let lease_path = install.join(LEASE_FILE);
     let lease = open_lock(&lease_path)?;
-    lock_file(&lease, true, "managed Node.js lease").await?;
+    let lease = lock_file(lease, true, "managed Node.js lease").await?;
     gc_node_root(root, &folder)?;
     drop(install_lock);
 
@@ -1005,6 +1069,7 @@ fn gc_node_root(root: &Path, keep: &str) -> Result<()> {
         };
         match lease.try_lock() {
             Ok(()) => {
+                let _lease = FileLock::new(lease);
                 if let Err(error) = std::fs::remove_dir_all(entry.path()) {
                     tracing::warn!(%error, path = %entry.path().display(), "could not remove obsolete managed Node.js");
                 }
@@ -1525,6 +1590,7 @@ fn gc_harness_root(root: &Path, keep_install_id: &str) -> Result<()> {
         };
         match lease.try_lock() {
             Ok(()) => {
+                let _lease = FileLock::new(lease);
                 if let Err(error) = std::fs::remove_dir_all(entry.path()) {
                     tracing::warn!(%error, path = %entry.path().display(), "could not remove obsolete managed harness");
                 }
@@ -1538,12 +1604,12 @@ fn gc_harness_root(root: &Path, keep_install_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn acquire_supervisor_lease(path: &Path) -> Result<File> {
+pub fn acquire_supervisor_lease(path: &Path) -> Result<FileLock> {
     let lease = open_lock(path)?;
     lease
         .lock_shared()
         .with_context(|| format!("lease managed harness for supervisor {}", path.display()))?;
-    Ok(lease)
+    Ok(FileLock::new(lease))
 }
 
 #[cfg(test)]
@@ -1597,6 +1663,33 @@ mod tests {
         command.arg("--version");
         apply_environment(&mut command, &environment);
         run_checked(&mut command, "verify relocated Kimi executable").unwrap();
+    }
+
+    #[test]
+    #[ignore = "downloads the pinned MiMo Code release into a disposable cache"]
+    fn mimo_real_install_launches_from_final_directory() {
+        let parent =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/mimo-install-validation");
+        std::fs::create_dir_all(&parent).unwrap();
+        let temp = tempfile::tempdir_in(parent).unwrap();
+        let environment = crate::login_environment::discover().unwrap();
+        let managed = resolve_at(
+            temp.path(),
+            HarnessKind::Mimo,
+            ExecutionPolicy::ConfiguredApprovals,
+            &environment,
+        )
+        .unwrap();
+        let mut command = Command::new(&managed.cli_entrypoint);
+        command.arg("--version");
+        apply_environment(&mut command, &environment);
+        command.envs(&managed.environment);
+        let output = crate::subprocess::run_with_input(&mut command, &[]).unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            crate::harness_runtime::MIMO_VERSION
+        );
     }
 
     #[test]
@@ -2367,17 +2460,82 @@ mod tests {
         complete_fake(&root, HarnessKind::Codex, "old", "bin/bridge");
         complete_fake(&root, HarnessKind::Codex, "current", "bin/bridge");
 
-        let old_lease = open_lock(&root.join("old").join(LEASE_FILE)).unwrap();
-        old_lease.lock_shared().unwrap();
+        let old_lease = acquire_supervisor_lease(&root.join("old").join(LEASE_FILE)).unwrap();
         gc_harness_root(&root, "current").unwrap();
         assert!(root.join("old").exists());
 
         drop(old_lease);
-        assert_lease_released(|| {
-            gc_harness_root(&root, "current").unwrap();
-            !root.join("old").exists()
-        });
+        gc_harness_root(&root, "current").unwrap();
+        assert!(!root.join("old").exists());
         assert!(root.join("current").exists());
+    }
+
+    // Hard-won: dfc33b0e9: an unrelated fork extended a released installation lease.
+    #[test]
+    fn released_managed_install_is_collected_while_an_unrelated_child_waits_to_exec() {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::CommandExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let selected = pin(HarnessKind::Grok);
+        let root = cache.join(HarnessKind::Grok.id());
+        std::fs::create_dir_all(&root).unwrap();
+        complete_fake(
+            &root,
+            HarnessKind::Grok,
+            selected.install_id,
+            selected.entrypoint,
+        );
+        let managed = resolve_at(
+            &cache,
+            HarnessKind::Grok,
+            ExecutionPolicy::ConfiguredApprovals,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let install = managed.lease_path.parent().unwrap().to_path_buf();
+        let (mut parent, forked) = UnixStream::pair().unwrap();
+        parent
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let parent_fd = parent.as_raw_fd();
+        let unrelated = std::thread::spawn(move || {
+            let fd = forked.as_raw_fd();
+            let mut command = Command::new("/usr/bin/true");
+            // SAFETY: only async-signal-safe close/read/write run after fork.
+            // Closing the peer ensures unwinding the parent releases the child.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::close(parent_fd);
+                    let mut byte = 1_u8;
+                    if libc::write(fd, (&byte as *const u8).cast(), 1) != 1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if libc::read(fd, (&mut byte as *mut u8).cast(), 1) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            crate::subprocess::run_capturing_stdout(&mut command)
+                .unwrap()
+                .status
+        });
+        parent.read_exact(&mut [0]).unwrap();
+        drop(managed);
+        let collected = gc_harness_root(&root, "a-different-install");
+        let exists = install.exists();
+        // Reap the child before asserting, including when collection fails.
+        parent.write_all(&[1]).unwrap();
+        assert!(unrelated.join().unwrap().success());
+        collected.unwrap();
+        assert!(
+            !exists,
+            "released install was still considered in use before exec"
+        );
     }
 
     #[test]
@@ -2411,24 +2569,10 @@ mod tests {
             Err(std::fs::TryLockError::WouldBlock)
         ));
         drop(supervisor);
-        assert_lease_released(|| match exclusive.try_lock() {
-            Ok(()) => true,
-            Err(std::fs::TryLockError::WouldBlock) => false,
-            Err(std::fs::TryLockError::Error(error)) => panic!("lease lock failed: {error}"),
-        });
-    }
-
-    // Parallel process-spawning tests can briefly inherit CLOEXEC descriptors
-    // between fork and exec. Closing our copy need not release the lock yet.
-    fn assert_lease_released(mut released: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !released() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "lease was not released"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        exclusive
+            .try_lock()
+            .expect("supervisor lease released immediately");
+        let _exclusive = FileLock::new(exclusive);
     }
 
     #[test]

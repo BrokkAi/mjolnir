@@ -195,6 +195,12 @@ pub struct SubagentFinishedReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MailboxEventBody {
+    OperatorAway {
+        request: String,
+    },
+    OperatorBack {
+        requests: Vec<String>,
+    },
     ReviewVerdict {
         review_id: String,
         repository: std::path::PathBuf,
@@ -268,6 +274,9 @@ impl MailboxEventBody {
     /// legacy text, but it cannot preserve peer sender identity.
     pub const fn minimum_relay_protocol(&self) -> u32 {
         match self {
+            Self::OperatorAway { .. } | Self::OperatorBack { .. } => {
+                crate::relay::RELAY_OPERATOR_AWAY_PROTOCOL
+            }
             Self::ReviewVerdict { .. } => crate::relay::RELAY_PUSH_REVIEW_PROTOCOL,
             Self::SubagentFinished { .. } => crate::relay::RELAY_SUBAGENT_FINISHED_PROTOCOL,
             Self::SessionMessage { .. } => crate::relay::RELAY_SESSION_MESSAGE_PROTOCOL,
@@ -309,6 +318,16 @@ pub struct MailboxEventDescription {
 /// event body. The caller still serializes this as the old `text` field.
 pub fn render_mailbox_event(event: &MailboxEvent) -> String {
     let description = describe_mailbox_event(event);
+    if matches!(
+        event.body,
+        MailboxEventBody::OperatorAway { .. } | MailboxEventBody::OperatorBack { .. }
+    ) {
+        return format!(
+            "{}\n{}",
+            description.header,
+            description.body.unwrap_or_default()
+        );
+    }
     if let MailboxEventBody::ParentMessage { text } = &event.body {
         return format!("{}\n{text}", description.header);
     }
@@ -350,12 +369,24 @@ pub fn render_mailbox_events(events: &[MailboxEvent]) -> String {
     }
     let mut blocks: Vec<_> = events
         .iter()
-        .filter(|event| is_session_message(&event.body))
+        .filter(|event| {
+            is_session_message(&event.body)
+                || matches!(
+                    event.body,
+                    MailboxEventBody::OperatorAway { .. } | MailboxEventBody::OperatorBack { .. }
+                )
+        })
         .map(render_mailbox_event)
         .collect();
     let untrusted = events
         .iter()
-        .filter(|event| !is_session_message(&event.body))
+        .filter(|event| {
+            !is_session_message(&event.body)
+                && !matches!(
+                    event.body,
+                    MailboxEventBody::OperatorAway { .. } | MailboxEventBody::OperatorBack { .. }
+                )
+        })
         .map(render_mailbox_event)
         .collect::<Vec<_>>();
     if !untrusted.is_empty() {
@@ -371,6 +402,31 @@ pub fn render_mailbox_events(events: &[MailboxEvent]) -> String {
 /// the same event type, title, actor, and item reference.
 pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
     let (header, body, context, transcript_line) = match &event.body {
+        MailboxEventBody::OperatorBack { requests } => (
+            "Mjolnir: the operator is back".to_owned(),
+            Some(format!(
+                "The operator is back. While they were away, Mjolnir answered these requests for them:\n\n{}\n\nIf you still need an answer, ask again now. It will be shown to the operator.",
+                requests
+                    .iter()
+                    .map(|request| quoted_body(request).join("\n"))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            )),
+            None,
+            "Told the agent you are back".to_owned(),
+        ),
+        MailboxEventBody::OperatorAway { request } => (
+            "Mjolnir: the operator is away".to_owned(),
+            Some(format!(
+                "The operator is away, so Mjolnir answered this request for them. They have not seen it and have not refused it:\n\n{}\n\nIf you have other useful work that does not depend on this answer, do that work now. If you cannot continue without an answer, make the same request again. Mjolnir will then show it to the operator and wait for them, which may take a long time.",
+                quoted_body(request).join("\n")
+            )),
+            None,
+            format!(
+                "Not shown because you were away: {}",
+                request.lines().next().unwrap_or_default()
+            ),
+        ),
         MailboxEventBody::ReviewVerdict {
             repository,
             base_commit,
@@ -380,19 +436,31 @@ pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
             ..
         } => {
             let short = |value: &str| value.chars().take(7).collect::<String>();
-            let range = format!(
-                "{}..{} in {}",
-                short(base_commit),
-                short(head_commit),
-                repository.display()
-            );
+            // An empty base means HEAD shares no history with any start point.
+            let range = if base_commit.is_empty() {
+                format!("up to {} in {}", short(head_commit), repository.display())
+            } else {
+                format!(
+                    "{}..{} in {}",
+                    short(base_commit),
+                    short(head_commit),
+                    repository.display()
+                )
+            };
             let text = match verdict {
                 crate::review::verdict::ReviewVerdict::Clean => format!(
                     "Review clean for commits {range}. Tree {} is recorded as reviewed; you may push.",
                     short(tree)
                 ),
+                crate::review::verdict::ReviewVerdict::Findings { synthesis, .. }
+                    if !verdict.is_complete() =>
+                {
+                    format!(
+                        "Review incomplete for commits {range}:\n{synthesis}\nAddress valid findings and call request_review again. The push stays blocked; override_review is unavailable while any reviewer has failed."
+                    )
+                }
                 crate::review::verdict::ReviewVerdict::Findings { synthesis, .. } => format!(
-                    "Review of commits {range} found:\n{synthesis}\nFix these, commit, and call request_review again before pushing."
+                    "Review of commits {range} found:\n{synthesis}\nFix these, commit, and call request_review again before pushing. If you judge these findings incorrect or unreasonable, call override_review with your reason instead."
                 ),
                 crate::review::verdict::ReviewVerdict::Failed { reason } => format!(
                     "Review of commits {range} failed: {reason}. Call request_review again; the push stays blocked until a review is clean."
@@ -717,12 +785,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_verdict_without_a_base_names_only_the_head() {
+        let description = describe_mailbox_event(&event(MailboxEventBody::ReviewVerdict {
+            review_id: "orphan-review".into(),
+            repository: "/workspace/solo".into(),
+            base_commit: String::new(),
+            head_commit: "bbbbbbb456".into(),
+            tree: "ccccccc789".into(),
+            verdict: crate::review::verdict::ReviewVerdict::Clean,
+        }));
+        assert!(
+            description
+                .header
+                .starts_with("Review clean for commits up to bbbbbbb in /workspace/solo."),
+            "{}",
+            description.header
+        );
+    }
+
     // Hard-won: #4625: actorless and legacy-unknown merges must not render a by-clause.
     #[test]
     fn golden_mailbox_agent_context() {
         let events = vec![
             event(MailboxEventBody::ReviewVerdict { review_id: "clean-review".into(), repository: "/workspace/app".into(), base_commit: "aaaaaaa123".into(), head_commit: "bbbbbbb456".into(), tree: "ccccccc789".into(), verdict: crate::review::verdict::ReviewVerdict::Clean }),
-            event(MailboxEventBody::ReviewVerdict { review_id: "findings-review".into(), repository: "/workspace/app".into(), base_commit: "aaaaaaa123".into(), head_commit: "bbbbbbb456".into(), tree: "ccccccc789".into(), verdict: crate::review::verdict::ReviewVerdict::Findings { synthesis: "Fix the parser race.".into(), evidence: Default::default() } }),
+            event(MailboxEventBody::ReviewVerdict { review_id: "findings-review".into(), repository: "/workspace/app".into(), base_commit: "aaaaaaa123".into(), head_commit: "bbbbbbb456".into(), tree: "ccccccc789".into(), verdict: crate::review::verdict::ReviewVerdict::Findings { synthesis: "Independent reviewer reports may overlap.\n\nReviewer 1 (session reviewer-one)\nFix the parser race.\n\nReviewer 2 (session reviewer-two)\nPreserve requests during retries.".into(), evidence: Default::default() } }),
+            event(MailboxEventBody::ReviewVerdict { review_id: "incomplete-review".into(), repository: "/workspace/app".into(), base_commit: "aaaaaaa123".into(), head_commit: "bbbbbbb456".into(), tree: "ccccccc789".into(), verdict: crate::review::verdict::ReviewVerdict::Findings { synthesis: "Reviewer 1 (session reviewer-one)\nFix the parser race.\n\nReviewer 2 (session reviewer-two)\nReview failed: worker disconnected".into(), evidence: crate::review::verdict::ReviewPassEvidence { reviewer_failures: vec![crate::review::verdict::ReviewerFailure { label: "Reviewer 2 (session reviewer-two)".into(), reason: "worker disconnected".into() }], ..Default::default() } } }),
             event(MailboxEventBody::ReviewVerdict { review_id: "failed-review".into(), repository: "/workspace/app".into(), base_commit: "aaaaaaa123".into(), head_commit: "bbbbbbb456".into(), tree: "ccccccc789".into(), verdict: crate::review::verdict::ReviewVerdict::Failed { reason: "reviewer disconnected".into() } }),
             event(MailboxEventBody::SubagentFinished { report: Box::new(serde_json::from_value(serde_json::json!({
                 "child_session_id":"child-1", "task_name":"Check parser", "state":"completed", "finished":true,

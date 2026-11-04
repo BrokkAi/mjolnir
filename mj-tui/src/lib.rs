@@ -35,7 +35,6 @@ use crate::dialogs::{
     ImportBundleConfirmation, ImportProgress, NoticeLogDialog, RenameEditor,
     RepositoryOriginDialog, TargetActionsDialog, WebDialog,
 };
-use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::palette::CommandPalette;
 use crate::resume::ResumeDialog;
@@ -45,14 +44,14 @@ use crate::workspaces::{WorkspaceControlFocus, WorkspaceManager};
 mod actions;
 mod combined;
 mod conversation_navigation;
+mod operator_away;
 pub use conversation_navigation::PaneAssignment;
+mod availability;
 mod component_events;
 mod dialogs;
 mod go;
-mod help;
 mod ingest;
 mod keybinds;
-mod machine_runtimes;
 mod modal_surface;
 mod notify;
 mod row_index;
@@ -116,6 +115,9 @@ mod docs_screenshots;
 mod test_support;
 
 pub use crate::actions::CommandId;
+pub use crate::availability::{
+    AvailabilityChecked, LocalEngine, MachineFinding, MachineRuntimeProbe,
+};
 pub use crate::combined::{render_combined, render_combined_with_theme};
 pub use crate::dashboard_conversation::SPLIT_REFUSED_NOTICE;
 pub use crate::dialogs::{ImportProfileOption, ImportSessionOption};
@@ -125,7 +127,6 @@ pub use crate::ingest::{
     PreparedMaterializedSessionSummary,
 };
 pub use crate::keybinds::KeyRoute;
-pub use crate::machine_runtimes::{MachineFinding, MachineRuntimeProbe, MachineRuntimesChecked};
 pub use crate::render::sessions::{NOTICE_NAME_CELLS, fit_session_name};
 pub use crate::resume::resume_profile_placeholders;
 pub use crate::review_settings::{ReviewSettingsChoices, ReviewSettingsDiscoveryResult};
@@ -222,6 +223,9 @@ const TEST_VERSION_LABEL: &str = "vX.Y.Z";
 /// A side effect requested by the dashboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DashboardAction {
+    SetOperatorAway {
+        away: bool,
+    },
     None,
     /// Read the host's global Git author identity before the first new
     /// session; the result goes to [`DashboardState::apply_git_identity_check`].
@@ -297,14 +301,14 @@ pub enum DashboardAction {
     /// live; the dashboard only shows it as a queued preview.
     QueueStartupPrompt {
         session_id: String,
-        text: String,
+        prompt: mj_chat::chat::StartupPrompt,
     },
     /// The person recalled a queued startup prompt into the standby composer
     /// to edit it. The host asks the daemon to withdraw it, so the composer
     /// is the prompt's only owner.
     WithdrawStartupPrompt {
         session_id: String,
-        text: String,
+        prompt: mj_chat::chat::StartupPrompt,
     },
     CreateSession {
         remember_container_size: bool,
@@ -463,6 +467,9 @@ pub enum DashboardAction {
         session_id: String,
         acknowledge_unpublished_work: bool,
     },
+    IgnoreNestedRepositoriesAndSuspend {
+        session_id: String,
+    },
     DiscardSinceCheckpoint {
         session_id: String,
         checkpoint: mj_core::state::CheckpointMetadata,
@@ -503,9 +510,11 @@ pub enum DashboardAction {
         target_id: String,
     },
     CancelTargetTest,
-    CheckTargetReadiness {
+    /// Find out, off the render loop, which profiles and runtimes are there,
+    /// adding what is new; the answer returns through
+    /// `DashboardState::apply_availability_check`.
+    CheckAvailability {
         generation: u64,
-        target_ids: Vec<String>,
     },
     /// Find out, off the render loop, which of these configured project
     /// directories exist; answers return through
@@ -540,6 +549,10 @@ pub enum DashboardAction {
     },
     MarkAllRead {
         receipts: Vec<(String, u64)>,
+    },
+    DismissQuestion {
+        session_id: String,
+        question: mj_core::assessment::InferredQuestion,
     },
     OpenResumeDialog,
     ImportSession {
@@ -579,7 +592,6 @@ pub enum DashboardAction {
     ConfirmImportBundle {
         create_managed_worktree: Option<bool>,
         accepted: bool,
-        include_untracked: bool,
     },
     OpenConfig,
     DiscoverSetup {
@@ -587,11 +599,6 @@ pub enum DashboardAction {
         scope: DetectScope,
         /// The SSH and EC2 machines in the Settings draft, whose runtimes a
         /// runtime detection probes as well as this machine's.
-        machines: Vec<(String, mj_core::config::Machine)>,
-    },
-    /// Probe machines that no runtime runs on and write the runtimes found.
-    CheckMachineRuntimes {
-        generation: u64,
         machines: Vec<(String, mj_core::config::Machine)>,
     },
     SaveSetup {
@@ -854,10 +861,7 @@ pub(crate) enum Mode {
     Importing(ImportProgress),
     ConfirmImportBundle(ImportBundleConfirmation),
     Confirm(ConfirmDialog),
-    /// The `F1` key reference, drawn over the mode it opened on top of. It
-    /// carries that mode so closing help puts it back untouched.
-    Help(HelpOverlay),
-    /// The `F2` command palette: every command that applies right now.
+    /// The searchable command palette: every command that applies right now.
     Palette(CommandPalette),
     Setup(setup::SetupDialog),
     Welcome(welcome::WelcomeDialog),
@@ -880,8 +884,20 @@ pub(crate) fn cycle_control<T: Copy + PartialEq>(current: T, order: &[T], revers
 ///
 /// The fields wrapped in [`Tracked`] are the inputs the session facts and
 /// the Sessions pane's order are derived from (see [`session_view`]).
+/// Identity of the dashboard input which requested a background text paste.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardPasteTarget {
+    revision: u64,
+    mode: std::mem::Discriminant<Mode>,
+    session: Option<String>,
+    pane: crate::tile_layout::PaneId,
+    focus: Focus,
+}
+
 pub struct DashboardState {
+    paste_revision: u64,
     pending_welcome: Option<welcome::WelcomeDialog>,
+    operator_presence: operator_away::OperatorPresence,
     #[cfg(test)]
     pub(crate) reconciliation_visits: Cell<usize>,
     pub(crate) row_index: RefCell<row_index::RowIndex>,
@@ -908,6 +924,9 @@ pub struct DashboardState {
     pending_setup_login: Option<(u64, String)>,
     pub(crate) profile_hydration_requests: BTreeMap<String, BTreeSet<String>>,
     pub(crate) profile_hydration_errors: BTreeMap<String, String>,
+    /// The capability demand last sent for a Settings draft, so each draft
+    /// selection is warmed once rather than after every background reply.
+    pub(crate) profile_hydration_sent: Option<String>,
     /// The resolved `[keys]` bindings, refreshed whenever configuration is
     /// replaced so a `config.toml` edit takes effect without a restart.
     pub(crate) keybinds: mj_core::config::Keybinds,
@@ -946,11 +965,6 @@ pub struct DashboardState {
     /// session so each draft stays with its row; the controller hands the
     /// draft to the real composer when the chat opens.
     pub(crate) standby_prompts: BTreeMap<String, ChatState>,
-    /// The composer that catches typing between the new-session wizard
-    /// closing and the daemon registering the session, when there is no
-    /// session id to key a standby by yet. It is adopted by the new session's
-    /// standby as soon as the launch registers.
-    pub(crate) launch_standby: Option<ChatState>,
     /// Durable move intents retained by the daemon, including failed and
     /// cancelled operations that still have an explicit recovery action.
     pub(crate) move_operations: mj_core::snapshot_map::SnapshotMap<String, MoveOperation>,
@@ -965,16 +979,8 @@ pub struct DashboardState {
     /// The build stamped on the workspace pane, as `v2.11.0`. Tests render
     /// [`TEST_VERSION_LABEL`] instead.
     pub(crate) version_label: String,
-    pub(crate) target_readiness: BTreeMap<String, wizards::TargetReadiness>,
-    pub(crate) target_readiness_generation: u64,
-    /// The latest check of each machine that no runtime runs on.
-    pub(crate) machine_runtime_checks: BTreeMap<String, machine_runtimes::MachineRuntimeCheck>,
-    pub(crate) machine_runtime_generation: u64,
-    /// How far tests have moved the readiness clock forward. An `Instant`
-    /// cannot precede boot, and a fresh CI machine has been up for less than
-    /// the readiness TTL, so tests age answers by advancing this instead.
-    #[cfg(test)]
-    pub(crate) readiness_clock_advance: std::time::Duration,
+    /// The one answer to which profiles and runtimes are there.
+    pub(crate) availability: availability::Availability,
     /// Whether the local directories of configured projects exist, so the
     /// project picker can mark the ones that are gone without touching the
     /// filesystem while it draws.
@@ -1087,7 +1093,6 @@ pub struct DashboardState {
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
     pub(crate) mode: Mode,
-    pub(crate) help_request_generation: u64,
     pub(crate) usage_request_generation: u64,
     pub(crate) go: Option<go::GoMode>,
     simple_mode: bool,
@@ -1230,6 +1235,7 @@ impl DashboardState {
     }
 
     pub fn new(config: Config, state: State, quotas: BTreeMap<String, ProfileQuota>) -> Self {
+        let operator_presence = state.operator_presence;
         let launch_recency = mj_client::runtime_feed::launch_recency(&state.sessions);
         let mut dashboard = Self {
             #[cfg(test)]
@@ -1246,10 +1252,12 @@ impl DashboardState {
             profile_capabilities: Default::default(),
             profile_login_statuses: Default::default(),
             profile_login_refresh: false,
+            paste_revision: 0,
             profile_login_generation: 0,
             pending_setup_login: None,
             profile_hydration_requests: Default::default(),
             profile_hydration_errors: Default::default(),
+            profile_hydration_sent: None,
             config: config.into(),
             state: state.into(),
             quotas,
@@ -1276,7 +1284,6 @@ impl DashboardState {
             unreachable_notices: BTreeMap::new(),
             session_operations: Default::default(),
             standby_prompts: BTreeMap::new(),
-            launch_standby: None,
             move_operations: Default::default(),
             capacity_details: BTreeMap::new(),
             container_capacities: BTreeMap::new(),
@@ -1288,12 +1295,7 @@ impl DashboardState {
                 concat!("v", env!("CARGO_PKG_VERSION"))
             }
             .to_owned(),
-            target_readiness: BTreeMap::new(),
-            target_readiness_generation: 0,
-            machine_runtime_checks: BTreeMap::new(),
-            machine_runtime_generation: 0,
-            #[cfg(test)]
-            readiness_clock_advance: std::time::Duration::ZERO,
+            availability: Default::default(),
             project_directory_checks: BTreeMap::new(),
             mount_history_refresh_pending: false,
             git_identity_gate: Default::default(),
@@ -1342,7 +1344,7 @@ impl DashboardState {
             last_row_click: None,
             mode: Mode::Dashboard,
             pending_welcome: None,
-            help_request_generation: 0,
+            operator_presence: Default::default(),
             usage_request_generation: 0,
             modal_click_transition: None,
             suppress_modal_release: false,
@@ -1385,6 +1387,7 @@ impl DashboardState {
             .map(|id| (id.clone(), SessionDetail::default()))
             .collect();
         dashboard.clamp_selections();
+        dashboard.set_operator_presence(operator_presence);
         dashboard
     }
 }
@@ -1412,14 +1415,6 @@ pub(crate) fn nth_key<T>(map: &BTreeMap<String, T>, index: usize) -> String {
         .nth(index)
         .cloned()
         .expect("wizard is only opened for non-empty configuration")
-}
-
-pub(crate) fn nth_enabled_profile(config: &Config, index: usize) -> String {
-    config
-        .enabled_profiles()
-        .nth(index)
-        .map(|(id, _)| id.to_owned())
-        .expect("wizard is only opened with an enabled profile")
 }
 
 fn is_paste_shortcut(key: KeyEvent) -> bool {

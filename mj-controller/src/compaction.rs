@@ -10,6 +10,9 @@ use serde_json::Value;
 use mj_checkpoint::archive::CanonicalSessionSnapshot;
 #[cfg(test)]
 use mj_checkpoint::archive::CanonicalTranscriptBody;
+use mj_transcript::handoff::{
+    MODEL_HANDOFF_OPENING, RETAINED_CLOSE, RETAINED_OPEN, encode_handoff, reusable_handoff,
+};
 use mj_transcript::summary::{SummaryRole, TranscriptSummary};
 
 pub use mj_core::config::DEFAULT_CONTEXT_BYTES;
@@ -157,6 +160,15 @@ pub struct CompactionBudget {
     pub handoff_bytes: usize,
 }
 
+/// A complete earlier state, through the canonical item at this position.
+#[derive(Debug, Clone)]
+pub(crate) struct PriorCompaction {
+    pub through_position: u64,
+    pub summary: String,
+    /// Materialized rows whose coverage by a native summary is unproven.
+    pub retained_positions: Vec<u64>,
+}
+
 impl CompactionBudget {
     /// One number for both, for callers and tests that do not distinguish
     /// the summarizer from the target.
@@ -176,27 +188,84 @@ pub async fn compact_snapshot(
     budget: CompactionBudget,
     backend: &impl CompactionBackend,
 ) -> Result<String> {
+    compact_snapshot_since(snapshot, budget, backend, None).await
+}
+
+pub(crate) async fn compact_snapshot_since(
+    snapshot: &CanonicalSessionSnapshot,
+    budget: CompactionBudget,
+    backend: &impl CompactionBackend,
+    prior: Option<&PriorCompaction>,
+) -> Result<String> {
     ensure!(
         budget.page_bytes >= MIN_CONTEXT_BYTES && budget.handoff_bytes >= MIN_CONTEXT_BYTES,
         "cross-harness context byte budget must be at least {MIN_CONTEXT_BYTES}"
     );
-    let turns = turns_from_snapshot(snapshot)?;
+    let generic = reusable_handoff(snapshot).map(|state| PriorCompaction {
+        through_position: state.through_position,
+        summary: state.summary,
+        retained_positions: Vec::new(),
+    });
+    let prior = [prior, generic.as_ref()]
+        .into_iter()
+        .flatten()
+        .filter(|candidate| {
+            snapshot.current_context_start() == 0
+                || candidate.through_position > snapshot.current_context_start()
+        })
+        .max_by_key(|candidate| candidate.through_position);
+    let entries = TranscriptSummary::from_snapshot(snapshot).entries;
+    let turns = if let Some(prior) = prior {
+        turns_from_entries(
+            entries.into_iter().filter(|entry| {
+                entry.position > prior.through_position
+                    || prior.retained_positions.contains(&entry.position)
+            }),
+            true,
+        )?
+    } else {
+        turns_from_entries(entries, false)?
+    };
     let retained = retained_snapshot(snapshot, budget.handoff_bytes / 3);
     let compactable_turns = &turns;
     let page_overhead = page_prompt("").len();
-    let rendered_bytes = compactable_turns
-        .iter()
-        .enumerate()
-        .map(|(index, turn)| rendered_turn_len(turn, index))
-        .sum::<usize>();
+    let previous = prior.map(|p| {
+        format!(
+            "<previous_state_snapshot>\n{}\n</previous_state_snapshot>\n\n",
+            p.summary
+        )
+    });
+    if compactable_turns.is_empty()
+        && let Some(prior) = prior
+    {
+        // A generic handoff body already carries retained context. A
+        // supplied native summary needs the writer's complete envelope.
+        let tail = if generic
+            .as_ref()
+            .is_some_and(|candidate| std::ptr::eq(candidate, prior))
+        {
+            None
+        } else {
+            Some(retained.as_str())
+        };
+        if let Ok(reused) = encoded_handoff(snapshot, &prior.summary, tail, budget.handoff_bytes) {
+            return Ok(reused);
+        }
+    }
+    let rendered_bytes = previous.as_ref().map_or(0, String::len)
+        + compactable_turns
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| rendered_turn_len(turn, index))
+            .sum::<usize>();
     let requests = Requests::new(backend);
 
     if rendered_bytes.saturating_add(page_overhead) <= budget.page_bytes {
         log_compaction_plan(rendered_bytes, 1, budget, true);
-        let transcript = render_turns(compactable_turns, 0);
+        let transcript = previous.clone().unwrap_or_default() + &render_turns(compactable_turns, 0);
         match requests.run(page_prompt(&transcript)).await? {
             RequestOutcome::Summary(summary) => {
-                return handoff(&summary, Some(&retained), budget.handoff_bytes);
+                return encoded_handoff(snapshot, &summary, Some(&retained), budget.handoff_bytes);
             }
             // The transcript fit Hel's byte budget but not the model's real
             // context, so fall through to the paged pipeline, whose prompts are
@@ -207,11 +276,19 @@ pub async fn compact_snapshot(
 
     let head = compactable_turns;
     let page_payload_bytes = budget.page_bytes.saturating_sub(page_overhead).max(1);
-    let pages = build_turn_pages(head, page_payload_bytes);
+    let mut pages = Vec::new();
+    if let Some(previous) = previous {
+        if previous.len() <= page_payload_bytes {
+            pages.push(previous);
+        } else {
+            pages.extend(split_utf8(previous, page_payload_bytes));
+        }
+    }
+    pages.extend(build_turn_pages(head, page_payload_bytes));
     log_compaction_plan(rendered_bytes, pages.len(), budget, false);
     let summaries = summarize_pages(pages, requests).await?;
     let summary = reduce_summaries(summaries, budget.page_bytes, requests).await?;
-    handoff(&summary, Some(&retained), budget.handoff_bytes)
+    encoded_handoff(snapshot, &summary, Some(&retained), budget.handoff_bytes)
 }
 
 /// State the plan before spending on it, so a slow compaction can be read out
@@ -389,8 +466,15 @@ fn split_at_utf8_midpoint(text: &str) -> (&str, &str) {
 /// failures before the first prompt; those are operational diagnostics rather
 /// than part of a user turn and are left out of the handoff.
 fn turns_from_snapshot(snapshot: &CanonicalSessionSnapshot) -> Result<Vec<Turn>> {
+    turns_from_entries(TranscriptSummary::from_snapshot(snapshot).entries, false)
+}
+
+fn turns_from_entries(
+    entries: impl IntoIterator<Item = mj_transcript::summary::SummaryEntry>,
+    allow_leading_continuation: bool,
+) -> Result<Vec<Turn>> {
     let mut turns = Vec::<Turn>::new();
-    for entry in TranscriptSummary::from_snapshot(snapshot).entries {
+    for entry in entries {
         match entry.role {
             SummaryRole::User => turns.push(Turn {
                 user: Some(entry.text),
@@ -406,23 +490,45 @@ fn turns_from_snapshot(snapshot: &CanonicalSessionSnapshot) -> Result<Vec<Turn>>
                 push_turn_event(&mut turns, TurnEvent::Message(entry.text))?;
             }
             SummaryRole::Assistant => {
+                if allow_leading_continuation && turns.is_empty() {
+                    turns.push(Turn {
+                        user: None,
+                        events: Vec::new(),
+                    });
+                }
                 push_turn_event(&mut turns, TurnEvent::Assistant(entry.text))?
             }
             SummaryRole::Tool => {
+                if allow_leading_continuation && turns.is_empty() {
+                    turns.push(Turn {
+                        user: None,
+                        events: Vec::new(),
+                    });
+                }
                 if let Some(turn) = turns.last_mut() {
                     append_turn_event(turn, TurnEvent::Tool(entry.tool.expect("tool summary")));
                 }
             }
-            SummaryRole::Plan => push_turn_event(
-                &mut turns,
-                TurnEvent::Plan(serde_json::from_str(&entry.text)?),
-            )?,
+            SummaryRole::Plan => {
+                if allow_leading_continuation && turns.is_empty() {
+                    turns.push(Turn {
+                        user: None,
+                        events: Vec::new(),
+                    });
+                }
+                push_turn_event(
+                    &mut turns,
+                    TurnEvent::Plan(serde_json::from_str(&entry.text)?),
+                )?
+            }
         }
     }
-    ensure!(
-        !turns.is_empty(),
-        "canonical transcript contains no user turns"
-    );
+    if !allow_leading_continuation {
+        ensure!(
+            !turns.is_empty(),
+            "canonical transcript contains no user turns"
+        );
+    }
     Ok(turns)
 }
 
@@ -628,15 +734,27 @@ async fn reduce_summaries<B: CompactionBackend>(
     summaries.pop().context("compaction produced no summaries")
 }
 
-fn handoff(summary: &str, retained: Option<&str>, handoff_bytes: usize) -> Result<String> {
-    let mut result = format!(
-        "{HANDOFF_PREAMBLE} The restored workspace is authoritative. Use the historical state below for continuity, and do not repeat completed work unless verification requires it.\n\n"
+fn encoded_handoff(
+    snapshot: &CanonicalSessionSnapshot,
+    summary: &str,
+    retained: Option<&str>,
+    handoff_bytes: usize,
+) -> Result<String> {
+    let text = encode_handoff(snapshot, &handoff(summary, retained, handoff_bytes)?)?;
+    ensure!(
+        text.len() <= handoff_bytes,
+        "compacted handoff exceeds the target context byte budget"
     );
+    Ok(text)
+}
+
+fn handoff(summary: &str, retained: Option<&str>, handoff_bytes: usize) -> Result<String> {
+    let mut result = MODEL_HANDOFF_OPENING.to_owned();
     result.push_str(summary);
     if let Some(tail) = retained {
-        result.push_str("\n\n<retained_recent_context>\n");
+        result.push_str(RETAINED_OPEN);
         result.push_str(tail);
-        result.push_str("</retained_recent_context>");
+        result.push_str(RETAINED_CLOSE);
     }
     ensure!(
         result.len() <= handoff_bytes,

@@ -75,15 +75,7 @@ fn budget(value: usize) -> usize {
 
 fn query(request: &HistoryRequest) -> Result<Value> {
     request.query.validate()?;
-    ensure!(
-        super::index_is_isolated(),
-        "session index location has not been configured"
-    );
-    ensure!(
-        !super::index_version_mismatch(),
-        "SessionWiki index version mismatch; the index was not modified"
-    );
-    let connection = super::open_readonly()?;
+    let connection = super::readable_index()?.with_context(super::unreadable_reason)?;
     connection.busy_timeout(std::time::Duration::from_secs(2))?;
     let ownership = super::top_level::current_snapshot()?;
     let cache = crate::import::NativeScanCache::shared();

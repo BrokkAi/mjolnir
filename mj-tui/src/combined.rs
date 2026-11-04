@@ -458,6 +458,9 @@ fn render_combined_themed(
             TerminalSizeRequirement::Width(NARROW_TERMINAL_WIDTH),
         );
         dashboard.end_surface_frame();
+        if dashboard.away_dialog().is_some() {
+            render_modal(frame, area, dashboard);
+        }
         return Vec::new();
     }
     // Below the sidebar width the Sessions list stacks above the
@@ -530,7 +533,7 @@ fn render_combined_themed(
     // With no conversation the prompt band holds the two-line guidance that
     // stands in for a composer, so it asks for the rows to show both. A
     // retiring transition uses only the compact status panel. A
-    // Starting/Resuming transition or an in-flight attach parks the real
+    // Starting/Resuming/Moving transition or an in-flight attach parks the real
     // composer in the band (the standby prompt), whose height grows with the
     // wrapped draft exactly like an attached chat's.
     let selected_session_id = dashboard.current_session_id().map(str::to_owned);
@@ -554,13 +557,7 @@ fn render_combined_themed(
         .unwrap_or(content_area.width);
     let focused_chat_session = focused_chat_on_screen(dashboard, chats, opening_panes);
     let standby_drawn = match &selected_transition {
-        Some((_, kind, failed)) => {
-            !failed
-                && matches!(
-                    kind,
-                    SessionTransitionKind::Starting | SessionTransitionKind::Resuming
-                )
-        }
+        Some((_, kind, failed)) => !failed && DashboardState::transition_accepts_prompts(*kind),
         None => {
             focused_chat_session.is_none()
                 && selected_session_id
@@ -568,47 +565,52 @@ fn render_combined_themed(
                     .is_some_and(|session_id| dashboard.opening_session() == Some(session_id))
         }
     };
-    // Between the new-session wizard closing and the daemon registering the
-    // session there is no session to key a standby by, so the launch standby
-    // fills the band instead and asks for the same room.
-    let launch_standby_drawn =
-        selected_transition.is_none() && dashboard.launch_standby_capturing();
-    let focused_desired_prompt = if launch_standby_drawn {
-        dashboard
-            .launch_standby
-            .as_ref()
-            .map_or(PROMPT_MINIMUM, |standby| {
-                standby.desired_prompt_height(focused_width)
-            })
-    } else if standby_drawn && let Some(session_id) = selected_session_id.as_deref() {
-        dashboard
-            .standby_prompt_mut(session_id)
-            .desired_prompt_height(focused_width)
-    } else if selected_transition.is_some() {
-        PROMPT_MINIMUM
-    } else {
-        focused_chat_session
-            .as_deref()
-            .and_then(|session_id| chats.get(session_id))
-            .map_or(EMPTY_PROMPT_HEIGHT, |chat| {
-                chat.desired_prompt_height(focused_width)
-            })
-    };
+    let focused_desired_prompt =
+        if standby_drawn && let Some(session_id) = selected_session_id.as_deref() {
+            dashboard
+                .standby_prompt_mut(session_id)
+                .desired_prompt_height(focused_width)
+        } else if selected_transition.is_some() {
+            PROMPT_MINIMUM
+        } else {
+            focused_chat_session
+                .as_deref()
+                .and_then(|session_id| chats.get(session_id))
+                .map_or(EMPTY_PROMPT_HEIGHT, |chat| {
+                    chat.desired_prompt_height(focused_width)
+                })
+        };
     // The band has to hold the tallest composer the panes want, because every
     // pane's prompt is carved out of the one band.
-    let desired_prompt = dashboard
+    let other_panes = dashboard
         .navigation
         .sessions()
         .iter()
         .filter(|(pane, _)| **pane != focused_pane)
-        .filter_map(|(pane, session_id)| {
-            Some(
-                chats
-                    .get(session_id)?
-                    .desired_prompt_height(*pane_widths.get(pane)?),
-            )
-        })
-        .fold(focused_desired_prompt, u16::max);
+        .map(|(pane, id)| (*pane, id.clone()))
+        .collect::<Vec<_>>();
+    let mut desired_prompt = focused_desired_prompt;
+    let mut desired_by_pane = BTreeMap::from([(focused_pane, focused_desired_prompt)]);
+    for (pane, session_id) in other_panes {
+        let Some(width) = pane_widths.get(&pane) else {
+            continue;
+        };
+        let parked = dashboard
+            .transition_kind(&session_id)
+            .is_some_and(DashboardState::transition_accepts_prompts)
+            || opening_panes.get(&pane) == Some(&session_id);
+        let height = if parked {
+            dashboard
+                .standby_prompt_mut(&session_id)
+                .desired_prompt_height(*width)
+        } else {
+            chats.get(&session_id).map_or(EMPTY_PROMPT_HEIGHT, |chat| {
+                chat.desired_prompt_height(*width)
+            })
+        };
+        desired_prompt = desired_prompt.max(height);
+        desired_by_pane.insert(pane, height);
+    }
     let sizes = [
         (
             SupportPane::Sessions,
@@ -710,6 +712,9 @@ fn render_combined_themed(
                 TerminalSizeRequirement::Height(required_frame_height),
             );
             dashboard.end_surface_frame();
+            if dashboard.away_dialog().is_some() {
+                render_modal(frame, area, dashboard);
+            }
             return Vec::new();
         }
     };
@@ -759,16 +764,10 @@ fn render_combined_themed(
                     .split(pane.rect);
                 return (pane.id, pane.rect, pane.is_focused, bands[0], bands[1]);
             }
-            let desired = if pane.is_focused {
-                focused_desired_prompt
-            } else {
-                dashboard
-                    .pane_session(pane.id)
-                    .and_then(|session_id| chats.get(session_id))
-                    .map_or(EMPTY_PROMPT_HEIGHT, |chat| {
-                        chat.desired_prompt_height(pane.rect.width)
-                    })
-            };
+            let desired = desired_by_pane
+                .get(&pane.id)
+                .copied()
+                .unwrap_or(EMPTY_PROMPT_HEIGHT);
             let (transcript, prompt) = leaf_bands(pane.rect, desired);
             (pane.id, pane.rect, pane.is_focused, transcript, prompt)
         })
@@ -945,7 +944,8 @@ fn render_combined_themed(
                 .filter(|session_id| {
                     pane_transition.is_none() && chat_shows_in_pane(opening, session_id)
                 })
-                .and_then(|session_id| chats.get_mut(session_id));
+                .and_then(|session_id| chats.get_mut(session_id))
+                .filter(|chat| chat.has_live_composer());
             let pane_failed = pane_session
                 .as_deref()
                 .filter(|session_id| opening.is_none() && dashboard.session_failed(session_id))
@@ -989,7 +989,7 @@ fn render_combined_themed(
                         transition,
                         failed,
                         pane_id,
-                        pane_focused: false,
+                        highlight_border: false,
                         title_lead: crate::pane_controls::pane_chrome_width(
                             dashboard,
                             pane_id,
@@ -1064,171 +1064,172 @@ fn render_combined_themed(
         // already empty.
         let zoom_chip = dashboard.conversation_zoomed();
         let close_chip = pane_bands.len() > 1 || dashboard.pane_session(pane_id).is_some();
-        chat_drew_footer = if launch_standby_drawn {
-            render_launch_standby_surface(
-                frame,
-                transcript_area,
-                prompt_area,
-                dashboard,
-                focus_borders,
-                crate::pane_controls::pane_chrome_width(dashboard, pane_id, transcript_area.width),
-            );
-            false
-        } else if let Some((session_id, transition, failed)) = selected_transition.clone() {
-            render_transition_surface(
-                frame,
-                transcript_area,
-                prompt_area,
-                dashboard,
-                &session_id,
-                TransitionSurface {
-                    transition,
-                    failed,
-                    pane_id,
-                    pane_focused: focus_borders,
-                    title_lead: crate::pane_controls::pane_chrome_width(
-                        dashboard,
+        chat_drew_footer =
+            if let Some((session_id, transition, failed)) = selected_transition.clone() {
+                render_transition_surface(
+                    frame,
+                    transcript_area,
+                    prompt_area,
+                    dashboard,
+                    &session_id,
+                    TransitionSurface {
+                        transition,
+                        failed,
                         pane_id,
-                        transcript_area.width,
-                    ),
-                },
-            );
-            false
-        } else {
-            match focused_chat_session
-                .as_deref()
-                .and_then(|session_id| chats.get_mut(session_id))
-            {
-                Some(chat) => {
-                    if !dashboard.launch_standby_capturing() {
+                        highlight_border: focus_borders,
+                        title_lead: crate::pane_controls::pane_chrome_width(
+                            dashboard,
+                            pane_id,
+                            transcript_area.width,
+                        ),
+                    },
+                );
+                false
+            } else {
+                match focused_chat_session
+                    .as_deref()
+                    .and_then(|session_id| chats.get_mut(session_id))
+                {
+                    Some(chat) => {
                         drawn_sessions.push(chat.session_id().to_owned());
+                        let chords = crate::render::footer_commands(
+                            dashboard,
+                            crate::actions::FooterGroup::Chord,
+                        );
+                        let functions = crate::render::direct_palette_commands(dashboard);
+                        let chord_prefix = crate::render::chord_prefix(dashboard);
+                        let commands = chords.iter().chain(&functions).cloned().collect::<Vec<_>>();
+                        let chords = chords
+                            .iter()
+                            .map(|(_, text)| text.as_str())
+                            .collect::<Vec<_>>();
+                        let functions = functions
+                            .iter()
+                            .map(|(_, text)| text.as_str())
+                            .collect::<Vec<_>>();
+                        let banner = dashboard
+                            .prefix_pending()
+                            .then(|| crate::render::prefix_banner_line(dashboard))
+                            .or_else(|| {
+                                dashboard
+                                    .resize_mode_active()
+                                    .then(crate::render::resize_banner_line)
+                            });
+                        chat.draw_in(
+                            frame,
+                            ChatRegions {
+                                transcript: transcript_area,
+                                prompt: prompt_area,
+                                footer: prompt_focused.then_some(ChatFooter {
+                                    area: footer_area,
+                                    chords: &chords,
+                                    chord_prefix: &chord_prefix,
+                                    functions: &functions,
+                                    banner: banner.as_ref(),
+                                }),
+                                overlay: pane_rect,
+                                title_controls: crate::pane_controls::pane_title_reserve(
+                                    dashboard,
+                                    transcript_area.width,
+                                    title_controls(close_chip) + zoom_title_controls(zoom_chip),
+                                ),
+                                title_lead: crate::pane_controls::pane_chrome_width(
+                                    dashboard,
+                                    pane_id,
+                                    transcript_area.width,
+                                ),
+                                pane_focused: focus_borders,
+                            },
+                            prompt_focused,
+                            transcript_selected,
+                        );
+                        if prompt_focused {
+                            // Draw the text the chat fitted into each area, not
+                            // the host's hint: the first chord carries the prefix.
+                            for (index, command_area, text) in chat.footer_command_areas() {
+                                if let Some((id, _)) = commands.get(index) {
+                                    crate::surface_controls::render_footer_command(
+                                        frame,
+                                        command_area,
+                                        dashboard,
+                                        *id,
+                                        &text,
+                                    );
+                                }
+                            }
+                        }
+                        // A chat's dialogs live inside its own pane, so its
+                        // surfaces join the frame's rather than replacing them:
+                        // the navigator and the other panes stay selectable.
+                        dashboard.frame_surfaces.append(chat.frame_surfaces());
+                        prompt_focused
                     }
-                    let chords = crate::render::footer_commands(
-                        dashboard,
-                        crate::actions::FooterGroup::Chord,
-                    );
-                    let chord_prefix = crate::render::chord_prefix(dashboard);
-                    let commands = chords.clone();
-                    let chords = chords
-                        .iter()
-                        .map(|(_, text)| text.as_str())
-                        .collect::<Vec<_>>();
-                    let banner = dashboard
-                        .prefix_pending()
-                        .then(|| crate::render::prefix_banner_line(dashboard))
-                        .or_else(|| {
-                            dashboard
-                                .resize_mode_active()
-                                .then(crate::render::resize_banner_line)
-                        });
-                    chat.draw_in(
-                        frame,
-                        ChatRegions {
-                            transcript: transcript_area,
-                            prompt: prompt_area,
-                            footer: prompt_focused.then_some(ChatFooter {
-                                area: footer_area,
-                                chords: &chords,
-                                chord_prefix: &chord_prefix,
-                                functions: &[],
-                                banner: banner.as_ref(),
-                            }),
-                            overlay: pane_rect,
-                            title_controls: crate::pane_controls::pane_title_reserve(
+                    None => {
+                        let opening = dashboard.opening_session().is_some();
+                        // A selected session whose target failed has no worker to
+                        // attach to; say so and how to get out of it.
+                        let failed = (!opening)
+                            .then(|| selected_session_id.clone())
+                            .flatten()
+                            .filter(|session_id| dashboard.session_failed(session_id));
+                        let reason = if opening {
+                            EmptyConversation::Opening
+                        } else if failed.is_some() {
+                            EmptyConversation::Failed
+                        } else if dashboard.ordered_sessions().is_empty() {
+                            EmptyConversation::NoLiveSession
+                        } else {
+                            EmptyConversation::NoConversationOpen
+                        };
+                        if let Some(session_id) = failed.as_deref()
+                            && transcript_area.height > 3
+                        {
+                            dashboard.failure_drawn(session_id);
+                        }
+                        let failure_body = render_empty_transcript(
+                            frame,
+                            transcript_area,
+                            reason,
+                            dashboard.config.spinner,
+                            failed
+                                .as_deref()
+                                .map(|session_id| dashboard.session_failure_text(session_id)),
+                            crate::pane_controls::pane_title_reserve(
                                 dashboard,
                                 transcript_area.width,
                                 title_controls(close_chip) + zoom_title_controls(zoom_chip),
                             ),
-                            title_lead: crate::pane_controls::pane_chrome_width(
-                                dashboard,
-                                pane_id,
-                                transcript_area.width,
-                            ),
-                            pane_focused: focus_borders,
-                        },
-                        prompt_focused,
-                        transcript_selected,
-                    );
-                    if prompt_focused {
-                        // Draw the text the chat fitted into each area, not
-                        // the host's hint: the first chord carries the prefix.
-                        for (index, command_area, text) in chat.footer_command_areas() {
-                            if let Some((id, _)) = commands.get(index) {
-                                crate::surface_controls::render_footer_command(
+                            focus_borders,
+                            dashboard.pane_shows_pin_hint(pane_id),
+                        );
+                        push_failure_surface(dashboard, pane_id, failure_body);
+                        if opening {
+                            // The real composer parks in the prompt band while the
+                            // attach runs, so anything typed lands in the chat that
+                            // opens.
+                            if let Some(session_id) = selected_session_id.as_deref() {
+                                draw_standby_prompt(
                                     frame,
-                                    command_area,
+                                    prompt_area,
                                     dashboard,
-                                    *id,
-                                    &text,
+                                    session_id,
+                                    pane_id,
+                                    None,
                                 );
                             }
+                        } else {
+                            render_empty_prompt_advice(
+                                frame,
+                                prompt_area,
+                                prompt_focused,
+                                reason,
+                                dashboard,
+                            );
                         }
+                        false
                     }
-                    // A chat's dialogs live inside its own pane, so its
-                    // surfaces join the frame's rather than replacing them:
-                    // the navigator and the other panes stay selectable.
-                    dashboard.frame_surfaces.append(chat.frame_surfaces());
-                    prompt_focused
                 }
-                None => {
-                    let opening = dashboard.opening_session().is_some();
-                    // A selected session whose target failed has no worker to
-                    // attach to; say so and how to get out of it.
-                    let failed = (!opening)
-                        .then(|| selected_session_id.clone())
-                        .flatten()
-                        .filter(|session_id| dashboard.session_failed(session_id));
-                    let reason = if opening {
-                        EmptyConversation::Opening
-                    } else if failed.is_some() {
-                        EmptyConversation::Failed
-                    } else if dashboard.ordered_sessions().is_empty() {
-                        EmptyConversation::NoLiveSession
-                    } else {
-                        EmptyConversation::NoConversationOpen
-                    };
-                    if let Some(session_id) = failed.as_deref()
-                        && transcript_area.height > 3
-                    {
-                        dashboard.failure_drawn(session_id);
-                    }
-                    let failure_body = render_empty_transcript(
-                        frame,
-                        transcript_area,
-                        reason,
-                        dashboard.config.spinner,
-                        failed
-                            .as_deref()
-                            .map(|session_id| dashboard.session_failure_text(session_id)),
-                        crate::pane_controls::pane_title_reserve(
-                            dashboard,
-                            transcript_area.width,
-                            title_controls(close_chip) + zoom_title_controls(zoom_chip),
-                        ),
-                        focus_borders,
-                        dashboard.pane_shows_pin_hint(pane_id),
-                    );
-                    push_failure_surface(dashboard, pane_id, failure_body);
-                    if opening {
-                        // The real composer parks in the prompt band while the
-                        // attach runs, so anything typed lands in the chat that
-                        // opens.
-                        if let Some(session_id) = selected_session_id.as_deref() {
-                            draw_standby_prompt(frame, prompt_area, dashboard, session_id, None);
-                        }
-                    } else {
-                        render_empty_prompt_advice(
-                            frame,
-                            prompt_area,
-                            prompt_focused,
-                            reason,
-                            dashboard,
-                        );
-                    }
-                    false
-                }
-            }
-        };
+            };
         if close_chip {
             crate::surface_controls::render_pane_close_control(
                 frame,
@@ -1306,7 +1307,9 @@ fn focused_chat_on_screen(
     let pane = dashboard.focused_pane();
     let session_id = dashboard.pane_session(pane)?;
     let opening = opening_panes.get(&pane).map(String::as_str);
-    (chats.contains_key(session_id)
+    (chats
+        .get(session_id)
+        .is_some_and(|chat| chat.has_live_composer())
         && chat_shows_in_pane(opening, session_id)
         && dashboard.transition_kind(session_id).is_none()
         && dashboard.transition_failure_kind(session_id).is_none())
@@ -1527,9 +1530,10 @@ fn draw_standby_prompt(
     prompt_area: Rect,
     dashboard: &mut DashboardState,
     session_id: &str,
+    pane_id: PaneId,
     note: Option<Line<'static>>,
 ) {
-    let focused = dashboard.prompt_has_focus();
+    let focused = pane_id == dashboard.focused_pane() && dashboard.prompt_has_focus();
     let surfaces = {
         let standby = dashboard.standby_prompt_mut(session_id);
         draw_standby_band(frame, prompt_area, standby, focused, note)
@@ -1550,78 +1554,25 @@ fn draw_standby_band(
     standby.frame_surfaces().clone()
 }
 
-/// Draws the surface shown between the new-session wizard closing and the
-/// daemon registering the session: the launch has no session record yet, so
-/// the panel reports the stage in general terms and the launch standby holds
-/// whatever is typed until the new session's standby adopts it.
-fn render_launch_standby_surface(
-    frame: &mut Frame,
-    transcript_area: Rect,
-    prompt_area: Rect,
-    dashboard: &mut DashboardState,
-    pane_focused: bool,
-    title_lead: u16,
-) {
-    let panel = theme::panel(pane_focused)
-        .title(transition_title(
-            SessionTransitionKind::Starting,
-            title_lead,
-        ))
-        .title(
-            Line::from(vec![
-                Span::raw(" "),
-                spinner::compact_span(dashboard.config.spinner, spinner::elapsed_ms()),
-                Span::raw(" "),
-            ])
-            .right_aligned(),
-        );
-    let details = vec![
-        Line::raw(format!(
-            "Current stage: Preparing session launch{}",
-            theme::glyphs().ellipsis
-        )),
-        Line::default(),
-        Line::styled(
-            "Type the first message now; it is sent when the session is live.",
-            theme::muted(),
-        ),
-    ];
-    frame.render_widget(
-        Paragraph::new(details)
-            .wrap(Wrap { trim: true })
-            .block(panel),
-        transcript_area,
-    );
-    let focused = dashboard.prompt_has_focus();
-    let Some(surfaces) = dashboard
-        .launch_standby
-        .as_mut()
-        .map(|standby| draw_standby_band(frame, prompt_area, standby, focused, None))
-    else {
-        return;
-    };
-    dashboard.frame_surfaces.append(&surfaces);
-}
-
 /// Draws the conversation replacement shown while a lifecycle owns the
 /// selected session. The warm chat remains alive off-screen so its draft,
 /// read cursor, and history survive the operation, but the transcript cannot
 /// be mistaken for a session that is being retired.
 ///
-/// Starting and Resuming keep the real composer on screen: the standby prompt
+/// Starting, Resuming, and Moving keep the real composer on screen: the standby prompt
 /// below the transition panel is the chat's own composer, so the first
 /// message can be drafted with the usual readline keys before the session is
-/// live (Enter holds the draft and explains), and the draft carries into the
+/// live (Enter queues it for the destination), and the draft carries into the
 /// conversation when the chat opens. Retiring and failed transitions have no
 /// conversation to type toward, so they keep the plain status panel.
 /// What one pane's transition panel reports: the operation under way, whether
-/// it failed, which pane holds it, and whether that pane has the keyboard.
+/// it failed, which pane holds it, and whether to highlight its border.
 #[derive(Clone, Copy)]
 struct TransitionSurface {
     transition: SessionTransitionKind,
     failed: bool,
     pane_id: PaneId,
-    pane_focused: bool,
+    highlight_border: bool,
     /// Columns the pane chrome draws its label into at the left of the
     /// title row; the title starts after them.
     title_lead: u16,
@@ -1651,7 +1602,7 @@ fn render_transition_surface(
         transition,
         failed,
         pane_id,
-        pane_focused,
+        highlight_border,
         title_lead,
     } = surface;
     if failed && transcript_area.height > 3 {
@@ -1696,7 +1647,7 @@ fn render_transition_surface(
         .and_then(|operation| operation.resume_destination.as_ref())
         .map(|(profile, _)| profile.as_str())
         .unwrap_or(&session.last_profile);
-    let mut panel = theme::panel(pane_focused).title(transition_title(transition, title_lead));
+    let mut panel = theme::panel(highlight_border).title(transition_title(transition, title_lead));
     if !failed {
         panel = panel.title(
             Line::from(vec![
@@ -1707,14 +1658,10 @@ fn render_transition_surface(
             .right_aligned(),
         );
     }
-    let type_ahead = !failed
-        && matches!(
-            transition,
-            SessionTransitionKind::Starting | SessionTransitionKind::Resuming
-        );
+    let type_ahead = !failed && DashboardState::transition_accepts_prompts(transition);
     let mut details = vec![
         Line::styled(
-            format!("{} · {}", target, session.display_title()),
+            format!("{} · {}", target, session.listed_title()),
             Style::default().add_modifier(ratatui::style::Modifier::BOLD),
         ),
         Line::raw(format!("Operation: {}", transition.label())),
@@ -1753,7 +1700,7 @@ fn render_transition_surface(
                 )
                 .left_aligned()
             });
-        draw_standby_prompt(frame, prompt_area, dashboard, session_id, note);
+        draw_standby_prompt(frame, prompt_area, dashboard, session_id, pane_id, note);
         return;
     }
     let cancel_line = if !failed && operation.is_some_and(|operation| operation.cancellable) {
@@ -1920,6 +1867,54 @@ mod tests {
                 "{width}: {first:?} is not a whole chord in {footer:?}"
             );
         }
+
+        let mut dashboard = dashboard_with_session(session.clone());
+        dashboard.focus = Focus::Prompt;
+        let mut config = dashboard.config.clone();
+        config.keys.prefix = "ctrl+a".into();
+        config.keys.help = ["prefix+?", "ctrl+alt+p"].into();
+        dashboard.set_config(config);
+        let fixture = mj_client::session::replacement_session_test_fixture(&session_id, 1);
+        let chat = ActiveChat::open(
+            fixture.stopped,
+            "hel",
+            None,
+            fixture.control,
+            mj_chat::chat::SessionHeaderIdentity::default(),
+            String::new(),
+            mj_chat::chat::Notices::default(),
+        );
+        let mut chats = BTreeMap::from([(session_id.clone(), chat)]);
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_combined_for_test(
+                    frame,
+                    &mut dashboard,
+                    &mut chats,
+                    &BTreeMap::new(),
+                    false,
+                );
+            })
+            .unwrap();
+        let footer = buffer_lines(terminal.backend().buffer())
+            .last()
+            .expect("footer row")
+            .clone();
+        assert!(footer.contains("ctrl+a then"), "{footer}");
+        assert!(footer.contains(": / ? palette"), "{footer}");
+        assert!(footer.contains("ctrl+alt+p palette"), "{footer}");
+
+        let chords = crate::render::footer_commands(&dashboard, crate::actions::FooterGroup::Chord);
+        let direct = crate::render::direct_palette_commands(&dashboard);
+        let direct_command_index = chords.len();
+        assert_eq!(direct[0].0, crate::CommandId::Palette);
+        let direct_area = chats[&session_id]
+            .footer_command_areas()
+            .into_iter()
+            .find(|(index, _, text)| *index == direct_command_index && text == "ctrl+alt+p palette")
+            .expect("direct palette footer is connected to the host command list");
+        assert_eq!(direct_area.0, direct_command_index);
     }
 
     /// Launch campaign finding A-13: in an empty pane the "Pin selected
@@ -2063,47 +2058,52 @@ mod tests {
         );
     }
 
-    /// A launch that has not registered yet draws the same pair of panels a
-    /// Starting transition does, with the launch standby in the band, so the
-    /// typing has somewhere visible to go before the session exists.
-    // Hard-won: c8d6442496: pre-registration typing went to the previously selected session.
+    // Hard-won: c90e988448: single-pane transitions confused border highlighting with caret focus.
     #[test]
-    fn a_launch_being_prepared_draws_the_launch_standby() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_launch_standby(mj_chat::chat::SessionHeaderIdentity {
-            target: "/tmp/project".into(),
-            profile: "profile-1".into(),
-            title: String::new(),
-            harness_kind: None,
-            subagent_count: 0,
-        });
-        for character in "first message ahead".chars() {
-            dashboard.handle_key(key(KeyCode::Char(character)));
-        }
-        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-        terminal
-            .draw(|frame| {
-                crate::render::render(frame, &mut dashboard);
-            })
-            .unwrap();
+    fn transition_caret_follows_keyboard_focus_without_a_highlighted_pane_border() {
+        use ratatui::backend::Backend as _;
 
-        let prompt = dashboard
-            .focused_prompt_area()
-            .expect("prompt pane rendered");
-        let lines = buffer_lines(terminal.backend().buffer());
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("Preparing session launch")),
-            "launch stage missing from {lines:?}"
-        );
-        let content = &lines[prompt.y as usize + 1..prompt.bottom() as usize - 1];
-        assert!(
-            content
-                .iter()
-                .any(|line| line.contains("first message ahead")),
-            "draft missing from {content:?}"
-        );
+        for kind in [
+            SessionOperationKind::Launching,
+            SessionOperationKind::Resuming,
+            SessionOperationKind::Moving,
+        ] {
+            let mut dashboard = dashboard_with_session(running_session());
+            dashboard.begin_session_operation("session-1".into(), kind, None);
+            let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+            for (draft, column) in [("", 0), ("a界b", 3)] {
+                for character in draft.chars() {
+                    dashboard.handle_key(key(KeyCode::Char(character)));
+                }
+                if !draft.is_empty() {
+                    dashboard.handle_key(key(KeyCode::Left));
+                }
+                for focused in [true, false] {
+                    if focused {
+                        dashboard.focus_prompt();
+                    } else {
+                        dashboard.focus_sessions();
+                    }
+                    terminal
+                        .draw(|frame| crate::render::render(frame, &mut dashboard))
+                        .unwrap();
+                    // TestBackend has no visibility accessor; changing a clone
+                    // must leave it equal only when visibility already agrees.
+                    let mut expected = terminal.backend().clone();
+                    if focused {
+                        expected.show_cursor().unwrap();
+                        let prompt = dashboard.focused_prompt_area().unwrap();
+                        terminal
+                            .backend_mut()
+                            .assert_cursor_position((prompt.x + 3 + column, prompt.y + 1));
+                    } else {
+                        expected.hide_cursor().unwrap();
+                    }
+                    assert_eq!(terminal.backend(), &expected, "{kind:?}, focus={focused}");
+                }
+                dashboard.focus_prompt();
+            }
+        }
     }
 
     /// Launch findings B-2 / D-1 for Suspending: the transition panel's title
@@ -2317,6 +2317,69 @@ mod tests {
         let lines = render_combined_golden(&mut standby, 100, 40);
         append_combined_golden(&mut output, "empty standby composer", 100, 40, &lines);
         append_pane_geometry(&mut output, &standby);
+
+        let mut split = dashboard_with_session(running_session());
+        let mut second = running_session();
+        second.id = "session-2".into();
+        let mut split_state = (*split.state).clone();
+        split_state.sessions.insert(second.id.clone(), second);
+        split.set_state(split_state);
+        render_combined_golden(&mut split, 160, 55);
+        let inactive = split.focused_pane();
+        let focused = split
+            .split_focused_pane(Direction::Horizontal, Some("session-2"))
+            .unwrap();
+        split.begin_session_operation("session-1".into(), SessionOperationKind::Moving, None);
+        split.begin_session_operation("session-2".into(), SessionOperationKind::Resuming, None);
+        for operation in split.session_operations.values_mut() {
+            operation.started_at_epoch_seconds = u64::MAX;
+        }
+        split.seed_standby_prompt("session-1", "queued before move".into());
+        split
+            .standby_prompt_mut("session-1")
+            .handle_key(key(KeyCode::Enter));
+        split.seed_standby_prompt(
+            "session-1",
+            "one\ntwo\nthree\nfour\nfive\nsix\nseven".into(),
+        );
+        split.seed_standby_prompt("session-2", "focused draft".into());
+        split.focus_prompt();
+        let mut terminal = Terminal::new(TestBackend::new(160, 55)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut split))
+            .unwrap();
+        let (inactive_transcript, inactive_prompt) = split.pane_bands(inactive).unwrap();
+        let focused_prompt = split.pane_bands(focused).unwrap().1;
+        let wanted = split
+            .standby_prompt_mut("session-1")
+            .desired_prompt_height(inactive_prompt.width);
+        assert!(
+            inactive_prompt.height
+                == prompt_target(wanted, inactive_prompt.height + inactive_transcript.height),
+            "inactive Moving composer must determine the shared band's height"
+        );
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert!(focused_prompt.contains(cursor));
+        let edge = &terminal.backend().buffer()[(inactive_prompt.x, inactive_prompt.y + 1)];
+        assert_eq!(
+            Some(edge.fg),
+            theme::border(false).fg,
+            "inactive composer must not draw a focused border or cursor"
+        );
+        let lines = render_combined_golden(&mut split, 160, 55);
+        append_combined_golden(
+            &mut output,
+            "split panes retain the inactive Moving draft and only focus the active composer",
+            160,
+            55,
+            &lines,
+        );
+        writeln!(
+            output,
+            "inactive prompt height: {}; desired: {wanted}; focused cursor: {cursor:?}",
+            inactive_prompt.height
+        )
+        .unwrap();
 
         let mut suspending = dashboard_with_session(running_session());
         suspending.begin_session_operation(

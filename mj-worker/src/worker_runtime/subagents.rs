@@ -66,13 +66,15 @@ pub(super) fn configure_claude_subagent_mcp(
         && regular_file_or_absent(&settings_path))
     {
         return match role {
-            Some(role @ (SubagentMcpRole::Parent | SubagentMcpRole::Child)) => {
-                Err(anyhow::anyhow!(
-                    "cannot register the Claude {} tools: {} is not a private staged profile",
-                    role.id(),
-                    home.display()
-                ))
-            }
+            Some(
+                role @ (SubagentMcpRole::Parent
+                | SubagentMcpRole::Child
+                | SubagentMcpRole::FetchOnly),
+            ) => Err(anyhow::anyhow!(
+                "cannot register the Claude {} tools: {} is not a private staged profile",
+                role.id(),
+                home.display()
+            )),
             Some(SubagentMcpRole::MessageOnly) => {
                 tracing::warn!(path = %home.display(), "skipping the Claude send_message server: the profile is not a private staged directory");
                 Ok(())
@@ -249,15 +251,23 @@ fn edit_profile_json(
 /// `<root>/profile` on this machine, `profiles/<session>` in a container or
 /// under a remote login (the controller's `removable_profile_root`). An
 /// earlier local session's `<root>/profile` may link to the person's own home,
-/// so each directory is checked without following links; resolving both sides
-/// would accept that link.
-fn private_staged_home(root: &Path, session_id: &str, home: &Path) -> bool {
-    let staged_directories = if home == root.join("profile") {
+/// so each directory is checked without following links. Only the local
+/// profile's parent and root are resolved for comparison, allowing symlinked
+/// ancestors without accepting a linked profile, profiles, or root directory.
+pub(super) fn private_staged_home(root: &Path, session_id: &str, home: &Path) -> bool {
+    let local_profile = home.file_name() == Some("profile".as_ref())
+        && home.parent().is_some_and(|parent| {
+            match (std::fs::canonicalize(parent), std::fs::canonicalize(root)) {
+                (Ok(parent), Ok(root)) => parent == root,
+                _ => false,
+            }
+        });
+    let staged_directories = if local_profile {
         vec![root, home]
     } else if home.file_name() == Some(session_id.as_ref())
         && home.parent().and_then(Path::file_name) == Some("profiles".as_ref())
     {
-        vec![home]
+        vec![home.parent().expect("profiles parent was checked"), home]
     } else {
         Vec::new()
     };
@@ -269,7 +279,7 @@ fn private_staged_home(root: &Path, session_id: &str, home: &Path) -> bool {
 
 /// A profile file is edited in place only when it is a regular file or does
 /// not exist yet; a link may lead out of the private profile.
-fn regular_file_or_absent(path: &Path) -> bool {
+pub(super) fn regular_file_or_absent(path: &Path) -> bool {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata.is_file(),
         Err(error) => error.kind() == std::io::ErrorKind::NotFound,
@@ -376,11 +386,13 @@ pub(super) fn configure_codex_mcp(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
 ) -> Result<bool> {
-    configure_codex_mcp_with_mailboxes(root, home, role, policy, true, true, false)
+    configure_codex_mcp_with_mailboxes(root, "", home, role, policy, true, true, false)
 }
 
+#[allow(clippy::too_many_arguments)] // Mirrors the worker startup policy and owned MCP options.
 fn configure_codex_mcp_with_mailboxes(
     root: &Path,
+    session_id: &str,
     home: &Path,
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
@@ -388,23 +400,37 @@ fn configure_codex_mcp_with_mailboxes(
     subtle_subagents: bool,
     review_gate: bool,
 ) -> Result<bool> {
-    // Earlier local workers used the person's original profile, directly or
-    // through <root>/profile as a symlink. Keep those on ACP until restaging;
-    // never write configuration through that compatibility link.
-    let staged = root.join("profile");
-    match std::fs::symlink_metadata(&staged) {
-        Ok(metadata) if !metadata.is_dir() => return Ok(false),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).context("inspect private Codex profile"),
-        Ok(_) => {}
-    }
-    let canonical = |path: &Path| {
-        std::fs::canonicalize(path)
-            .with_context(|| format!("resolve Codex profile {}", path.display()))
-    };
-    if canonical(home)? != canonical(&staged)? {
+    if !private_staged_home(root, session_id, home) {
         return Ok(false);
     }
+    // Install on every worker start, including without delegation and in YOLO,
+    // so changing the execution policy never leaves an older profile behind.
+    let rules = home.join("rules");
+    match std::fs::symlink_metadata(&rules) {
+        Ok(metadata) => anyhow::ensure!(
+            metadata.is_dir(),
+            "Codex rules directory {} must be a real directory",
+            rules.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&rules)
+                .with_context(|| format!("create Codex rules directory {}", rules.display()))?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect Codex rules {}", rules.display()));
+        }
+    }
+    let rule = rules.join("mj-gh.rules");
+    anyhow::ensure!(
+        regular_file_or_absent(&rule),
+        "managed Codex rule {} must be a regular file",
+        rule.display()
+    );
+    mj_core::config::atomic_write(
+        &rule,
+        b"prefix_rule(pattern=[\"gh\"], decision=\"allow\")\n",
+    )
+    .with_context(|| format!("write managed Codex rule {}", rule.display()))?;
     // The staged copy is session-private, so re-serializing it through a
     // structured table (which drops comments and formatting) is acceptable.
     let path = home.join("config.toml");
@@ -491,8 +517,10 @@ fn configure_codex_mcp_with_mailboxes(
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)] // Startup supplies the session identity alongside its profile.
 pub(super) fn configure_codex_profile(
     root: &Path,
+    session_id: &str,
     home: &Path,
     environment: &mut BTreeMap<String, String>,
     role: Option<mj_core::subagent::SubagentMcpRole>,
@@ -502,6 +530,7 @@ pub(super) fn configure_codex_profile(
     configure_codex_mailbox_hook(root, environment)?;
     configure_codex_mcp_with_mailboxes(
         root,
+        session_id,
         home,
         role,
         policy,
@@ -1048,6 +1077,63 @@ mod tests {
 
     use mj_core::subagent::SubagentToolAction;
 
+    // Hard-won: a602a316a: a symlinked data ancestor disabled Claude messaging and native steering.
+    #[cfg(unix)]
+    #[test]
+    fn claude_profile_repair_accepts_symlinked_ancestors_with_different_path_spellings() {
+        use mj_core::subagent::SubagentMcpRole;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let alias = temp.path().join("data-link");
+        let staged_root = data.join("workers/session");
+        std::fs::create_dir_all(staged_root.join("profile")).unwrap();
+        std::os::unix::fs::symlink(&data, &alias).unwrap();
+        let alias_root = alias.join("workers/session");
+        let owner = super::super::WorkerRootOwner::acquire(&alias_root).unwrap();
+        let canonical_root = owner.root();
+
+        for (root, home) in [
+            (canonical_root, alias_root.join("profile")),
+            (alias_root.as_path(), canonical_root.join("profile")),
+        ] {
+            std::fs::write(home.join(".claude.json"), b"{}").unwrap();
+            std::fs::write(home.join("settings.json"), b"{}").unwrap();
+            configure_claude_subagent_mcp(
+                root,
+                "session",
+                &home,
+                Some(SubagentMcpRole::MessageOnly),
+                true,
+                true,
+                false,
+            )
+            .unwrap();
+            assert!(configure_claude_mailbox_hook(root, "session", &home).unwrap());
+
+            let config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(home.join(".claude.json")).unwrap()).unwrap();
+            assert_eq!(
+                config["mcpServers"]["mj-agents"]["command"],
+                serde_json::json!(root.join("hel"))
+            );
+            let settings: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                settings["permissions"]["allow"],
+                serde_json::json!(["mcp__mj-agents__send_message", "mcp__mj-agents__fetch"])
+            );
+            let command = settings["hooks"]["PostToolBatch"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap();
+            assert!(command.ends_with(&format!(
+                "--socket {} --event PostToolBatch",
+                mj_core::targets::posix_quote(&root.join("control.sock").to_string_lossy())
+            )));
+        }
+    }
+
     // Hard-won: 3c8973b87: the check expected <root>/profile/.claude, so it refused every real Claude home and steering was never offered.
     #[test]
     fn claude_mailbox_hook_resolves_the_worker_socket_and_preserves_profile_settings() {
@@ -1207,6 +1293,37 @@ mod tests {
         let before = std::fs::read(&path).unwrap();
         assert!(!configure_claude_mailbox_hook(root.path(), "session", &home).unwrap());
         assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        // A root that is itself a link stays unsafe, even when the home is
+        // spelled through the real directory. Unrelated profiles stay unsafe.
+        std::fs::remove_file(home.join("settings.json")).unwrap();
+        let linked_root = outside.path().join("worker-link");
+        std::os::unix::fs::symlink(root.path(), &linked_root).unwrap();
+        let unrelated_home = outside.path().join("profile");
+        std::fs::create_dir(&unrelated_home).unwrap();
+        for (root, home) in [
+            (linked_root.as_path(), home.clone()),
+            (linked_root.as_path(), linked_root.join("profile")),
+            (root.path(), unrelated_home),
+        ] {
+            for name in ["settings.json", ".claude.json"] {
+                std::fs::write(home.join(name), b"{}").unwrap();
+            }
+            assert!(!configure_claude_mailbox_hook(root, "session", &home).unwrap());
+            configure_claude_subagent_mcp(
+                root,
+                "session",
+                &home,
+                Some(mj_core::subagent::SubagentMcpRole::MessageOnly),
+                true,
+                true,
+                false,
+            )
+            .unwrap();
+            for name in ["settings.json", ".claude.json"] {
+                assert_eq!(std::fs::read(home.join(name)).unwrap(), b"{}");
+            }
+        }
     }
 
     #[test]
@@ -1461,7 +1578,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
             serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap()).unwrap();
         assert_eq!(
             settings["permissions"]["allow"],
-            serde_json::json!(["mcp__mj-agents__send_message"])
+            serde_json::json!(["mcp__mj-agents__send_message", "mcp__mj-agents__fetch"])
         );
 
         // Losing the role removes the server; the person's servers stay.
@@ -1522,7 +1639,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
             (settings, config, allow)
         };
 
-        // A child's only tool is handback.
+        // Children can hand back and fetch without asking the person.
         let root = profile();
         std::fs::write(
             root.path().join("profile/settings.json"),
@@ -1530,7 +1647,14 @@ print(sys.argv[sys.argv.index('--role') + 1])
         )
         .unwrap();
         let (settings, _, allow) = configure(&root, SubagentMcpRole::Child, true);
-        assert_eq!(allow, ["Bash(ls:*)", "mcp__mj-agents__handback"]);
+        assert_eq!(
+            allow,
+            [
+                "Bash(ls:*)",
+                "mcp__mj-agents__handback",
+                "mcp__mj-agents__fetch"
+            ]
+        );
         assert_eq!(
             settings["permissions"]["deny"],
             serde_json::json!(["WebFetch"])
@@ -1562,7 +1686,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
             1,
             "{allow:?}"
         );
-        for tool in ["spawn", "list_agents", "send_message", "close"] {
+        for tool in ["spawn", "list_agents", "send_message", "close", "fetch"] {
             assert!(
                 allow.contains(&format!("mcp__mj-agents__{tool}")),
                 "{tool}: {allow:?}"
@@ -1674,6 +1798,10 @@ print(sys.argv[sys.argv.index('--role') + 1])
                 let home = root.path().join("profile");
                 std::fs::create_dir(&home).unwrap();
                 let path = home.join("config.toml");
+                let rules = home.join("rules");
+                std::fs::create_dir(&rules).unwrap();
+                let user_rule = "prefix_rule(pattern=[\"git\"], decision=\"prompt\")\n";
+                std::fs::write(rules.join("user.rules"), user_rule).unwrap();
                 let original = r#"
 model = "parent-model"
 [features]
@@ -1696,6 +1824,15 @@ enabled = false
                 let first = std::fs::read_to_string(&path).unwrap();
                 assert!(configure_codex_mcp(root.path(), &home, Some(role), policy).unwrap());
                 assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+                let gh_rule = "prefix_rule(pattern=[\"gh\"], decision=\"allow\")\n";
+                assert_eq!(
+                    std::fs::read_to_string(rules.join("mj-gh.rules")).unwrap(),
+                    gh_rule
+                );
+                assert_eq!(
+                    std::fs::read_to_string(rules.join("user.rules")).unwrap(),
+                    user_rule
+                );
                 let config: toml::Value = toml::from_str(&first).unwrap();
                 let original: toml::Value = toml::from_str(original).unwrap();
                 assert_eq!(config["model"], original["model"]);
@@ -1757,6 +1894,14 @@ enabled = false
                     toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
                 assert!(disabled["mcp_servers"].get("mj-agents").is_none());
                 assert_eq!(
+                    std::fs::read_to_string(rules.join("mj-gh.rules")).unwrap(),
+                    gh_rule
+                );
+                assert_eq!(
+                    std::fs::read_to_string(rules.join("user.rules")).unwrap(),
+                    user_rule
+                );
+                assert_eq!(
                     disabled["mcp_servers"]["user-server"],
                     original["mcp_servers"]["user-server"]
                 );
@@ -1776,6 +1921,12 @@ enabled = false
             |role| configure_codex_mcp(root.path(), &home, role, ExecutionPolicy::Unconstrained);
         configure(None).unwrap();
         assert!(!path.exists());
+        let rule = home.join("rules/mj-gh.rules");
+        let expected = "prefix_rule(pattern=[\"gh\"], decision=\"allow\")\n";
+        assert_eq!(std::fs::read_to_string(&rule).unwrap(), expected);
+        std::fs::write(&rule, "obsolete managed rule").unwrap();
+        configure(None).unwrap();
+        assert_eq!(std::fs::read_to_string(&rule).unwrap(), expected);
         configure(Some(SubagentMcpRole::Child)).unwrap();
         let config: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
@@ -1811,8 +1962,53 @@ enabled = false
             assert!(configure(Some(SubagentMcpRole::Parent)).is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
         }
+        let remote = root.path().join("profiles/session");
+        std::fs::create_dir_all(&remote).unwrap();
+        for policy in [
+            ExecutionPolicy::ConfiguredApprovals,
+            ExecutionPolicy::Unconstrained,
+        ] {
+            for role in [
+                None,
+                Some(SubagentMcpRole::Parent),
+                Some(SubagentMcpRole::MessageOnly),
+                Some(SubagentMcpRole::Child),
+            ] {
+                assert!(
+                    configure_codex_mcp_with_mailboxes(
+                        root.path(),
+                        "session",
+                        &remote,
+                        role,
+                        policy,
+                        true,
+                        true,
+                        false
+                    )
+                    .unwrap()
+                );
+                assert_eq!(
+                    std::fs::read_to_string(remote.join("rules/mj-gh.rules")).unwrap(),
+                    expected
+                );
+            }
+        }
+        assert!(
+            !configure_codex_mcp_with_mailboxes(
+                root.path(),
+                "different-session",
+                &remote,
+                None,
+                ExecutionPolicy::ConfiguredApprovals,
+                true,
+                true,
+                false
+            )
+            .unwrap()
+        );
     }
 
+    // Hard-won: a602a316a5: a linked profiles parent let private-profile writes reach a source profile.
     #[test]
     fn legacy_codex_homes_stay_on_acp_without_writing_the_users_profile() {
         use mj_core::config::ExecutionPolicy;
@@ -1841,6 +2037,7 @@ enabled = false
             ] {
                 assert!(!configure(home, role).unwrap());
                 assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+                assert!(!source.path().join("rules").exists());
             }
         }
         std::fs::remove_file(&staged).unwrap();
@@ -1850,6 +2047,58 @@ enabled = false
         assert!(configure(&staged, Some(SubagentMcpRole::Parent)).unwrap());
         assert!(staged.join("config.toml").is_file());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(!source.path().join("rules").exists());
+        let rules = staged.join("rules");
+        std::fs::remove_dir_all(&rules).unwrap();
+        std::os::unix::fs::symlink(source.path(), &rules).unwrap();
+        assert!(configure(&staged, None).is_err());
+        assert!(!source.path().join("mj-gh.rules").exists());
+        std::fs::remove_file(&rules).unwrap();
+        std::fs::create_dir(&rules).unwrap();
+        std::os::unix::fs::symlink(&path, rules.join("mj-gh.rules")).unwrap();
+        assert!(configure(&staged, None).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        let source_session = source.path().join("session");
+        std::fs::create_dir(&source_session).unwrap();
+        let source_config = source_session.join("config.toml");
+        std::fs::write(&source_config, original).unwrap();
+        let profiles = root.path().join("profiles");
+        std::os::unix::fs::symlink(source.path(), &profiles).unwrap();
+        let remote_home = profiles.join("session");
+        for role in [
+            None,
+            Some(SubagentMcpRole::Parent),
+            Some(SubagentMcpRole::Child),
+        ] {
+            assert!(!private_staged_home(root.path(), "session", &remote_home));
+            assert!(
+                !configure_codex_mcp_with_mailboxes(
+                    root.path(),
+                    "session",
+                    &remote_home,
+                    role,
+                    ExecutionPolicy::ConfiguredApprovals,
+                    true,
+                    true,
+                    false,
+                )
+                .unwrap()
+            );
+            assert_eq!(std::fs::read_to_string(&source_config).unwrap(), original);
+            assert!(!source_session.join("rules").exists());
+        }
+
+        // A link above the real profiles directory still names a private home.
+        std::fs::remove_file(&profiles).unwrap();
+        std::fs::create_dir_all(&remote_home).unwrap();
+        let ancestor = source.path().join("worker-alias");
+        std::os::unix::fs::symlink(root.path(), &ancestor).unwrap();
+        assert!(private_staged_home(
+            root.path(),
+            "session",
+            &ancestor.join("profiles/session")
+        ));
     }
 
     fn request(id: &str) -> SubagentToolRequest {
@@ -2493,6 +2742,7 @@ mod review_gate_tests {
             SubagentMcpRole::Parent,
             SubagentMcpRole::Child,
             SubagentMcpRole::MessageOnly,
+            SubagentMcpRole::FetchOnly,
         ] {
             for gate in [false, true] {
                 let root = tempfile::tempdir().unwrap();
@@ -2533,6 +2783,7 @@ mod review_gate_tests {
                 );
                 configure_codex_mcp_with_mailboxes(
                     root.path(),
+                    "",
                     &home,
                     Some(role),
                     mj_core::config::ExecutionPolicy::ConfiguredApprovals,

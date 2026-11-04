@@ -1,11 +1,14 @@
 //! Hel's daemon-side controller: provisioning, session management, the web
 //! server, and the surrounding host-side services.
 
+mod aws_credentials;
 mod claude_usage;
 mod codex_usage;
 mod grok_usage;
 mod kimi_auth;
 mod muse_usage;
+mod oauth_lock;
+mod quota_runtime;
 mod zai_usage;
 
 pub mod compaction;
@@ -44,6 +47,7 @@ pub mod targets;
 pub mod termination;
 
 pub mod daemon;
+pub mod node_registry;
 pub mod pollers;
 pub(crate) mod project_memory_merge;
 pub mod server_runtime;

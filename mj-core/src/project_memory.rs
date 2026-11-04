@@ -18,7 +18,6 @@ pub const MEMORY_INDEX: &str = "MEMORY.md";
 pub const MAX_VIRTUAL_PATH_BYTES: usize = 1024;
 pub const STARTUP_INDEX_LINES: usize = 200;
 pub const STARTUP_INDEX_BYTES: usize = 25 * 1024;
-pub const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -758,13 +757,10 @@ impl ProjectMemoryStore {
             collect_entries(&self.root, &self.root, &mut entries)?;
         }
         let mut files = BTreeMap::new();
-        let mut total = 0_usize;
         for entry in entries {
-            ensure_snapshot_budget(&mut total, entry.bytes)?;
             let relative = validate_virtual_path(&entry.path)?;
             let content = fs::read_to_string(self.root.join(relative))
                 .with_context(|| format!("read memory snapshot document {}", entry.path))?;
-            ensure_snapshot_budget(&mut total, content.len().saturating_sub(entry.bytes))?;
             files.insert(entry.path, content);
         }
         Ok(ProjectMemorySnapshot { files })
@@ -773,10 +769,8 @@ impl ProjectMemoryStore {
     /// Apply documents from a legacy relay snapshot. This stays additive so an
     /// older controller cannot delete documents it does not know to sync.
     pub fn install_snapshot(&self, snapshot: &ProjectMemorySnapshot) -> Result<bool> {
-        let mut total = 0_usize;
         let mut changed = false;
         for (path, content) in &snapshot.files {
-            ensure_snapshot_budget(&mut total, content.len())?;
             let relative = validate_virtual_path(path)?;
             crate::confined_path::reject_symlinks(&self.root, &relative, true)?;
             ensure_snapshot_document(content)?;
@@ -803,11 +797,9 @@ impl ProjectMemoryStore {
     /// Make the directory hold exactly `tree`: write changed documents and
     /// delete documents that `tree` omits. Returns whether anything changed.
     pub fn replace_tree(&self, tree: &ProjectMemorySnapshot) -> Result<bool> {
-        let mut total = 0_usize;
         let mut desired = BTreeMap::<String, (PathBuf, &str)>::new();
         let mut relative_paths = BTreeSet::new();
         for (path, content) in &tree.files {
-            ensure_snapshot_budget(&mut total, content.len())?;
             let relative = validate_virtual_path(path)?;
             crate::confined_path::reject_symlinks(&self.root, &relative, true)?;
             ensure_snapshot_document(content)?;
@@ -922,17 +914,6 @@ fn collect_visible_directories(
             output.push(path);
         }
     }
-    Ok(())
-}
-
-fn ensure_snapshot_budget(total: &mut usize, bytes: usize) -> Result<()> {
-    *total = total
-        .checked_add(bytes)
-        .context("memory snapshot size overflow")?;
-    anyhow::ensure!(
-        *total <= MAX_SNAPSHOT_BYTES,
-        "project memory snapshot exceeds {MAX_SNAPSHOT_BYTES} bytes"
-    );
     Ok(())
 }
 
@@ -1124,7 +1105,6 @@ fn validate_virtual_path(path: &str) -> Result<PathBuf> {
 
 struct MemoryFileEntry {
     path: String,
-    bytes: usize,
 }
 
 fn collect_entries(root: &Path, directory: &Path, output: &mut Vec<MemoryFileEntry>) -> Result<()> {
@@ -1149,13 +1129,9 @@ fn collect_entries(root: &Path, directory: &Path, output: &mut Vec<MemoryFileEnt
 }
 
 fn snapshot_entry(root: &Path, path: &Path) -> Result<MemoryFileEntry> {
-    let metadata = fs::metadata(path)?;
     let relative = path.strip_prefix(root)?;
     let rendered = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
-    Ok(MemoryFileEntry {
-        path: rendered,
-        bytes: usize::try_from(metadata.len()).unwrap_or(usize::MAX),
-    })
+    Ok(MemoryFileEntry { path: rendered })
 }
 
 #[cfg(test)]
@@ -1385,6 +1361,31 @@ mod tests {
             fs::read_to_string(directory.path().join("memory-redirect.json")).unwrap(),
             "redirect"
         );
+    }
+
+    // Hard-won: a5d320817: memory trees above one MiB prevented Move, Suspend and recovery checkpoints.
+    #[test]
+    fn large_snapshot_collect_install_and_replace_round_trip() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let source_store = ProjectMemoryStore::new(source.path());
+        let destination_store = ProjectMemoryStore::new(destination.path());
+        let tree = ProjectMemorySnapshot {
+            files: BTreeMap::from([
+                ("/MEMORY.md".into(), "large memory\n".repeat(250_000)),
+                ("/nested/notes.md".into(), "notes".into()),
+            ]),
+        };
+        source_store.install_snapshot(&tree).unwrap();
+        let captured = source_store.snapshot().unwrap();
+        assert_eq!(captured, tree);
+        destination_store.install_snapshot(&captured).unwrap();
+        assert_eq!(destination_store.snapshot().unwrap(), tree);
+        source_store
+            .replace_tree(&ProjectMemorySnapshot::default())
+            .unwrap();
+        source_store.replace_tree(&captured).unwrap();
+        assert_eq!(source_store.snapshot().unwrap(), tree);
     }
 
     #[test]

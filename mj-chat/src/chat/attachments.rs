@@ -10,7 +10,7 @@ use std::io::Read;
 use std::ops::Range;
 use std::path::Path;
 
-use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent};
+use agent_client_protocol::v1::schema::{ContentBlock, ImageContent, TextContent};
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -19,7 +19,7 @@ use crate::clipboard::ClipboardImage;
 use mj_core::attachment::{AttachmentRef, AttachmentStore, MAX_IMAGES};
 
 /// Prefix used for drafts whose payload is encoded as JSON.
-pub const CHAT_DRAFT_PREFIX: &str = "mjolnir-chat-draft-v1:";
+pub use mj_core::draft::CHAT_DRAFT_PREFIX;
 
 /// The text and inline images currently in the composer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -579,7 +579,7 @@ pub(super) fn insert_image(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::ContentBlock;
+    use agent_client_protocol::v1::schema::ContentBlock;
     use base64::Engine;
 
     fn image(tag: &str) -> ClipboardImage {

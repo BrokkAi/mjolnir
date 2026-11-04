@@ -405,15 +405,17 @@ pub(crate) fn directory_size(path: &Path) -> Result<u64> {
 
 pub(super) fn claude_candidates(home: &Path) -> Result<Vec<FileScanCandidate>> {
     let projects = home.join("projects");
-    ensure!(
-        projects.is_dir(),
-        "Claude projects directory is missing: {}",
-        projects.display()
-    );
+    // Profiles used only by workers may never have created a local history.
+    let entries = match fs::read_dir(&projects) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read Claude projects directory {}", projects.display()));
+        }
+    };
     let mut candidates = Vec::new();
-    for project in fs::read_dir(&projects)
-        .with_context(|| format!("read Claude projects directory {}", projects.display()))?
-    {
+    for project in entries {
         let project = project?;
         let project_path = project.path();
         let project_metadata = fs::symlink_metadata(&project_path)?;

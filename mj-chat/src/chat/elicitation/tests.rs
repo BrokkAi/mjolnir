@@ -545,13 +545,12 @@ fn golden_elicitation_dialog() {
     let buffer = rendered_in_pane(&claude, 100, 20);
     append_elicitation_golden_state(
         &mut output,
-        "Claude optional question starts with nothing picked",
+        "Claude question starts with its first option picked",
         &buffer,
         &[],
     );
-    // Pick first, then write: arrows to the text box under the choices pass
-    // Memcached without picking it, and the pick stays Redis.
-    claude.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+    // Keep the default pick while writing: arrows to the text box under the
+    // choices pass Memcached without picking it, and the pick stays Redis.
     claude.handle_key(KeyCode::Down, KeyModifiers::NONE);
     claude.handle_key(KeyCode::Down, KeyModifiers::NONE);
     claude.paste("Keep TTLs short");
@@ -590,9 +589,10 @@ fn golden_elicitation_dialog() {
             ),
         ],
     );
-    // With nothing picked, the text alone is the whole answer, also when the
-    // arrows pass every option on the way to it.
+    // Take back the default pick so the text alone is the whole answer, also
+    // when the arrows pass every option on the way to it.
     let mut own = ElicitationDialog::new(claude.request.clone());
+    own.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
     own.handle_key(KeyCode::Down, KeyModifiers::NONE);
     own.handle_key(KeyCode::Down, KeyModifiers::NONE);
     for character in "Valkey".chars() {
@@ -611,7 +611,7 @@ fn golden_elicitation_dialog() {
         .expect("submitting with an unanswered question still answers");
     append_elicitation_golden_state(
         &mut output,
-        "Claude Other text reached with arrows picks nothing on the way",
+        "Claude default taken back, arrows to Other pick nothing on the way",
         &buffer,
         &[format!("submitted: {answer:?}")],
     );
@@ -624,7 +624,11 @@ fn golden_elicitation_dialog() {
     let start = std::time::Instant::now();
     let later = |clicks: u32| start + crate::components::DOUBLE_CLICK_INTERVAL * 3 * clicks;
     let mut toggles = ElicitationDialog::new(claude.request.clone());
-    let mut steps = Vec::new();
+    toggles.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+    let mut steps = vec![format!(
+        "Space takes back default Redis: {}",
+        page_answer(&toggles)
+    )];
     for (click, (label, step)) in [
         ("click Redis", "Redis"),
         ("click Memcached", "Memcached"),
@@ -710,10 +714,13 @@ fn golden_elicitation_dialog() {
 
     // Enter answers with what is already there. It takes the option under
     // the cursor only when the question would otherwise be empty.
+    // Explicitly take back Redis before exercising Enter on an empty answer.
     let mut empty = ElicitationDialog::new(claude.request.clone());
+    empty.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
     empty.handle_key(KeyCode::Down, KeyModifiers::NONE);
     empty.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     let mut written = ElicitationDialog::new(claude.request.clone());
+    written.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
     written.handle_key(KeyCode::Down, KeyModifiers::NONE);
     written.handle_key(KeyCode::Down, KeyModifiers::NONE);
     written.paste("Valkey");
@@ -960,6 +967,34 @@ fn a_claude_question_starts_with_its_recommended_option_picked() {
             ElicitationValue::String("Memcached".into())
         )]))
     );
+}
+
+#[test]
+fn claude_questions_start_with_their_recommended_or_first_option_picked() {
+    let mut params: serde_json::Value =
+        serde_json::from_str(include_str!("testdata/claude-ask-user-question.json")).unwrap();
+    params["requestedSchema"]["properties"]["question_0"]["oneOf"][1]["title"] =
+        "Memcached (Recommended)".into();
+    let question = &mut params["requestedSchema"]["properties"]["question_1"];
+    question["type"] = "string".into();
+    question["oneOf"] = question.as_object_mut().unwrap().remove("items").unwrap()["anyOf"].take();
+    let dialog = ElicitationDialog::new(
+        ElicitationRequest::from_acp_params("claude-mixed-recommendations", params).unwrap(),
+    );
+    assert_eq!(
+        dialog.option_cursors[0], 1,
+        "Q1 starts on its recommendation"
+    );
+    assert_eq!(dialog.option_cursors[1], 0, "Q2 starts on its first option");
+    for (index, value) in [(0, "Memcached"), (1, "linux")] {
+        assert_eq!(
+            dialog.question_content(index),
+            Ok(BTreeMap::from([(
+                format!("question_{index}"),
+                ElicitationValue::String(value.into())
+            )]))
+        );
+    }
 }
 
 #[test]

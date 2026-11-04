@@ -76,6 +76,42 @@ pub struct WaitObservation {
 }
 
 impl WaitObservation {
+    /// Read turn resolution from one worker publication. Delegation and the
+    /// wait API must not announce an ending before this worker finishes its
+    /// assessment or retries the request.
+    pub(crate) fn observe_worker_turn(
+        &mut self,
+        snapshot: &mj_core::state::ManagedSessionSnapshot,
+    ) {
+        self.execution = snapshot.materialized.execution;
+        self.active_turn = snapshot.materialized.active_turn.clone();
+        self.last_turn_outcome = snapshot.materialized.last_turn_outcome.clone();
+        self.queued = snapshot
+            .materialized
+            .queued_prompts
+            .iter()
+            .map(|prompt| prompt.command_id.clone())
+            .collect();
+        self.capacity_retry = snapshot.operational.capacity_retry.clone();
+        self.retry_assessment_pending = snapshot.operational.retry_assessment_pending;
+        self.turn_assessment = snapshot.operational.assessment.as_deref().cloned();
+        self.quota_recovery = snapshot
+            .operational
+            .continuation
+            .quota_recovery
+            .clone()
+            .filter(|recovery| !recovery.submitted);
+    }
+
+    pub(crate) fn worker_turn_pending(snapshot: &mj_core::state::ManagedSessionSnapshot) -> bool {
+        let mut observation = Self::default();
+        observation.observe_worker_turn(snapshot);
+        observation
+            .last_turn_outcome
+            .as_ref()
+            .is_none_or(|outcome| observation.turn_end(outcome).is_none())
+    }
+
     /// How the turn that left `outcome` ended, or `None` while it has not.
     ///
     /// A turn has ended once the worker has stopped working on its request.
@@ -99,11 +135,10 @@ impl WaitObservation {
         {
             return None;
         }
-        let verdict = self.turn_assessment.as_ref().filter(|assessment| {
-            assessment.turn_id == outcome.command_id
-                && assessment.completed_ordinal == outcome.completed_ordinal
-                && assessment.current()
-        });
+        let verdict = self
+            .turn_assessment
+            .as_ref()
+            .filter(|assessment| assessment.applies_to(outcome));
         // Only a request Jev has yet to answer holds the turn. A failed check
         // waits minutes to retry, with no limit on retries, so holding on it
         // would let a broken Jev profile keep every turn wait open; the turn
@@ -122,7 +157,7 @@ impl WaitObservation {
             if let Some(recovery) = recovery {
                 result.message = Some(recovery.notice.clone());
             }
-        } else if result.outcome == WaitOutcome::Finished && action == Some(Action::AwaitInput) {
+        } else if result.outcome == WaitOutcome::Finished && outcome.requires_input(verdict) {
             result.outcome = WaitOutcome::InputRequired;
             result.stop_reason = Some(mj_core::acp::AWAITING_INPUT_STOP_REASON.into());
         }

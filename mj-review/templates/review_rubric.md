@@ -55,10 +55,6 @@ The comments will be presented in the code review as inline comments. You should
 
 At the beginning of the finding title, tag the bug with priority level. For example "[P1] Un-padding slices along wrong tensor dimensions". [P0] – Drop everything to fix.  Blocking release, operations, or major usage. Only use for universal issues that do not depend on any assumptions about the inputs. · [P1] – Urgent. Should be addressed in the next cycle · [P2] – Normal. To be fixed eventually · [P3] – Low. Nice to have.
 
-Additionally, include a numeric priority field in the JSON output for each finding: set "priority" to 0 for P0, 1 for P1, 2 for P2, or 3 for P3. If a priority cannot be determined, omit the field or use null.
-
-At the end of your findings, output an "overall correctness" verdict of whether or not the patch should be considered "correct".
-Correct implies that existing code and tests will not break, and the patch is free of bugs and other blocking issues.
 Ignore non-blocking issues such as style, formatting, typos, documentation, and other nits.
 
 FORMATTING GUIDELINES:
@@ -66,30 +62,8 @@ The finding description should be one paragraph.
 
 OUTPUT FORMAT:
 
-## Output schema  — MUST MATCH *exactly*
+Write your findings as plain text, highest priority first. Start each finding on its own line with a dash, then the `[Pn]` tag and title, then the file path and the shortest line range that locates the problem (`path/to/file.rs:120-124`), then one paragraph explaining why it is a problem. The location must overlap the diff. Do not generate a fix.
 
-```json
-{
-  "findings": [
-    {
-      "title": "<≤ 80 chars, imperative>",
-      "body": "<valid Markdown explaining *why* this is a problem; cite files/lines/functions>",
-      "confidence_score": <float 0.0-1.0>,
-      "priority": <int 0-3, optional>,
-      "code_location": {
-        "absolute_file_path": "<file path>",
-        "line_range": {"start": <int>, "end": <int>}
-      }
-    }
-  ],
-  "overall_correctness": "patch is correct" | "patch is incorrect",
-  "overall_explanation": "<1-3 sentence explanation justifying the overall_correctness verdict>",
-  "overall_confidence_score": <float 0.0-1.0>
-}
-```
+If there is no finding that a person would definitely want to fix, your entire answer must be exactly:
 
-* **Do not** wrap the JSON in markdown fences or extra prose.
-* The code_location field is required and must include absolute_file_path and line_range.
-* Line ranges must be as short as possible for interpreting the issue (avoid ranges over 5–10 lines; pick the most suitable subrange).
-* The code_location should overlap with the diff.
-* Do not generate a PR fix.
+No findings.

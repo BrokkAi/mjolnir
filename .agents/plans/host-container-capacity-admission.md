@@ -84,6 +84,10 @@ The admission calculation treats RAM as a hard, non-compressible commitment. It 
 
 ## Decision Log
 
+- Decision: CPU overcommit is admitted with a warning for every runtime. RAM is a hard aggregate limit only for Apple `container` targets, local or SSH; Docker and Podman admit RAM overcommit with a warning even on a Mac. Create, resume, and move use one serialized daemon admission function.
+  Rationale: Issue #1375 showed an idle 96-core Podman host being blocked by summed cgroup ceilings, which idle containers do not consume. Apple's Virtualization VMs do not return freed memory to macOS, so Apple container RAM commitments retain strict admission. Per-session host-total checks and the new-session 2-CPU/4-GiB minimum remain.
+  Date/Author: 2026-10-26 / Codex
+
 - Decision: Use 4 CPUs and 8 GiB as the baseline size for a new container session.
   Rationale: This is materially more useful than the prior 8 CPU / 32 GiB default while still supporting normal repository work, and the user explicitly selected it.
   Date/Author: 2026-10-25 / Codex
@@ -370,3 +374,7 @@ The web and TUI receive `HostContainerCapacity` rather than recomputing reserve 
 - 2026-10-25: Independent review confirmed all five findings. Added resume/move leases, separated EC2 and container preferences, scoped the minimum to new sessions, corrected unknown-capacity rendering, and switched hard-limit formatting to floor instead of round.
 - 2026-10-25: A second independent review confirmed three additional findings. Added non-owning joined leases, source-aware Move capacity reservations with in-place bypass and same-host max accounting, and daemon-computed capacity in the terminal runtime feed.
 - 2026-10-25: A third independent review confirmed two additional findings. Revalidated the in-place decision against daemon-owned state and made source accounting follow the durable source lifetime.
+
+- 2026-10-26: Issue #1375 revises the original aggregate refusal policy: CPU always warns; RAM refuses only on Apple `container` targets. Other runtimes proceed when capacity is unavailable or incomplete. The daemon now shares target detection, readings, locking, budget calculation, decision, warnings, and reservations across create/resume/move; creation warnings use the existing HTTP `notice` response without a daemon protocol bump. Earlier implementation notes describe the superseded policy.
+
+- 2026-10-26: Consolidation also makes lease joins and release one serialized ownership decision. Every holder retains the reservation; only the last drop releases it. Joins must match the physical host group, allocation, and RAM policy, so a different launch cannot reuse another operation's admission. Web Move preparation runs off the control loop and shares its cancellation control with the daemon lifecycle. Only a create under a hard RAM limit holds the admission lock until its durable record exists; other creates release it after computing their warning, so a batch of Podman or Docker launches does not wait on each registration in turn.

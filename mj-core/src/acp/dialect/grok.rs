@@ -1,11 +1,12 @@
 //! Grok Build's legacy ACP extensions.
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::Agent;
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::{
     SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelect, SessionConfigSelectOption, SessionConfigSelectOptions,
     SessionConfigValueId, SessionId,
 };
-use agent_client_protocol::{Agent, ConnectionTo};
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::config::HarnessKind;
@@ -293,7 +294,7 @@ pub fn response_was_lost(error: &anyhow::Error) -> bool {
         source
             .downcast_ref::<agent_client_protocol::Error>()
             .is_some_and(|error| {
-                error.code == agent_client_protocol::ErrorCode::InternalError
+                error.code == agent_client_protocol::ErrorCode::INTERNAL_ERROR
                     && error
                         .message
                         .starts_with("response to `session/set_model` never received:")

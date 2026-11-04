@@ -70,6 +70,7 @@ impl ViewerHistory {
         RuntimeCursor {
             incarnation: self.incarnation.clone(),
             sequence: revision,
+            subagent_parents: Default::default(),
         }
     }
 
@@ -162,6 +163,7 @@ impl ViewerFeed {
         let cursor = RuntimeCursor {
             incarnation,
             sequence: current.revision,
+            subagent_parents: Default::default(),
         };
         if let (Some(requested), Some(base)) = (requested, base) {
             self.known_interned = viewer_wire::interned_keys_from_sessions(&base.sessions)?;
@@ -196,6 +198,7 @@ impl ViewerFeed {
                 Some(RuntimeCursor {
                     incarnation,
                     sequence: current_entry.revision,
+                    subagent_parents: Default::default(),
                 }),
             );
         };
@@ -206,6 +209,7 @@ impl ViewerFeed {
         let cursor = RuntimeCursor {
             incarnation,
             sequence: current_entry.revision,
+            subagent_parents: Default::default(),
         };
         self.delta(&current, current_entry, cursor)
     }
@@ -314,6 +318,7 @@ pub(super) fn parse_cursor(text: &str) -> Option<RuntimeCursor> {
     Some(RuntimeCursor {
         incarnation: incarnation.to_owned(),
         sequence: sequence.parse().ok()?,
+        subagent_parents: Default::default(),
     })
 }
 
@@ -439,6 +444,7 @@ mod tests {
                 Some(RuntimeCursor {
                     incarnation: "old-daemon".into(),
                     sequence: 20,
+                    subagent_parents: Default::default(),
                 }),
             )
             .unwrap();
@@ -470,8 +476,10 @@ mod tests {
         assert!(frame["metadata"].get("profiles").is_none());
 
         let mut metadata_change = snapshot(33, vec![changed]);
+        metadata_change.operator_away = true;
         metadata_change.review_config.trigger = mj_core::config::ReviewTrigger::Turn;
         let frame = decode(&feed.update(metadata_change).unwrap()[0]);
+        assert_eq!(frame["metadata"]["operator_away"], true);
         assert_eq!(frame["metadata"]["review_config"]["trigger"], "turn");
         assert!(frame["metadata"].get("profiles").is_none());
     }

@@ -110,7 +110,7 @@ pub(crate) fn combo_key_event(combo: KeyCombo) -> KeyEvent {
 /// in `mj-core` must be given a command here before it compiles.
 pub(crate) fn command_for_action(action: KeyAction) -> CommandId {
     match action {
-        KeyAction::Help => CommandId::Help,
+        KeyAction::Help => CommandId::Palette,
         KeyAction::OpenSettings => CommandId::OpenConfig,
         KeyAction::Detach => CommandId::QuitDetach,
         KeyAction::NewSession => CommandId::NewSessionWizard,
@@ -175,7 +175,7 @@ pub(crate) fn command_for_action(action: KeyAction) -> CommandId {
 
 /// How many bindings at the head of `bindings` form the nine numbered
 /// workspace keys, so the interface can print them as one row.
-fn digit_range_len(bindings: &[Binding]) -> usize {
+fn digit_range_len(bindings: &[&Binding]) -> usize {
     if bindings.len() < 9 {
         return 0;
     }
@@ -202,8 +202,7 @@ fn binding_label(keybinds: &Keybinds, binding: &Binding, rhs_only: bool) -> Stri
 
 /// Every label for one action, with the nine numbered workspace keys collapsed
 /// into a single `1-9` row.
-fn action_labels(keybinds: &Keybinds, action: KeyAction, rhs_only: bool) -> Vec<String> {
-    let bindings = keybinds.bindings(action);
+fn binding_labels(keybinds: &Keybinds, bindings: &[&Binding], rhs_only: bool) -> Vec<String> {
     let mut labels = Vec::new();
     let mut position = 0;
     while let Some(binding) = bindings.get(position) {
@@ -356,8 +355,16 @@ impl DashboardState {
         }
         let prefix = self.keybinds.prefix_label();
         let pressed = format_key_combo(combo);
-        let notice = match action_labels(&self.keybinds, KeyAction::Help, true).first() {
-            Some(help) => format!("{prefix} {pressed} is not bound; {prefix} {help} lists keys"),
+        let palette_labels = command_action_labels(
+            &self.keybinds,
+            CommandId::Palette,
+            KeyAction::Palette,
+            false,
+        );
+        let notice = match palette_labels.first() {
+            Some(palette) => {
+                format!("{prefix} {pressed} is not bound; {palette} opens the command palette")
+            }
             None => format!("{prefix} {pressed} is not bound"),
         };
         self.set_notice(notice);
@@ -383,7 +390,7 @@ impl DashboardState {
             .map(|hint| hint.label.to_owned())
             .collect::<Vec<_>>();
         if let Some(action) = spec.action {
-            labels.extend(action_labels(&self.keybinds, action, false));
+            labels.extend(command_action_labels(&self.keybinds, id, action, false));
         }
         labels
     }
@@ -399,7 +406,7 @@ impl DashboardState {
         let spec = crate::actions::spec(id);
         spec.action
             .and_then(|action| {
-                action_labels(&self.keybinds, action, false)
+                command_action_labels(&self.keybinds, id, action, false)
                     .into_iter()
                     .next()
             })
@@ -410,9 +417,15 @@ impl DashboardState {
     /// chord command, otherwise its first pane key.
     pub(crate) fn footer_key(&self, id: CommandId) -> Option<String> {
         let spec = crate::actions::spec(id);
+        if id == CommandId::Palette {
+            return self
+                .palette_binding_labels(Trigger::Prefix, true)
+                .into_iter()
+                .reduce(|first, next| format!("{first} / {next}"));
+        }
         let after_prefix = || {
             spec.action.and_then(|action| {
-                action_labels(&self.keybinds, action, true)
+                command_action_labels(&self.keybinds, id, action, true)
                     .into_iter()
                     .next()
             })
@@ -425,6 +438,45 @@ impl DashboardState {
             .map(|hint| hint.label.to_owned())
             .or_else(after_prefix)
     }
+
+    pub(crate) fn palette_binding_labels(&self, trigger: Trigger, rhs_only: bool) -> Vec<String> {
+        let bindings =
+            command_action_bindings(&self.keybinds, CommandId::Palette, KeyAction::Palette)
+                .into_iter()
+                .filter(|binding| binding.trigger == trigger)
+                .collect::<Vec<_>>();
+        binding_labels(&self.keybinds, &bindings, rhs_only)
+    }
+
+    pub(crate) fn direct_palette_footer_key(&self) -> Option<String> {
+        self.palette_binding_labels(Trigger::Direct, false)
+            .into_iter()
+            .reduce(|first, next| format!("{first} / {next}"))
+    }
+}
+
+fn command_action_labels(
+    keybinds: &Keybinds,
+    id: CommandId,
+    action: KeyAction,
+    rhs_only: bool,
+) -> Vec<String> {
+    let bindings = command_action_bindings(keybinds, id, action);
+    binding_labels(keybinds, &bindings, rhs_only)
+}
+
+fn command_action_bindings(keybinds: &Keybinds, id: CommandId, action: KeyAction) -> Vec<&Binding> {
+    let mut actions = vec![action];
+    actions.extend(
+        KeyAction::ALL
+            .iter()
+            .copied()
+            .filter(|candidate| *candidate != action && command_for_action(*candidate) == id),
+    );
+    actions
+        .into_iter()
+        .flat_map(|candidate| keybinds.bindings(candidate))
+        .collect()
 }
 
 #[cfg(test)]
@@ -456,6 +508,18 @@ mod tests {
             }
         );
         assert!(!dashboard.prefix_pending());
+
+        let ctrl_f1 = KeyEvent::new(KeyCode::F(1), KeyModifiers::CONTROL);
+        let ctrl_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        for key in [ctrl_f1, ctrl_p] {
+            assert_eq!(
+                dashboard.route_bound_key(&key),
+                KeyRoute::Command {
+                    id: CommandId::Palette,
+                    index: None,
+                }
+            );
+        }
 
         let dormant_prefix = KeyEvent::new(KeyCode::F(12), KeyModifiers::CONTROL);
         assert_eq!(
@@ -528,7 +592,7 @@ mod tests {
                 assert_eq!(
                     dashboard.route_bound_key(&plain('?')),
                     KeyRoute::Command {
-                        id: CommandId::Help,
+                        id: CommandId::Palette,
                         index: None,
                     }
                 );
@@ -573,14 +637,15 @@ mod tests {
             ),
             (
                 KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
-                CommandId::Help,
+                CommandId::Palette,
             ),
             (
                 KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT),
-                CommandId::Help,
+                CommandId::Palette,
             ),
         ] {
             let mut dashboard = dashboard_with_session(running_session());
+            assert_eq!(dashboard.route_bound_key(&pressed), KeyRoute::Forward);
             dashboard.route_bound_key(&prefix_key());
             assert_eq!(
                 dashboard.route_bound_key(&pressed),
@@ -591,6 +656,135 @@ mod tests {
                 "{pressed:?}"
             );
         }
+    }
+
+    #[test]
+    fn decoded_legacy_help_bindings_are_palette_aliases() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let config_text = format!(
+            "version = {}\n\n[keys]\nprefix = \"ctrl+a\"\nhelp = [\"ctrl+alt+p\", \"prefix+x\", \"prefix+f1\"]\npalette = \"\"\n",
+            mj_core::config::CONFIG_VERSION
+        );
+        std::fs::write(&path, &config_text).unwrap();
+        let config = mj_core::config::Config::load_from(&path).unwrap();
+        assert_eq!(
+            config.keys.help.entries(),
+            ["ctrl+alt+p", "prefix+x", "prefix+f1"]
+        );
+        assert!(config.keys.palette.entries().is_empty());
+        config.save_to(&path).unwrap();
+        let config = mj_core::config::Config::load_from(&path).unwrap();
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_config(config.with_local_targets());
+
+        assert_eq!(
+            dashboard.key_labels(CommandId::Palette),
+            ["?", "ctrl+alt+p", "ctrl+a x", "ctrl+a f1"]
+        );
+        assert_eq!(
+            dashboard.footer_key(CommandId::Palette).as_deref(),
+            Some("x / f1")
+        );
+        assert_eq!(
+            dashboard.direct_palette_footer_key().as_deref(),
+            Some("ctrl+alt+p")
+        );
+        let footer = crate::render::combined_footer_text(&dashboard, 200);
+        assert!(footer.contains("ctrl+a then g sessions"), "{footer}");
+        assert!(footer.contains("x / f1 palette"), "{footer}");
+        assert!(footer.contains("ctrl+alt+p palette"), "{footer}");
+        assert!(!footer.contains("ctrl+a then ctrl+alt+p"), "{footer}");
+        let prefix = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        for key in [
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
+        ] {
+            assert_eq!(dashboard.route_bound_key(&prefix), KeyRoute::Consumed);
+            assert_eq!(
+                dashboard.route_bound_key(&key),
+                KeyRoute::Command {
+                    id: CommandId::Palette,
+                    index: None,
+                }
+            );
+        }
+        assert_eq!(
+            dashboard.route_bound_key(&KeyEvent::new(
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )),
+            KeyRoute::Command {
+                id: CommandId::Palette,
+                index: None,
+            }
+        );
+
+        dashboard.route_bound_key(&prefix);
+        assert_eq!(
+            dashboard.route_bound_key(&KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE)),
+            KeyRoute::Consumed
+        );
+        assert_eq!(
+            dashboard.notices.current().as_deref(),
+            Some("ctrl+a f12 is not bound; ctrl+alt+p opens the command palette")
+        );
+
+        let disabled = format!(
+            "version = {}\n\n[keys]\nprefix = \"ctrl+a\"\nhelp = \"\"\npalette = \"\"\nworkspace_manager = \"prefix+?\"\n",
+            mj_core::config::CONFIG_VERSION
+        );
+        std::fs::write(&path, &disabled).unwrap();
+        let config = mj_core::config::Config::load_from(&path).unwrap();
+        dashboard.set_config(config.with_local_targets());
+        dashboard.route_bound_key(&prefix);
+        let banner = crate::render::prefix_banner_line(&dashboard);
+        let banner_text = banner
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(banner_text, " PREFIX  esc cancel · ctrl+a send");
+        assert_eq!(
+            dashboard.route_bound_key(&plain('?')),
+            KeyRoute::Command {
+                id: CommandId::Workspaces,
+                index: None,
+            }
+        );
+        dashboard.route_bound_key(&prefix);
+        assert_eq!(
+            dashboard.route_bound_key(&KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE)),
+            KeyRoute::Consumed
+        );
+        assert_eq!(
+            dashboard.notices.current().as_deref(),
+            Some("ctrl+a f12 is not bound")
+        );
+
+        let duplicate = format!(
+            "version = {}\n\n[keys]\nprefix = \"ctrl+a\"\nhelp = \"prefix+x\"\npalette = \"prefix+x\"\n",
+            mj_core::config::CONFIG_VERSION
+        );
+        std::fs::write(&path, &duplicate).unwrap();
+        let config = mj_core::config::Config::load_from(&path).unwrap();
+        dashboard.set_config(config.with_local_targets());
+        assert_eq!(
+            dashboard
+                .key_labels(CommandId::Palette)
+                .iter()
+                .filter(|label| label.as_str() == "ctrl+a x")
+                .count(),
+            1
+        );
+        assert_eq!(dashboard.route_bound_key(&prefix), KeyRoute::Consumed);
+        assert_eq!(
+            dashboard.route_bound_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            KeyRoute::Command {
+                id: CommandId::Palette,
+                index: None,
+            }
+        );
     }
 
     #[test]

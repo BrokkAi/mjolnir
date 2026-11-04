@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AvailableCommand, SessionConfigKind, SessionConfigOption, SessionModeState,
 };
 use serde_json::Value;
@@ -86,6 +86,10 @@ impl AcpSessionSurface {
         self.current_model = config_current_value(options, "model");
         self.current_effort = config_current_value(options, "effort");
         self.sync_plan_mode();
+    }
+
+    pub fn config_options(&self) -> &[SessionConfigOption] {
+        &self.config_options
     }
 
     pub fn set_session_modes(&mut self, modes: Option<SessionModeState>) {
@@ -367,7 +371,7 @@ pub fn config_current_value(options: &[SessionConfigOption], key: &str) -> Optio
 
 #[cfg(test)]
 mod tests {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         SessionConfigId, SessionConfigSelect, SessionConfigSelectOption,
         SessionConfigSelectOptions, SessionConfigValueId, SessionMode, SessionModeState,
     };

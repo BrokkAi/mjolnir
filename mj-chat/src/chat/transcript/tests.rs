@@ -5,8 +5,8 @@ use crate::chat::test_support::{
     queued, snapshot, transcript_text,
 };
 use crate::selection::SelectionState;
-use agent_client_protocol::schema::v1::ToolCallStatus;
-use agent_client_protocol::schema::v1::ToolKind;
+use agent_client_protocol::v1::schema::ToolCallStatus;
+use agent_client_protocol::v1::schema::ToolKind;
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -317,6 +317,7 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
     chat.render_mode = TranscriptRenderMode::Rich;
     chat.turn_started_at_epoch_seconds = None;
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
+        dismiss_question_supported: false,
         pursuing_goal: Default::default(),
         checking_response: false,
         quota_recovery: None,
@@ -2497,7 +2498,7 @@ fn an_abnormally_ended_standalone_terminal_item_renders_everywhere() {
             terminal_record(Some(0), Some("SIGKILL")),
             "killed by SIGKILL",
         ),
-        (terminal_record(None, None), "released before exit"),
+        (terminal_record(None, None), "exit status unavailable"),
     ] {
         let session = standalone_terminal_session(record);
 
@@ -2613,7 +2614,12 @@ fn codex_raw_output_renders_for_a_terminal_hel_has_no_record_for() {
     };
     let details = |raw_output: serde_json::Value| {
         let call = ToolCall::deserialize(&call(raw_output)).expect("valid ACP tool call");
-        tool_content_details(&call.content, &[], call.raw_output.as_ref())
+        tool_content_details(
+            &call.content,
+            &[],
+            call.raw_output.as_ref(),
+            tool_status(&call.status),
+        )
     };
 
     assert_eq!(
@@ -3639,6 +3645,7 @@ fn append_transcript_golden_state(
     }
 }
 
+// Hard-won: 0d4b1c9a1: submissions and rebuilds overrode deliberate reader navigation.
 #[test]
 fn golden_transcript_navigation() {
     let mut output = String::new();
@@ -3832,6 +3839,214 @@ fn golden_transcript_navigation() {
         );
     }
 
+    // Exercise the live materialized path, not just appending ChatEntry rows.
+    let mut session = MaterializedSession::empty("scroll-regression");
+    session.transcript = (1..=40)
+        .map(|position| user_transcript_item(position, &format!("message {position}")))
+        .collect();
+    session.applied_event_ordinal = 40;
+    for shell in [false, true] {
+        let mut session = session.clone();
+        let mut chat = ChatState::from_materialized(&session, &[], &[]);
+        golden_chat_buffer(&mut chat, 60, 24);
+        chat.handle_key(key(KeyCode::PageUp));
+        let before = drawn_transcript(&mut chat, 60, 24);
+        assert!(!visible_messages(&before).is_empty());
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let operation = if shell {
+            super::super::remote::ChatRemoteOperation::RunShell {
+                command_id: "scroll-send".into(),
+                command: "printf hello".into(),
+            }
+        } else {
+            super::super::remote::ChatRemoteOperation::Prompt {
+                command_id: "scroll-send".into(),
+                text: "a new question".into(),
+                images: Vec::new(),
+            }
+        };
+        super::super::remote::queue_chat_remote_operation(&tx, operation, &mut chat);
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+        assert_eq!(visible_messages(&before), visible_messages(&rows));
+        append_transcript_golden_state(
+            &mut output,
+            if shell {
+                "historical view while sending shell"
+            } else {
+                "historical view while sending prompt"
+            },
+            60,
+            24,
+            &rows,
+            &[],
+        );
+        let accepted = if shell {
+            fixture_item(
+                41,
+                "shell:scroll-send".into(),
+                TranscriptBody::System {
+                    text: "printf hello: completed".into(),
+                },
+            )
+        } else {
+            let mut item = user_transcript_item(41, "a new question");
+            Arc::make_mut(&mut item).stable_id = "user:scroll-send".into();
+            item
+        };
+        session.transcript.push(accepted);
+        session
+            .transcript
+            .push(agent_message_item("agent:42", 42, "new streamed reply"));
+        session.applied_event_ordinal = 42;
+        chat.apply_materialized(&session, &[], &[]);
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+        assert_eq!(visible_messages(&before), visible_messages(&rows));
+        append_transcript_golden_state(
+            &mut output,
+            if shell {
+                "historical view after shell and reply"
+            } else {
+                "historical view after prompt and reply"
+            },
+            60,
+            24,
+            &rows,
+            &[],
+        );
+        let streaming = Arc::make_mut(session.transcript.last_mut().unwrap());
+        let TranscriptBody::Agent {
+            chunks,
+            streaming: active,
+        } = &mut streaming.body
+        else {
+            panic!("expected an agent reply");
+        };
+        *active = true;
+        chunks.push(serde_json::json!({"content": {"type": "text", "text": " grows in place"}}));
+        streaming.latest_content_event_ordinal = Some(43);
+        session.applied_event_ordinal = 43;
+        chat.apply_materialized(&session, &[], &[]);
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+        assert_eq!(visible_messages(&before), visible_messages(&rows));
+        if !shell {
+            append_transcript_golden_state(
+                &mut output,
+                "historical view while reply grows",
+                60,
+                24,
+                &rows,
+                &[],
+            );
+        }
+        // A sliding canonical window moves the selected entry's index.
+        session.transcript.drain(..10);
+        session.applied_event_ordinal = 44;
+        chat.apply_materialized(&session, &[], &[]);
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+        assert_eq!(visible_messages(&before), visible_messages(&rows));
+        if !shell {
+            append_transcript_golden_state(
+                &mut output,
+                "historical identity after window slides",
+                60,
+                24,
+                &rows,
+                &[],
+            );
+        }
+        chat.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
+        session.transcript.push(agent_message_item(
+            "agent:45",
+            45,
+            "reply at the followed tail",
+        ));
+        session.applied_event_ordinal = 45;
+        chat.apply_materialized(&session, &[], &[]);
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+        assert!(shows(&rows, "reply at the followed tail"));
+        if !shell {
+            append_transcript_golden_state(
+                &mut output,
+                "explicit end resumes following updates",
+                60,
+                24,
+                &rows,
+                &[],
+            );
+        }
+    }
+
+    let mut revealed = MaterializedSession::empty("revealed-scroll");
+    revealed
+        .transcript
+        .push(agent_message_item("agent:1", 1, "opening reply"));
+    revealed.transcript.extend(
+        (2..=40).map(|position| user_transcript_item(position, &format!("message {position}"))),
+    );
+    revealed.applied_event_ordinal = 40;
+    let mut automatic = ChatState::from_materialized(&revealed, &[], &[]);
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut automatic, 60, 24));
+    assert!(shows(&rows, "opening reply"));
+    let mut updated = revealed.clone();
+    updated.transcript.push(agent_message_item(
+        "agent:41",
+        41,
+        "automatic reveal follows this reply",
+    ));
+    updated.applied_event_ordinal = 41;
+    automatic.apply_materialized(&updated, &[], &[]);
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut automatic, 60, 24));
+    assert!(shows(&rows, "automatic reveal follows this reply"));
+    append_transcript_golden_state(
+        &mut output,
+        "automatic reveal follows materialized update",
+        60,
+        24,
+        &rows,
+        &[],
+    );
+    for navigate_away in [false, true] {
+        let mut chat = ChatState::from_materialized(&revealed, &[], &[]);
+        // An update before the first draw must retain the automatic reveal.
+        let mut updated = revealed.clone();
+        updated.applied_event_ordinal = 41;
+        chat.apply_materialized(&updated, &[], &[]);
+        let before = drawn_transcript(&mut chat, 60, 24);
+        assert!(shows(&before, "opening reply"));
+        if navigate_away {
+            chat.handle_key(key(KeyCode::PageDown));
+        }
+        // Same coordinate, or away/back with no intervening draw.
+        chat.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
+        let saved = chat.transcript_position();
+        let mut reopened = ChatState::from_materialized(&updated, &[], &[]);
+        reopened.restore_transcript_position(saved);
+        updated.transcript.push(agent_message_item(
+            "agent:42",
+            42,
+            "new reply below the reveal",
+        ));
+        updated.applied_event_ordinal = 42;
+        for (label, mut chat) in [
+            ("explicit reveal navigation", chat),
+            ("restored explicit reveal navigation", reopened),
+        ] {
+            chat.apply_materialized(&updated, &[], &[]);
+            let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+            assert_eq!(visible_messages(&before), visible_messages(&rows));
+            assert!(shows(&rows, "opening reply"));
+            let label = format!(
+                "{label} ({})",
+                if navigate_away {
+                    "away and back"
+                } else {
+                    "same row"
+                }
+            );
+            append_transcript_golden_state(&mut output, &label, 60, 24, &rows, &[]);
+        }
+    }
+
     mj_core::golden::assert_platform_golden(
         env!("CARGO_MANIFEST_DIR"),
         "transcript-navigation",
@@ -3963,6 +4178,8 @@ fn golden_conversation_title() {
 }
 
 // Hard-won: d00682c9: expanded send_message details showed only the receipt, omitting its arguments.
+// Hard-won: 464f66ded: raw-output-only failures omitted their error message beside expanded arguments.
+// Hard-won: c823ba502: a failed Codex command expanded to only its terminal id.
 #[test]
 fn golden_rich_transcript_tool_presentation() {
     let mut output = String::new();
@@ -4236,6 +4453,256 @@ fn golden_rich_transcript_tool_presentation() {
         &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28)),
         &[],
     );
+
+    let command = "git fetch origin master && git worktree add -b experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance origin/master";
+    let terminal_id = "exec-c88fb185-27bf-4e54-affa-c458b09d0b3c";
+    let mut terminal_session = MaterializedSession::empty("terminal-metadata-failure");
+    for (index, update) in [
+        serde_json::json!({
+            "sessionUpdate": "tool_call", "toolCallId": terminal_id,
+            "title": command, "kind": "execute", "status": "in_progress",
+            "rawInput": {"command": command, "cwd": "/home/jonathan/Projects/bifrost"},
+            "content": [{"type": "terminal", "terminalId": terminal_id}],
+            "_meta": {"terminal_info": {"terminal_id": terminal_id, "cwd": "/home/jonathan/Projects/bifrost"}}
+        }),
+        serde_json::json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": terminal_id,
+            "_meta": {"terminal_output": {"terminal_id": terminal_id, "data": "From github.com:BrokkAi/bifrost\n"}}
+        }),
+        serde_json::json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": terminal_id,
+            "_meta": {"terminal_output_delta": {"terminal_id": terminal_id, "data": "\u{1b}[31mfatal: a branch named 'experiment-bbtree-performance' already exists\u{1b}[0m\n"}}
+        }),
+        serde_json::json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": terminal_id, "status": "failed"
+        }),
+        serde_json::json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": terminal_id,
+            "_meta": {"terminal_exit": {"terminal_id": terminal_id, "exit_code": 128, "signal": null}}
+        }),
+    ].into_iter().enumerate() {
+        let mut event = mj_core::relay::RelayEvent {
+            format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
+            ordinal: u64::try_from(index).unwrap() + 1,
+            previous_digest: terminal_session.applied_event_digest.clone(),
+            digest: String::new(), recorded_at_ms: started, command_id: None,
+            observation: mj_core::relay::RelayObservation::SessionUpdate {
+                update: Box::new(serde_json::from_value(update).unwrap()),
+            },
+        };
+        event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+        let projected = mj_transcript::projection::project_relay_event(&terminal_session, &event).unwrap();
+        mj_transcript::projection::apply_committed_projection_event(&mut terminal_session, &event, projected.mutation).unwrap();
+        if index == 2 || index == 4 {
+            let mut chat = ChatState::from_materialized(&terminal_session, &[], &[]);
+            let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28));
+            click_rendered_text(&mut chat, &rows, "git fetch");
+            let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28));
+            let rendered = rows.join("\n");
+            assert!(rendered.contains("already exists"), "{rendered}");
+            assert!(!rendered.contains("terminal exec-"), "{rendered}");
+            assert!(!rendered.contains("exit status unavailable"), "{rendered}");
+            append_transcript_golden_state(&mut output, if index == 2 {
+                "streamed terminal output expanded while running"
+            } else {
+                "failed terminal metadata expanded with exit code"
+            }, 80, 28, &rows, &[]);
+        }
+    }
+    // Reopening from the canonical checkpoint preserves the output and status.
+    let canonical =
+        mj_transcript::projection::canonical_session_from_materialized(&terminal_session).unwrap();
+    let terminal_session = mj_transcript::projection::materialized_session_from_canonical(
+        "terminal-metadata-failure",
+        &canonical,
+    )
+    .unwrap();
+    let mut chat = ChatState::from_materialized(&terminal_session, &[], &[]);
+    chat.render_mode = TranscriptRenderMode::Raw;
+    append_transcript_golden_state(
+        &mut output,
+        "failed terminal metadata reopened in raw mode",
+        80,
+        28,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28)),
+        &[],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let mut session = MaterializedSession::empty("raw-output-failure");
+    let diagnostic = "permission denied while contacting peer";
+    for (index, (label, update)) in [
+        (
+            "raw-output failure pending expanded",
+            serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "peer-request",
+                "title": "contact_peer",
+                "status": "pending",
+                "rawInput": {"peer": "peer-session", "message": "Check parser"}
+            }),
+        ),
+        (
+            "raw-output failure running expanded",
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "peer-request",
+                "status": "in_progress",
+                "content": [{"type": "content", "content": {
+                    "type": "text", "text": "peer handshake started"
+                }}]
+            }),
+        ),
+        (
+            "raw-output failure failed expanded",
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "peer-request",
+                "status": "failed",
+                "rawOutput": {"result": null, "error": {"message": diagnostic}}
+            }),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let seq = u64::try_from(index).unwrap() + 1;
+        // Keep the original ACP fields in the durable projection for replay.
+        let mut event = mj_core::relay::RelayEvent {
+            format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
+            ordinal: seq,
+            previous_digest: session.applied_event_digest.clone(),
+            digest: String::new(),
+            recorded_at_ms: started,
+            command_id: None,
+            observation: mj_core::relay::RelayObservation::SessionUpdate {
+                update: Box::new(serde_json::from_value(update.clone()).unwrap()),
+            },
+        };
+        event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+        let projected = mj_transcript::projection::project_relay_event(&session, &event).unwrap();
+        mj_transcript::projection::apply_committed_projection_event(
+            &mut session,
+            &event,
+            projected.mutation,
+        )
+        .unwrap();
+        chat.apply_session_update_at(seq, Some(started), &update);
+        if index == 0 {
+            let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24));
+            click_rendered_text(&mut chat, &rows, "contact_peer");
+        }
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24));
+        if index == 2 {
+            let rendered = rows.join("\n");
+            assert!(rendered.contains("peer-session"), "{rendered}");
+            assert!(rendered.contains("Check parser"), "{rendered}");
+            assert_eq!(
+                rendered.matches("peer handshake started").count(),
+                1,
+                "{rendered}"
+            );
+            assert_eq!(rendered.matches(diagnostic).count(), 1, "{rendered}");
+        }
+        append_transcript_golden_state(&mut output, label, 80, 24, &rows, &[]);
+    }
+    let mut restored = ChatState::from_materialized(&session, &[], &[]);
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut restored, 80, 24));
+    click_rendered_text(&mut restored, &rows, "contact_peer");
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut restored, 80, 24));
+    let rendered = rows.join("\n");
+    assert!(rendered.contains("peer-session"), "{rendered}");
+    assert!(rendered.contains("Check parser"), "{rendered}");
+    assert_eq!(
+        rendered.matches("peer handshake started").count(),
+        1,
+        "{rendered}"
+    );
+    assert_eq!(rendered.matches(diagnostic).count(), 1, "{rendered}");
+    append_transcript_golden_state(
+        &mut output,
+        "raw-output failure replayed and reopened",
+        80,
+        24,
+        &rows,
+        &[],
+    );
+
+    let snapshot_session = mj_transcript::projection::materialized_session_from_entries(
+        "raw-output-failure",
+        &restored.entries,
+        3,
+        mj_core::relay::WorkerPhase::Idle,
+        Default::default(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let mut snapshot_restored = ChatState::from_materialized(&snapshot_session, &[], &[]);
+    let snapshot_rows =
+        crate::golden::buffer_lines(&golden_chat_buffer(&mut snapshot_restored, 80, 24));
+    click_rendered_text(&mut snapshot_restored, &snapshot_rows, "contact_peer");
+    assert_eq!(
+        crate::golden::buffer_lines(&golden_chat_buffer(&mut snapshot_restored, 80, 24)),
+        rows,
+        "the snapshot helper preserves the expanded error with its arguments and progress"
+    );
+
+    // Later partial updates own only the fields they carry. A new raw output
+    // replaces the error rather than accumulating it with earlier failures.
+    let html_error = "<error>peer denied</error>";
+    for (seq, fields, expected_error) in [
+        (4, serde_json::json!({"status": "failed"}), Some(diagnostic)),
+        (
+            5,
+            serde_json::json!({"rawOutput": {"error": "peer retry rejected"}}),
+            Some("peer retry rejected"),
+        ),
+        (
+            6,
+            serde_json::json!({"rawOutput": {"result": null, "error": null}}),
+            None,
+        ),
+        (
+            7,
+            serde_json::json!({
+                "rawOutput": {"error": html_error},
+                "content": [
+                    {"type": "content", "content": {
+                        "type": "text", "text": "peer handshake started"
+                    }},
+                    {"type": "content", "content": {
+                        "type": "text", "text": html_error
+                    }}
+                ]
+            }),
+            Some(html_error),
+        ),
+    ] {
+        let mut update = fields;
+        update["sessionUpdate"] = serde_json::json!("tool_call_update");
+        update["toolCallId"] = serde_json::json!("peer-request");
+        chat.apply_session_update_at(seq, Some(started), &update);
+        assert_eq!(
+            chat.entries[0].tool_error.is_some(),
+            expected_error.is_some()
+        );
+        let rendered =
+            crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24)).join("\n");
+        assert!(rendered.contains("peer-session"), "{rendered}");
+        assert!(rendered.contains("Check parser"), "{rendered}");
+        assert_eq!(
+            rendered.matches("peer handshake started").count(),
+            1,
+            "{rendered}"
+        );
+        for error in [diagnostic, "peer retry rejected", html_error] {
+            assert_eq!(
+                rendered.matches(error).count(),
+                usize::from(expected_error == Some(error)),
+                "{rendered}"
+            );
+        }
+    }
 
     let session = fallback_terminal_session(terminal_record(Some(0), None));
     let mut chat = ChatState::from_materialized(&session, &[], &[]);

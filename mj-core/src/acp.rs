@@ -7,7 +7,7 @@ pub mod surface;
 mod terminal_compat;
 use crate::elicitation::*;
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::*;
+use agent_client_protocol::v1::schema::*;
 pub use claude_result::{ClaudeResultUsage, ClaudeTurnResult};
 use dialect::grok;
 use serde::{Deserialize, Serialize};
@@ -250,12 +250,12 @@ pub fn select_contains(kind: &SessionConfigKind, desired: &str) -> bool {
         return false;
     };
     match &select.options {
-        agent_client_protocol::schema::v1::SessionConfigSelectOptions::Ungrouped(options) => {
+        agent_client_protocol::v1::schema::SessionConfigSelectOptions::Ungrouped(options) => {
             options
                 .iter()
                 .any(|option| option.value.to_string() == desired)
         }
-        agent_client_protocol::schema::v1::SessionConfigSelectOptions::Grouped(groups) => groups
+        agent_client_protocol::v1::schema::SessionConfigSelectOptions::Grouped(groups) => groups
             .iter()
             .flat_map(|group| &group.options)
             .any(|option| option.value.to_string() == desired),
@@ -424,38 +424,44 @@ pub const CODEX_MISSING_THREAD_MESSAGE: &str = "no rollout found for thread id";
 /// for the thread being resumed.
 pub const CODEX_THREAD_NOT_FOUND_MESSAGE: &str = "thread not found: ";
 
-/// The stable part of Claude Code's refusal to resume a session it never wrote
-/// a transcript for. Claude Code writes a session's transcript file at the
-/// first prompt, so a session that was opened and never prompted does not
-/// exist to resume. `@agentclientprotocol/claude-agent-acp` answers the ACP
-/// standard "resource not found" error, and it reaches Mjolnir as
-/// `Resource not found: <session id>: {"uri": "<session id>"}`. The session id
-/// is matched along with the prefix, so an unrelated missing resource can
-/// never be read as a missing session.
-pub const CLAUDE_MISSING_SESSION_MESSAGE: &str = "Resource not found: ";
-
 /// Whether a failed `session/resume` or `session/load` says the harness has no
 /// such native session. Only harnesses that defer writing a session to disk
 /// until its first user message can report a session Mjolnir believes it
 /// created; every other harness answers `false`, so its reload failure keeps
-/// failing loudly. If a harness rewords its message, this stops matching and
+/// failing loudly. If a harness changes its answer, this stops matching and
 /// the resume fails loudly again; it can never degrade into silently replacing
 /// a native session that still exists.
 pub fn error_reports_missing_native_session(
     harness: HarnessKind,
     native_session_id: &str,
-    error: &str,
+    error: &anyhow::Error,
 ) -> bool {
     match harness {
         HarnessKind::Codex => {
+            let error = format!("{error:#}");
             error.contains(CODEX_MISSING_THREAD_MESSAGE)
                 || error.contains(&format!(
                     "{CODEX_THREAD_NOT_FOUND_MESSAGE}{native_session_id}"
                 ))
         }
-        HarnessKind::Claude => error.contains(&format!(
-            "{CLAUDE_MISSING_SESSION_MESSAGE}{native_session_id}"
-        )),
+        // Claude Code writes a session's transcript at the first prompt, so a
+        // session that was opened and never prompted does not exist to resume.
+        // `@agentclientprotocol/claude-agent-acp` answers the ACP "resource not
+        // found" error naming the session in its data: `sessionId` from 0.99,
+        // `uri` before. Requiring the session being resumed means an unrelated
+        // missing resource can never be read as a missing session.
+        HarnessKind::Claude => error
+            .chain()
+            .filter_map(|cause| cause.downcast_ref::<agent_client_protocol::Error>())
+            .any(|error| {
+                error.code == agent_client_protocol::ErrorCode::RESOURCE_NOT_FOUND
+                    && error.data.as_ref().is_some_and(|data| {
+                        ["sessionId", "uri"].iter().any(|key| {
+                            data.get(key).and_then(serde_json::Value::as_str)
+                                == Some(native_session_id)
+                        })
+                    })
+            }),
         // dsh-acp writes a session's record at `session/new`, before its
         // first prompt, so a missing one is a real failure.
         HarnessKind::Kimi
@@ -475,15 +481,35 @@ pub struct AcceptedSessionConfig {
     pub effort: Option<String>,
 }
 
-/// A task in Claude Code's process-local background-task level signal.
-///
-/// The adapter also sends `task_type` and an optional `ambient` marker. Hel
-/// only needs the stable id and user-facing description, and filters ambient
-/// housekeeping tasks before publishing the replacement level to the relay.
+/// Historical raw SDK task record, retained for old RuntimeEvent payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaudeBackgroundTask {
     pub task_id: String,
     pub description: String,
+}
+
+/// A change in the adapter-owned AIR background task inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AirTaskUpdate {
+    TurnSpawned {
+        task_id: String,
+        #[serde(default)]
+        replayed: bool,
+    },
+    Spawned {
+        task_id: String,
+        description: String,
+        can_stop: bool,
+    },
+    Changed {
+        task_id: String,
+        description: Option<String>,
+        can_stop: Option<bool>,
+    },
+    Finished {
+        task_id: String,
+        settled: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -541,17 +567,28 @@ pub enum RuntimeEvent {
     SessionUpdate {
         update: serde_json::Value,
     },
-    /// Replacement level for Claude Code's live non-ambient background tasks.
-    /// This provider signal does not represent transcript or foreground work.
+    /// Historical runtime payload; retained only for transcript decoding.
     ClaudeBackgroundTasksChanged {
         tasks: Vec<ClaudeBackgroundTask>,
     },
+    /// Historical runtime payload; retained only for transcript decoding.
     ClaudeAsyncTaskControlChanged {
         task_id: String,
         can_stop: bool,
-        /// The task completed or failed, so Claude Code will follow it with a
-        /// task-notification turn. A task the user stopped gets no turn.
+        /// claude-agent-acp 0.97.0 publishes autonomous model cycles through the async
+        /// task API; these are not background work or a pending task turn.
+        #[serde(default)]
+        autonomous_turn: bool,
+        /// The edge arrived before live history was enabled.
+        #[serde(default)]
+        replayed: bool,
+        /// An ordinary task completed or failed, so Claude Code will follow
+        /// it with a task-notification turn. A stopped task gets no turn.
         settled: bool,
+    },
+    AirTaskChanged {
+        session_id: String,
+        update: AirTaskUpdate,
     },
     /// Claude Code reported the end of one model cycle. It travels on the
     /// same ordered stream as `SessionUpdate`, so everything the adapter sent
@@ -810,7 +847,7 @@ impl AcpSessionFacts {
         harness_kind: HarnessKind,
         configuration: &std::collections::BTreeMap<String, String>,
         config_options: &[SessionConfigOption],
-        modes: Option<&agent_client_protocol::schema::v1::SessionModeState>,
+        modes: Option<&agent_client_protocol::v1::schema::SessionModeState>,
     ) -> Self {
         let values = configuration
             .iter()
@@ -884,20 +921,37 @@ pub fn plan_review_answer(response: ElicitationResponse) -> (String, Option<Stri
 #[cfg(test)]
 mod missing_thread_tests {
     use super::*;
+    use anyhow::Context as _;
+
+    /// A reload failure as the worker sees it: the adapter's JSON-RPC error
+    /// under the worker's own context.
+    fn reload_error(id: &str, code: i32, message: &str, data: serde_json::Value) -> anyhow::Error {
+        Err::<(), _>(agent_client_protocol::Error::new(code, message).data(data))
+            .with_context(|| format!("resume ACP session {id}"))
+            .unwrap_err()
+    }
 
     #[test]
     fn codex_reports_a_missing_thread_through_the_wrapped_adapter_message() {
         // What codex-acp actually sends back for a thread with no rollout.
+        let missing = reload_error(
+            "0199f0ba",
+            -32603,
+            "Internal error",
+            serde_json::json!({"details": "no rollout found for thread id 0199f0ba"}),
+        );
         assert!(error_reports_missing_native_session(
             HarnessKind::Codex,
             "0199f0ba",
-            r#"resume ACP session 0199f0ba: Internal error: {"details": "no rollout found for thread id 0199f0ba"}"#
+            &missing
         ));
         // Anything else keeps failing the resume loudly.
         assert!(!error_reports_missing_native_session(
             HarnessKind::Codex,
             "0199f0ba",
-            "resume ACP session 0199f0ba: Internal error: session store is locked"
+            &anyhow::anyhow!(
+                "resume ACP session 0199f0ba: Internal error: session store is locked"
+            )
         ));
     }
 
@@ -906,50 +960,75 @@ mod missing_thread_tests {
     fn codex_reports_a_thread_it_never_wrote_as_thread_not_found() {
         // What codex-acp sent when a same-build worker reloaded a thread that
         // was created and never prompted (launch finding I2-7).
-        let error = r#"load ACP session 01a0cfd5-7c1e-4f00-9d7e-1a2b3c4d5e6f: Internal error: {"details": "thread not found: 01a0cfd5-7c1e-4f00-9d7e-1a2b3c4d5e6f"}"#;
+        let error = anyhow::anyhow!(
+            r#"load ACP session 01a0cfd5-7c1e-4f00-9d7e-1a2b3c4d5e6f: Internal error: {{"details": "thread not found: 01a0cfd5-7c1e-4f00-9d7e-1a2b3c4d5e6f"}}"#
+        );
         assert!(error_reports_missing_native_session(
             HarnessKind::Codex,
             "01a0cfd5-7c1e-4f00-9d7e-1a2b3c4d5e6f",
-            error
+            &error
         ));
         // A missing thread other than the one being resumed is not ours.
         assert!(!error_reports_missing_native_session(
             HarnessKind::Codex,
             "0f0f0f0f-0000-4000-8000-000000000000",
-            error
+            &error
         ));
     }
 
     #[test]
     fn claude_reports_a_missing_session_only_for_the_session_being_resumed() {
-        // What claude-agent-acp actually sends back for a session with no
-        // transcript on disk.
-        let missing = concat!(
-            "resume ACP session 7ee4c940-f82c-4c6a-847f-47e21675e585: ",
-            "Resource not found: 7ee4c940-f82c-4c6a-847f-47e21675e585: {\n",
-            "  \"uri\": \"7ee4c940-f82c-4c6a-847f-47e21675e585\"\n}"
-        );
-        assert!(error_reports_missing_native_session(
-            HarnessKind::Claude,
-            "7ee4c940-f82c-4c6a-847f-47e21675e585",
-            missing
-        ));
-        // A resource error about anything else must never replace the session.
+        let id = "7ee4c940-f82c-4c6a-847f-47e21675e585";
+        // What claude-agent-acp sends back for a session with no transcript on
+        // disk: ACP SDK `sessionNotFound` from 0.99, `resourceNotFound` before.
+        let missing = [
+            reload_error(
+                id,
+                -32002,
+                "Resource not found",
+                serde_json::json!({"sessionId": id}),
+            ),
+            reload_error(
+                id,
+                -32002,
+                &format!("Resource not found: {id}"),
+                serde_json::json!({"uri": id}),
+            ),
+        ];
+        for missing in &missing {
+            assert!(error_reports_missing_native_session(
+                HarnessKind::Claude,
+                id,
+                missing
+            ));
+            // A resource error about anything else must never replace the session.
+            assert!(!error_reports_missing_native_session(
+                HarnessKind::Claude,
+                "0f0f0f0f-0000-4000-8000-000000000000",
+                missing
+            ));
+            // Each harness only recognizes its own answer.
+            assert!(!error_reports_missing_native_session(
+                HarnessKind::Codex,
+                id,
+                missing
+            ));
+        }
+        // The same session named under another error code is a different failure.
         assert!(!error_reports_missing_native_session(
             HarnessKind::Claude,
-            "0f0f0f0f-0000-4000-8000-000000000000",
-            missing
+            id,
+            &reload_error(
+                id,
+                -32603,
+                "Internal error",
+                serde_json::json!({"sessionId": id})
+            )
         ));
         assert!(!error_reports_missing_native_session(
             HarnessKind::Claude,
-            "7ee4c940-f82c-4c6a-847f-47e21675e585",
-            "resume ACP session 7ee4c940-f82c-4c6a-847f-47e21675e585: connection closed"
-        ));
-        // Each harness only recognizes its own wording.
-        assert!(!error_reports_missing_native_session(
-            HarnessKind::Codex,
-            "7ee4c940-f82c-4c6a-847f-47e21675e585",
-            missing
+            id,
+            &anyhow::anyhow!("resume ACP session {id}: connection closed")
         ));
     }
 
@@ -964,12 +1043,17 @@ mod missing_thread_tests {
             assert!(!error_reports_missing_native_session(
                 harness,
                 "native",
-                r#"Resource not found: native: {"uri": "native"}"#
+                &reload_error(
+                    "native",
+                    -32002,
+                    "Resource not found",
+                    serde_json::json!({"sessionId": "native"})
+                )
             ));
             assert!(!error_reports_missing_native_session(
                 harness,
                 "native",
-                "no rollout found for thread id native"
+                &anyhow::anyhow!("no rollout found for thread id native")
             ));
         }
     }

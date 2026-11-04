@@ -116,11 +116,22 @@ pub fn materialized_session_from_entries(
                     if let Some(input) = &entry.tool_input {
                         call = call.raw_input(input.clone());
                     }
+                    let mut raw_output = serde_json::Map::new();
+                    if let Some(error) = &entry.tool_error {
+                        raw_output.insert("error".into(), serde_json::Value::String(error.clone()));
+                    }
                     if !entry.tool_diffstats.is_empty() || !entry.tool_locations.is_empty() {
-                        call = call.raw_output(serde_json::json!({
-                            "legacyDiffstats": entry.tool_diffstats,
-                            "legacyLocations": entry.tool_locations,
-                        }));
+                        raw_output.insert(
+                            "legacyDiffstats".into(),
+                            serde_json::json!(entry.tool_diffstats),
+                        );
+                        raw_output.insert(
+                            "legacyLocations".into(),
+                            serde_json::json!(entry.tool_locations),
+                        );
+                    }
+                    if !raw_output.is_empty() {
+                        call = call.raw_output(serde_json::Value::Object(raw_output));
                     }
                     let presentation = entry
                         .tool_presentation

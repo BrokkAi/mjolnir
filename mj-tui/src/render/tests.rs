@@ -11,7 +11,7 @@ use mj_core::state::{
 };
 
 use mj_chat::selection::SurfaceId;
-use mj_client::quota::{API_LABEL, ProfileQuota, QuotaWindow};
+use mj_client::quota::{API_LABEL, NOT_REPORTED_LABEL, ProfileQuota, QuotaWindow};
 use mj_core::targets::{DeploymentCapacityUsage, ProvisionStage};
 
 use super::*;
@@ -703,7 +703,7 @@ fn a_pending_question_is_the_excerpt_instead_of_the_tool_name() {
     assert_eq!(current_agent_excerpt(&asking), Some("Choose a path"));
 }
 
-/// Help is the one hint that is worth more than any other, so it survives
+/// Command search is the one hint worth more than any other, so it survives
 /// every focus and every width squeeze.
 /// A hint cut in half names a key that does not exist. Narrow terminals
 /// therefore lose whole hints from the right, and never part of one.
@@ -721,19 +721,16 @@ fn footer_hints(footer: &str) -> Vec<String> {
 
 /// The prefix label rides on the first chord hint, which is also the first
 /// chord a narrow row gives up. The label must outlive it: a row reading
-/// `: palette · ? keys` would say `:` alone opens the palette.
+/// `: / ? palette` would say only `:` opens the palette.
 // Hard-won: 22d10cb4: A narrow footer dropped the prefix label with the first chord and made the remaining shortcut look like a plain key.
 #[test]
 fn the_prefix_is_still_named_when_only_protected_chords_survive() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
     let footer = combined_footer_text(&dashboard, 60);
-    assert_eq!(
-        footer, "Enter open │ ctrl+b then : palette · ? keys",
-        "{footer}"
-    );
+    assert_eq!(footer, "Enter open │ ctrl+b then : / ? palette", "{footer}");
     assert!(
-        !combined_footer_text(&dashboard, 200).contains("then : palette"),
+        !combined_footer_text(&dashboard, 200).contains("then : / ? palette"),
         "a wide row keeps the label on the first chord"
     );
 }
@@ -774,7 +771,7 @@ fn every_pane_footer_names_the_prefix_at_140_100_and_80_columns() {
                 "{focus:?} {width}: {footer}"
             );
             assert!(
-                footer.ends_with(": palette · ? keys"),
+                footer.ends_with(": / ? palette"),
                 "{focus:?} {width}: {footer}"
             );
             assert!(!footer.contains("then: :"), "{focus:?} {width}: {footer}");
@@ -782,13 +779,13 @@ fn every_pane_footer_names_the_prefix_at_140_100_and_80_columns() {
     }
 }
 
-/// The prefix chords give way before the pane's own hints, and help and palette
+/// The prefix chords give way before the pane's own hints, and palette aliases
 /// remain visible after every other hint has been dropped. The pane group is
 /// the short list of keys that work right here; the chord group is the long one
 /// the palette holds in full, so the long one is what a narrow row gives up.
 // Hard-won: 36fbf1f1: A 140-column footer kept chord hints while dropping the focused pane hints that teach its active controls.
 #[test]
-fn footer_drops_chord_hints_before_pane_hints_and_keeps_help_longest() {
+fn footer_drops_chord_hints_before_pane_hints_and_keeps_palette_longest() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
     dashboard.focus_sessions();
@@ -804,18 +801,18 @@ fn footer_drops_chord_hints_before_pane_hints_and_keeps_help_longest() {
     let squeezed = combined_footer_text(&dashboard, 90);
     assert_eq!(
         squeezed,
-        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : palette · ? keys"
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette"
     );
 
     // Narrower still, the pane hints give way from the right as well, and the
     // prefix label stays on the first chord left standing.
     assert_eq!(
         combined_footer_text(&dashboard, 52),
-        "Enter open │ ctrl+b then : palette · ? keys"
+        "Enter open │ ctrl+b then : / ? palette"
     );
 
-    assert_eq!(combined_footer_text(&dashboard, 20), ": palette · ? keys");
-    assert_eq!(combined_footer_text(&dashboard, 6), "? keys");
+    assert_eq!(combined_footer_text(&dashboard, 20), ": / ? palette");
+    assert!(combined_footer_text(&dashboard, 6).is_empty());
     assert!(combined_footer_text(&dashboard, 5).is_empty());
     assert!(combined_footer_text(&dashboard, 0).is_empty());
 }
@@ -951,6 +948,8 @@ fn weekly_quota(profile_id: &str, remaining: u8) -> ProfileQuota {
         windows: vec![QuotaWindow {
             label: "weekly".into(),
             remaining_percent: Some(remaining),
+            duration_seconds: None,
+            model_scope: None,
             used: None,
             limit: None,
             resets: None,
@@ -970,6 +969,8 @@ fn weekly_and_five_hour_quota(profile_id: &str, weekly: u8, five_hour: u8) -> Pr
     quota.windows.push(QuotaWindow {
         label: "5h".into(),
         remaining_percent: Some(five_hour),
+        duration_seconds: None,
+        model_scope: None,
         used: None,
         limit: None,
         resets: None,
@@ -1000,6 +1001,7 @@ fn api_quota(profile_id: &str) -> ProfileQuota {
 fn background_work_reaches_both_session_row_forms() {
     let started_at_ms = i64::try_from(mj_core::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
     let activity = mj_client::usage_format::SessionActivity {
+        dismiss_question_supported: false,
         pursuing_goal: Default::default(),
         checking_response: false,
         quota_recovery: None,
@@ -1074,7 +1076,8 @@ fn minimized_sessions_dashboard(projects: usize, per_project: usize) -> Dashboar
     let mut dashboard = DashboardState::new(
         config(),
         State {
-            last_subagent_policy: Default::default(),
+            operator_presence: Default::default(),
+            last_subagent_policies: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
@@ -1549,26 +1552,14 @@ fn session_name_prefers_override_then_acp_title_then_created_title() {
 }
 
 /// The standard local container targets exist whether or not an engine is
-/// installed. The Targets pane checks each one in the background, the same
-/// check the new-session wizard uses, and marks one whose engine is missing
-/// rather than listing it as if it could run.
+/// installed. The Targets pane reads the same availability answer the
+/// pickers use, and marks one whose engine is missing rather than listing it
+/// as if it could run.
 // Hard-won: 0b408d01: Launch finding J-7 showed the Targets pane omitted whether a listed local container engine was unavailable.
 #[test]
 fn targets_pane_marks_a_local_container_target_whose_engine_is_missing() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
-    let Some(crate::DashboardAction::CheckTargetReadiness {
-        generation,
-        target_ids,
-    }) = dashboard.take_target_availability_check()
-    else {
-        panic!("the Targets pane must check its local container targets");
-    };
-    assert_eq!(target_ids, vec!["podman".to_owned()]);
-    assert!(
-        dashboard.take_target_availability_check().is_none(),
-        "a check in flight is not repeated"
-    );
     let render_text = |dashboard: &mut DashboardState| {
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
         terminal
@@ -1584,11 +1575,9 @@ fn targets_pane_marks_a_local_container_target_whose_engine_is_missing() {
     };
     assert!(!render_text(&mut dashboard).contains("podman (unavailable)"));
 
-    dashboard.apply_target_readiness(
-        generation,
-        "podman".into(),
-        Err("Podman preflight failed: podman: not found".into()),
-    );
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        crate::test_support::availability_answer(dashboard, &["podman"], &[])
+    });
 
     let rendered = render_text(&mut dashboard);
     assert!(rendered.contains("podman (unavailable)"), "{rendered}");
@@ -1616,7 +1605,7 @@ fn feed_installed_config_hides_default_docker_but_keeps_a_user_written_one() {
         let daemon_config = daemon_config.with_local_targets();
         let sent = mj_client::runtime_feed::RuntimeMetadata {
             default_targets: daemon_config.default_targets.clone(),
-            config: daemon_config,
+            config: daemon_config.into(),
             ..Default::default()
         };
         let received: mj_client::runtime_feed::RuntimeMetadata =
@@ -1629,19 +1618,9 @@ fn feed_installed_config_hides_default_docker_but_keeps_a_user_written_one() {
         let mut target = test_capacity_target();
         target.target_ids = vec!["docker".into(), "localhost".into()];
         dashboard.set_deployment_capacity_targets(vec![target]);
-        let Some(crate::DashboardAction::CheckTargetReadiness {
-            generation,
-            target_ids,
-        }) = dashboard.take_target_availability_check()
-        else {
-            panic!("the Targets pane must check its local container targets");
-        };
-        assert!(target_ids.contains(&"docker".to_owned()));
-        dashboard.apply_target_runtime_missing(
-            generation,
-            "docker".into(),
-            "docker: not found".into(),
-        );
+        crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+            crate::test_support::availability_answer(dashboard, &["docker"], &[])
+        });
         drawn_dashboard(&mut dashboard, 160)
     };
 
@@ -2053,6 +2032,8 @@ fn quota_bars_show_fractional_remaining_capacity_and_blank_missing_windows() {
     let window = QuotaWindow {
         label: "Week".into(),
         remaining_percent: Some(73),
+        duration_seconds: None,
+        model_scope: None,
         used: None,
         limit: None,
         resets: None,
@@ -3170,22 +3151,9 @@ fn golden_dashboard_resource_panels() {
         "sandbox".into(),
     ];
     dashboard.set_deployment_capacity_targets(vec![target]);
-    let readiness = dashboard.take_target_availability_check();
-    append_golden_value(&mut output, "target readiness request", &readiness);
-    if let Some(crate::DashboardAction::CheckTargetReadiness {
-        generation,
-        target_ids,
-    }) = readiness
-    {
-        for id in ["docker", "sandbox"] {
-            dashboard.apply_target_runtime_missing(
-                generation,
-                id.into(),
-                "docker: not found".into(),
-            );
-        }
-        append_golden_value(&mut output, "checked target ids", target_ids);
-    }
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        crate::test_support::availability_answer(dashboard, &["docker", "sandbox"], &[])
+    });
     append_dashboard_golden(
         &mut output,
         "Targets hides unavailable defaults",
@@ -3287,7 +3255,19 @@ fn golden_dashboard_resource_panels() {
     );
     append_dashboard_golden(&mut output, "expired login quota", 120, 28, &mut dashboard);
 
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    let mut api_config = config();
+    let mut bedrock = api_config.profiles.remove("claude-1").unwrap();
+    bedrock.home = std::path::PathBuf::from("/profiles/bedrock-claude");
+    bedrock
+        .environment
+        .insert("CLAUDE_CODE_USE_BEDROCK".into(), "1".into());
+    api_config.profiles.insert("bedrock-claude".into(), bedrock);
+    let mut dashboard = DashboardState::new(api_config, State::default(), BTreeMap::new());
+    dashboard.apply_quota(ProfileQuota {
+        harness: HarnessKind::Claude,
+        refreshed_at_epoch_seconds: 0,
+        ..api_quota("bedrock-claude")
+    });
     let mut quota = api_quota("codex-1");
     quota.refreshed_at_epoch_seconds = 0;
     dashboard.apply_quota(quota);
@@ -3299,11 +3279,115 @@ fn golden_dashboard_resource_panels() {
         &mut dashboard,
     );
 
+    let mut mimo_config = config();
+    let mut mimo = mimo_config.profiles["codex-1"].clone();
+    mimo.kind = HarnessKind::Mimo;
+    mimo.home = std::path::PathBuf::from("/profiles/mimo");
+    mimo_config.profiles.insert("mimo-1".into(), mimo);
+    let mut dashboard = DashboardState::new(mimo_config, State::default(), BTreeMap::new());
+    dashboard.apply_quota(ProfileQuota {
+        harness: HarnessKind::Mimo,
+        extra: Some(NOT_REPORTED_LABEL.into()),
+        refreshed_at_epoch_seconds: 0,
+        ..api_quota("mimo-1")
+    });
+    append_dashboard_golden(
+        &mut output,
+        "quota a harness never shares",
+        120,
+        28,
+        &mut dashboard,
+    );
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let now = i64::try_from(now).unwrap();
+    let mut claude_config = config();
+    claude_config.profiles.insert(
+        "claude-2".into(),
+        claude_config.profiles["claude-1"].clone(),
+    );
+    let claude_quota = |profile_id: &str, fable: Option<u8>| ProfileQuota {
+        banked_resets: None,
+        profile_id: profile_id.into(),
+        harness: HarnessKind::Claude,
+        // Fable deliberately precedes the master weekly window: ordering
+        // must not change which value fills the weekly bar.
+        windows: fable
+            .map(|remaining| {
+                vec![QuotaWindow {
+                    label: "Week (Fable)".into(),
+                    remaining_percent: Some(remaining),
+                    duration_seconds: Some(604_800),
+                    model_scope: Some("fable".into()),
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: None,
+                }]
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .chain([
+                QuotaWindow {
+                    label: "Week".into(),
+                    remaining_percent: Some(21),
+                    duration_seconds: Some(604_800),
+                    model_scope: None,
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: Some(now + 2 * 24 * 60 * 60 + 30),
+                },
+                QuotaWindow {
+                    label: "5h".into(),
+                    remaining_percent: Some(40),
+                    duration_seconds: Some(18_000),
+                    model_scope: None,
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: Some(now + 60 * 60 + 30),
+                },
+            ])
+            .collect(),
+        extra: None,
+        error: None,
+        refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
+    };
+    let mut claude_reports = BTreeMap::from([
+        ("claude-1".into(), claude_quota("claude-1", Some(17))),
+        ("claude-2".into(), claude_quota("claude-2", None)),
+    ]);
+    claude_reports.insert(
+        "codex-1".into(),
+        ProfileQuota {
+            harness: HarnessKind::Codex,
+            windows: vec![QuotaWindow {
+                label: "Week (Fable)".into(),
+                remaining_percent: Some(17),
+                duration_seconds: Some(604_800),
+                model_scope: Some("fable".into()),
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: None,
+            }],
+            ..claude_quota("codex-1", Some(17))
+        },
+    );
+    let mut dashboard = DashboardState::new(claude_config, State::default(), claude_reports);
+    append_dashboard_golden(
+        &mut output,
+        "Claude Fable weekly quota",
+        140,
+        28,
+        &mut dashboard,
+    );
+
     let quota = ProfileQuota {
         banked_resets: None,
         profile_id: "codex-1".into(),
@@ -3312,6 +3396,8 @@ fn golden_dashboard_resource_panels() {
             QuotaWindow {
                 label: "Week".into(),
                 remaining_percent: Some(73),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: Some("09:00 Aug 20".into()),
@@ -3320,6 +3406,8 @@ fn golden_dashboard_resource_panels() {
             QuotaWindow {
                 label: "5H".into(),
                 remaining_percent: Some(70),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: Some("14:00 Aug 13".into()),
@@ -3352,6 +3440,8 @@ fn golden_dashboard_resource_panels() {
             QuotaWindow {
                 label: "Week".into(),
                 remaining_percent: Some(73),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: None,
@@ -3360,6 +3450,8 @@ fn golden_dashboard_resource_panels() {
             QuotaWindow {
                 label: "5H".into(),
                 remaining_percent: Some(70),
+                duration_seconds: None,
+                model_scope: None,
                 used: None,
                 limit: None,
                 resets: None,
@@ -3463,4 +3555,65 @@ fn a_long_disks_dropdown_keeps_the_target_row_one_line_and_scrolls() {
     let rendered = drawn_dashboard(&mut dashboard, 160);
     assert!(rendered.contains("/srv/volume-29 40.0G free"), "{rendered}");
     assert_eq!(capacity_table_lines(&dashboard), 1);
+}
+
+#[test]
+fn golden_operator_away_dialog() {
+    let mut output = String::new();
+    for (symbols, label, width, height) in [
+        (mj_core::config::SymbolSet::Unicode, "AFK", 100, 32),
+        (mj_core::config::SymbolSet::Ascii, "AFK ASCII", 100, 32),
+        (mj_core::config::SymbolSet::Unicode, "AFK small", 32, 12),
+        (
+            mj_core::config::SymbolSet::Unicode,
+            "AFK tall narrow",
+            56,
+            32,
+        ),
+        (mj_core::config::SymbolSet::Unicode, "AFK tiny", 10, 5),
+    ] {
+        let mut config = config();
+        config.advanced.symbols = Some(symbols);
+        let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+        for index in 0..4 {
+            let mut session = running_session();
+            session.id = format!("waiting-{index}");
+            session.title = format!("Waiting session {index}");
+            session.acp_session_title = None;
+            dashboard.session_details.insert(
+                session.id.clone(),
+                SessionDetail {
+                    pending_elicitations: vec![question(&session.id)],
+                    ..Default::default()
+                },
+            );
+            dashboard.state.sessions.insert(session.id.clone(), session);
+        }
+        dashboard.set_operator_presence(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
+        append_dashboard_golden(&mut output, label, width, height, &mut dashboard);
+        if label == "AFK" {
+            dashboard.session_details.clear();
+            append_dashboard_golden(
+                &mut output,
+                "AFK waiting requests cleared",
+                width,
+                height,
+                &mut dashboard,
+            );
+        }
+        if label == "AFK small" {
+            dashboard.handle_key(key(KeyCode::End));
+            append_dashboard_golden(
+                &mut output,
+                "AFK small scrolled",
+                width,
+                height,
+                &mut dashboard,
+            );
+        }
+    }
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "operator-away-dialog", &output);
 }

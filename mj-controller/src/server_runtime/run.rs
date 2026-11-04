@@ -71,7 +71,9 @@ pub(crate) async fn run_server(
     controller.state.sessions = initial.records;
     controller.state.subagents = initial.subagents;
     controller.config = initial.metadata.installed_config();
-    controller.state.last_subagent_policy = initial.metadata.last_subagent_policy;
+    let mut installed_runtime_config = initial.metadata.config.clone();
+    controller.state.last_subagent_policies = initial.metadata.last_subagent_policies;
+    controller.state.operator_presence = initial.metadata.operator_presence;
     let mut operations = initial
         .metadata
         .lifecycles
@@ -95,7 +97,7 @@ pub(crate) async fn run_server(
         &capacity_targets_rx.borrow_and_update(),
         &mut capacity_state,
     );
-    let container_capacities = daemon_runtime.container_capacity_projection(&controller.state);
+    let container_capacities = initial.metadata.container_capacities.clone();
     let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(publication.snapshot(
         &controller,
         &workspace_updates.borrow().clone(),
@@ -219,6 +221,7 @@ pub(crate) async fn run_server(
         qr_login_url,
         fallback_reason,
         certificate_sha256,
+        local_address: None,
     };
 
     let mut serve = ViewerServer::spawn({
@@ -258,6 +261,7 @@ pub(crate) async fn run_server(
         let (move_prepared_tx, mut move_prepared_rx) =
             tokio::sync::mpsc::unbounded_channel::<MovePrepared>();
         let mut archive_jobs = tokio::task::JoinSet::new();
+        let mut operator_activity_jobs = tokio::task::JoinSet::new();
         let mut bundle_jobs = tokio::task::JoinSet::new();
         let mut preflight_jobs = tokio::task::JoinSet::new();
         let mut move_preparation_jobs = tokio::task::JoinSet::new();
@@ -326,8 +330,12 @@ pub(crate) async fn run_server(
                 publication.observe_runtime(&runtime, &mut native_agents, &mut move_recoveries);
                 controller.state.sessions = runtime.records;
                 controller.state.subagents = runtime.subagents;
-                controller.config = runtime.metadata.installed_config();
-                controller.state.last_subagent_policy = runtime.metadata.last_subagent_policy;
+                if installed_runtime_config != runtime.metadata.config {
+                    controller.config = runtime.metadata.installed_config();
+                    installed_runtime_config = runtime.metadata.config.clone();
+                }
+                controller.state.last_subagent_policies = runtime.metadata.last_subagent_policies;
+                controller.state.operator_presence = runtime.metadata.operator_presence;
                 for (session_id, error) in &pending_action_errors {
                     if let Some(session) = controller.state.sessions.get_mut(session_id)
                         && session.last_error.is_none()
@@ -338,8 +346,7 @@ pub(crate) async fn run_server(
                 operations = runtime.metadata.lifecycles.iter()
                     .map(|view| (view.session_id.clone(), viewer_operation(view)))
                     .collect();
-                let container_capacities =
-                    daemon_runtime.container_capacity_projection(&controller.state);
+                let container_capacities = runtime.metadata.container_capacities;
                 let snapshot = publication.snapshot(
                     &controller,
                     &workspace_updates.borrow().clone(),
@@ -1133,7 +1140,12 @@ pub(crate) async fn run_server(
                         }
                     }
                 }
-                action = action_rx.recv() => {
+                completed = operator_activity_jobs.join_next(), if !operator_activity_jobs.is_empty() => {
+                    if let Some(Err(error)) = completed {
+                        tracing::warn!(%error, "operator activity task failed");
+                    }
+                }
+                action = action_rx.recv(), if operator_activity_jobs.len() < 32 => {
                     let Some(request) = action else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering actions");
                         break;
@@ -1142,6 +1154,14 @@ pub(crate) async fn run_server(
                     // no session slot and starts no lifecycle work, so it is
                     // answered here rather than admitted as an action.
                     match &request.action {
+                        ControllerAction::RecordOperatorActivity => {
+                            let runtime = daemon_runtime.clone();
+                            operator_activity_jobs.spawn(async move {
+                                runtime.record_operator_activity().await;
+                                let _ = request.reply.send(ActionOutcome::accepted());
+                            });
+                            continue;
+                        }
                         ControllerAction::RefreshCapacity { target_id } => {
                             let known = capacity_state.contains_key(target_id);
                             // One queued nudge refreshes every target. Do not
@@ -1230,7 +1250,6 @@ pub(crate) async fn run_server(
                     }
                     let session_id = match admit_phone_action(
                         &request.action,
-                        action_cancellations.len(),
                         &mut active_actions,
                     ) {
                         Ok(session_id) => session_id,
@@ -1242,15 +1261,9 @@ pub(crate) async fn run_server(
                             continue;
                         }
                     };
-                    if let ControllerAction::Move { request: move_request } = &request.action
-                        && let Err(error) = daemon_runtime.start_move_session((**move_request).clone()).await {
-                        if let Some(id) = &session_id { active_actions.remove(id); }
-                        let _ = request.reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));
-                        continue;
-                    }
                     let ControllerRequest { action, reply } = request;
                     // A destroy holds admission as a destroy from the moment it is accepted, so a stop right after "accepted" waits for it (#1191).
-                    let upgrade_work = match match &action { ControllerAction::Move { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
+                    let upgrade_work = match match &action { ControllerAction::SetOperatorAway { .. } => crate::upgrade::activity("operator away setting").map(Some), ControllerAction::Move { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
                         Ok(work) => work,
                         Err(error) => {
                             let _ = reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));
@@ -1278,7 +1291,7 @@ pub(crate) async fn run_server(
                     if let Some(session_id) = &session_id {
                         action_sessions.insert(action_id, session_id.clone());
                     }
-                    let suspension_reply = if matches!(action, ControllerAction::Suspend { .. }) {
+                    let admission_reply = if matches!(action, ControllerAction::Suspend { .. } | ControllerAction::Move { .. }) {
                         Some(reply)
                     } else {
                         action_replies.accept(action_id, &action, reply);
@@ -1304,11 +1317,21 @@ pub(crate) async fn run_server(
                         let _upgrade_work = upgrade_work;
                         let joined = tokio::task::spawn_blocking(move || {
                             let _upgrade_blocking = upgrade_blocking;
-                            let mut suspension_reply = suspension_reply;
+                            let mut admission_reply = admission_reply;
                             let result = (|| -> Result<()> {
+                                // Move admission can probe an uncached host and load the
+                                // store. Keep that preparation off the control loop,
+                                // but refuse it before acknowledging the request.
+                                if let ControllerAction::Move { request } = &action {
+                                    anyhow::ensure!(!control.cancelled.load(Ordering::Acquire), "phone action cancelled");
+                                    mj_core::runtime::block_on(daemon_runtime.start_move_session((**request).clone(), control.lifecycle.clone().expect("Move has a lifecycle control")))??;
+                                    if let Some(reply) = admission_reply.take() {
+                                        let _ = reply.send(ActionOutcome::accepted());
+                                    }
+                                }
                                 if let ControllerAction::Suspend { session_id, .. } = &action {
                                     mj_core::runtime::block_on(daemon_runtime.prepare_suspension(session_id))??;
-                                    if let Some(reply) = suspension_reply.take() {
+                                    if let Some(reply) = admission_reply.take() {
                                         let _ = reply.send(ActionOutcome::accepted());
                                     }
                                 }
@@ -1332,7 +1355,7 @@ pub(crate) async fn run_server(
                                 ))?
                             })();
                             let result = result.map_err(|error| PhoneActionFailure::of(&error));
-                            if let Some(reply) = suspension_reply {
+                            if let Some(reply) = admission_reply {
                                 let outcome = match &result {
                                     Ok(()) => ActionOutcome::accepted(),
                                     Err(failure) => failure.outcome(&action_reference(action_id)),
@@ -1380,6 +1403,15 @@ pub(crate) async fn run_server(
                         continue;
                     };
                     let started_session_id = started.session.id.clone();
+                    // Registration turned review off for a session it cannot
+                    // review; tell whoever asked for it.
+                    let started_notice = [
+                        started.review_turned_off.then(|| {
+                            mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF.to_owned()
+                        }),
+                        started.capacity_warning,
+                    ].into_iter().flatten().collect::<Vec<_>>();
+                    let started_notice = (!started_notice.is_empty()).then(|| started_notice.join("\n"));
                     let publication = if !action_cancellations.contains_key(&started.action_id) {
                         Err("phone action completed before its provisional session was published".into())
                     } else {
@@ -1411,6 +1443,7 @@ pub(crate) async fn run_server(
                         match &publication {
                             Ok(()) => ActionOutcome::Accepted {
                                 session_id: Some(started_session_id),
+                                notice: started_notice,
                             },
                             // Publication fails only for reasons this loop
                             // words itself -- a race for the new session, or
@@ -1447,7 +1480,7 @@ pub(crate) async fn run_server(
                     action_replies.resolve(
                         action_id,
                         match &result {
-                            Ok(()) => ActionOutcome::Accepted { session_id: session_id.clone() },
+                            Ok(()) => ActionOutcome::Accepted { session_id: session_id.clone(), notice: None },
                             Err(failure) => failure.outcome(&reference),
                         },
                     );
@@ -1479,16 +1512,6 @@ pub(crate) async fn run_server(
                         session_id.as_deref(),
                         &result,
                     );
-                    // A session that is taking work again has recovered from
-                    // whatever its last close did, so it stops reporting it.
-                    if result.is_ok() && let Some(session_id) = session_id.clone() {
-                        let daemon_runtime = daemon_runtime.clone();
-                        let Ok(upgrade_task) = crate::upgrade::activity("close failure clear") else { continue };
-                        tokio::spawn(async move {
-                            let _upgrade_task = upgrade_task;
-                            daemon_runtime.clear_recorded_close_failure(&session_id).await;
-                        });
-                    }
                     request_controller_reload(
                         &mut controller_reload_in_flight,
                         &mut controller_reload_requested,
@@ -1551,6 +1574,7 @@ pub(crate) async fn run_server(
         }
         // Bundle jobs are supervised so shutdown never leaves a detached
         // request task behind holding the config mutation lock.
+        operator_activity_jobs.shutdown().await;
         bundle_jobs.shutdown().await;
         // Preflight jobs own cancellation guards for their blocking Git
         // probes. Aborting them here signals those probes before the server's

@@ -410,6 +410,67 @@ fn write_modern_rollout(path: &Path, id: &str, session_id: &str) {
 }
 
 #[test]
+fn ignore_nested_repositories_exports_outer_work_without_persisting_the_omission() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    let repository = spec.workspace_root.join("app");
+    let nested = ".scratch/ü landing/master-check";
+    git(
+        &repository,
+        &["worktree", "add", "--detach", nested, "HEAD"],
+    );
+    fs::write(
+        repository.join(nested).join("valuable.txt"),
+        b"nested work\n",
+    )
+    .unwrap();
+    git(
+        &repository,
+        &["clone", "--no-hardlinks", ".", ".scratch/independent"],
+    );
+    fs::write(
+        repository.join(".scratch/independent/valuable.txt"),
+        b"clone work\n",
+    )
+    .unwrap();
+    fs::write(repository.join("README.md"), b"staged\n").unwrap();
+    git(&repository, &["add", "README.md"]);
+    fs::write(repository.join("README.md"), b"unstaged\n").unwrap();
+    fs::write(repository.join("keep.txt"), b"untracked\n").unwrap();
+    let exclude = fs::read(repository.join(".git/info/exclude")).unwrap();
+
+    let error = export_checkpoint(&spec).unwrap_err();
+    assert!(format!("{error:#}").contains(mj_core::archive::NESTED_REPOSITORY_CHECKPOINT_ERROR));
+    assert!(!spec.output_path.exists());
+    spec.ignore_nested_repositories = true;
+    // Exercise the controller/target JSON contract as well as archive restore.
+    let request: CheckpointExportSpec =
+        serde_json::from_slice(&serde_json::to_vec(&spec).unwrap()).unwrap();
+    export_checkpoint(&request).unwrap();
+    verify_archive_streaming(&spec.output_path).unwrap();
+    let restored = temp.path().join("restored");
+    fs::create_dir(&restored).unwrap();
+    git(&restored, &["clone", repository.to_str().unwrap(), "app"]);
+    restore_repositories(&spec.output_path, &restored, &SystemGit).unwrap();
+    let checkout = restored.join("app");
+    assert_eq!(fs::read(checkout.join("README.md")).unwrap(), b"unstaged\n");
+    assert_eq!(git(&checkout, &["show", ":README.md"]), "staged");
+    assert_eq!(fs::read(checkout.join("keep.txt")).unwrap(), b"untracked\n");
+    assert!(!checkout.join(".scratch").exists());
+    assert_eq!(
+        fs::read(repository.join(".git/info/exclude")).unwrap(),
+        exclude
+    );
+    assert_eq!(
+        fs::read(repository.join(nested).join("valuable.txt")).unwrap(),
+        b"nested work\n"
+    );
+    spec.ignore_nested_repositories = false;
+    let error = export_checkpoint(&spec).unwrap_err();
+    assert!(format!("{error:#}").contains(mj_core::archive::NESTED_REPOSITORY_CHECKPOINT_ERROR));
+}
+
+#[test]
 fn codex_collection_keeps_only_the_root_thread_from_a_session_tree() {
     let temp = tempfile::tempdir().unwrap();
     let archived_root = temp
@@ -1049,66 +1110,59 @@ fn claude_allowlist_collects_project_memory_for_the_session_slug_only() {
     );
 }
 
+// Hard-won: b63fedbf31: filename filtering discarded selected native artifacts and project memory.
 #[test]
-fn claude_project_memory_skips_secret_like_names() {
+fn claude_checkpoint_preserves_session_and_project_memory_filenames() {
     let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("projects/-workspace-app");
+    let (mut spec, _) = fixture(temp.path());
+    spec.session.harness_kind = HarnessKind::Claude;
+    spec.harness_home = temp.path().join("claude");
+    let project = spec.harness_home.join("projects/-workspace-app");
     fs::create_dir_all(project.join("memory")).unwrap();
+    fs::create_dir_all(project.join(NATIVE).join("credentials")).unwrap();
     fs::write(project.join(format!("{NATIVE}.jsonl")), b"transcript").unwrap();
-    fs::write(project.join("memory/settings.json"), b"secret config").unwrap();
-    fs::write(project.join("memory/.env"), b"TOKEN=1").unwrap();
-    fs::write(project.join("memory/keep.md"), b"safe memory").unwrap();
-
-    let artifacts =
-        collect_native_artifacts(HarnessKind::Claude, temp.path(), NATIVE, false).unwrap();
-    let paths: Vec<_> = artifacts
-        .iter()
-        .map(|artifact| artifact.relative_path.clone())
-        .collect();
-    assert!(paths.contains(&PathBuf::from("projects/-workspace-app/memory/keep.md")));
-    assert!(!paths.contains(&PathBuf::from(
-        "projects/-workspace-app/memory/settings.json"
-    )));
-    assert!(!paths.contains(&PathBuf::from("projects/-workspace-app/memory/.env")));
-}
-
-/// Collection and the archive gate read one shared rule set, so every
-/// credential name is dropped while walking the session subtree instead of
-/// failing the archive write afterwards.
-#[test]
-fn claude_allowlist_skips_credential_names_in_the_session_subtree() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("projects/-workspace-app");
-    let session = project.join(NATIVE);
-    fs::create_dir_all(&session).unwrap();
-    fs::write(project.join(format!("{NATIVE}.jsonl")), b"transcript").unwrap();
-    fs::write(session.join("notes.jsonl"), b"kept").unwrap();
-    for name in [
-        ".credentials.json",
-        "auth.toml",
-        "vendor-credentials.json",
-        "vendor_credentials.json",
-    ] {
-        fs::write(session.join(name), b"secret").unwrap();
-    }
-
-    let artifacts =
-        collect_native_artifacts(HarnessKind::Claude, temp.path(), NATIVE, false).unwrap();
-    let paths: Vec<_> = artifacts
-        .iter()
-        .map(|artifact| artifact.relative_path.clone())
-        .collect();
-    let expected = [
-        PathBuf::from(format!("projects/-workspace-app/{NATIVE}.jsonl")),
-        PathBuf::from(format!("projects/-workspace-app/{NATIVE}/notes.jsonl")),
+    let files = [
+        PathBuf::from("memory/settings.json"),
+        PathBuf::from("memory/.env"),
+        Path::new(NATIVE).join("config.json"),
+        Path::new(NATIVE).join(".credentials.json"),
+        Path::new(NATIVE).join("credentials/notes.txt"),
     ];
+    for relative in &files {
+        fs::write(project.join(relative), b"preserved contents").unwrap();
+    }
+    export_checkpoint(&spec).unwrap();
+
+    let harness_home = temp.path().join("restored-claude");
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            report_root: None,
+            archive_path: spec.output_path,
+            workspace_root: spec.workspace_root.clone(),
+            relay_root: temp.path().join("restored-claude-relay"),
+            harness_home: harness_home.clone(),
+            restore_repositories: false,
+            restore_native: true,
+            queue_policy: QueueRestorePolicy::Restore,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    let restored_project = harness_home
+        .join("projects")
+        .join(claude_project_slug(&spec.workspace_root.join("app")));
     assert_eq!(
-        paths.len(),
-        expected.len(),
-        "credential names leaked into the native artifacts: {paths:?}"
+        fs::read(restored_project.join(format!("{NATIVE}.jsonl"))).unwrap(),
+        b"transcript"
     );
-    for path in expected {
-        assert!(paths.contains(&path), "{path:?} was not collected");
+    for relative in files {
+        assert_eq!(
+            fs::read(restored_project.join(&relative)).unwrap(),
+            b"preserved contents",
+            "native artifact {} was not preserved",
+            relative.display()
+        );
     }
 }
 
@@ -1304,6 +1358,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
     let output = worker_root.join("source.hel.zip");
     (
         CheckpointExportSpec {
+            ignore_nested_repositories: false,
             report_directories: None,
             protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
             session: SessionManifest {
@@ -1798,6 +1853,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
     fs::create_dir_all(&memory_root).unwrap();
     fs::write(memory_root.join("MEMORY.md"), "remember this").unwrap();
     mj_core::worker_launch::WorkerLaunchConfig {
+        initial_commands: Vec::new(),
         reviewer_launch: None,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
@@ -2274,7 +2330,7 @@ fn a_workspace_restore_refuses_a_branch_checked_out_in_another_worktree() {
     );
     let before = git(&destination, &["rev-parse", "HEAD"]);
 
-    let error = restore_repositories(&archive_path, &restore_root, &crate::test_support::Git225)
+    let error = restore_repositories(&archive_path, &restore_root, &crate::test_support::Git231)
         .unwrap_err();
 
     assert!(
@@ -3331,7 +3387,7 @@ fn checkpoint_round_trips_ten_image_references_and_restores_the_blob() {
         seed.queued_prompts[0].content,
         spec.canonical_session.queued_prompts[0].content
     );
-    let mut blocks: Vec<agent_client_protocol::schema::v1::ContentBlock> = seed.queued_prompts[0]
+    let mut blocks: Vec<agent_client_protocol::v1::schema::ContentBlock> = seed.queued_prompts[0]
         .content
         .iter()
         .cloned()
@@ -3347,7 +3403,7 @@ fn checkpoint_round_trips_ten_image_references_and_restores_the_blob() {
         .resolve(&mut blocks)
         .unwrap();
     for block in blocks {
-        let agent_client_protocol::schema::v1::ContentBlock::Image(image) = block else {
+        let agent_client_protocol::v1::schema::ContentBlock::Image(image) = block else {
             panic!("checkpoint image queue contained a non-image block");
         };
         assert!(image.uri.is_none());
@@ -3369,7 +3425,7 @@ fn restored_image_resolution_rejects_missing_and_corrupt_blobs() {
     let queued = restored_seed(&restored_relay).queued_prompts[0]
         .content
         .clone();
-    let mut blocks: Vec<agent_client_protocol::schema::v1::ContentBlock> = queued
+    let mut blocks: Vec<agent_client_protocol::v1::schema::ContentBlock> = queued
         .iter()
         .cloned()
         .map(serde_json::from_value)
@@ -3726,6 +3782,7 @@ fn parallel_repository_collection_preserves_manifest_order() {
 /// A child's report files sit beside the repositories, outside all of them, so
 /// no repository capture sees them. The checkpoint carries them itself and puts
 /// them back even when the harness history is not restored.
+// Hard-won: b63fedbf31: a report named config.json blocked Move during checkpoint export.
 #[test]
 fn checkpoint_carries_subagent_reports_and_restores_them_beside_the_repositories() {
     for explicit in [false, true] {
@@ -3756,6 +3813,8 @@ fn checkpoint_carries_subagent_reports_and_restores_them_beside_the_repositories
         fs::create_dir_all(reports.join("logs")).unwrap();
         fs::write(reports.join("findings.md"), b"full findings").unwrap();
         fs::write(reports.join("logs/test.log"), b"test output").unwrap();
+        fs::create_dir_all(reports.join("L4-flow")).unwrap();
+        fs::write(reports.join("L4-flow/config.json"), b"{\"flow\":4}").unwrap();
         export_checkpoint(&spec).unwrap();
         assert_eq!(
             read_archive_verified(&spec.output_path)
@@ -3802,6 +3861,10 @@ fn checkpoint_carries_subagent_reports_and_restores_them_beside_the_repositories
         assert_eq!(
             fs::read(restored.join("findings.md")).unwrap(),
             b"newer findings"
+        );
+        assert_eq!(
+            fs::read(restored.join("L4-flow/config.json")).unwrap(),
+            b"{\"flow\":4}"
         );
 
         #[cfg(unix)]

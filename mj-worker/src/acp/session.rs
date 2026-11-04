@@ -20,7 +20,6 @@ pub(super) async fn serve_session(
     opened: Arc<Mutex<Option<OpenedSession>>>,
     agent_output_count: &AgentOutputCount,
     last_agent_message: &LastAgentMessage,
-    claude_result_count: &ClaudeResultCount,
     live_history_enabled: &AtomicBool,
     resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
@@ -29,19 +28,27 @@ pub(super) async fn serve_session(
 ) -> Result<Option<SessionRestart>> {
     let mut meta = serde_json::Map::new();
     meta.insert("terminal_output".into(), serde_json::Value::Bool(true));
+    meta.insert(
+        "terminal_output_delta".into(),
+        serde_json::Value::Bool(true),
+    );
     if spec.harness == HarnessKind::Codex {
         meta.insert("execution".into(), serde_json::json!({"version":1}));
     }
     if matches!(spec.harness, HarnessKind::Claude | HarnessKind::Codex) {
+        let mut air_capabilities = vec!["asyncTasks", "nativeSubagentSessions", "sessionFailure"];
+        if spec.harness == HarnessKind::Claude {
+            air_capabilities.push("backgroundSubagents");
+        }
         meta.insert(
             "jetbrains".into(),
             serde_json::json!({
                 "air": {
                     "version": 1,
-                    // `sessionFailure` makes codex-acp report a failed turn
+                    // `sessionFailure` makes adapters report a failed turn
                     // with a typed record instead of an ordinary end of turn
                     // whose error is agent text (issue 1217).
-                    "capabilities": if spec.harness == HarnessKind::Claude { vec!["asyncTasks", "nativeSubagentSessions", "nativeSubagentAvailability"] } else { vec!["nativeSubagentSessions", "nativeSubagentAvailability", "sessionFailure"] }
+                    "capabilities": air_capabilities
                 }
             }),
         );
@@ -71,36 +78,23 @@ pub(super) async fn serve_session(
             initialized.protocol_version
         );
     }
-    if spec.harness == HarnessKind::Codex
-        && spec
-            .goal_recovery
-            .lock()
-            .expect("goal lock poisoned")
-            .asking()
-    {
-        ensure!(
-            initialized
-                .meta
-                .as_ref()
-                .and_then(|m| m.get("goal"))
-                .and_then(|g| g.get("resumePolicies"))
-                .and_then(|p| p.as_array())
-                .is_some_and(|p| p.iter().any(|v| v == "pause")),
-            "the installed Codex adapter cannot pause a goal before explicit resume; update the adapter"
-        );
-    }
-    let native_children_supported = initialized
+    let advertised_air_capabilities = initialized
         .meta
         .as_ref()
         .and_then(|meta| meta.get("jetbrains"))
         .and_then(|value| value.get("air"))
         .and_then(|value| value.get("capabilities"))
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|capabilities| {
-            capabilities
-                .iter()
-                .any(|value| value == "nativeSubagentSessions")
-        });
+        .and_then(serde_json::Value::as_array);
+    let native_children_supported = advertised_air_capabilities.is_some_and(|capabilities| {
+        capabilities
+            .iter()
+            .any(|value| value == "nativeSubagentSessions")
+    });
+    let background_subagents_supported = advertised_air_capabilities.is_some_and(|capabilities| {
+        capabilities
+            .iter()
+            .any(|value| value == "backgroundSubagents")
+    });
     let steering_supported = steering_supported_from_meta(initialized.meta.as_ref());
     let availability_supported = initialized
         .meta
@@ -133,6 +127,12 @@ pub(super) async fn serve_session(
     )
     .await?;
 
+    if spec.harness == HarnessKind::Claude && !background_subagents_supported {
+        emit_runtime_event(events, RuntimeEvent::Warning {
+            message: "This Claude adapter does not advertise backgroundSubagents. Foreground completion requires claude-agent-acp 0.95.0 or later; upgrade the container or worker to let prompts finish while background agents run.".into(),
+        }).await?;
+    }
+
     if matches!(spec.harness, HarnessKind::Claude | HarnessKind::Codex)
         && !native_children_supported
     {
@@ -141,23 +141,46 @@ pub(super) async fn serve_session(
         }).await?;
     }
 
-    let capability = initialized
+    let air_goal = initialized
         .meta
         .as_ref()
-        .and_then(mj_core::goal::goal_meta)
-        .and_then(|value| {
-            match serde_json::from_value::<mj_core::goal::GoalCapability>(value.clone()) {
-                Ok(capability) => Some(capability),
-                Err(error) => {
-                    tracing::warn!(%error, "adapter advertised malformed goal controls");
-                    None
-                }
+        .and_then(|meta| meta.get("jetbrains"))
+        .and_then(|jetbrains| jetbrains.get("air"))
+        .and_then(|air| air.get("goal"));
+    let capability = air_goal.and_then(|value| {
+        match serde_json::from_value::<mj_core::goal::GoalCapability>(value.clone()) {
+            Ok(capability) => Some(capability),
+            Err(error) => {
+                tracing::warn!(%error, "adapter advertised malformed goal controls");
+                None
             }
-        });
+        }
+    });
+    let goal_recovery_supported = capability.as_ref().is_some_and(|capability| {
+        capability.supports(mj_core::goal::GoalControlAction::Pause)
+            && capability.supports(mj_core::goal::GoalControlAction::Resume)
+    }) && air_goal
+        .and_then(|goal| goal.get("resumePolicies"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|policies| policies.iter().any(|policy| policy == "pause"));
+    if capability
+        .as_ref()
+        .is_some_and(|capability| capability.supports(mj_core::goal::GoalControlAction::Resume))
+        && spec
+            .goal_recovery
+            .lock()
+            .expect("goal lock poisoned")
+            .asking()
+    {
+        ensure!(
+            goal_recovery_supported,
+            "the installed adapter cannot pause a goal before explicit resume; update the adapter"
+        );
+    }
     goal::publish(
         spec,
         events,
-        serde_json::json!({"mjGoalCapability": capability}),
+        serde_json::json!({"mjGoalCapability": &capability}),
     )
     .await?;
 
@@ -275,7 +298,7 @@ pub(super) async fn serve_session(
                 {
                     *state = fresh;
                 }
-                if spec.harness == HarnessKind::Codex
+                if capability.is_some()
                     && let Some(meta) = loaded_meta.as_ref()
                 {
                     goal::publish(spec, events, serde_json::Value::Object(meta.clone())).await?;
@@ -304,7 +327,7 @@ pub(super) async fn serve_session(
             let created = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
             let created = created.context("create ACP session")?;
-            if spec.harness == HarnessKind::Codex
+            if capability.is_some()
                 && let Some(meta) = created.meta.as_ref()
             {
                 goal::publish(spec, events, serde_json::Value::Object(meta.clone())).await?;
@@ -362,7 +385,7 @@ pub(super) async fn serve_session(
 
     // Launch flags and environment are applied before the bridge starts. ACP
     // modes are selected after the session exists, before any prompt can run.
-    let enforcement = spec.harness.execution_enforcement(spec.execution_policy);
+    let enforcement = session_enforcement(spec);
     let mut config_options = config_options.unwrap_or_default();
     let mut modes = modes;
     let mut plan_mode_transition = PlanModeTransition::default();
@@ -683,6 +706,7 @@ pub(super) async fn serve_session(
     }
 
     let mut goal_question = goal::recover(
+        goal_recovery_supported,
         connection,
         &session_id,
         spec,
@@ -715,10 +739,7 @@ pub(super) async fn serve_session(
                 // reload back, and one registered later belongs to a bridge
                 // being replaced, which cancels it as every replacement does.
                 if imported.changed().await?
-                    && pending_elicitations
-                        .lock()
-                        .expect("pending elicitation lock poisoned")
-                        .is_empty()
+                    && pending_elicitations.is_empty()
                 {
                     return Ok(Some(SessionRestart::ReloadLogins(session_id.to_string())));
                 }
@@ -765,10 +786,7 @@ pub(super) async fn serve_session(
                 unreachable!("resolved before ACP dispatch")
             }
             CommandRequest::ClearContext { request_id } => {
-                if !pending_elicitations
-                    .lock()
-                    .expect("pending elicitation lock poisoned")
-                    .is_empty()
+                if !pending_elicitations.is_empty()
                     || config_recovery.is_some()
                     || goal_question.is_some()
                 {
@@ -876,9 +894,6 @@ pub(super) async fn serve_session(
                 // `session/prompt` reply, so there is no harness that is safe
                 // to exempt and nothing left to special-case.
                 let stall_policy = spec.stall_policy.unwrap_or_else(turn_stall_policy);
-                // Read before the send: a Claude result stamped at or below
-                // this position arrived before the prompt reached the adapter.
-                let mut prompt_sent_after = claude_result_count.get();
                 let mut prompt: ActivePrompt = Box::pin(
                     connection
                         .send_request(PromptRequest::new(session_id.clone(), prompt))
@@ -942,6 +957,15 @@ pub(super) async fn serve_session(
                                 Ok(response) => {
                                     let usage_meta = response.usage.as_ref().and_then(|usage| usage.meta.clone());
                                     usage = response.usage.map(|usage| mj_core::usage::TokenUsage::from_acp(spec.harness, usage));
+                                    if spec.harness == HarnessKind::Claude
+                                        && let Some(usage) = usage.as_mut()
+                                        && let Err(error) = claude_usage::attach_provider_details(usage, response.meta.as_ref())
+                                    {
+                                        usage.scope = mj_core::usage::UsageScope::Unspecified;
+                                        emit_runtime_event(events, RuntimeEvent::Warning {
+                                            message: format!("Claude per-model usage could not be recorded; turn accounting is incomplete: {error:#}"),
+                                        }).await?;
+                                    }
                                     if spec.harness == HarnessKind::Muse {
                                         usage = usage.map(|usage| muse_usage::attach_provider_details(usage, usage_meta.as_ref()));
                                     }
@@ -961,7 +985,7 @@ pub(super) async fn serve_session(
                                         // has no failed one.
                                         tracing::warn!(harness = ?spec.harness, category = %failure.category, title = %failure.title, "prompt failed");
                                         let failed = mj_core::diagnostic::TurnDiagnostic::from_session_failure(&failure);
-                                        let (stop_reason, message) = session_failure_outcome(spec.harness, &failed);
+                                        let (stop_reason, message) = session_failure_outcome(&failed);
                                         emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
                                         diagnostic = Some(failed);
                                         stop_reason
@@ -1259,47 +1283,6 @@ pub(super) async fn serve_session(
                                 cancellation.context("cancel ACP prompt during runtime shutdown")?;
                                 return Ok(None);
                             }
-                            Some(CommandRequest::ReleasePrompt { request_id: released, received, stop_reason, usage }) => {
-                                // The coordinator saw the result of the cycle
-                                // that answered this prompt. Only this loop knows
-                                // whether that cycle is really the prompt's last:
-                                // a cancel's reply, a plan hand-off, or a newer
-                                // `session/prompt` under the same id still decide.
-                                let answers_this_prompt = released == request_id
-                                    && prompt_running
-                                    && received > prompt_sent_after;
-                                if !answers_this_prompt
-                                    || cancel_deadline.is_some()
-                                    || approved_plan.is_some()
-                                    || mode_restoration.is_some()
-                                {
-                                    tracing::debug!(
-                                        session_id = %session_id,
-                                        request_id = %released,
-                                        received,
-                                        prompt_sent_after,
-                                        cancelling = cancel_deadline.is_some(),
-                                        plan_handoff = approved_plan.is_some() || mode_restoration.is_some(),
-                                        "a Claude result did not end the running prompt"
-                                    );
-                                    continue;
-                                }
-                                spec.acp_activity.mark();
-                                spec.step_clock.end_turn();
-                                settle_steer_at_turn_end(events, &mut pending_steer).await?;
-                                emit_runtime_event(
-                                    events,
-                                    RuntimeEvent::PromptFinished {
-                                        request_id: request_id.clone(),
-                                        stop_reason: stop_reason.clone(),
-                                        usage,
-                                        diagnostic: None,
-                                    },
-                                )
-                                .await?;
-                                detach_prompt_reply(connection, prompt, request_id, stop_reason);
-                                break;
-                            }
                             Some(CommandRequest::Prompt { request_id, .. } | CommandRequest::PromptAttachments { request_id, .. }) => {
                                 emit_runtime_event(
                                     events,
@@ -1342,62 +1325,60 @@ pub(super) async fn serve_session(
                                 elicitation_id,
                                 response,
                                 resolved,
-                            }) if prompt_running && answer_cancels_turn(pending_elicitations, &elicitation_id, &response) => {
-                                // Cancel on a tool permission stops the turn,
-                                // as an interrupt does. Cancelling it answers
-                                // the request `cancelled`. With no turn
-                                // running, the request alone is cancelled.
-                                implementation_rx.close(); approved_plan = None; implementation_deadline = None;
-                                let outcome = cancel_prompt_turn(connection, &session_id, terminals, pending_elicitations)
-                                    .map_err(|error| format!("cancel ACP prompt: {error}"));
-                                if outcome.is_ok() && cancel_deadline.is_none() {
-                                    cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
-                                }
-                                if resolved.send(outcome).is_err() {
-                                    tracing::debug!(
-                                        session_id = %session_id,
-                                        operation = "resolve_elicitation",
-                                        %elicitation_id,
-                                        "elicitation resolution receiver was already closed"
-                                    );
-                                }
-                            }
-                            Some(CommandRequest::ResolveElicitation {
-                                elicitation_id,
-                                response,
-                                resolved,
                             }) => {
-                                let goal_outcome = goal::resolve(connection, &session_id, spec, events, &mut goal_question, config_recovery.is_some(), (&elicitation_id, &response)).await?;
-                                let outcome = if let Some(outcome) = goal_outcome {
-                                    outcome
-                                } else { match resolve_session_config_recovery(
-                                    connection,
-                                    &session_id,
-                                    spec,
-                                    events,
-                                    &mut config_options,
-                                    &mut grok_models,
-                                    &mut config_recovery,
-                                    false,
-                                    &elicitation_id,
-                                    &response,
-                                )
-                                .await?
-                                {
-                                    Some(outcome) => outcome,
-                                    None => resolve_pending_elicitation(
-                                        pending_elicitations,
+                                if let Some(permission) = prompt_running.then(|| pending_elicitations.take_turn_cancel(&elicitation_id, &response)).flatten() {
+                                    // Cancel on a tool permission stops the turn,
+                                    // as an interrupt does. Cancelling it answers
+                                    // the request `cancelled`. With no turn
+                                    // running, the request alone is cancelled.
+                                    implementation_rx.close(); approved_plan = None; implementation_deadline = None;
+                                    let outcome = cancel_prompt_turn(connection, &session_id, terminals, pending_elicitations)
+                                        .map_err(|error| format!("cancel ACP prompt: {error}"));
+                                    drop(permission);
+                                    if outcome.is_ok() && cancel_deadline.is_none() {
+                                        cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
+                                    }
+                                    if resolved.send(outcome).is_err() {
+                                        tracing::debug!(
+                                            session_id = %session_id,
+                                            operation = "resolve_elicitation",
+                                            %elicitation_id,
+                                            "elicitation resolution receiver was already closed"
+                                        );
+                                    }
+                                } else {
+                                    let goal_outcome = goal::resolve(connection, &session_id, spec, events, &mut goal_question, config_recovery.is_some(), (&elicitation_id, &response)).await?;
+                                    let outcome = if let Some(outcome) = goal_outcome {
+                                        outcome
+                                    } else { match resolve_session_config_recovery(
+                                        connection,
+                                        &session_id,
+                                        spec,
+                                        events,
+                                        &mut config_options,
+                                        &mut grok_models,
+                                        &mut config_recovery,
+                                        false,
                                         &elicitation_id,
-                                        response,
-                                    ),
-                                }};
-                                if resolved.send(outcome).is_err() {
-                                    tracing::debug!(
-                                        session_id = %session_id,
-                                        operation = "resolve_elicitation",
-                                        %elicitation_id,
-                                        "elicitation resolution receiver was already closed"
-                                    );
+                                        &response,
+                                    )
+                                    .await?
+                                    {
+                                        Some(outcome) => outcome,
+                                        None => resolve_pending_elicitation(
+                                            pending_elicitations,
+                                            &elicitation_id,
+                                            response,
+                                        ),
+                                    }};
+                                    if resolved.send(outcome).is_err() {
+                                        tracing::debug!(
+                                            session_id = %session_id,
+                                            operation = "resolve_elicitation",
+                                            %elicitation_id,
+                                            "elicitation resolution receiver was already closed"
+                                        );
+                                    }
                                 }
                             }
                             Some(CommandRequest::StopBackgroundTask { target, resolved }) => {
@@ -1429,7 +1410,6 @@ pub(super) async fn serve_session(
                                     last_agent_message.clear();
                                     asked_to_compact = false;
                                     spec.step_clock.begin_turn();
-                                    prompt_sent_after = claude_result_count.get();
                                     prompt = Box::pin(connection.send_request(PromptRequest::new(session_id.clone(), vec![ContentBlock::Text(TextContent::new(continuation))])).block_task());
                                     prompt_running = true;
                                 }
@@ -1664,15 +1644,6 @@ pub(super) async fn serve_session(
                     pending_elicitations,
                 )
                 .await?;
-            }
-            CommandRequest::ReleasePrompt { request_id, .. } => {
-                // The adapter's reply ended this prompt before the coordinator
-                // relayed its result.
-                tracing::debug!(
-                    session_id = %session_id,
-                    %request_id,
-                    "a Claude result arrived for a prompt that had already ended"
-                );
             }
             CommandRequest::ResolveElicitation {
                 elicitation_id,

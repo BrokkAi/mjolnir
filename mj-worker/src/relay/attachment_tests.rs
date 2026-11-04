@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::v1::ContentBlock;
+use agent_client_protocol::v1::schema::ContentBlock;
 use base64::Engine as _;
 use mj_core::attachment::*;
 use std::fs;

@@ -22,7 +22,7 @@
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 completed command style: header=Some(Rgb(151, 163, 163)), body=Some(Rgb(151, 163, 163))
 pending command style: header=Some(Rgb(151, 163, 163)), body=Some(Rgb(151, 163, 163))
 running command style: header=Some(Rgb(232, 189, 123)), body=None
@@ -52,7 +52,7 @@ failed command style: header=Some(Rgb(244, 154, 165)), body=None
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 tool click targets: {1, 2, 3}
 
 === completed command expanded (80x24) ===
@@ -79,7 +79,7 @@ tool click targets: {1, 2, 3}
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 expanded tools: {2}
 
 === running command expanded (80x24) ===
@@ -106,7 +106,7 @@ expanded tools: {2}
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 expanded tools: {1, 2}
 
 === thought text does not expand tools (60x24) ===
@@ -133,7 +133,7 @@ expanded tools: {1, 2}
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+Tab pane │ ctrl+b then q detach · : / ? palette
 expanded tools: {}
 
 === execute pending (100x24) ===
@@ -160,7 +160,7 @@ expanded tools: {}
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === execute running (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -186,7 +186,7 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === execute completed (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -212,7 +212,7 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === raw keeps provider title (100x24) ===
 ╭ Conversation · raw source ───────────────────────────────────────────────────────────────────────╮
@@ -238,7 +238,7 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 
 === message input arrives while running (80x28) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
@@ -268,7 +268,7 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 
 === message input survives result update (80x28) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
@@ -298,7 +298,7 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 
 === raw message includes arguments and receipt (80x28) ===
 ╭ Conversation · raw source ───────────────────────────────────────────────────╮
@@ -328,7 +328,7 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 
 === restored message includes original arguments (80x28) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
@@ -358,7 +358,7 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 
 === empty input replaces earlier message arguments (80x28) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
@@ -388,7 +388,201 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== streamed terminal output expanded while running (80x28) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running · 15:00                                                    ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │ Input arguments                                                           ▐│
+│ │ command:                                                                  ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │                                                                           ▐│
+│ │ cwd:                                                                      ▐│
+│ │ /home/jonathan/Projects/bifrost                                           ▐│
+│ │ From github.com:BrokkAi/bifrost                                           ▐│
+│ │ fatal: a branch named 'experiment-bbtree-performance' already exists      ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== failed terminal metadata expanded with exit code (80x28) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ × Tool · failed · 15:00                                                     ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │ Input arguments                                                           ▐│
+│ │ command:                                                                  ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │                                                                           ▐│
+│ │ cwd:                                                                      ▐│
+│ │ /home/jonathan/Projects/bifrost                                           ▐│
+│ │ From github.com:BrokkAi/bifrost                                           ▐│
+│ │ fatal: a branch named 'experiment-bbtree-performance' already exists      ▐│
+│ │                                                                           ▐│
+│ │ exited 128                                                                ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== failed terminal metadata reopened in raw mode (80x28) ===
+╭ Conversation · raw source ───────────────────────────────────────────────────╮
+│ × Tool · failed                                                             ▐│
+│ │ git fetch origin master && git worktree add -b                            ▐│
+│ │ experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance     ▐│
+│ │ origin/master                                                             ▐│
+│ │ Input arguments                                                           ▐│
+│ │ {                                                                         ▐│
+│ │   "command": "git fetch origin master && git worktree add -b              ▐│
+│ │   experiment-bbtree-performance .mj/lanes/experiment-bbtree-performance   ▐│
+│ │   origin/master",                                                         ▐│
+│ │   "cwd": "/home/jonathan/Projects/bifrost"                                ▐│
+│ │ }                                                                         ▐│
+│ │ From github.com:BrokkAi/bifrost                                           ▐│
+│ │ fatal: a branch named 'experiment-bbtree-performance' already exists      ▐│
+│ │                                                                           ▐│
+│ │ exited 128                                                                ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== raw-output failure pending expanded (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ • Tool · waiting · 15:00                                                    ▐│
+│ │ contact_peer                                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ peer:                                                                     ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Check parser                                                              ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== raw-output failure running expanded (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running · 15:00                                                    ▐│
+│ │ contact_peer                                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ peer:                                                                     ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Check parser                                                              ▐│
+│ │ peer handshake started                                                    ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== raw-output failure failed expanded (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ × Tool · failed · 15:00                                                     ▐│
+│ │ contact_peer                                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ peer:                                                                     ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Check parser                                                              ▐│
+│ │ peer handshake started                                                    ▐│
+│ │ Error                                                                     ▐│
+│ │ {                                                                         ▐│
+│ │   "message": "permission denied while contacting peer"                    ▐│
+│ │ }                                                                         ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
+
+=== raw-output failure replayed and reopened (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ × Tool · failed · 15:00                                                     ▐│
+│ │ contact_peer                                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ peer:                                                                     ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Check parser                                                              ▐│
+│ │ peer handshake started                                                    ▐│
+│ │ Error                                                                     ▐│
+│ │ {                                                                         ▐│
+│ │   "message": "permission denied while contacting peer"                    ▐│
+│ │ }                                                                         ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 
 === clean fallback terminal in rich mode (80x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
@@ -414,7 +608,7 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 
 === clean fallback terminal in raw mode (80x24) ===
 ╭ Conversation · raw source ───────────────────────────────────────────────────╮
@@ -440,7 +634,7 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 
 === unclaimed live terminal (80x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
@@ -466,7 +660,7 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 
 === live terminal removed after exit (80x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
@@ -492,7 +686,7 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 
 === older tool groups collapsed (36x48) ===
 ╭ Conversation ────────────────────╮
@@ -542,7 +736,7 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │  commands                        │
 │                                  │
 ╰──────────────────────────────────╯
-ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 
 === older group expanded (36x48) ===
 ╭ Conversation ────────────────────╮
@@ -592,7 +786,7 @@ ctrl+b then : palette · ? keys
 │  commands                        │
 │                                  │
 ╰──────────────────────────────────╯
-ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 expanded tools: {2}
 
 === older group collapsed (36x48) ===
@@ -643,7 +837,7 @@ expanded tools: {2}
 │  commands                        │
 │                                  │
 ╰──────────────────────────────────╯
-ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 expanded tools: {}
 
 === newer tool groups collapsed (36x48) ===
@@ -694,7 +888,7 @@ expanded tools: {}
 │  commands                        │
 │                                  │
 ╰──────────────────────────────────╯
-ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 
 === newer group expanded (36x48) ===
 ╭ Conversation ────────────────────╮
@@ -744,7 +938,7 @@ ctrl+b then : palette · ? keys
 │  commands                        │
 │                                  │
 ╰──────────────────────────────────╯
-ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 expanded tools: {6}
 
 === newer group collapsed (36x48) ===
@@ -795,7 +989,7 @@ expanded tools: {6}
 │  commands                        │
 │                                  │
 ╰──────────────────────────────────╯
-ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 expanded tools: {}
 
 === wrapped summary member expands from continuation row (30x24) ===
@@ -822,7 +1016,7 @@ expanded tools: {}
 │  for commands              │
 │                            │
 ╰────────────────────────────╯
-ctrl+b then : palette · ? keys
+q detach · : / ? palette
 second member hitboxes: 3
 expanded tools: {2}
 
@@ -850,7 +1044,7 @@ expanded tools: {2}
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 
 === raw markdown markers (30x24) ===
 ╭ Conversation · raw source ─╮
@@ -876,7 +1070,7 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │  for commands              │
 │                            │
 ╰────────────────────────────╯
-ctrl+b then : palette · ? keys
+q detach · : / ? palette
 
 === inline tool calls (80x36) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
@@ -914,7 +1108,7 @@ ctrl+b then : palette · ? keys
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 
 === inline call expanded (80x36) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
@@ -952,7 +1146,7 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 expanded tools: {2}
 
 === inline with one output line and ASCII symbols (80x36) ===
@@ -991,7 +1185,7 @@ expanded tools: {2}
 |                                                                              |
 |                                                                              |
 +--------------------------------------------------- Enter  send   /  commands +
-Tab pane - Ctrl-V paste - Enter send | ctrl+b then : palette - ? keys
+Tab pane - Ctrl-V paste - Enter send | ctrl+b then q detach - : / ? palette
 
 === mailbox events collapsed (60x36) ===
 ╭ Conversation ────────────────────────────────────────────╮
@@ -1029,7 +1223,7 @@ Tab pane - Ctrl-V paste - Enter send | ctrl+b then : palette - ? keys
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === an expanded event without a report wraps its header once (44x24) ===
 ╭ Conversation ────────────────────────────╮
@@ -1055,7 +1249,7 @@ Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 
 === only the second repeated event expands after resize (44x36) ===
 ╭ Conversation ────────────────────────────╮
@@ -1093,7 +1287,7 @@ Tab pane │ ctrl+b then : palette · ? keys
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 copied report: "支持 Unicode and <script>literal text</script>.\n- A report bullet stays in this event."
 
 
@@ -1133,7 +1327,7 @@ copied report: "支持 Unicode and <script>literal text</script>.\n- A report bu
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 
 === both reports expand independently (44x48) ===
 ╭ Conversation ────────────────────────────╮
@@ -1183,7 +1377,7 @@ Tab pane │ ctrl+b then : palette · ? keys
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 
 === mailbox report scrolled before collapse (44x22) ===
 ╭ Conversation · message 1 of 1 · End to f…╮
@@ -1207,7 +1401,7 @@ Tab pane │ ctrl+b then : palette · ? keys
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 
 === one report collapsed from wrapped body with ASCII arrows (44x48) ===
 + Conversation ----------------------------+
@@ -1257,7 +1451,7 @@ Tab pane │ ctrl+b then : palette · ? keys
 |                                          |
 |                                          |
 +------------------------------------------+
-Tab pane | ctrl+b then : palette - ? keys
+ctrl+b then q detach - : / ? palette
 
 === mailbox header scrolled out of view (44x14) ===
 ╭ Conversation · message 1 of 1 · End to f…╮
@@ -1273,7 +1467,7 @@ Tab pane | ctrl+b then : palette - ? keys
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 
 === body click collapses the report and restores its header (44x14) ===
 ╭ Conversation ────────────────────────────╮
@@ -1289,7 +1483,7 @@ Tab pane │ ctrl+b then : palette · ? keys
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 
 === raw mailbox text remains complete (60x48) ===
 ╭ Conversation · raw source ───────────────────────────────╮
@@ -1339,7 +1533,7 @@ Tab pane │ ctrl+b then : palette · ? keys
 │                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+Tab pane │ ctrl+b then q detach · : / ? palette
 
 === incoming messages start collapsed between agent replies (44x36) ===
 ╭ Conversation ────────────────────────────╮
@@ -1377,7 +1571,7 @@ Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 
 === header text opens only one message in a shared delivery (44x36) ===
 ╭ Conversation ────────────────────────────╮
@@ -1415,7 +1609,7 @@ Tab pane │ ctrl+b then : palette · ? keys
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 
 === both incoming messages stay open after update and resize (32x36) ===
 ╭ Conversation ────────────────╮
@@ -1453,7 +1647,7 @@ Tab pane │ ctrl+b then : palette · ? keys
 │  commands                    │
 │                              │
 ╰──────────────────────────────╯
-ctrl+b then : palette · ? keys
+q detach · : / ? palette
 
 === wrapped message body collapses only that message (32x36) ===
 ╭ Conversation ────────────────╮
@@ -1491,7 +1685,7 @@ ctrl+b then : palette · ? keys
 │  commands                    │
 │                              │
 ╰──────────────────────────────╯
-ctrl+b then : palette · ? keys
+q detach · : / ? palette
 
 === raw mode keeps complete incoming messages (44x36) ===
 ╭ Conversation · raw source ───────────────╮
@@ -1529,7 +1723,7 @@ ctrl+b then : palette · ? keys
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 
 === restored anchor distinguishes messages in one delivery (44x24) ===
 ╭ Conversation ────────────────────────────╮
@@ -1555,7 +1749,7 @@ Tab pane │ ctrl+b then : palette · ? keys
 │                                          │
 │                                          │
 ╰──────────────────────────────────────────╯
-Tab pane │ ctrl+b then : palette · ? keys
+ctrl+b then q detach · : / ? palette
 {"Entry":{"start_seq":2,"stable_id":"message:review-two","row":0}}
 
 === incoming message ASCII marks (44x36) ===
@@ -1594,4 +1788,4 @@ Tab pane │ ctrl+b then : palette · ? keys
 |                                          |
 |                                          |
 +------------------------------------------+
-Tab pane | ctrl+b then : palette - ? keys
+ctrl+b then q detach - : / ? palette

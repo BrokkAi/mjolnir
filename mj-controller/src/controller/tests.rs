@@ -26,6 +26,7 @@ fn registration_config() -> Config {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     config.bundles.insert(
@@ -884,24 +885,26 @@ fn registration_records_a_plain_local_directory_as_its_project() {
         config,
         state: State::default(),
     };
-    let mut options = launch_options(Vec::new());
-    options.project_directory = Some(workspace.path().to_owned());
-    let error = controller
-        .register_session_with_resources("codex", "project", "local", "plain", options)
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("cannot be reviewed"),
-        "{error:#}"
-    );
-
+    // A session that asked for review off already has it, so registration
+    // reports no change for the caller to announce.
     let mut options = launch_options(Vec::new());
     options.project_directory = Some(workspace.path().to_owned());
     options.review = Some(mj_core::config::SessionReview::Off);
-    let id = controller
-        .register_session_with_resources("codex", "project", "local", "plain", options)
+    let explicit = controller
+        .register_session_reporting_review("codex", "project", "local", "plain", options)
         .unwrap();
+    assert!(!explicit.review_turned_off);
+
+    let mut options = launch_options(Vec::new());
+    options.project_directory = Some(workspace.path().to_owned());
+    let registration = controller
+        .register_session_reporting_review("codex", "project", "local", "plain", options)
+        .unwrap();
+    assert!(registration.review_turned_off);
+    let id = registration.id;
 
     let stored = &controller.state.sessions[&id];
+    assert_eq!(stored.review, Some(mj_core::config::SessionReview::Off));
     assert_eq!(stored.project_directory.as_deref(), Some(workspace.path()));
     assert!(stored.managed_worktree.is_none());
     let project = stored.project.as_ref().expect("plain project was recorded");
@@ -1250,6 +1253,8 @@ const CONFIG_ID_RENAME_CHILD: &str = "MJ_TEST_CONFIG_ID_RENAME_CHILD";
 
 #[test]
 fn configuration_id_rename_rewrites_durable_session_references() {
+    use mj_core::subagent::SubagentPolicy;
+
     if std::env::var_os(CONFIG_ID_RENAME_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         run_registration_child(
@@ -1276,10 +1281,30 @@ fn configuration_id_rename_rewrites_durable_session_references() {
             launch_options(Vec::new()),
         )
         .unwrap();
+    assert_eq!(
+        controller.state.last_subagent_policy_for("codex"),
+        SubagentPolicy::Native
+    );
 
     controller
         .rename_profile_id("codex", "codex-renamed")
         .unwrap();
+    assert_eq!(
+        controller.state.last_subagent_policies.get("codex-renamed"),
+        Some(&SubagentPolicy::Native)
+    );
+    assert!(
+        !controller
+            .state
+            .last_subagent_policies
+            .contains_key("codex")
+    );
+    // Hard-won: #1370: a runtime switched off came back on under its new name.
+    let (_, ()) = Config::update(|config| {
+        config.disabled_targets.insert("podman".into());
+        Ok(())
+    })
+    .unwrap();
     controller
         .rename_target_id("podman", "podman-renamed")
         .unwrap();
@@ -1290,6 +1315,7 @@ fn configuration_id_rename_rewrites_durable_session_references() {
     assert_eq!(session.target_template_id, "podman-renamed");
     assert!(loaded.config.profiles.contains_key("codex-renamed"));
     assert!(loaded.config.targets.contains_key("podman-renamed"));
+    assert!(loaded.config.enabled_target("podman-renamed").is_none());
     assert!(!config_rename_journal_path().exists());
 }
 
@@ -1619,6 +1645,20 @@ fn controller_store_lock_excludes_a_second_process_owner() {
     drop(first);
     run_controller_lock_probe(directory.path(), false);
 }
+
+// The data store holds every session record; it must not be traversable by
+// other local users (#1409).
+#[cfg(unix)]
+#[test]
+fn a_new_controller_data_directory_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = tempfile::tempdir().unwrap();
+    let directory = parent.path().join("store");
+    let _guard = ControllerStoreGuard::acquire_at(&directory).unwrap();
+    let mode = std::fs::metadata(&directory).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+}
 fn run_controller_lock_probe(directory: &Path, expect_locked: bool) {
     IsolatedTest::new("controller::tests::controller_store_lock_subprocess_probe")
         .env("MJ_CONTROLLER_LOCK_PROBE", directory)
@@ -1758,13 +1798,37 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
             profile_id: "codex".into(),
             model: None,
             effort: None,
+            fast_mode: false,
             working_directory: PathBuf::new(),
             initial_prompt: "Review calc.py".into(),
             request_key: "review-calc".into(),
             report_root: Some("/reports".into()),
         })
         .unwrap();
-    let child_id = child.child_session_id;
+    let child_id = child.child_session_id.clone();
+    let group_id = format!("subagent-spawn-{}", child.request_key);
+    let initial = crate::database::load_startup_group(&child_id, &group_id).unwrap();
+    assert!(matches!(
+        serde_json::from_str::<crate::daemon::StartupStep>(&initial.last().unwrap().step_json).unwrap(),
+        crate::daemon::StartupStep::ApiPrompt { text } if text == child.initial_prompt
+    ));
+    // A previous daemon could have committed registration but crashed before
+    // writing input. Recovery restores the same brief without rewriting a
+    // group that a retry already supplied, even if defaults changed meanwhile.
+    rusqlite::Connection::open(crate::database::database_path())
+        .unwrap()
+        .execute("DELETE FROM startup_steps WHERE session_id=?1", [&child_id])
+        .unwrap();
+    super::recover_registered_subagent_startup(&child, false).unwrap();
+    assert_eq!(
+        crate::database::load_startup_group(&child_id, &group_id).unwrap(),
+        initial
+    );
+    super::recover_registered_subagent_startup(&child, true).unwrap();
+    assert_eq!(
+        crate::database::load_startup_group(&child_id, &group_id).unwrap(),
+        initial
+    );
     // The child is told its own directory under the parent's report root, and
     // the store remembers it for the parent's wait.
     let report_dir = format!("/reports/{child_id}");
@@ -1883,6 +1947,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
             profile_id: "codex".into(),
             model: None,
             effort: None,
+            fast_mode: false,
             working_directory: PathBuf::new(),
             initial_prompt: "Review calc.py".into(),
             request_key: "review-calc".into(),
@@ -1999,7 +2064,7 @@ fn a_session_named_review_model_takes_a_baseline_for_the_reviewer_auto_will_choo
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    // DSH is the only profile, and Auto has no model policy for it.
+    // DSH is the only profile; both a pinned model and the price fallback can use it.
     let mut config = registration_config();
     let mut dsh = config.profiles.remove("codex").unwrap();
     dsh.kind = HarnessKind::Dsh;
@@ -2017,6 +2082,7 @@ fn a_session_named_review_model_takes_a_baseline_for_the_reviewer_auto_will_choo
             .unwrap()
     };
     let named = register(Some(mj_core::config::SessionReview::Turn {
+        count: None,
         model: Some("deepseek-flash".into()),
         effort: None,
         tier: None,
@@ -2034,32 +2100,11 @@ fn a_session_named_review_model_takes_a_baseline_for_the_reviewer_auto_will_choo
             .unwrap()
             .review_capture
     };
-    let auto_candidates = |id: &str| {
-        let settings = controller
-            .config
-            .review
-            .for_session(controller.state.sessions[id].review.as_ref());
-        let (providers, mut reasons) =
-            crate::review_selection::inspect_providers(&controller.config);
-        let auto = crate::review_selection::auto_profiles(
-            &controller.config,
-            &providers,
-            &settings,
-            None,
-            &mut reasons,
-        );
-        assert!(reasons.is_empty(), "{reasons:?}");
-        auto.supported
-            .into_iter()
-            .map(|(profile, _)| profile.to_owned())
-            .collect::<Vec<_>>()
-    };
-
     assert!(takes_baseline(&named));
-    assert_eq!(auto_candidates(&named), ["dsh"]);
-    // Without a named model Auto cannot use DSH, so no baseline is spent.
-    assert!(!takes_baseline(&unnamed));
-    assert!(auto_candidates(&unnamed).is_empty());
+    assert!(
+        takes_baseline(&unnamed),
+        "the cheapest-model fallback can use DSH without a named model"
+    );
 }
 
 fn durable_remote_template(host: &str) -> TargetTemplate {
@@ -2268,6 +2313,7 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
             profile_id: "codex".into(),
             model: None,
             effort: None,
+            fast_mode: false,
             working_directory: "/workspace/project".into(),
             initial_prompt: "test child".into(),
             request_key: "durable-child".into(),
@@ -2530,10 +2576,14 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
     let mut controller = Controller {
         config: registration_config(),
         state: State {
-            last_subagent_policy: SubagentPolicy::Mjolnir {
-                straightforward: None,
-                subtle: None,
-            },
+            operator_presence: Default::default(),
+            last_subagent_policies: std::collections::BTreeMap::from([(
+                "codex".into(),
+                SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
+            )]),
             ..Default::default()
         },
     };
@@ -2702,6 +2752,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         profile_id: "resolved-reviewer".into(),
         model: launch.model.clone(),
         effort: launch.effort.clone(),
+        fast_mode: false,
         working_directory: Default::default(),
         initial_prompt: "Review and hand back JSON".into(),
         request_key: "same-request".into(),
@@ -2778,6 +2829,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             profile_id: "codex".into(),
             model: None,
             effort: None,
+            fast_mode: false,
             working_directory: Default::default(),
             initial_prompt: "work".into(),
             request_key: "same-request".into(),

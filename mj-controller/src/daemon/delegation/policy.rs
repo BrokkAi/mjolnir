@@ -4,6 +4,7 @@ use crate::pollers::*;
 use crate::quota::ProfileQuota;
 use crate::server_runtime::profile_catalog::ProfileCatalog;
 use crate::worker_client::CredentialSyncCoordinator;
+use std::time::SystemTime;
 use tokio::sync::{mpsc, watch};
 
 #[derive(Clone)]
@@ -144,10 +145,25 @@ impl Policy {
                 &mut self.batch,
                 &self.profiles_tx,
             );
-            let mut reports = self.reports.lock().expect("quota reports poisoned");
-            reports.retain(|id, _| controller.config.enabled_profile(id).is_some());
-            self.quotas_tx.send_replace(reports.clone());
-            drop(reports);
+            let removed = {
+                let mut reports = self.reports.lock().expect("quota reports poisoned");
+                let removed = reports
+                    .keys()
+                    .filter(|id| controller.config.enabled_profile(id).is_none())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                reports.retain(|id, _| controller.config.enabled_profile(id).is_some());
+                self.quotas_tx.send_replace(reports.clone());
+                removed
+            };
+            if !removed.is_empty() {
+                let mut health = crate::profile_health::shared()
+                    .lock()
+                    .expect("profile health poisoned");
+                for id in removed {
+                    health.forget_quota(&id);
+                }
+            }
             self.probing
                 .retain(|id| controller.config.enabled_profile(id).is_some());
             self.publish_quotas();
@@ -157,7 +173,7 @@ impl Policy {
     fn publish_quotas(&self) {
         let reports = self.reports.lock().expect("quota reports poisoned").clone();
         self.state.publish_quotas(mj_client::quota::QuotaSnapshot {
-            reports,
+            reports: surface_quota_reports(&reports),
             probing: self.probing.clone(),
             cycles: self.cycles,
         });
@@ -180,9 +196,26 @@ impl Policy {
                         .sync_profile_now(&outcome.report.profile_id, None);
                 }
                 self.probing.remove(&outcome.report.profile_id);
-                let mut reports = self.reports.lock().expect("quota reports poisoned");
-                reports.insert(outcome.report.profile_id.clone(), outcome.report);
-                self.quotas_tx.send_replace(reports.clone());
+                let profile_id = outcome.report.profile_id.clone();
+                // A usage-priced profile has no allowance to run out of.
+                let windows = outcome.report.error.is_none().then(|| {
+                    if outcome.report.is_usage_priced() {
+                        Vec::new()
+                    } else {
+                        outcome.report.windows.clone()
+                    }
+                });
+                {
+                    let mut reports = self.reports.lock().expect("quota reports poisoned");
+                    reports.insert(profile_id.clone(), outcome.report);
+                    self.quotas_tx.send_replace(reports.clone());
+                }
+                if let Some(windows) = windows {
+                    crate::profile_health::shared()
+                        .lock()
+                        .expect("profile health poisoned")
+                        .observe_quota(&profile_id, &windows, SystemTime::now());
+                }
             }
             QuotaUpdate::Finished { .. } => {
                 self.probing.clear();
@@ -221,5 +254,101 @@ impl Policy {
                 self.state.push_notice("", notice.text);
             }
         }
+    }
+}
+
+fn surface_quota_reports(
+    reports: &BTreeMap<String, ProfileQuota>,
+) -> BTreeMap<String, ProfileQuota> {
+    reports
+        .iter()
+        .map(|(id, report)| (id.clone(), crate::quota::surface_quota_report(report)))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn published_quota_snapshot_keeps_claude_fable_and_hides_other_scopes() {
+        let report = ProfileQuota {
+            banked_resets: None,
+            profile_id: "claude".into(),
+            harness: mj_core::config::HarnessKind::Claude,
+            windows: vec![
+                crate::quota::QuotaWindow {
+                    label: "Week".into(),
+                    remaining_percent: Some(70),
+                    duration_seconds: Some(604_800),
+                    model_scope: None,
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: Some(2_000),
+                },
+                crate::quota::QuotaWindow {
+                    label: "Week (Fable)".into(),
+                    remaining_percent: Some(17),
+                    duration_seconds: Some(604_800),
+                    model_scope: Some("fable".into()),
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: Some(1_500),
+                },
+                crate::quota::QuotaWindow {
+                    label: "Week (Other)".into(),
+                    remaining_percent: Some(8),
+                    duration_seconds: Some(604_800),
+                    model_scope: Some("other-model".into()),
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: None,
+                },
+            ],
+            extra: None,
+            error: None,
+            refreshed_at_epoch_seconds: 1_000,
+            rate_limited_until_epoch_seconds: None,
+        };
+        let codex = ProfileQuota {
+            profile_id: "codex".into(),
+            harness: mj_core::config::HarnessKind::Codex,
+            windows: vec![crate::quota::QuotaWindow {
+                label: "Week (Scoped)".into(),
+                remaining_percent: Some(9),
+                duration_seconds: Some(604_800),
+                model_scope: Some("fable".into()),
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: None,
+            }],
+            ..report.clone()
+        };
+        let reports = BTreeMap::from([
+            ("claude".to_owned(), report.clone()),
+            ("codex".to_owned(), codex.clone()),
+        ]);
+        let snapshot = mj_client::quota::QuotaSnapshot {
+            reports: surface_quota_reports(&reports),
+            ..Default::default()
+        };
+        let serialized = serde_json::to_vec(&snapshot).expect("serialize published snapshot");
+        let snapshot: mj_client::quota::QuotaSnapshot =
+            serde_json::from_slice(&serialized).expect("read published snapshot");
+
+        assert_eq!(reports["claude"].windows.len(), 3);
+        assert_eq!(reports["codex"].windows.len(), 1);
+        assert_eq!(snapshot.reports["claude"].windows.len(), 2);
+        assert_eq!(snapshot.reports["claude"].windows[0].label, "Week");
+        assert_eq!(snapshot.reports["claude"].windows[1].label, "Week (Fable)");
+        assert_eq!(
+            snapshot.reports["claude"].windows[1].remaining_percent,
+            Some(17)
+        );
+        assert_eq!(snapshot.reports["codex"].windows.len(), 0);
     }
 }

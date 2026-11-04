@@ -1,8 +1,8 @@
 name: macOS
 
-# The one macOS job definition. ci.yml calls it for macOS-sensitive changes
-# (listed in .github/macos-ci-paths.txt) and on every release tag, and
-# nightly.yml calls it every night and on manual dispatch. Do not add
+# The one macOS job definition. ci.yml calls it on every release tag, and
+# nightly.yml calls it every night and on manual dispatch. Check-ins do not
+# run it. Do not add
 # workflow-level concurrency here: in a called workflow, github.workflow is the
 # caller's name, so the group would collide with the caller's own.
 
@@ -37,16 +37,6 @@ jobs:
 
     - name: Run Clippy lints
       run: cargo clippy --all-targets -- -D warnings
-
-    # Move transfers need rsync 3.0 or newer, and the rsync that ships with
-    # macOS rejects --protect-args. Users install the same formula.
-    - name: Install rsync
-      env:
-        HOMEBREW_NO_AUTO_UPDATE: "1"
-      run: |
-        brew install rsync
-        echo "$(brew --prefix rsync)/bin" >> "$GITHUB_PATH"
-        "$(brew --prefix rsync)/bin/rsync" --version
 
     # The runtime suite exercises Unix target paths, directory fsync, and Git
     # worktree byte preservation. This lane executes it on macOS.

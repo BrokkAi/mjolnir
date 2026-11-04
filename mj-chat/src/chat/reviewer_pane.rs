@@ -4,7 +4,6 @@ use super::transcript::{copied_rows_text, materialized_chat_entries_reusing, ren
 use super::viewport::RowViewport;
 use crate::selection::SelectionRange;
 use crate::theme;
-use mj_core::elicitation::ElicitationRequest;
 use mj_core::state::MaterializedSession;
 use mj_core::transcript::ChatEntry;
 use ratatui::layout::Rect;
@@ -37,12 +36,6 @@ impl ReviewerPane {
         self.session = Some(session);
         self.width = 0;
         true
-    }
-
-    pub(super) fn pending_elicitations(&self) -> &[ElicitationRequest] {
-        self.session
-            .as_ref()
-            .map_or(&[], |session| session.pending_elicitations.as_slice())
     }
 
     /// Whether the reviewer has produced anything yet.

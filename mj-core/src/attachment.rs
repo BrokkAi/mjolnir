@@ -1,7 +1,7 @@
 //! Session-private immutable image blobs. Internal image references are resolved
 //! only at the ACP boundary; image bytes never belong in durable relay commands.
 use crate::hex::lower_hex;
-use agent_client_protocol::schema::v1::{ContentBlock, ImageContent};
+use agent_client_protocol::v1::schema::{ContentBlock, ImageContent};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -169,7 +169,7 @@ impl AttachmentStore {
     pub fn root(&self) -> &Path {
         &self.root
     }
-    fn lock(&self) -> Result<fs::File> {
+    fn lock(&self) -> Result<crate::file_lock::FileLock> {
         let parent = self
             .root
             .parent()
@@ -182,7 +182,7 @@ impl AttachmentStore {
             .truncate(false)
             .open(self.root.with_extension("lock"))?;
         file.lock().context("lock attachment store")?;
-        Ok(file)
+        Ok(crate::file_lock::FileLock::new(file))
     }
     fn ensure_open(&self) -> Result<()> {
         ensure!(

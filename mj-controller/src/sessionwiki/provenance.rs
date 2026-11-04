@@ -1,7 +1,7 @@
 //! File evidence from stored ACP calls, shared by live and checkpoint indexing.
 use std::collections::BTreeSet;
 
-use agent_client_protocol::schema::v1::{ToolCall, ToolCallContent, ToolCallStatus, ToolKind};
+use agent_client_protocol::v1::schema::{ToolCall, ToolCallContent, ToolCallStatus, ToolKind};
 use anyhow::Result;
 use sessionwiki::adapters::Adapter;
 use sessionwiki::model::{EditEvent, EditKind};

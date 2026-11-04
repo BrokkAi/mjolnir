@@ -15,6 +15,7 @@ To see it working, start Mjolnir in an isolated instance with `HOME` pointed at 
 - [x] (2026-10-26) TUI: check the identity in the background before the first new session of a run, then offer the dialog (`mj-tui/src/dialogs/git_identity.rs`).
 - [x] (2026-10-26) Web viewer: `GET`/`POST /api/git-identity` and the dialog when the new-session form opens.
 - [x] (2026-10-26) Full validation and commit.
+- [x] (2026-11-04) Merge master (protocol 74) and advance the wire protocol to 75. Rebuild the golden dialog footer for master's command-palette hint, and replace the removed `CommandId::Help` in the "result behind another dialog" test with `SessionUsageReport`.
 
 ## Surprises & Discoveries
 
@@ -29,7 +30,7 @@ To see it working, start Mjolnir in an isolated instance with `HOME` pointed at 
 - Decision: Write the identity to the host's global Git configuration, not to Mjolnir's own config.
   Rationale: The user chose this. One identity then serves the host and every session, and git itself remains the single owner of the fact, so no copy can go stale.
   Date/Author: 2026-10-26 / user and agent.
-- Decision: The TUI asks the daemon (`DaemonAction::GitIdentity` / `SetGitIdentity`, protocol 63) instead of running Git in its own process.
+- Decision: The TUI asks the daemon (`DaemonAction::GitIdentity` / `SetGitIdentity`, protocol 75 after merging master's 74) instead of running Git in its own process.
   Rationale: Review of #1368 pointed out that a daemon started under systemd or launchd, or from a shell with a different `HOME` or `GIT_CONFIG_GLOBAL`, sees a different global config than the TUI. Provisioning reads Git in the daemon, so the daemon is the only owner of the fact. This supersedes the first design, which ran the helpers inside the TUI process.
   Date/Author: 2026-10-26 / agent.
 - Decision: The identity merges the system and global scopes, and `includeIf` in the global file marks it `per_directory`, which suppresses the prompt.

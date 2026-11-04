@@ -82,6 +82,10 @@ impl TurnDiagnostic {
         ) {
             return true;
         }
+        // Typed non-account limits must never be reclassified from their prose.
+        if self.code.as_deref() == Some("limit") {
+            return false;
+        }
         let message = self.message.to_ascii_lowercase();
         (message.contains("usage limit")
             || message.contains("usage-limit")
@@ -146,12 +150,10 @@ impl SessionFailure {
 
 impl TurnDiagnostic {
     /// The diagnostic of a turn the bridge reported as failed with a typed
-    /// record. The record leaves out Codex's error kind, which quota handling
-    /// and credential sync read from the code, so the two kinds they need are
-    /// recovered from the bridge's policy table, where each maps to exactly
-    /// one category and action set: only an exhausted plan is `limit` with no
-    /// actions (a rate limit offers `retry`, a full context `new_session`), and
-    /// only a rejected login is `access`. Any other failure keeps its category.
+    /// record. Claude and Codex identify account quota as `limit` with no
+    /// actions. Rate limits offer `retry`, budget/context limits `new_session`.
+    /// Keep those limits distinct from quota even when their title mentions usage.
+    /// A rejected login is `access`; credential sync reads its code.
     ///
     /// Codex often passes the provider's error body through as the title
     /// (`{"type":"error","error":{"message":...},"status":400}`); the

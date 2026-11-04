@@ -73,7 +73,7 @@ fn review_status_omits_the_deprecated_tier() {
     };
     assert_eq!(
         review_status_line(&review, true),
-        "Reviewing every completed turn with [review] profile \"reviewer\". A review is open now."
+        "Reviewing every completed turn with [review] profile \"reviewer\"; 2 reviewers. A review is open now."
     );
 }
 
@@ -1796,6 +1796,32 @@ mod golden_cases {
             },
         );
 
+        chat.set_input("describe ".into());
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        let composer = chat.take_live_composer().unwrap();
+        let mut adopted = ChatState::standby(
+            "session-1",
+            &config,
+            SessionHeaderIdentity::default(),
+            Notices::default(),
+        );
+        adopted.adopt_live_composer(composer);
+        let action = adopted.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "image staged before capability discovery survives live handoff and queues with its marker",
+            &mut adopted,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |chat| {
+                details(&[&format!(
+                    "queued images: {}",
+                    chat.latest_startup_prompt().unwrap().payload.images.len()
+                )])
+            },
+        );
+
         save("chat-composer-draft-lifecycle", &output);
     }
 
@@ -2682,7 +2708,7 @@ mod golden_cases {
         advertise(&mut chat, 1, &["plan"]);
         chat.set_config_options(&[
             select_config_option("mode", "default", &["default", "readOnly", "plan"])
-                .category(agent_client_protocol::schema::v1::SessionConfigOptionCategory::Mode),
+                .category(agent_client_protocol::v1::schema::SessionConfigOptionCategory::Mode),
             select_config_option(
                 "approval_mode",
                 "allowAll",

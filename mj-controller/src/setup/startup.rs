@@ -1,6 +1,6 @@
 //! One serialized setup transaction per instance, including interruption recovery.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -173,7 +173,10 @@ fn add_profiles_for(
     Ok(added)
 }
 
-fn acquire_setup_lock(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<File> {
+fn acquire_setup_lock(
+    path: &Path,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<mj_core::file_lock::FileLock> {
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true);
     #[cfg(unix)]
@@ -185,7 +188,7 @@ fn acquire_setup_lock(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<File>
     loop {
         ensure!(!cancelled(), "setup cancelled");
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => return Ok(mj_core::file_lock::FileLock::new(file)),
             Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(25)),
             Err(std::fs::TryLockError::Error(error)) => return Err(error).context("lock setup"),
         }
@@ -219,10 +222,11 @@ pub fn run_setup_command(config_path: &Path) -> Result<()> {
         writeln!(output, "{line}")?;
     }
     // A machine is a session target only through its runtimes, so setup adds
-    // them for every machine that has none yet.
+    // every runtime kind each machine newly runs, as the dashboard's check does.
     let machines: Vec<_> = Config::load_from(config_path)?
-        .machines_without_runtimes()
-        .map(|(id, machine)| (id.to_owned(), machine.clone()))
+        .machines
+        .into_iter()
+        .filter(|(_, machine)| !matches!(machine, mj_core::config::Machine::Local { .. }))
         .collect();
     let found = probe_machines(&machines, &probes);
     for (machine, runtimes) in add_machine_runtimes(config_path, &found, &|| false)? {

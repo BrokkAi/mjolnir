@@ -1,5 +1,38 @@
 use super::*;
 
+/// Operation identity and the notice already reported belong to one observation.
+pub(super) struct RemoteLifecycleObservation {
+    operation_id: String,
+    notice: Option<String>,
+}
+
+/// Returns whether this operation supersedes an observed one for the session.
+fn observe_remote_lifecycle(
+    operations: &mut BTreeMap<String, RemoteLifecycleObservation>,
+    dashboard: &mut DashboardState,
+    lifecycle: &crate::daemon::RuntimeLifecycleView,
+) -> bool {
+    let previous = operations.insert(
+        lifecycle.session_id.clone(),
+        RemoteLifecycleObservation {
+            operation_id: lifecycle.operation_id.clone(),
+            notice: lifecycle.notice.clone(),
+        },
+    );
+    let supersedes = previous
+        .as_ref()
+        .is_some_and(|previous| previous.operation_id != lifecycle.operation_id);
+    if let Some(notice) = &lifecycle.notice
+        && (supersedes
+            || previous
+                .as_ref()
+                .is_none_or(|previous| previous.notice.as_ref() != Some(notice)))
+    {
+        dashboard.set_notice(notice);
+    }
+    supersedes
+}
+
 enum LifecycleCompletion {
     Current(Option<Box<ActiveLifecycleOperation>>),
     Superseded,
@@ -23,7 +56,6 @@ fn take_lifecycle_completion(
 impl DashboardContext {
     pub(crate) fn cancel_background_work(&mut self) {
         self.wiki_search_task = None;
-        self.help_search.cancel();
         self.usage_report.cancel();
         self.cancel_chat_open();
         self.critical_operations.cancel_all();
@@ -63,11 +95,20 @@ impl DashboardContext {
         self.drain_import_profiles();
         self.drain_import_tasks();
         self.drain_lifecycle_updates();
+        for (session, id, terminal) in self.dashboard.move_prompt_origins() {
+            self.startup_prompts.observe_move(&session, id, terminal);
+        }
+        self.reconcile_composer_ownership();
+        self.startup_prompts
+            .flush_held(&self.dashboard_io_tx, &self.critical_operations);
+        let composer_completed = self.collect_prepared_startup_prompts();
+        self.startup_prompts.poll(&self.dashboard_io_tx);
         let pending_completed = self.drain_dashboard_io();
         // Collected rather than short-circuited: every feed's flag has to be
         // cleared for the next drain.
         [
             pending_completed,
+            composer_completed,
             self.quota.take_delivered(),
             self.profile_capabilities.take_delivered(),
             self.worker.take_delivered(),
@@ -85,6 +126,97 @@ impl DashboardContext {
         ]
         .into_iter()
         .any(|delivered| delivered)
+    }
+
+    /// Worker feeds may remain warm while one live composer belongs to standby.
+    fn reconcile_composer_ownership(&mut self) {
+        for (session_id, chat) in &mut self.chats {
+            let parked = self
+                .dashboard
+                .transition_kind(session_id)
+                .is_some_and(DashboardState::transition_accepts_prompts);
+            let has_standby = self.dashboard.has_standby_composer(session_id);
+            if parked
+                && !has_standby
+                && let Some(composer) = chat.take_live_composer()
+            {
+                self.dashboard.adopt_standby_composer(session_id, composer);
+            } else if !parked
+                && has_standby
+                && chat.session_feed_open()
+                && !self
+                    .opening_chat_sessions
+                    .values()
+                    .any(|opening| opening == session_id)
+                && let Some(composer) = self.dashboard.take_standby_composer(session_id)
+            {
+                chat.adopt_live_composer(composer);
+                chat.keep_deferred_submission_as_draft();
+            }
+        }
+        for (session_id, chat) in &mut self.chats {
+            if chat.has_live_composer()
+                && let Some((generation, id, succeeded)) =
+                    self.startup_prompts.terminal_move(session_id)
+            {
+                chat.settle_deferred_move_origin(generation, id.as_deref(), succeeded);
+            }
+        }
+        let mut sessions = self.dashboard.pane_session_ids();
+        sessions.extend(self.dashboard.standby_session_ids());
+        for session_id in sessions {
+            if self.dashboard.has_standby_composer(&session_id)
+                || self
+                    .dashboard
+                    .transition_kind(&session_id)
+                    .is_some_and(|kind| kind == mj_core::state::SessionTransitionKind::Moving)
+            {
+                let origin = self.startup_prompts.move_origin(&session_id);
+                self.dashboard.set_standby_move_origin(&session_id, origin);
+                if let Some((generation, id, succeeded)) =
+                    self.startup_prompts.terminal_move(&session_id)
+                {
+                    self.dashboard.settle_standby_move_origin(
+                        &session_id,
+                        generation,
+                        id.as_deref(),
+                        succeeded,
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) fn collect_prepared_startup_prompts(&mut self) -> bool {
+        let (mut changed, actions) = self.dashboard.drain_standby_composers();
+        for action in actions {
+            if let DashboardAction::QueueStartupPrompt { session_id, prompt } = action {
+                self.startup_prompts.enqueue(
+                    session_id,
+                    prompt,
+                    None,
+                    self.dashboard_io_tx.clone(),
+                    self.critical_operations.clone(),
+                );
+            }
+        }
+        for (session_id, chat) in &mut self.chats {
+            let mut prepared = chat.take_prepared_startup_prompts();
+            if let Some(prompt) = chat.drain_composer() {
+                prepared.push(prompt);
+            }
+            changed |= !prepared.is_empty();
+            for prompt in prepared {
+                self.startup_prompts.enqueue(
+                    session_id.clone(),
+                    prompt,
+                    None,
+                    self.dashboard_io_tx.clone(),
+                    self.critical_operations.clone(),
+                );
+            }
+        }
+        changed
     }
 
     /// Whether the once-a-second clock has anything new to put on screen.
@@ -182,6 +314,15 @@ impl DashboardContext {
     pub(crate) fn drain_worker_updates(&mut self) {
         while let Some(update) = self.worker.next_ready() {
             let session_id = update.session_id.clone();
+            if !self
+                .controller
+                .state
+                .sessions
+                .get(&session_id)
+                .is_some_and(session_target_is_pollable)
+            {
+                continue;
+            }
             let connected = update.view.connected;
             apply_worker_activity(
                 &mut self.dashboard,
@@ -196,30 +337,14 @@ impl DashboardContext {
                     None
                 }
             };
-            match apply_worker_poll_update(
-                &mut self.controller,
-                &mut self.dashboard,
-                &mut self.chats,
-                update,
-                Some((&self.dashboard_io_tx, &self.critical_operations)),
-            ) {
-                Ok(Some(materialized)) => {
-                    let viewed_through_event_ordinal = self
-                        .controller
-                        .state
-                        .sessions
-                        .get(&session_id)
-                        .map_or(0, |session| session.viewed_through_event_ordinal);
-                    self.request_materialized_projection(
-                        materialized,
-                        viewed_through_event_ordinal,
-                    );
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    self.dashboard
-                        .set_notice(format!("Could not save harness title: {error:#}"));
-                }
+            if let Some(materialized) = apply_worker_poll_update(&mut self.dashboard, update) {
+                let viewed_through_event_ordinal = self
+                    .controller
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .map_or(0, |session| session.viewed_through_event_ordinal);
+                self.request_materialized_projection(materialized, viewed_through_event_ordinal);
             }
             if let Some(episode_id) =
                 self.worker_diagnoses
@@ -244,6 +369,16 @@ impl DashboardContext {
         let Some(update) = latest else {
             return;
         };
+        if update.subagent_parents != *self.runtime_subagent_parents.borrow() {
+            return;
+        }
+        if self.dashboard.notice().as_deref() == Some("Loading sub-agents…") {
+            self.dashboard.clear_notice();
+        }
+        self.auto_afk.configure(
+            self.controller.config.advanced.auto_afk_minutes > 0,
+            update.operator_presence.away,
+        );
         // The serialized runtime feed owns ordering through incarnation-scoped
         // cursors. A replacement daemon's revision can start below the old one.
         let removed_layouts = self
@@ -281,6 +416,8 @@ impl DashboardContext {
             &update.workspace_names,
         );
         self.dashboard.set_workspace_names(update.workspace_names);
+        self.dashboard
+            .set_operator_presence(update.operator_presence);
         self.dashboard.set_launch_recency(update.launch_recency);
         self.dashboard.set_recent_launch(update.recent_launch);
         self.dashboard
@@ -292,7 +429,7 @@ impl DashboardContext {
         self.apply_runtime_records(
             update.records,
             update.subagents,
-            update.last_subagent_policy,
+            update.last_subagent_policies,
         );
         self.dashboard
             .set_native_agent_snapshot(update.native_agents);
@@ -310,8 +447,9 @@ impl DashboardContext {
             .map(|lifecycle| lifecycle.session_id.clone())
             .collect::<BTreeSet<_>>();
         for session_id in self
-            .remote_lifecycle_sessions
-            .difference(&active)
+            .remote_lifecycle_operations
+            .keys()
+            .filter(|session_id| !active.contains(*session_id))
             .cloned()
             .collect::<Vec<_>>()
         {
@@ -319,10 +457,13 @@ impl DashboardContext {
             if !self.lifecycle_operations.contains_key(&session_id) && !move_active {
                 self.dashboard.finish_session_operation(&session_id);
             }
-            self.remote_lifecycle_sessions.remove(&session_id);
             self.remote_lifecycle_operations.remove(&session_id);
         }
         for lifecycle in lifecycles {
+            if let Some(id) = &lifecycle.move_operation_id {
+                self.startup_prompts
+                    .observe_move(&lifecycle.session_id, id.clone(), None);
+            }
             let kind = lifecycle_kind(lifecycle.kind);
             mark_active_chat_retiring_for_remote_lifecycle(
                 self.chats.get_mut(&lifecycle.session_id),
@@ -332,19 +473,16 @@ impl DashboardContext {
             // Keep the daemon identity even while a local action is waiting
             // for its callback. The callback is keyed only by session id, so
             // this lets it distinguish an authoritative newer operation.
-            let previous_operation_id = self
-                .remote_lifecycle_operations
-                .insert(lifecycle.session_id.clone(), lifecycle.operation_id.clone());
-            self.remote_lifecycle_sessions
-                .insert(lifecycle.session_id.clone());
+            let supersedes = observe_remote_lifecycle(
+                &mut self.remote_lifecycle_operations,
+                &mut self.dashboard,
+                &lifecycle,
+            );
             if !self
                 .lifecycle_operations
                 .contains_key(&lifecycle.session_id)
             {
-                if previous_operation_id
-                    .as_ref()
-                    .is_some_and(|previous| previous != &lifecycle.operation_id)
-                {
+                if supersedes {
                     // A new daemon operation for the same session supersedes
                     // the old overlay even when both snapshots use the same
                     // lifecycle kind.
@@ -369,9 +507,6 @@ impl DashboardContext {
                         target_id,
                     );
                 }
-            }
-            if let Some(notice) = lifecycle.notice {
-                self.dashboard.set_notice(notice);
             }
         }
     }
@@ -398,6 +533,8 @@ impl DashboardContext {
         let Some(config) = latest else {
             return;
         };
+        self.auto_afk
+            .set_enabled(config.advanced.auto_afk_minutes > 0);
         // The chat's copy of `[review]` follows the daemon's, so `/review
         // status` and the composer's armed indicator report what is actually
         // running rather than what this process last read from disk.
@@ -407,9 +544,15 @@ impl DashboardContext {
         if config == self.controller.config {
             return;
         }
+        // A save from any surface reaches every terminal here, so this is
+        // where a changed `[daemon]` setting is carried out.
+        let daemon_changed = config.daemon != self.controller.config.daemon;
         self.controller.config = config.clone();
         self.dashboard.set_config(config);
         self.refresh_chat_context();
+        if daemon_changed {
+            super::actions::spawn_daemon_placement(self);
+        }
         // A profile added or changed here is probed once by the daemon, which
         // reloads the same configuration; this process asks no provider.
         // Config and session records have one owner: the runtime feed.
@@ -419,8 +562,11 @@ impl DashboardContext {
     pub(crate) fn apply_runtime_records(
         &mut self,
         records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
-        subagents: mj_core::snapshot_map::SnapshotMap<String, SubagentRecord>,
-        last_subagent_policy: mj_core::subagent::SubagentPolicy,
+        subagents: mj_core::snapshot_map::SnapshotMap<String, SubagentMetadata>,
+        last_subagent_policies: std::collections::BTreeMap<
+            String,
+            mj_core::subagent::SubagentPolicy,
+        >,
     ) {
         let mut sessions = records;
         read_receipts::preserve_read_positions(&mut sessions, &self.controller.state.sessions);
@@ -453,11 +599,15 @@ impl DashboardContext {
         }
         if self.controller.state.sessions == sessions
             && self.controller.state.subagents == subagents
-            && self.controller.state.last_subagent_policy == last_subagent_policy
+            && self.controller.state.last_subagent_policies == last_subagent_policies
         {
             return;
         }
+        let mut retired_ids = Vec::new();
         for (id, record) in self.controller.state.sessions.changes(&sessions) {
+            if !record.is_some_and(session_target_is_pollable) {
+                retired_ids.push(id.clone());
+            }
             match (record, self.controller.state.sessions.get(id)) {
                 (None, Some(last)) if self.chats.contains_key(id) => {
                     self.departed_records.insert(id.clone(), last.clone());
@@ -471,8 +621,11 @@ impl DashboardContext {
         self.departed_records.retain(|id, _| chats.contains_key(id));
         self.controller.state.sessions = sessions;
         self.controller.state.subagents = subagents;
-        self.controller.state.last_subagent_policy = last_subagent_policy;
+        self.controller.state.last_subagent_policies = last_subagent_policies;
         self.dashboard.set_state(self.controller.state.clone());
+        for id in retired_ids {
+            self.worker_diagnoses.observe(&id, true, None);
+        }
         self.finish_sessions_stopped_by_suspend();
         self.reconcile_question_drafts();
         self.refresh_chat_context();
@@ -553,7 +706,6 @@ impl DashboardContext {
                                 prompt.dirty_git_roots,
                                 prompt.omitted_non_git_dirs,
                                 prompt.scratch_git_roots,
-                                prompt.has_untracked_files,
                                 prompt.managed_worktree,
                             );
                         }
@@ -609,8 +761,6 @@ impl DashboardContext {
             }
             spawn_lifecycle_reload(
                 LifecycleReload { update, operation },
-                self.workspace_id.clone(),
-                self.client_id.clone(),
                 self.dashboard_io_tx.clone(),
             );
         }
@@ -711,6 +861,65 @@ fn next_workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: #1388: unrelated runtime updates repeatedly restored retained lifecycle warnings.
+    #[test]
+    fn lifecycle_notices_are_reported_once_per_observed_transition() {
+        let mut dashboard = DashboardState::new(
+            Config::default(),
+            mj_core::state::State::default(),
+            BTreeMap::new(),
+        );
+        let notices = mj_chat::chat::Notices::default();
+        dashboard.share_notices(notices.clone());
+        let mut operations = BTreeMap::new();
+        let mut lifecycle = crate::daemon::RuntimeLifecycleView {
+            operation_id: "first".into(),
+            move_operation_id: None,
+            cancellable: true,
+            session_id: "session".into(),
+            kind: crate::daemon::RuntimeLifecycleKind::Create,
+            started_at_epoch_seconds: 1,
+            active_stages: Vec::new(),
+            resume_destination: None,
+            notice: Some("Clone cache preparation failed".into()),
+        };
+        observe_remote_lifecycle(&mut operations, &mut dashboard, &lifecycle);
+        assert_eq!(dashboard.notice(), lifecycle.notice);
+        dashboard.set_notice("A later background notice");
+        for _ in 0..20 {
+            observe_remote_lifecycle(&mut operations, &mut dashboard, &lifecycle);
+        }
+        assert_eq!(
+            dashboard.notice().as_deref(),
+            Some("A later background notice")
+        );
+        dashboard.clear_notice();
+        observe_remote_lifecycle(&mut operations, &mut dashboard, &lifecycle);
+        assert!(
+            dashboard.notice().is_none(),
+            "dismissed warnings must stay dismissed"
+        );
+        assert_eq!(notices.history().len(), 2);
+
+        lifecycle.notice = Some("Clone-cache cleanup was skipped".into());
+        observe_remote_lifecycle(&mut operations, &mut dashboard, &lifecycle);
+        assert_eq!(dashboard.notice(), lifecycle.notice);
+        dashboard.clear_notice();
+        lifecycle.operation_id = "second".into();
+        assert!(observe_remote_lifecycle(
+            &mut operations,
+            &mut dashboard,
+            &lifecycle
+        ));
+        assert_eq!(dashboard.notice(), lifecycle.notice);
+        dashboard.clear_notice();
+        lifecycle.notice = None;
+        observe_remote_lifecycle(&mut operations, &mut dashboard, &lifecycle);
+        lifecycle.notice = Some("Clone cache preparation failed".into());
+        observe_remote_lifecycle(&mut operations, &mut dashboard, &lifecycle);
+        assert_eq!(dashboard.notice(), lifecycle.notice);
+    }
 
     #[test]
     fn a_created_workspace_opens_with_the_feed_frame_that_adds_it() {

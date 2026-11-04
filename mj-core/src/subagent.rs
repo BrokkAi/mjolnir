@@ -141,13 +141,9 @@ impl SubagentPolicy {
             self.clone()
         }
     }
-    /// Whether a new session with this policy becomes the shared choice the
-    /// next Create starts from. A harness without sub-agents of its own
-    /// changes it only by choosing Mjolnir, so choosing None there never
-    /// takes Native away from the next Claude or Codex session.
+    /// Whether this harness can remember the selected policy for its profile.
     pub fn updates_remembered_choice(&self, harness: crate::config::HarnessKind) -> bool {
         harness.supports_delegation_tools()
-            && (harness.has_native_subagents() || self.uses_mjolnir())
     }
     pub fn for_launch(&self, harness: crate::config::HarnessKind, is_child: bool) -> Self {
         if !harness.supports_delegation_tools() {
@@ -195,6 +191,32 @@ pub fn parse_stored_policy(json: &str) -> serde_json::Result<SubagentPolicy> {
     let policy = deserialize_launch_policy(&mut deserializer)?;
     deserializer.end()?;
     Ok(policy)
+}
+
+/// Read the remembered per-profile choices while accepting the old scalar
+/// field and legacy boolean policy values used by durable snapshots.
+pub fn deserialize_policy_map<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<String, SubagentPolicy>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let mut policies = std::collections::BTreeMap::new();
+    match value {
+        serde_json::Value::Object(values)
+            if !values.get("mode").is_some_and(serde_json::Value::is_string) =>
+        {
+            for (profile, value) in values {
+                let policy =
+                    parse_stored_policy(&value.to_string()).map_err(serde::de::Error::custom)?;
+                policies.insert(profile, policy);
+            }
+        }
+        value => {
+            let policy =
+                parse_stored_policy(&value.to_string()).map_err(serde::de::Error::custom)?;
+            policies.insert(String::new(), policy);
+        }
+    }
+    Ok(policies)
 }
 
 /// The refusal code for an unavailable sub-agent choice. A
@@ -370,8 +392,20 @@ pub struct SubagentToolRequest {
     deny_unknown_fields
 )]
 pub enum SubagentToolAction {
+    Fetch {
+        session_id: String,
+        path: PathBuf,
+        #[serde(default)]
+        ls: bool,
+    },
     ListProfiles,
-    RequestReview {},
+    RequestReview {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    OverrideReview {
+        reason: String,
+    },
     Spawn {
         task_name: String,
         instructions: String,
@@ -429,8 +463,20 @@ pub enum SubagentToolAction {
     deny_unknown_fields
 )]
 enum SubagentToolActionWire {
+    Fetch {
+        session_id: String,
+        path: PathBuf,
+        #[serde(default)]
+        ls: bool,
+    },
     ListProfiles,
-    RequestReview {},
+    RequestReview {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    OverrideReview {
+        reason: String,
+    },
     Spawn {
         task_name: String,
         instructions: String,
@@ -485,7 +531,8 @@ impl SubagentToolAction {
         matches!(
             self,
             Self::Spawn { .. }
-                | Self::RequestReview {}
+                | Self::RequestReview { .. }
+                | Self::OverrideReview { .. }
                 | Self::SendInput { .. }
                 | Self::SendMessage { .. }
                 | Self::LegacyInterruptAgent { .. }
@@ -526,8 +573,18 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
         let wire =
             serde_json::from_value::<SubagentToolActionWire>(value).map_err(D::Error::custom)?;
         Ok(match wire {
+            SubagentToolActionWire::Fetch {
+                session_id,
+                path,
+                ls,
+            } => Self::Fetch {
+                session_id,
+                path,
+                ls,
+            },
             SubagentToolActionWire::ListProfiles => Self::ListProfiles,
-            SubagentToolActionWire::RequestReview {} => Self::RequestReview {},
+            SubagentToolActionWire::RequestReview { path } => Self::RequestReview { path },
+            SubagentToolActionWire::OverrideReview { reason } => Self::OverrideReview { reason },
             SubagentToolActionWire::Spawn {
                 task_name,
                 instructions,
@@ -733,6 +790,82 @@ pub struct SubagentRecord {
     pub handback_tool: bool,
 }
 
+/// Relationship and lifecycle metadata published to control surfaces.
+/// Complete prompts and reviewer launch configuration remain in the store's
+/// `SubagentRecord`; a metadata snapshot cannot create a new child launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentMetadata {
+    #[serde(default)]
+    pub kind: SubagentKind,
+    pub child_session_id: String,
+    pub parent_session_id: String,
+    pub task_name: String,
+    pub profile_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    pub working_directory: PathBuf,
+    pub request_key: String,
+    pub created_at: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "delivered_turn"
+    )]
+    pub noticed_turn: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_finish: Option<SubagentFinishIdentity>,
+    #[serde(default)]
+    pub handback_tool: bool,
+}
+
+impl From<&SubagentRecord> for SubagentMetadata {
+    fn from(record: &SubagentRecord) -> Self {
+        Self {
+            kind: record.kind,
+            child_session_id: record.child_session_id.clone(),
+            parent_session_id: record.parent_session_id.clone(),
+            task_name: record.task_name.clone(),
+            profile_id: record.profile_id.clone(),
+            model: record.model.clone(),
+            effort: record.effort.clone(),
+            working_directory: record.working_directory.clone(),
+            request_key: record.request_key.clone(),
+            created_at: record.created_at.clone(),
+            noticed_turn: record.noticed_turn,
+            reported_finish: record.reported_finish.clone(),
+            handback_tool: record.handback_tool,
+        }
+    }
+}
+
+impl From<SubagentRecord> for SubagentMetadata {
+    fn from(record: SubagentRecord) -> Self {
+        Self::from(&record)
+    }
+}
+
+impl SubagentMetadata {
+    /// Apply metadata edits without replacing the durable launch intent.
+    pub fn apply_to(&self, record: &mut SubagentRecord) {
+        record.kind = self.kind;
+        record.child_session_id = self.child_session_id.clone();
+        record.parent_session_id = self.parent_session_id.clone();
+        record.task_name = self.task_name.clone();
+        record.profile_id = self.profile_id.clone();
+        record.model = self.model.clone();
+        record.effort = self.effort.clone();
+        record.working_directory = self.working_directory.clone();
+        record.request_key = self.request_key.clone();
+        record.created_at = self.created_at.clone();
+        record.noticed_turn = self.noticed_turn;
+        record.reported_finish = self.reported_finish.clone();
+        record.handback_tool = self.handback_tool;
+    }
+}
+
 /// Lifecycle group used by the tool and both user interfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -768,6 +901,7 @@ pub enum SubagentMcpRole {
     Parent,
 
     MessageOnly,
+    FetchOnly,
     Child,
 }
 
@@ -777,6 +911,7 @@ impl SubagentMcpRole {
         match self {
             Self::Parent => "parent",
             Self::MessageOnly => "message_only",
+            Self::FetchOnly => "fetch_only",
             Self::Child => "child",
         }
     }
@@ -786,9 +921,10 @@ impl SubagentMcpRole {
     #[must_use]
     pub fn tool_names(self) -> &'static [&'static str] {
         match self {
-            Self::Parent => &["spawn", "list_agents", "send_message", "close"],
-            Self::MessageOnly => &["send_message"],
-            Self::Child => &["handback"],
+            Self::Parent => &["spawn", "list_agents", "send_message", "close", "fetch"],
+            Self::MessageOnly => &["send_message", "fetch"],
+            Self::FetchOnly => &["fetch"],
+            Self::Child => &["handback", "fetch"],
         }
     }
 }
@@ -807,6 +943,7 @@ impl std::str::FromStr for SubagentMcpRole {
             "parent" => Ok(Self::Parent),
             "fixed_parent" => Ok(Self::Parent),
             "message_only" => Ok(Self::MessageOnly),
+            "fetch_only" => Ok(Self::FetchOnly),
             "child" => Ok(Self::Child),
             other => anyhow::bail!("unknown sub-agent MCP role {other:?}"),
         }
@@ -1212,20 +1349,14 @@ pub fn in_place_subagents_notice(children: &[InPlaceSubagent]) -> Option<String>
     if children.is_empty() {
         return None;
     }
-    let listed = children
-        .iter()
-        .map(|child| {
-            format!(
-                "{} (child_session_id {}; {})",
-                safe_subagent_task_name(&child.task_name),
-                child.child_session_id,
-                child.state.label()
-            )
-        })
-        .collect::<Vec<_>>();
+    let count = children.len();
+    let noun = if count == 1 {
+        "sub-agent"
+    } else {
+        "sub-agents"
+    };
     Some(format!(
-        "In-place harness swap kept these sub-agents attached: {}. Any wait in progress was interrupted; reissue wait without arguments to collect reports. Check list_agents for pending_messages before resending a message.",
-        listed.join(", ")
+        "In-place harness swap kept {count} {noun} attached. Any wait in progress was interrupted; reissue wait without arguments to collect reports. Check list_agents for pending_messages before resending a message."
     ))
 }
 
@@ -1459,6 +1590,24 @@ pub fn has_handed_back(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn request_review_path_preserves_legacy_encoding() {
+        let old = r#"{"action":"request_review","params":{}}"#;
+        let action: SubagentToolAction = serde_json::from_str(old).unwrap();
+        assert!(matches!(
+            action,
+            SubagentToolAction::RequestReview { path: None }
+        ));
+        assert_eq!(serde_json::to_string(&action).unwrap(), old);
+        let scoped = SubagentToolAction::RequestReview {
+            path: Some("/worktree".into()),
+        };
+        assert_eq!(
+            serde_json::from_str::<SubagentToolAction>(&serde_json::to_string(&scoped).unwrap())
+                .unwrap(),
+            scoped
+        );
+    }
 
     #[test]
     fn only_child_mutations_hold_an_in_place_move_drain() {
@@ -1485,6 +1634,9 @@ mod tests {
             },
             SubagentToolAction::CloseAgent {
                 child_session_id: "child".into(),
+            },
+            SubagentToolAction::OverrideReview {
+                reason: "reason".into(),
             },
         ];
         assert!(
@@ -2142,8 +2294,13 @@ mod tests {
         assert!(!context.contains("same child ids"));
         assert!(context.contains("list_agents and check pending_messages"));
         let notice = in_place_subagents_notice(&children).unwrap();
-        assert!(notice.contains("inspect migration (child_session_id child-running; running)"));
-        assert!(notice.contains("review tests (child_session_id child-parked; parked)"));
+        assert!(notice.starts_with("In-place harness swap kept 2 sub-agents attached."));
+        assert!(!notice.contains("child-running"));
+        assert!(
+            in_place_subagents_notice(&children[..1])
+                .unwrap()
+                .starts_with("In-place harness swap kept 1 sub-agent attached.")
+        );
         assert!(notice.contains("wait in progress was interrupted"));
         assert!(notice.contains("pending_messages before resending"));
         assert_eq!(in_place_subagents_prompt_context(&[]), None);

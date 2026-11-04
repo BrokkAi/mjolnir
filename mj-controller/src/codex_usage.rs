@@ -4,8 +4,8 @@
 //! protocol rather than a one-shot CLI command. Keep the JSONL client isolated
 //! from the UI so protocol parsing and unavailable states remain testable.
 
+use mj_core::file_lock::FileLock;
 use std::collections::{HashMap, VecDeque};
-use std::fs::File;
 #[cfg(unix)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -57,12 +57,29 @@ pub struct CodexUsageReport {
 pub struct CodexUsageWindow {
     pub label: String,
     pub remaining_percent: u8,
+    pub duration_seconds: Option<i64>,
     pub resets_at: Option<i64>,
+}
+
+/// Where a Codex quota check starts its app-server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CodexLauncher {
+    /// The Mjolnir-managed installation under this cache root, or the
+    /// process's default cache root.
+    Managed(Option<PathBuf>),
+    /// The agent-dev image's `codex`.
+    Container(crate::quota_runtime::ContainerCheck),
 }
 
 pub struct CodexUsageClient {
     child: Child,
-    _lease: File,
+    /// Which launcher started this client; a poll that asks for another one
+    /// replaces it.
+    launcher: CodexLauncher,
+    /// The managed installation's lease, held while its launcher runs.
+    lease: Option<FileLock>,
+    /// The container the app-server runs in, removed when the client stops.
+    container: Option<crate::quota_runtime::QuotaContainer>,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     stderr: StderrTail,
@@ -75,13 +92,22 @@ impl CodexUsageClient {
     fn spawn(
         cwd: PathBuf,
         env: HashMap<String, String>,
-        cache_root: Option<PathBuf>,
+        launcher: &CodexLauncher,
     ) -> Result<Self, QueryError> {
-        let cache_root = match cache_root {
-            Some(root) => root,
-            None => process_managed_cache_root()?,
+        let (mut child, lease, container) = match launcher {
+            CodexLauncher::Managed(cache_root) => {
+                let cache_root = match cache_root {
+                    Some(root) => root.clone(),
+                    None => process_managed_cache_root()?,
+                };
+                let (child, lease) = spawn_codex(cwd, env, cache_root)?;
+                (child, Some(lease), None)
+            }
+            CodexLauncher::Container(check) => {
+                let (child, container) = spawn_codex_in_container(check, env)?;
+                (child, None, Some(container))
+            }
         };
-        let (mut child, lease) = spawn_codex(cwd, env, cache_root)?;
 
         let stdin = child
             .stdin
@@ -98,7 +124,9 @@ impl CodexUsageClient {
         let (stderr, stderr_reader) = StderrTail::capture(stderr);
         Ok(Self {
             child,
-            _lease: lease,
+            launcher: launcher.clone(),
+            lease,
+            container,
             stdin,
             stdout: BufReader::new(stdout),
             stderr,
@@ -224,7 +252,8 @@ impl CodexUsageClient {
         drop(self.stdin);
         // Closing stdin asks app-server to stop. The quota process is always
         // launched directly (never through npx), so killing the recorded child
-        // is sufficient if it does not notice EOF promptly.
+        // is sufficient if it does not notice EOF promptly. In a container
+        // the child is the engine client, and the container is removed below.
         if let Err(error) = self.child.start_kill()
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -233,8 +262,13 @@ impl CodexUsageClient {
         if let Err(error) = self.child.wait().await {
             tracing::warn!(%error, "could not reap the Codex quota process");
         }
-        if let Err(error) = self._lease.unlock() {
+        if let Some(lease) = self.lease
+            && let Err(error) = lease.release()
+        {
             tracing::warn!(%error, "could not release the managed Codex installation lease");
+        }
+        if let Some(container) = self.container {
+            container.remove().await;
         }
         self.stderr_reader
     }
@@ -363,14 +397,24 @@ fn parse_response(message: &Value, expected_id: u64) -> Result<Option<Value>, Qu
 }
 
 /// Spawn the cached client if it is missing, then make sure it is initialized.
-async fn prepare(
-    client: &mut Option<CodexUsageClient>,
+async fn prepare<'a>(
+    client: &'a mut Option<CodexUsageClient>,
     cwd: PathBuf,
     env: HashMap<String, String>,
-    cache_root: Option<PathBuf>,
-) -> Result<&mut CodexUsageClient, QueryError> {
+    launcher: &CodexLauncher,
+) -> Result<&'a mut CodexUsageClient, QueryError> {
+    if let Some(stale) = client.take_if(|ready| &ready.launcher != launcher) {
+        stale.shutdown().await;
+    }
     if client.is_none() {
-        *client = Some(CodexUsageClient::spawn(cwd, env, cache_root)?);
+        if let CodexLauncher::Container(check) = launcher {
+            check
+                .runtime
+                .ensure_image_async()
+                .await
+                .map_err(|error| QueryError::ImageUnavailable(format!("{error:#}")))?;
+        }
+        *client = Some(CodexUsageClient::spawn(cwd, env, launcher)?);
     }
     let ready = client.as_mut().expect("client initialized above");
     ready.initialize().await?;
@@ -397,10 +441,10 @@ pub(crate) async fn refresh_with_cache_root(
     client: &mut Option<CodexUsageClient>,
     cwd: PathBuf,
     env: HashMap<String, String>,
-    cache_root: Option<PathBuf>,
+    launcher: &CodexLauncher,
 ) -> CodexUsageStatus {
     let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        prepare(client, cwd, env, cache_root).await?.query().await
+        prepare(client, cwd, env, launcher).await?.query().await
     })
     .await;
 
@@ -439,10 +483,10 @@ pub(crate) async fn refresh_login_with_cache_root(
     client: &mut Option<CodexUsageClient>,
     cwd: PathBuf,
     env: HashMap<String, String>,
-    cache_root: Option<PathBuf>,
+    launcher: &CodexLauncher,
 ) -> Result<(), LoginRefreshFailure> {
     let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        prepare(client, cwd, env, cache_root)
+        prepare(client, cwd, env, launcher)
             .await?
             .refresh_token()
             .await
@@ -500,11 +544,35 @@ pub(crate) fn install_fake_managed_codex(cache_root: &Path, script: &str) -> Pat
     install
 }
 
+/// Start the agent-dev image's `codex app-server` with the profile home
+/// mounted. The same environment rules as [`spawn_codex`] apply: no API key
+/// (#1160), and error-level logs only.
+fn spawn_codex_in_container(
+    check: &crate::quota_runtime::ContainerCheck,
+    env: HashMap<String, String>,
+) -> Result<(Child, crate::quota_runtime::QuotaContainer), QueryError> {
+    let mut env = env
+        .into_iter()
+        .filter(|(name, _)| !mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT.contains(&name.as_str()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    env.insert("RUST_LOG".to_owned(), "error".to_owned());
+    let launch = check.launch("codex", &["app-server", "--stdio"], &env);
+    let mut command = crate::quota_runtime::ContainerCheck::piped_command(&launch);
+    command.stderr(std::process::Stdio::piped());
+    match command.spawn() {
+        Ok(child) => Ok((child, launch.container)),
+        Err(error) => Err(QueryError::Launch(format!(
+            "could not start {} for the Codex quota check: {error}",
+            launch.program.display()
+        ))),
+    }
+}
+
 fn spawn_codex(
     cwd: PathBuf,
     env: HashMap<String, String>,
     cache_root: PathBuf,
-) -> Result<(Child, File), QueryError> {
+) -> Result<(Child, FileLock), QueryError> {
     let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
 
     #[cfg(not(unix))]
@@ -586,7 +654,7 @@ fn spawn_codex(
 }
 
 #[cfg(unix)]
-fn open_managed_codex_lease(install: &Path) -> Result<File, QueryError> {
+fn open_managed_codex_lease(install: &Path) -> Result<FileLock, QueryError> {
     let lease_path = install.join(LEASE_FILE);
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -604,7 +672,7 @@ fn open_managed_codex_lease(install: &Path) -> Result<File, QueryError> {
             }
         })?;
     match file.try_lock_shared() {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(FileLock::new(file)),
         Err(std::fs::TryLockError::WouldBlock) => Err(QueryError::NotInstalled {
             expected: Some(install.to_path_buf()),
             detail: Some("managed Codex installation is being repaired".to_owned()),
@@ -634,6 +702,8 @@ enum QueryError {
     // constructs it.
     #[cfg_attr(not(unix), allow(dead_code))]
     Launch(String),
+    /// The container engine does not hold the agent-dev image yet.
+    ImageUnavailable(String),
     NotSignedIn,
     UnsupportedAccount,
     Unsupported,
@@ -675,6 +745,9 @@ impl QueryError {
                 "Codex quota probing is unavailable because managed Codex installations require Unix"
             }
             Self::Launch(_) => "could not start Codex CLI",
+            Self::ImageUnavailable(_) => {
+                "the agent-dev image is not downloaded yet; Mjolnir downloads it in the background"
+            }
             Self::NotSignedIn => "not signed in with ChatGPT",
             Self::UnsupportedAccount => {
                 "ChatGPT subscription quota is not available for this account"
@@ -690,6 +763,7 @@ impl std::fmt::Display for QueryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Launch(detail) => write!(f, "could not start Codex CLI: {detail}"),
+            Self::ImageUnavailable(detail) => f.write_str(detail),
             Self::Protocol(kind) => write!(f, "Codex app-server protocol error ({kind:?})"),
             Self::NotInstalled { expected, detail } => {
                 f.write_str(self.user_reason())?;
@@ -761,6 +835,7 @@ fn parse_window(value: &Value) -> Option<CodexUsageWindow> {
     Some(CodexUsageWindow {
         label: window_label(duration),
         remaining_percent: (100 - used) as u8,
+        duration_seconds: duration.and_then(|minutes| minutes.checked_mul(60)),
         resets_at: value.get("resetsAt").and_then(Value::as_i64),
     })
 }
@@ -814,7 +889,13 @@ mod tests {
         env: HashMap<String, String>,
         temp: &tempfile::TempDir,
     ) -> CodexUsageStatus {
-        refresh_with_cache_root(client, cwd, env, Some(test_cache_root(temp))).await
+        refresh_with_cache_root(
+            client,
+            cwd,
+            env,
+            &CodexLauncher::Managed(Some(test_cache_root(temp))),
+        )
+        .await
     }
 
     #[cfg(unix)]
@@ -824,7 +905,13 @@ mod tests {
         env: HashMap<String, String>,
         temp: &tempfile::TempDir,
     ) -> Result<(), LoginRefreshFailure> {
-        refresh_login_with_cache_root(client, cwd, env, Some(test_cache_root(temp))).await
+        refresh_login_with_cache_root(
+            client,
+            cwd,
+            env,
+            &CodexLauncher::Managed(Some(test_cache_root(temp))),
+        )
+        .await
     }
 
     #[cfg(unix)]
@@ -928,8 +1015,12 @@ mod tests {
             .write(true)
             .open(&lease_path)
             .expect("open lease to check repair exclusion");
-        let client = CodexUsageClient::spawn(temp.path().to_path_buf(), env, Some(cache_root))
-            .expect("spawn managed app-server");
+        let client = CodexUsageClient::spawn(
+            temp.path().to_path_buf(),
+            env,
+            &CodexLauncher::Managed(Some(cache_root)),
+        )
+        .expect("spawn managed app-server");
 
         assert!(matches!(
             lease_reader.try_lock(),
@@ -1451,7 +1542,7 @@ IFS= read -r line
             &mut client,
             temp.path().to_path_buf(),
             env,
-            Some(test_cache_root(&temp)),
+            &CodexLauncher::Managed(Some(test_cache_root(&temp))),
         )
         .await
         .expect("initialized client");
@@ -1480,5 +1571,145 @@ IFS= read -r line
         );
         let ordinary = "2026-10-05T12:00:00Z WARN codex_login::auth: POST https://auth.openai.com/oauth/token returned 401";
         assert_eq!(redact_secrets(ordinary), ordinary);
+    }
+
+    /// A stand-in container engine: `image inspect` succeeds unless
+    /// `image_missing`, `run` logs its arguments and becomes `app_server`,
+    /// and `rm` logs its arguments.
+    #[cfg(unix)]
+    fn fake_container_check(
+        temp: &tempfile::TempDir,
+        app_server: &str,
+        image_missing: bool,
+    ) -> (crate::quota_runtime::ContainerCheck, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = temp.path().join("engine.log");
+        let server = temp.path().join("app-server");
+        std::fs::write(&server, app_server).unwrap();
+        std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let inspect = if image_missing {
+            "echo 'Error: example.invalid/agent-dev:test: image not known' >&2; exit 125"
+        } else {
+            "echo sha256:test"
+        };
+        let engine = temp.path().join("podman");
+        std::fs::write(
+            &engine,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  image) {inspect} ;;\n  run) echo \"run $*\" >> '{log}'; exec '{server}' ;;\n  rm) echo \"rm $*\" >> '{log}' ;;\nesac\n",
+                log = log.display(),
+                server = server.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let check = crate::quota_runtime::ContainerCheck {
+            runtime: crate::quota_runtime::ContainerRuntime {
+                engine: crate::quota_runtime::Engine::Podman,
+                program: engine,
+                image: "example.invalid/agent-dev:test".to_owned(),
+            },
+            home: temp.path().join("codex-home"),
+        };
+        (check, log)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_container_check_passes_secrets_by_name_and_removes_its_container_on_shutdown() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let seen = temp.path().join("seen");
+        let (check, log) = fake_container_check(
+            &temp,
+            &format!(
+                r#"#!/bin/sh
+printf '%s|%s\n' "$PROFILE_SECRET" "${{OPENAI_API_KEY:-unset}}" > '{seen}'
+IFS= read -r line || exit 1
+printf '%s\n' '{{"id":1,"result":{{}}}}'
+IFS= read -r line || exit 1
+IFS= read -r line || exit 1
+printf '%s\n' '{{"id":2,"result":{{"account":{{"type":"chatgpt"}}}}}}'
+IFS= read -r line || exit 1
+printf '%s\n' '{{"id":3,"result":{{"rateLimits":{{"primary":{{"usedPercent":25,"windowDurationMins":300}}}}}}}}'
+read -r line
+"#,
+                seen = seen.display()
+            ),
+            false,
+        );
+        let env = HashMap::from([
+            ("PROFILE_SECRET".to_owned(), "secret-value-1".to_owned()),
+            ("OPENAI_API_KEY".to_owned(), "secret-value-2".to_owned()),
+        ]);
+        let mut client = None;
+
+        let status = refresh_with_cache_root(
+            &mut client,
+            temp.path().to_path_buf(),
+            env,
+            &CodexLauncher::Container(check),
+        )
+        .await;
+        assert!(
+            matches!(status, CodexUsageStatus::Available(_)),
+            "{status:?}"
+        );
+        client.take().expect("cached client").shutdown().await;
+
+        let log = std::fs::read_to_string(log).expect("engine log");
+        let lines = log.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2, "{log}");
+        let run = lines[0];
+        // Values travel in the engine's environment, where `ps` cannot read
+        // them, and Codex never sees an API key that would replace the login.
+        assert!(run.contains(" --env PROFILE_SECRET "), "{run}");
+        assert!(!run.contains("secret-value"), "{run}");
+        assert!(!run.contains("OPENAI_API_KEY"), "{run}");
+        assert!(
+            run.ends_with(" example.invalid/agent-dev:test codex app-server --stdio"),
+            "{run}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            "secret-value-1|unset\n"
+        );
+        // Killing the engine client leaves a container running, so the
+        // client removes the container it named.
+        let name = run
+            .split(" --name ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .expect("named container");
+        assert_eq!(lines[1], format!("rm rm --force --ignore {name}"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_container_check_without_its_image_reports_the_download_and_runs_nothing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (check, log) = fake_container_check(&temp, "#!/bin/sh\nexit 1\n", true);
+        let mut client = None;
+
+        let status = refresh_with_cache_root(
+            &mut client,
+            temp.path().to_path_buf(),
+            HashMap::new(),
+            &CodexLauncher::Container(check),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            CodexUsageStatus::Unavailable(
+                "the agent-dev image is not downloaded yet; Mjolnir downloads it in the background"
+                    .to_owned()
+            )
+        );
+        assert!(client.is_none());
+        assert!(
+            !log.exists(),
+            "nothing ran: {:?}",
+            std::fs::read_to_string(&log)
+        );
     }
 }

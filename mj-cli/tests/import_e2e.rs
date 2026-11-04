@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use mj_checkpoint::archive::read_archive_verified;
 use mj_core::config::{
     CONFIG_VERSION, Config, ContainerTemplate, HarnessKind, HarnessProfile, ProjectBundle,
@@ -75,6 +75,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
     let mut config = Config {
         keys: Default::default(),
         jev: Default::default(),
+        quota: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -83,12 +84,14 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        daemon: Default::default(),
         github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
         default_targets: Default::default(),
+        disabled_targets: Default::default(),
         machines: Default::default(),
         profiles: BTreeMap::from([(
             "claude-e2e".into(),
@@ -100,6 +103,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                muse_auto_review: None,
                 codex_profile: None,
             },
         )]),
@@ -203,6 +207,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
     let config = Config {
         keys: Default::default(),
         jev: Default::default(),
+        quota: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -211,12 +216,14 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        daemon: Default::default(),
         github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
         default_targets: Default::default(),
+        disabled_targets: Default::default(),
         machines: Default::default(),
         profiles: BTreeMap::from([(
             "kimi-e2e".into(),
@@ -228,6 +235,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                muse_auto_review: None,
                 codex_profile: None,
             },
         )]),
@@ -338,6 +346,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
     let config = Config {
         keys: Default::default(),
         jev: Default::default(),
+        quota: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -346,12 +355,14 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        daemon: Default::default(),
         github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
         default_targets: Default::default(),
+        disabled_targets: Default::default(),
         machines: Default::default(),
         profiles: BTreeMap::from([(
             "grok-e2e".into(),
@@ -363,6 +374,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                muse_auto_review: None,
                 codex_profile: None,
             },
         )]),
@@ -580,6 +592,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
     let config = Config {
         keys: Default::default(),
         jev: Default::default(),
+        quota: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -588,12 +601,14 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        daemon: Default::default(),
         github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
         default_targets: Default::default(),
+        disabled_targets: Default::default(),
         machines: Default::default(),
         profiles: BTreeMap::from([(
             "codex-e2e".into(),
@@ -605,6 +620,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                muse_auto_review: None,
                 codex_profile: None,
             },
         )]),

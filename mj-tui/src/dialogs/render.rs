@@ -36,6 +36,20 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
         } => &["Cancel", "Destroy session", "Destroy and delete branch"],
         Confirmation::DestroyStopped { .. } => &["Cancel", "Destroy session"],
         Confirmation::CloseFailed {
+            can_discard: false,
+            error,
+            ..
+        } if nested_repository_checkpoint_failure(error) => &["Cancel", "Ignore and Suspend"],
+        Confirmation::CloseFailed {
+            can_discard: true,
+            error,
+            ..
+        } if nested_repository_checkpoint_failure(error) => &[
+            "Cancel",
+            "Discard changes since checkpoint…",
+            "Ignore and Suspend",
+        ],
+        Confirmation::CloseFailed {
             can_discard: false, ..
         } => &["Cancel", "Retry suspension"],
         Confirmation::CloseFailed {
@@ -184,7 +198,6 @@ pub(crate) fn import_progress_status(progress: &ImportProgress) -> Line<'static>
 pub(crate) fn import_progress_mut(mode: &mut Mode) -> Option<&mut ImportProgress> {
     match mode {
         Mode::Importing(progress) => Some(progress),
-        Mode::Help(overlay) => import_progress_mut(overlay.return_to.as_mut()),
         Mode::Confirm(dialog) => match &mut dialog.confirmation {
             Confirmation::Dismiss { mode, .. } => import_progress_mut(mode.as_mut()),
             _ => None,
@@ -267,9 +280,7 @@ pub(crate) fn render_import_bundle_confirmation(
 ) {
     let mut lines = Vec::new();
     if !confirmation.dirty_git_roots.is_empty() {
-        lines.push(Line::raw(
-            "These Git roots have local changes; Mjolnir will archive tracked changes:",
-        ));
+        lines.push(Line::raw("These checkouts have uncommitted changes:"));
         lines.extend(
             confirmation.dirty_git_roots.iter().map(|root| {
                 Line::styled(root.clone(), Style::default().fg(theme::palette().warning))
@@ -281,7 +292,7 @@ pub(crate) fn render_import_bundle_confirmation(
             lines.push(Line::raw(""));
         }
         lines.push(Line::raw(
-            "These edited directories are outside Git and cannot be included:",
+            "These changed directories are outside Git and won't be included:",
         ));
         lines.extend(confirmation.omitted_non_git_dirs.iter().map(|directory| {
             Line::styled(
@@ -295,7 +306,7 @@ pub(crate) fn render_import_bundle_confirmation(
             lines.push(Line::raw(""));
         }
         lines.push(Line::raw(
-            "These scratch repositories are under temporary directories and stay out of the workspace:",
+            "These scratch repositories are in temporary directories and stay outside the import:",
         ));
         lines.extend(
             confirmation.scratch_git_roots.iter().map(|root| {
@@ -304,24 +315,17 @@ pub(crate) fn render_import_bundle_confirmation(
         );
     }
     lines.push(Line::raw(""));
-    if confirmation.has_untracked_files {
-        lines.push(Line::raw(
-            "Ignore untracked files leaves files Git does not track out of the import. Commits, staged changes and unstaged changes are still included. Files that .gitignore excludes are never included.",
-        ));
-        lines.push(Line::raw("Space toggles the checkbox."));
+    if confirmation.dirty_git_roots.is_empty() {
+        lines.push(Line::raw("Git checkouts are clean."));
     }
-    lines.push(Line::raw(if confirmation.managed_worktree.available {
-        if confirmation.create_managed_worktree {
-            "On resume, create a separate session-owned checkout."
-        } else {
-            "On resume, use the imported session's directory directly."
-        }
+    if confirmation.managed_worktree.available {
+        lines.push(Line::raw(
+            "Checked creates a clean, separate checkout. Unchecked uses the original directory with its current files.",
+        ));
     } else {
-        "This import uses an isolated workspace."
-    }));
-    let control_lines = usize::from(confirmation.has_untracked_files)
-        + usize::from(confirmation.managed_worktree.available)
-        + 2;
+        lines.push(Line::raw("This import uses an isolated workspace."));
+    }
+    let control_lines = usize::from(confirmation.managed_worktree.available) + 2;
     let body_paragraph = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
     let height = popup_height(
         &body_paragraph,
@@ -363,18 +367,6 @@ pub(crate) fn render_import_bundle_confirmation(
             true,
             &mut form,
             DialogControl::ImportManagedWorktree,
-        );
-    }
-    let y = y.saturating_add(u16::from(confirmation.managed_worktree.available));
-    if confirmation.has_untracked_files {
-        Checkbox::render(
-            frame,
-            Rect::new(inner.x, y, inner.width, 1),
-            "Ignore untracked files",
-            confirmation.ignore_untracked,
-            true,
-            &mut form,
-            DialogControl::ImportIgnore,
         );
     }
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
@@ -1441,17 +1433,28 @@ pub(crate) fn confirmation_body(
         ),
         Confirmation::CloseFailed {
             session_id, error, ..
-        } => (
-            " Suspension could not complete ",
-            vec![
+        } => {
+            let mut lines = vec![
                 session_line(session_id, session_name, width),
                 Line::raw(""),
                 Line::styled(
                     format!("Suspension failed: {error}"),
                     Style::default().fg(theme::palette().warning),
                 ),
-            ],
-        ),
+            ];
+            if nested_repository_checkpoint_failure(error) {
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    "Ignore and Suspend omits untracked nested Git repositories from the recovery copy.",
+                    Style::default().fg(theme::palette().warning),
+                ));
+                lines.push(Line::styled(
+                    "Files inside them will not be recoverable after suspension removes the environment.",
+                    Style::default().fg(theme::palette().warning),
+                ));
+            }
+            (" Suspension could not complete ", lines)
+        }
         Confirmation::RestartAgent {
             session_id,
             interrupting,

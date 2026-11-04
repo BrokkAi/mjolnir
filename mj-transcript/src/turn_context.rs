@@ -1,5 +1,5 @@
 //! Process-local classification evidence using the shared transcript summary.
-use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate};
+use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate};
 use mj_core::activity::ActivityFacts;
 use mj_core::activity::verdict::*;
 use mj_core::config::HarnessKind;
@@ -461,7 +461,7 @@ mod tests {
             tools_in_flight: vec![InFlightToolCall {
                 tool_call_id: "active-build".into(),
                 title: Some("active-build".into()),
-                status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
+                status: agent_client_protocol::v1::schema::ToolCallStatus::InProgress,
                 started_at_ms: 1_000,
             }],
             ..Default::default()
@@ -545,7 +545,7 @@ mod tests {
                 .map(|n| InFlightToolCall {
                     tool_call_id: n.to_string(),
                     title: Some("🦀".repeat(200)),
-                    status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
+                    status: agent_client_protocol::v1::schema::ToolCallStatus::InProgress,
                     started_at_ms: 2_000,
                 })
                 .collect(),

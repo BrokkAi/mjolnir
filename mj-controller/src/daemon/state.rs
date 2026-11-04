@@ -1,7 +1,16 @@
 /// Consecutive failed delivery rounds before a startup step is given up.
-const STARTUP_STEP_ATTEMPTS: u32 = 5;
+pub(super) const STARTUP_STEP_ATTEMPTS: u32 = 5;
 
 use super::*;
+
+#[derive(Debug)]
+struct StartupQueueChanged;
+impl std::fmt::Display for StartupQueueChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("startup queue changed while waiting for Move")
+    }
+}
+impl std::error::Error for StartupQueueChanged {}
 
 impl RuntimeState {
     pub(crate) fn worker_background_gate(&self) -> Arc<crate::recovery_gate::RecoveryGate> {
@@ -79,6 +88,7 @@ impl RuntimeState {
             Some(profile_catalog.clone()),
             reviewer_runtime.clone(),
         );
+        let inactivity = auto_afk::Inactivity::new(controller.config.advanced.auto_afk_minutes);
         Self {
             attachments: Mutex::new(BTreeMap::new()),
             phone_status: Mutex::new(WebViewerStatus::Starting),
@@ -100,8 +110,10 @@ impl RuntimeState {
             harness_readiness: Mutex::new(HarnessReadinessWatch::default()),
             startup_prompts: Mutex::new(BTreeMap::new()),
             startup_enqueue: tokio::sync::Mutex::new(()),
+            startup_delivery_gates: Mutex::new(BTreeMap::new()),
             controller_loader,
-            config_mutation: tokio::sync::Mutex::new(()),
+            config_mutation: tokio::sync::Mutex::new(inactivity),
+            inactivity_changed: tokio::sync::Notify::new(),
             projects: Arc::new(crate::project_catalog::Catalog::default()),
             profile_catalog,
             recovery_observer,
@@ -348,17 +360,136 @@ impl RuntimeState {
         ))
     }
 
-    /// Wait until a just-created session has a harness that can be handed to.
+    pub(super) fn startup_delivery_gate(&self, session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self
+            .startup_delivery_gates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        gates.retain(|_, gate| gate.strong_count() != 0);
+        if let Some(gate) = gates.get(session_id).and_then(std::sync::Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        gates.insert(session_id.to_owned(), Arc::downgrade(&gate));
+        gate
+    }
+
+    /// The lifecycle owner decides admission. The gate orders an admitted submit
+    /// against Move execution, including a Move admitted immediately afterward.
+    fn startup_can_submit(
+        &self,
+        session_id: &str,
+        move_origin: Option<&str>,
+        operational: Option<&mj_core::relay::RelayOperationalState>,
+    ) -> Result<bool> {
+        let owner = self.owner();
+        let active = owner.lifecycle.get(session_id);
+        let operation = owner
+            .committed()
+            .and_then(|state| state.moves.get(session_id));
+        let current_destination = operation.filter(|operation| {
+            operation.phase == mj_core::state::MovePhase::Completed
+                && owner
+                    .controller()
+                    .state
+                    .sessions
+                    .get(session_id)
+                    .is_some_and(|record| {
+                        record.target == operation.destination_target
+                            && record.native_session_id == operation.destination_native_session_id
+                    })
+        });
+        let refuse = |reason: &str| {
+            anyhow::Error::new(mj_client::session::Refused).context(format!(
+                "the prompt's Move {reason}; input returned to your draft"
+            ))
+        };
+        if let Some(origin) = move_origin {
+            if let Some(active) = active.filter(|active| active.is_running()) {
+                if active.kind != LifecycleKind::Move
+                    || active.move_operation_id.as_deref() != Some(origin)
+                {
+                    return Err(refuse("was superseded"));
+                }
+                return Ok(false);
+            }
+            if active.is_some_and(|active| {
+                active.kind == LifecycleKind::Move
+                    && active.move_operation_id.as_deref() == Some(origin)
+                    && !active.control.stopped_for_shutdown()
+                    && (active.control.cancel_accepted()
+                        || matches!(active.phase, LifecyclePhase::Completed(Err(_))))
+            }) {
+                return Err(refuse("failed or was cancelled"));
+            }
+            let operation = operation
+                .filter(|operation| operation.operation_id == origin)
+                .ok_or_else(|| refuse("is missing or was superseded"))?;
+            if operation.is_active() {
+                return Ok(false);
+            }
+            if operation.phase != mj_core::state::MovePhase::Completed {
+                return Err(refuse("failed or was cancelled"));
+            }
+            if current_destination.is_none() {
+                return Err(refuse("destination was superseded"));
+            }
+        } else if active
+            .is_some_and(|active| active.kind == LifecycleKind::Move && active.is_running())
+            || operation.is_some_and(|operation| {
+                operation.is_active()
+                    || (operation.queue_admission_started && !operation.queue_admission_finished)
+            })
+        {
+            return Ok(false);
+        }
+        // Even input queued before Move must wait for its destination actor.
+        // Historical failures do not bind ordinary later startup/resume work.
+        match (
+            current_destination.and_then(|operation| operation.destination_store_id.as_ref()),
+            operational,
+        ) {
+            (Some(expected), Some(operational)) => {
+                Ok(operational.store_id.as_ref() == Some(expected))
+            }
+            (None, Some(_)) if move_origin.is_some() => {
+                Err(refuse("has no verified destination identity"))
+            }
+            _ => Ok(true),
+        }
+    }
+
+    /// Hold the delivery reservation until worker acceptance, never across the
+    /// wait for a destination to appear. Each attempt uses the current actor.
     pub(super) async fn wait_for_ready_session(
         &self,
         session_id: &str,
-    ) -> Result<crate::session_manager::ManagedSessionHandle> {
+        command_id: &str,
+        move_origin: Option<&str>,
+    ) -> Result<(
+        crate::session_manager::ManagedSessionHandle,
+        tokio::sync::OwnedMutexGuard<()>,
+    )> {
         const POLL: Duration = Duration::from_millis(250);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30 * 60);
         loop {
-            // A session that is coming up moves through Disconnected and
-            // Checkpointing on its way; only a state it cannot leave ends the
-            // wait. This is the same set the API's first-prompt wait accepts.
+            let gate = self.startup_delivery_gate(session_id).lock_owned().await;
+            if !self.startup_can_submit(session_id, move_origin, None)? {
+                // Durable Move ownership also protects the source after restart.
+                // Failed Move disposition retires pending work; uncertain
+                // delivery retains its identity for explicit recovery.
+                drop(gate);
+                let id = session_id.to_owned();
+                let current = blocking(move || crate::database::next_startup_delivery(&id)).await?;
+                if current.is_none_or(|step| {
+                    step.command_id != command_id
+                        || matches!(step.phase.as_str(), "rejecting" | "cancelling")
+                }) {
+                    return Err(StartupQueueChanged.into());
+                }
+                tokio::time::sleep(POLL).await;
+                continue;
+            }
             match self.session_state(session_id) {
                 Some(
                     SessionState::Provisioning
@@ -371,19 +502,22 @@ impl RuntimeState {
             }
             if let Ok(handle) = self.session_manager.session(session_id).await {
                 let view = handle.view();
-                // A target that is gone never becomes ready. Reporting it now
-                // beats holding the queued work for the full deadline.
                 if let Some(ViewError::TargetMissing(detail)) = &view.error {
                     bail!("session {session_id} lost its target: {detail}");
                 }
                 if view.connected
-                    && view
-                        .snapshot
-                        .is_some_and(|snapshot| snapshot.operational.native_session_is_ready())
+                    && let Some(snapshot) = &view.snapshot
+                    && snapshot.operational.native_session_is_ready()
+                    && self.startup_can_submit(
+                        session_id,
+                        move_origin,
+                        Some(&snapshot.operational),
+                    )?
                 {
-                    return Ok(handle);
+                    return Ok((handle, gate));
                 }
             }
+            drop(gate);
             ensure!(
                 tokio::time::Instant::now() < deadline,
                 "session {session_id} was not ready for its hand-off within 30 minutes"
@@ -503,36 +637,36 @@ impl RuntimeState {
         }
     }
 
-    /// Retire a recorded close failure once something for the session has
-    /// succeeded.
-    ///
-    /// The reason is published for a session that is alive, so it has to stop
-    /// being published for one that is working again; a lifecycle transition
-    /// clears `last_error` on its own, and this covers the ordinary actions,
-    /// such as a prompt, that do not.
-    pub async fn clear_recorded_close_failure(self: &Arc<Self>, session_id: &str) {
+    /// Retire the public lifecycle failure observed when a new turn started.
+    /// A later failure must survive a delayed background clear.
+    pub async fn clear_recorded_lifecycle_failure(
+        self: &Arc<Self>,
+        session_id: &str,
+        recorded_error: &str,
+    ) {
         let recorded = self
             .owner()
             .controller()
             .state
             .sessions
             .get(session_id)
-            .is_some_and(|record| record.public_error().is_some());
+            .is_some_and(|record| record.public_error() == Some(recorded_error));
         if !recorded {
             return;
         }
         let cleared = blocking({
             let session_id = session_id.to_owned();
+            let recorded_error = recorded_error.to_owned();
             move || {
                 let mut controller = Controller::load()?;
-                controller.clear_recorded_close_failure(&session_id)
+                controller.clear_recorded_lifecycle_failure(&session_id, &recorded_error)
             }
         })
         .await;
         match cleared {
             Ok(true) => {
                 if let Err(error) = self.reload_controller().await {
-                    tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after clearing a recorded close failure");
+                    tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after clearing a recorded lifecycle failure");
                 }
                 self.publish_revision();
             }
@@ -540,7 +674,7 @@ impl RuntimeState {
             Err(error) => tracing::warn!(
                 %session_id,
                 error = format!("{error:#}"),
-                "could not clear a recorded close failure"
+                "could not clear a recorded lifecycle failure"
             ),
         }
     }
@@ -572,7 +706,7 @@ impl RuntimeState {
 
     pub(super) fn prune_dead_clients(&self) {
         self.attachments()
-            .retain(|_, attachment| process_is_alive(attachment.pid));
+            .retain(|_, attachment| attachment.renewed.elapsed() < ATTACHMENT_LEASE);
     }
 
     pub(super) fn workspace_has_active_resume(&self, workspace_id: &str) -> bool {
@@ -694,6 +828,26 @@ impl RuntimeState {
             })?
     }
 
+    /// Remove a saved project under the daemon's config-mutation coordinator,
+    /// then publish the exact config returned by the persisted mutation.
+    pub async fn remove_project(&self, bundle_id: String) -> Result<()> {
+        let mut inactivity = self.config_mutation.lock().await;
+        let config =
+            tokio::task::spawn_blocking(move || crate::controller::remove_bundle(&bundle_id))
+                .await
+                .context("project removal task panicked")??;
+        self.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
+        {
+            self.owner().install_config(config.clone());
+            self.review_config
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone_from(&config.review);
+        }
+        self.publish_revision();
+        Ok(())
+    }
+
     /// Hand a changed workspace list to the terminal clients and the web viewer.
     pub(crate) fn publish_workspaces(&self, workspaces: Vec<WorkspaceRecord>) {
         self.workspaces_tx.send_replace(workspaces);
@@ -717,6 +871,7 @@ impl RuntimeState {
     /// Steps are carried out in the order they arrive. The entry in the map
     /// exists only while a drain owns it, so "no entry" and "no live task"
     /// are the same condition and a second call never starts a second drain.
+    #[cfg(test)]
     pub(crate) async fn queue_startup_step(
         self: &Arc<Self>,
         session_id: &str,
@@ -755,6 +910,17 @@ impl RuntimeState {
         // The same set `wait_for_ready_session` accepts: anything else will
         // never become ready, so queueing would only lose the text later.
         match self.session_state(session_id) {
+            Some(_)
+                if steps.iter().any(|(_, step)| {
+                    matches!(
+                        step,
+                        StartupStep::Prompt {
+                            move_operation_id: Some(_),
+                            ..
+                        }
+                    )
+                }) => {}
+            _ if !self.startup_can_submit(session_id, None, None)? => {}
             Some(
                 SessionState::Provisioning
                 | SessionState::Running
@@ -794,9 +960,9 @@ impl RuntimeState {
     pub(crate) async fn withdraw_startup_prompt(
         &self,
         session_id: &str,
-        text: &str,
+        command_id: &str,
     ) -> Result<bool> {
-        let (id, prompt) = (session_id.to_owned(), text.to_owned());
+        let (id, prompt) = (session_id.to_owned(), command_id.to_owned());
         blocking(move || crate::database::withdraw_startup_prompt(&id, &prompt)).await
     }
 
@@ -938,10 +1104,42 @@ impl RuntimeState {
                     }
                 };
             drop(admission);
+            let mut decoded: StartupStep = match serde_json::from_str(&step.step_json) {
+                Ok(step) => step,
+                Err(error) => {
+                    self.fail_startup_queue(
+                        session_id,
+                        &format!("invalid durable startup step: {error}"),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let move_origin = match &decoded {
+                StartupStep::Prompt {
+                    move_operation_id, ..
+                } => move_operation_id.as_deref(),
+                _ => None,
+            };
             // A step that is accepted, cancelling or rejecting only needs its
             // final phase written, so it settles even after its session is gone.
             let delivers = !matches!(step.phase.as_str(), "accepted" | "cancelling" | "rejecting");
-            let handle = if !delivers {
+            // Initial worker input is already in the worker's FIFO. This
+            // daemon owns only its durable receipt monitoring, including after
+            // a fast first turn has finished and the child has parked.
+            let worker_initial = delivers
+                && self
+                    .owner()
+                    .controller()
+                    .state
+                    .subagents
+                    .get(session_id)
+                    .is_some_and(|child| {
+                        child.kind == mj_core::subagent::SubagentKind::Worker
+                            && step.group_id.as_deref()
+                                == Some(format!("subagent-spawn-{}", child.request_key).as_str())
+                    });
+            let ready = if !delivers || worker_initial {
                 None
             } else {
                 tokio::select! {
@@ -951,8 +1149,21 @@ impl RuntimeState {
                     .await;
                     return;
                 }
-                ready = self.wait_for_ready_session(session_id) => match ready {
+                ready = self.wait_for_ready_session(session_id, &step.command_id, move_origin) => match ready {
                     Ok(handle) => Some(handle),
+                    Err(error) if error.is::<StartupQueueChanged>() => continue,
+                    Err(error) if error.is::<mj_client::session::Refused>() && step.phase == "pending" && step.group_id.is_none() => {
+                        if let StartupStep::Prompt { text, encoded_draft, .. } = &decoded {
+                            if let Err(recovery) = self.return_startup_prompt_to_draft(session_id, &step.command_id,
+                                encoded_draft.as_deref().unwrap_or(text), &format!("{error:#}")).await {
+                                self.fail_startup_queue(session_id, &format!("draft recovery remains saved: {recovery:#}")).await;
+                                return;
+                            }
+                            continue;
+                        }
+                        self.fail_startup_queue(session_id, &format!("{error:#}")).await;
+                        return;
+                    }
                     Err(error) => {
                         let id = session_id.to_owned();
                         let reason = format!("{error:#}");
@@ -966,18 +1177,36 @@ impl RuntimeState {
                 },
                 }
             };
+            let (handle, _delivery_gate) = match ready {
+                Some((handle, gate)) => (Some(handle), Some(gate)),
+                None => (None, None),
+            };
             let command_id = step.command_id.clone();
-            let mut decoded: StartupStep = match serde_json::from_str(&step.step_json) {
-                Ok(step) => step,
-                Err(error) => {
+            if step.phase == "rejecting"
+                && let StartupStep::Prompt {
+                    text,
+                    encoded_draft,
+                    ..
+                } = &decoded
+            {
+                if let Err(error) = self
+                    .return_startup_prompt_to_draft(
+                        session_id,
+                        &command_id,
+                        encoded_draft.as_deref().unwrap_or(text),
+                        step.error.as_deref().unwrap_or("prompt refused"),
+                    )
+                    .await
+                {
                     self.fail_startup_queue(
                         session_id,
-                        &format!("invalid durable startup step: {error}"),
+                        &format!("draft recovery remains saved: {error:#}"),
                     )
                     .await;
                     return;
                 }
-            };
+                continue;
+            }
             if !matches!(step.phase.as_str(), "cancelling" | "rejecting")
                 && let StartupStep::InstallHandoff(snapshot) = &decoded
             {
@@ -1013,7 +1242,7 @@ impl RuntimeState {
                     return;
                 }
             }
-            if let Some(handle) = &handle {
+            if handle.is_some() || worker_initial {
                 let persisted_id = command_id.clone();
                 match blocking(move || crate::database::claim_startup_delivery(&persisted_id)).await
                 {
@@ -1027,9 +1256,31 @@ impl RuntimeState {
                         return;
                     }
                 }
-                let outcome = tokio::select! {
-                    () = cancel.cancelled() => Err(anyhow!("the daemon stopped before startup delivery settled")),
-                    result = self.run_startup_step(session_id, handle, &decoded, &command_id) => result,
+                // A delivering retry may already have been accepted. Only the
+                // worker's receipt can decide that case, even if destination
+                // capabilities changed in the meantime.
+                let unsupported_image = step.phase == "pending"
+                    && matches!(&decoded, StartupStep::Prompt { prompt: Some(prompt), .. }
+                        if prompt.iter().any(|block| matches!(block, ContentBlock::Image(_))))
+                    && handle.as_ref().is_some_and(|handle| {
+                        !handle
+                            .view()
+                            .snapshot
+                            .is_some_and(|snapshot| snapshot.operational.accepts_prompt_images())
+                    });
+                let outcome = if worker_initial {
+                    tokio::select! {
+                        () = cancel.cancelled() => return,
+                        result = self.observe_worker_startup_step(session_id, &decoded, &command_id) => result,
+                    }
+                } else if unsupported_image {
+                    Err(anyhow::Error::new(mj_client::session::Refused)
+                        .context("the destination harness does not support image prompts"))
+                } else {
+                    tokio::select! {
+                        () = cancel.cancelled() => Err(anyhow!("the daemon stopped before startup delivery settled")),
+                        result = self.run_startup_step(session_id, handle.as_ref().expect("live startup step"), &decoded, &command_id) => result,
+                    }
                 };
                 let ordinal = match outcome {
                     Ok(ordinal) => ordinal,
@@ -1061,18 +1312,31 @@ impl RuntimeState {
                             .is_some();
                         if refused
                             && step.group_id.is_none()
-                            && let StartupStep::Prompt { text, .. } = &decoded
+                            && let StartupStep::Prompt {
+                                text,
+                                encoded_draft,
+                                ..
+                            } = &decoded
                         {
                             // The worker refused this prompt outright, so it was
                             // never accepted: give the text back rather than
                             // retrying something that will be refused again.
-                            self.return_startup_prompt_to_draft(
-                                session_id,
-                                &command_id,
-                                text,
-                                &format!("{error:#}"),
-                            )
-                            .await;
+                            if let Err(error) = self
+                                .return_startup_prompt_to_draft(
+                                    session_id,
+                                    &command_id,
+                                    encoded_draft.as_deref().unwrap_or(text),
+                                    &format!("{error:#}"),
+                                )
+                                .await
+                            {
+                                self.fail_startup_queue(
+                                    session_id,
+                                    &format!("draft recovery remains saved: {error:#}"),
+                                )
+                                .await;
+                                return;
+                            }
                             continue;
                         }
                         self.fail_startup_queue(session_id, &format!("{error:#}"))
@@ -1120,6 +1384,123 @@ impl RuntimeState {
         }
     }
 
+    /// Observe the worker-owned initial queue without resubmitting its input.
+    /// Receipts remain available after a completed child parks or a daemon
+    /// restarts, so bookkeeping never requires restarting that child.
+    async fn observe_worker_startup_step(
+        &self,
+        session_id: &str,
+        step: &StartupStep,
+        command_id: &str,
+    ) -> Result<Option<u64>> {
+        let (key, value) = match step {
+            StartupStep::Configure { key, value, .. } => (key.as_str(), value.as_str()),
+            StartupStep::ApiPrompt { .. } => ("prompt", "original brief"),
+            _ => bail!("worker initial input contains a non-input step"),
+        };
+        let failure = |reason: String| {
+            anyhow::Error::new(super::startup_followup::StartupRejected(format!(
+                "{}: {reason}",
+                self.startup_configuration_context(session_id, key, value)
+            )))
+        };
+        let mut deadline = None;
+        loop {
+            let id = session_id.to_owned();
+            let command = command_id.to_owned();
+            match step {
+                StartupStep::Configure { optional, .. } => {
+                    if let Some(result) =
+                        blocking(move || crate::database::load_config_result(&id, &command)).await?
+                    {
+                        if let Some(error) = result {
+                            if !optional {
+                                return Err(failure(error));
+                            }
+                            tracing::warn!(
+                                session_id,
+                                key,
+                                value,
+                                error,
+                                "optional initial worker configuration was rejected"
+                            );
+                        }
+                        return Ok(None);
+                    }
+                }
+                StartupStep::ApiPrompt { .. } => {
+                    if let Some(ordinal) =
+                        blocking(move || crate::database::load_prompt_acceptance(&id, &command))
+                            .await?
+                    {
+                        let id = session_id.to_owned();
+                        blocking(move || crate::database::record_subagent_prompt(&id, ordinal))
+                            .await?;
+                        return Ok(Some(ordinal));
+                    }
+                }
+                _ => unreachable!("validated worker input"),
+            }
+            match self.session_state(session_id) {
+                Some(SessionState::Running | SessionState::Disconnected) => {
+                    // Provisioning marks Running only after native readiness.
+                    // Bound receipt delivery even after a lost connection,
+                    // without timing downloads or other provisioning work.
+                    deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + Duration::from_secs(60)
+                    });
+                }
+                Some(SessionState::Provisioning | SessionState::Checkpointing) => {}
+                state => {
+                    let reason = self
+                        .owner()
+                        .controller()
+                        .state
+                        .sessions
+                        .get(session_id)
+                        .and_then(|record| record.last_error.clone())
+                        .unwrap_or_else(|| {
+                            format!("session is {state:?} before its worker receipt")
+                        });
+                    return Err(failure(reason));
+                }
+            }
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                return Err(failure(
+                    "the worker did not complete this initial input within 60 seconds".into(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn startup_configuration_context(&self, session_id: &str, key: &str, value: &str) -> String {
+        let location = self
+            .owner()
+            .controller()
+            .state
+            .sessions
+            .get(session_id)
+            .map(|record| {
+                let host = record.target.as_ref().map(|target| {
+                    mj_core::targets::storage::session_storage_paths(
+                        target,
+                        session_id,
+                        record.project_directory.as_deref(),
+                    )
+                    .host
+                });
+                match host {
+                    Some(host) => format!("target {} on {host}", record.target_template_id),
+                    None => format!("target {}", record.target_template_id),
+                }
+            });
+        format!(
+            "startup configuration {key}={value} for session {session_id} ({}) failed",
+            location.as_deref().unwrap_or("target no longer registered")
+        )
+    }
+
     async fn run_startup_step(
         &self,
         session_id: &str,
@@ -1138,12 +1519,16 @@ impl RuntimeState {
                 .map(Some),
             StartupStep::Prompt {
                 text,
+                prompt,
+                encoded_draft: _,
+                move_operation_id: _,
                 inherited_draft,
             } => self
                 .submit_startup_prompt(
                     session_id,
                     handle,
                     text,
+                    prompt.as_deref(),
                     inherited_draft.as_deref(),
                     command_id,
                 )
@@ -1153,19 +1538,18 @@ impl RuntimeState {
                 key,
                 value,
                 optional,
-            } => {
-                super::startup_followup::configure_startup(
-                    &handle.client(),
-                    command_id,
-                    key,
-                    value,
-                    *optional,
-                )
-                .await
-            }
+            } => super::startup_followup::configure_startup(
+                &handle.client(),
+                command_id,
+                key,
+                value,
+                *optional,
+            )
+            .await
+            .with_context(|| self.startup_configuration_context(session_id, key, value)),
             StartupStep::ApiPrompt { text } => {
                 let ordinal = self
-                    .submit_startup_prompt(session_id, handle, text, None, command_id)
+                    .submit_startup_prompt(session_id, handle, text, None, None, command_id)
                     .await?;
                 let id = session_id.to_owned();
                 blocking(move || crate::database::record_subagent_prompt(&id, ordinal)).await?;
@@ -1176,11 +1560,13 @@ impl RuntimeState {
 
     /// Submit one queued prompt and give it the history and draft handling a
     /// prompt submitted from a live composer gets.
+    #[allow(clippy::too_many_arguments)] // History and draft identity are separate from wire content.
     async fn submit_startup_prompt(
         &self,
         session_id: &str,
         handle: &crate::session_manager::ManagedSessionHandle,
         text: &str,
+        prompt: Option<&[ContentBlock]>,
         inherited_draft: Option<&str>,
         command_id: &str,
     ) -> Result<u64> {
@@ -1195,7 +1581,10 @@ impl RuntimeState {
             .submit(
                 command_id.to_owned(),
                 RelayCommand::Prompt {
-                    prompt: vec![ContentBlock::Text(TextContent::new(text.to_owned()))],
+                    prompt: prompt.map_or_else(
+                        || vec![ContentBlock::Text(TextContent::new(text.to_owned()))],
+                        <[ContentBlock]>::to_vec,
+                    ),
                 },
             )
             .await?;
@@ -1279,9 +1668,32 @@ impl RuntimeState {
             return;
         }
         let decoded: Option<StartupStep> = serde_json::from_str(&step.step_json).ok();
-        if let Some(StartupStep::Prompt { text, .. }) = &decoded {
-            self.return_startup_prompt_to_draft(session_id, &step.command_id, text, &reason)
-                .await;
+        if step.group_id.is_none()
+            && step.phase == "delivering"
+            && matches!(&decoded, Some(StartupStep::Prompt { .. }))
+        {
+            // A lost acknowledgement may hide an accepted prompt. Keep its
+            // identity and reconcile forever; a retry budget proves no refusal.
+            self.fail_startup_queue(session_id, "worker acceptance is still unknown; saved prompt will keep reconciling with its original command ID").await;
+            return;
+        }
+        if let Some(StartupStep::Prompt {
+            text,
+            encoded_draft,
+            ..
+        }) = &decoded
+        {
+            if let Err(error) = self
+                .return_startup_prompt_to_draft(
+                    session_id,
+                    &step.command_id,
+                    encoded_draft.as_deref().unwrap_or(text),
+                    &reason,
+                )
+                .await
+            {
+                tracing::error!(session_id, %error, "startup draft recovery remains saved");
+            }
             return;
         }
         let command_id = step.command_id.clone();
@@ -1316,29 +1728,19 @@ impl RuntimeState {
         command_id: &str,
         text: &str,
         reason: &str,
-    ) {
+    ) -> Result<()> {
         let settled_id = command_id.to_owned();
         let persisted = reason.to_owned();
-        if let Err(error) = blocking(move || {
-            crate::database::set_startup_delivery_phase(&settled_id, "failed", Some(&persisted))
-        })
-        .await
-        {
-            tracing::error!(session_id, %error, "could not mark a refused startup prompt failed");
-            return;
-        }
-        if let Err(error) = self.append_draft_input(session_id, text).await {
-            tracing::error!(session_id, %error, "could not return a refused startup prompt to the draft");
-            self.push_notice(
-                session_id,
-                format!("A queued prompt was refused and could not be saved as a draft: {reason}"),
-            );
-            return;
-        }
+        blocking(move || crate::database::reject_startup_prompt(&settled_id, &persisted)).await?;
+        let settled_id = command_id.to_owned();
+        let draft = text.to_owned();
+        blocking(move || crate::database::recover_startup_prompt(&settled_id, &draft)).await?;
+        self.publish_revision();
         self.push_notice(
             session_id,
             format!("A queued prompt was refused and returned to your draft: {reason}"),
         );
+        Ok(())
     }
 
     /// Stop this drain without turning uncertain accepted input into a new draft.
@@ -1366,6 +1768,7 @@ impl RuntimeState {
     }
 
     /// Restore input through the writer; the owner observes only committed data.
+    #[cfg(test)]
     pub(super) async fn append_draft_input(&self, session_id: &str, text: &str) -> Result<()> {
         let session_id = session_id.to_owned();
         let text = text.to_owned();

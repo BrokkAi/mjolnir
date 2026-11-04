@@ -34,6 +34,9 @@ The viewer can:
   reviewing the resolved launch;
 - open a live conversation, send prompts, and run the slash commands the
   session actually supports;
+- use **Session settings** or `/config` to review and change every selectable
+  setting the active harness advertises, including approval and collaboration
+  options that are not model or effort;
 - queue prompts while an agent is busy, **Interrupt turn** without releasing the environment, and cancel shell work;
 - suspend a session, resume it from its checkpoint, and browse all suspended resume
   candidates, including records previously archived by a provider;
@@ -104,6 +107,25 @@ The browser's Back button returns from a conversation to its workspace. A
 temporary network loss does not move session ownership into the browser: the
 daemon and target keep working, and the viewer reconnects to their current
 state.
+
+## Change settings
+
+Choose **Menu › Settings** to see and change the same settings as the
+terminal's Settings dialog: agent profiles, projects, runtimes, machines, code
+review, continuation, sub-agents, SessionWiki, web access, display and privacy.
+Each section names what it is set to; open it to change its fields, add or
+remove entries, then press **Save**. Saving writes the configuration file with
+the same checks the terminal uses. A setting another client changed since you
+opened the page is refused with a message, and **Discard** reloads the current
+file. The terminal and the viewer see each other's saved changes within a
+second.
+
+Environment variable values are never sent to the browser. A literal value is
+shown as hidden and can be replaced but not read. A few steps need the terminal
+itself, and the page names them where they apply: signing a profile in
+(`mj login --profile <id>`), detecting profiles and runtimes, the build cache
+settings that inspect a machine first, and choosing the reviewer's model and
+effort.
 
 ## Recover a port conflict
 
@@ -185,7 +207,9 @@ The viewer is designed for one operator, not as a multi-user team service.
 Treat its login code, cookies, TLS private key, and any copied
 transcript as secrets. The repository and harness processes remain on their
 configured targets, but an authenticated viewer can send prompts and lifecycle
-commands with your authority.
+commands with your authority, and change your configuration through Settings.
+Settings is available only to the signed-in viewer; the API token that agents
+use cannot reach it.
 
 See [Security boundaries](/security/) for the full trust model,
 [Configuration reference](/configuration/#web-viewer-phone) for every field,

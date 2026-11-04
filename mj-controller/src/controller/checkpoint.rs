@@ -78,7 +78,7 @@ pub const HOST_CHECKOUT_REPOSITORY: &str = "project";
 /// treated as wedged. Busy recovery checkpoints defer immediately. A close
 /// sends a non-steering turn cancellation and gives the worker this same
 /// bounded interval to settle before recovery restarts it.
-const CHECKPOINT_BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
+pub(in crate::controller) const CHECKPOINT_BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
 /// A close gets a fresh cancellation grace period once the worker accepts the
 /// request. This keeps an expensive status sync from consuming the whole
 /// cancellation budget before the worker has had a chance to settle.

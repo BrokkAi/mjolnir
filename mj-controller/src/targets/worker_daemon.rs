@@ -291,13 +291,30 @@ pub fn in_place_worker_reset_plan(
     session_id: &str,
     previous_profile_root: &str,
 ) -> Result<CommandSpec> {
+    worker_reset_plan(locator, session_id, Some(previous_profile_root))
+}
+
+/// Reset only the relay for a native conversation that stays in its home.
+/// Stop its processes first; keep the executable, native files and caches.
+pub fn retained_native_worker_reset_plan(
+    locator: &TargetLocator,
+    session_id: &str,
+) -> Result<CommandSpec> {
+    worker_reset_plan(locator, session_id, None)
+}
+
+fn worker_reset_plan(
+    locator: &TargetLocator,
+    session_id: &str,
+    previous_profile_root: Option<&str>,
+) -> Result<CommandSpec> {
     verify_locator(locator, session_id)?;
     let session_worker_root = worker_root(locator, session_id)?;
     // A root that is a link left for a session an earlier release started
     // (`controller::local_profile_homes`) is unlinked, never followed: the path
     // carries no trailing slash, so `rm` removes the link itself.
-    let script = format!(
-        "{}\nrm -rf -- {} {}\nrm -f -- {} {} {}\nrm -rf -- {}\nmkdir -p -- {}\n",
+    let mut script = format!(
+        "{}\nrm -rf -- {} {}\n",
         stop_worker_daemon_script(&session_worker_root),
         posix_quote(&format!(
             "{session_worker_root}/{}",
@@ -307,12 +324,31 @@ pub fn in_place_worker_reset_plan(
             "{session_worker_root}/{}",
             mj_core::relay::RELAY_JOURNAL_DIR
         )),
-        posix_quote(&format!("{session_worker_root}/hel")),
-        posix_quote(&format!("{session_worker_root}/launch.json")),
-        posix_quote(&format!("{session_worker_root}/ownership.json")),
-        posix_quote(previous_profile_root.trim_end_matches('/')),
-        posix_quote(&session_worker_root),
     );
+    let mut metadata = vec!["launch.json", "ownership.json"];
+    if previous_profile_root.is_some() {
+        metadata.insert(0, "hel");
+    } else {
+        metadata.extend([
+            mj_core::relay::NATIVE_SESSION_IDENTITY_FILE,
+            mj_core::relay::RESTORED_RELAY_SEED_FILE,
+        ]);
+    }
+    script.push_str(&format!(
+        "rm -f -- {}\n",
+        metadata
+            .into_iter()
+            .map(|name| posix_quote(&format!("{session_worker_root}/{name}")))
+            .collect::<Vec<_>>()
+            .join(" ")
+    ));
+    if let Some(profile_root) = previous_profile_root {
+        script.push_str(&format!(
+            "rm -rf -- {}\nmkdir -p -- {}\n",
+            posix_quote(profile_root.trim_end_matches('/')),
+            posix_quote(&session_worker_root),
+        ));
+    }
     Ok(
         locator_command(locator, vec!["sh".into(), "-c".into(), script])
             .purpose("reset the worker root for an in-place harness replacement")
@@ -336,11 +372,40 @@ mod tests {
         )
     }
 
+    // Hard-won: c29b1379c: an in-place Move's relay reset made review rescan the checkout and refuse it.
+    #[test]
+    #[cfg(unix)]
+    fn in_place_reset_preserves_the_review_untracked_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("0123456789abcdef");
+        std::fs::create_dir_all(root.join("profile")).unwrap();
+        let record = root.join(mj_core::relay::REVIEW_UNTRACKED_FILE);
+        std::fs::write(&record, "original review record").unwrap();
+        std::fs::write(root.join(mj_core::relay::RELAY_STATE_FILE), "{}").unwrap();
+        let plan = in_place_worker_reset_plan(
+            &TargetLocator::LocalBare {
+                worker_root: root.to_string_lossy().into_owned(),
+            },
+            "0123456789abcdef",
+            &root.join("profile").to_string_lossy(),
+        )
+        .unwrap();
+        let (status, stdout) = run_script(&plan.args[1]);
+        assert_eq!(status, 0, "{stdout}");
+        assert_eq!(
+            std::fs::read_to_string(record).unwrap(),
+            "original review record"
+        );
+        assert!(!root.join(mj_core::relay::RELAY_STATE_FILE).exists());
+        assert!(!root.join("profile").exists());
+    }
+
     /// A worker records its own pid in its startup file before it writes a
     /// pidfile and before its socket exists. The probe has to believe that
     /// record: a worker is not always recognisable by its command line, and
     /// one that is not was reported as gone while it was still running.
     // Hard-won: 915d5c30: a live worker with an unexpected command line was reported gone.
+    // Hard-won: #1383: a worker recorded local time while its controller checked UTC.
     #[test]
     #[cfg_attr(
         windows,
@@ -349,15 +414,46 @@ mod tests {
     fn a_worker_is_found_by_the_pid_it_recorded_even_when_its_command_line_differs() {
         let root = tempfile::tempdir().unwrap();
         // This test process is certainly alive, and its command line is a test
-        // binary, which matches nothing the probe looks for.
+        // binary, which matches nothing the probe looks for. Recording and
+        // checking use different environments, as worker login re-exec does.
+        let locales = mj_core::subprocess::run_with_input(
+            std::process::Command::new("locale").arg("-a"),
+            &[],
+        )
+        .unwrap();
+        assert!(locales.status.success());
+        let locales = String::from_utf8(locales.stdout).unwrap();
+        let recording_locale = locales
+            .lines()
+            .find(|locale| !matches!(*locale, "C" | "POSIX"))
+            .unwrap_or("C");
+        let birth = mj_core::subprocess::run_with_input(
+            std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    &format!(
+                        "{}\nmj_process_birth \"$1\"",
+                        mj_core::subprocess::PROCESS_BIRTH_SCRIPT
+                    ),
+                    "record-worker-birth",
+                    &std::process::id().to_string(),
+                ])
+                .env("TZ", "America/Chicago")
+                .env("LC_ALL", recording_locale),
+            &[],
+        )
+        .unwrap();
+        assert!(birth.status.success());
+        let birth = String::from_utf8(birth.stdout).unwrap().trim().to_owned();
         std::fs::write(
             root.path().join(mj_core::relay::WORKER_STARTUP_FILE),
             serde_json::to_vec(&serde_json::json!({
                 "step": "review-baseline",
                 "pid": std::process::id(),
-                "process_birth": mj_core::subprocess::process_birth_identity(std::process::id()).unwrap(),
+                "process_birth": birth,
                 "steps": [],
-            })).unwrap(),
+            }))
+            .unwrap(),
         )
         .unwrap();
 
@@ -365,10 +461,23 @@ mod tests {
             "{}\nhel_recorded_worker",
             worker_daemon_identity_script(&root.path().to_string_lossy())
         );
-        let (status, stdout) = run_script(&script);
-
-        assert_eq!(status, 0, "the probe must find the recorded worker");
-        assert_eq!(stdout, std::process::id().to_string());
+        let output = mj_core::subprocess::run_with_input(
+            std::process::Command::new("sh")
+                .args(["-c", &script])
+                .env("TZ", "UTC")
+                .env("LC_ALL", "C"),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "the probe must find the recorded worker across TZ/locale changes: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            std::process::id().to_string()
+        );
     }
 
     /// A startup record left by a worker that has since gone must not be read

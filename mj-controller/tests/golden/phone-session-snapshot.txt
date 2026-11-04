@@ -2,7 +2,7 @@
 [
   {
     "key": "model",
-    "label": "model",
+    "label": "Model",
     "current": "sonnet",
     "choices": [
       {
@@ -17,7 +17,7 @@
   },
   {
     "key": "effort",
-    "label": "effort",
+    "label": "Effort",
     "current": "high",
     "choices": [
       {
@@ -35,7 +35,7 @@
 [
   {
     "key": "model",
-    "label": "model",
+    "label": "Model",
     "current": "opus",
     "choices": [
       {
@@ -50,7 +50,7 @@
   },
   {
     "key": "effort",
-    "label": "effort",
+    "label": "Effort",
     "current": "max",
     "choices": [
       {
@@ -67,6 +67,7 @@
 === live container session with a second workspace (1 session card) ===
 {
   "review_trigger": "off",
+  "review_count": 2,
   "subagents": {
     "mode": "native"
   },
@@ -167,6 +168,7 @@
 {
   "row": {
     "review_trigger": "off",
+    "review_count": 2,
     "subagents": {
       "mode": "native"
     },
@@ -271,6 +273,7 @@
 === only workspace (1 session card) ===
 {
   "review_trigger": "off",
+  "review_count": 2,
   "subagents": {
     "mode": "native"
   },
@@ -358,6 +361,7 @@
   "session": {
     "row": {
       "review_trigger": "off",
+      "review_count": 2,
       "subagents": {
         "mode": "native"
       },
@@ -454,6 +458,7 @@
   "session": {
     "row": {
       "review_trigger": "off",
+      "review_count": 2,
       "subagents": {
         "mode": "native"
       },
@@ -547,6 +552,7 @@
 {
   "parent": {
     "review_trigger": "off",
+    "review_count": 2,
     "subagents": {
       "mode": "native"
     },
@@ -629,6 +635,7 @@
   },
   "child": {
     "review_trigger": "off",
+    "review_count": 2,
     "subagents": {
       "mode": "native"
     },
@@ -715,6 +722,7 @@
 === bare target (1 session card) ===
 {
   "review_trigger": "off",
+  "review_count": 2,
   "subagents": {
     "mode": "native"
   },
@@ -798,6 +806,7 @@
 === stopped session without recovery copy (1 session card) ===
 {
   "review_trigger": "off",
+  "review_count": 2,
   "subagents": {
     "mode": "native"
   },
@@ -945,6 +954,7 @@
 === last top-level message time (1 session card) ===
 {
   "review_trigger": "off",
+  "review_count": 2,
   "subagents": {
     "mode": "native"
   },
@@ -1022,6 +1032,7 @@
 === messages without recorded times (1 session card) ===
 {
   "review_trigger": "off",
+  "review_count": 2,
   "subagents": {
     "mode": "native"
   },
@@ -1097,6 +1108,7 @@
 === conversation not available (1 session card) ===
 {
   "review_trigger": "off",
+  "review_count": 2,
   "subagents": {
     "mode": "native"
   },
@@ -1169,6 +1181,7 @@
 {
   "session": {
     "review_trigger": "off",
+    "review_count": 2,
     "subagents": {
       "mode": "native"
     },
@@ -1241,4 +1254,84 @@
     "active": true,
     "session_id": "0123456789abcdef0123456789abcdef"
   }
+}
+=== viewer quota windows (Claude, unknown Claude, and Codex profiles) ===
+{
+  "profiles": [
+    {
+      "id": "claude",
+      "quota": {
+        "summary": "Week 21% left · Week (Fable) 17% left",
+        "windows": [
+          {
+            "label": "Week",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "long",
+            "percent_used": 79,
+            "fable_remaining_percent": 17,
+            "projects_exhaustion_before_reset": false
+          },
+          {
+            "label": "5H",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "five_hour",
+            "percent_used": 37,
+            "projects_exhaustion_before_reset": false
+          }
+        ],
+        "stale": true,
+        "refreshed_at_epoch_seconds": 0,
+        "has_error": false
+      }
+    },
+    {
+      "id": "claude-unknown",
+      "quota": {
+        "summary": "Week available · Week (Fable) 17% left",
+        "windows": [
+          {
+            "label": "Week",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "long",
+            "projects_exhaustion_before_reset": false
+          },
+          {
+            "label": "5H",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "five_hour",
+            "percent_used": 37,
+            "projects_exhaustion_before_reset": false
+          }
+        ],
+        "stale": true,
+        "refreshed_at_epoch_seconds": 0,
+        "has_error": false
+      }
+    },
+    {
+      "id": "codex",
+      "quota": {
+        "summary": "Week 70% left",
+        "windows": [
+          {
+            "label": "Week",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "long",
+            "percent_used": 30,
+            "projects_exhaustion_before_reset": false
+          },
+          {
+            "label": "5H",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "five_hour",
+            "percent_used": 20,
+            "projects_exhaustion_before_reset": false
+          }
+        ],
+        "stale": true,
+        "refreshed_at_epoch_seconds": 0,
+        "has_error": false
+      }
+    }
+  ]
 }

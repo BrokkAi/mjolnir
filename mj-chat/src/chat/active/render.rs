@@ -333,8 +333,8 @@ pub(crate) fn render_chat_footer(
         ],
         footer_area.width,
         footer.chord_prefix,
-        // The host ranks its hints, and puts the two it wants kept longest —
-        // the palette and the help key — at the end of the list.
+        // The host ranks its hints and puts the palette aliases last so they
+        // stay visible when the row narrows.
         |command: &Option<usize>| {
             command.is_some_and(|index| {
                 index + 2 >= footer.chords.len().saturating_add(footer.functions.len())
@@ -404,7 +404,7 @@ pub(crate) fn render_chat_footer(
 pub(crate) fn test_footer(area: Rect) -> ChatFooter<'static> {
     ChatFooter {
         area,
-        chords: &["b panes", "q detach", ": palette", "? keys"],
+        chords: &["b panes", "q detach", ": / ? palette"],
         chord_prefix: "ctrl+b then ",
         functions: &[],
         banner: None,

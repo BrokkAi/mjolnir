@@ -13,3 +13,399 @@
     "kind": "user"
   }
 ]
+=== query "\"usd before credits\"" ===
+[
+  {
+    "session_id": "billing",
+    "kind": "agent"
+  }
+]
+preview billing:
+{
+  "blocks": [
+    {
+      "role": "assistant",
+      "text": "October 1–31, USD before credits: café 東京",
+      "hits": [
+        [
+          16,
+          34
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+=== query "usd before credits" ===
+[
+  {
+    "session_id": "billing",
+    "kind": "agent"
+  },
+  {
+    "session_id": "scattered",
+    "kind": "user"
+  }
+]
+preview billing:
+{
+  "blocks": [
+    {
+      "role": "assistant",
+      "text": "October 1–31, USD before credits: café 東京",
+      "hits": [
+        [
+          16,
+          19
+        ],
+        [
+          20,
+          26
+        ],
+        [
+          27,
+          34
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+preview scattered:
+{
+  "blocks": [
+    {
+      "role": "user",
+      "text": "credits arrive after the USD before taxes",
+      "hits": [
+        [
+          0,
+          7
+        ],
+        [
+          25,
+          28
+        ],
+        [
+          29,
+          35
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+=== query "october \"usd before credits\"" ===
+[
+  {
+    "session_id": "billing",
+    "kind": "agent"
+  }
+]
+preview billing:
+{
+  "blocks": [
+    {
+      "role": "assistant",
+      "text": "October 1–31, USD before credits: café 東京",
+      "hits": [
+        [
+          0,
+          7
+        ],
+        [
+          16,
+          34
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+=== query "\"usd before credits" ===
+[
+  {
+    "session_id": "billing",
+    "kind": "agent"
+  }
+]
+preview billing:
+{
+  "blocks": [
+    {
+      "role": "assistant",
+      "text": "October 1–31, USD before credits: café 東京",
+      "hits": [
+        [
+          16,
+          34
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+=== query "\"\"\"quoted phrase\"\"\"" ===
+[
+  {
+    "session_id": "quoted",
+    "kind": "user"
+  }
+]
+preview quoted:
+{
+  "blocks": [
+    {
+      "role": "user",
+      "text": "a literal \"quoted phrase\"; caféine",
+      "hits": [
+        [
+          10,
+          25
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+=== query "\"qx\" \"qy\"" ===
+[
+  {
+    "session_id": "short",
+    "kind": "agent"
+  }
+]
+preview short:
+{
+  "blocks": [
+    {
+      "role": "assistant",
+      "text": "qx qy % _ \\",
+      "hits": [
+        [
+          0,
+          2
+        ],
+        [
+          3,
+          5
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+=== query "qx %_" ===
+[]
+=== query "\"%\"" ===
+[
+  {
+    "session_id": "short",
+    "kind": "agent"
+  }
+]
+preview short:
+{
+  "blocks": [
+    {
+      "role": "assistant",
+      "text": "qx qy % _ \\",
+      "hits": [
+        [
+          6,
+          7
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+=== query "\"_\"" ===
+[
+  {
+    "session_id": "short",
+    "kind": "agent"
+  }
+]
+preview short:
+{
+  "blocks": [
+    {
+      "role": "assistant",
+      "text": "qx qy % _ \\",
+      "hits": [
+        [
+          8,
+          9
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+=== query "\"\\\"" ===
+[
+  {
+    "session_id": "short",
+    "kind": "agent"
+  }
+]
+preview short:
+{
+  "blocks": [
+    {
+      "role": "assistant",
+      "text": "qx qy % _ \\",
+      "hits": [
+        [
+          10,
+          11
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+=== query "\"cafe\u{301}\"" ===
+[
+  {
+    "session_id": "billing",
+    "kind": "agent"
+  },
+  {
+    "session_id": "quoted",
+    "kind": "user"
+  }
+]
+preview billing:
+{
+  "blocks": [
+    {
+      "role": "assistant",
+      "text": "October 1–31, USD before credits: café 東京",
+      "hits": [
+        [
+          36,
+          41
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+preview quoted:
+{
+  "blocks": [
+    {
+      "role": "user",
+      "text": "a literal \"quoted phrase\"; caféine",
+      "hits": [
+        [
+          27,
+          32
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+=== query "\"東京\"" ===
+[
+  {
+    "session_id": "billing",
+    "kind": "agent"
+  }
+]
+preview billing:
+{
+  "blocks": [
+    {
+      "role": "assistant",
+      "text": "October 1–31, USD before credits: café 東京",
+      "hits": [
+        [
+          42,
+          48
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+=== query "café caf" ===
+[
+  {
+    "session_id": "billing",
+    "kind": "agent"
+  },
+  {
+    "session_id": "quoted",
+    "kind": "user"
+  }
+]
+preview billing:
+{
+  "blocks": [
+    {
+      "role": "assistant",
+      "text": "October 1–31, USD before credits: café 東京",
+      "hits": [
+        [
+          36,
+          41
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+preview quoted:
+{
+  "blocks": [
+    {
+      "role": "user",
+      "text": "a literal \"quoted phrase\"; caféine",
+      "hits": [
+        [
+          27,
+          32
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+=== query "\"\"" ===
+[]
+=== query "\" \"" ===
+[]

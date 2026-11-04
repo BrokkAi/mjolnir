@@ -2,7 +2,6 @@
 //! belong to this worker; shared directories contain only tool-owned caches.
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
@@ -272,9 +271,7 @@ fn quote_path(path: &Path) -> String {
 }
 
 fn write_launcher(path: &Path, body: &str) -> Result<()> {
-    atomic_write_existing(path, format!("#!/bin/sh\nset -eu\n{body}").as_bytes())?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    Ok(())
+    super::shell_environment::write_executable(path, &format!("#!/bin/sh\nset -eu\n{body}"))
 }
 
 fn prepare_gradle(

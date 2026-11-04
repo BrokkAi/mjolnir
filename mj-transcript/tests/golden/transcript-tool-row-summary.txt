@@ -15,7 +15,7 @@ killed by SIGKILL
 
 === released terminal (transcript row) ===
 out
-released before exit
+exit status unavailable
 
 === silent signal termination (transcript row) ===
 killed by SIGTERM

@@ -12,6 +12,27 @@ pub(super) enum SessionRelays {
     Direct,
 }
 
+/// Reads the host's slopcop login. The daemon reads its own environment and
+/// slopcop's configuration; tests pass their own reader, so a test never reads
+/// the developer's login.
+pub(super) type SlopcopLoginSource = fn() -> Result<Option<mj_core::slopcop::SlopcopLogin>>;
+
+/// What one reconciliation knows about the host's slopcop login.
+#[derive(Debug, Clone)]
+pub(super) enum HostSlopcopLogin {
+    /// It could not be read. Session copies stay as they are, because an
+    /// unreadable login is not a signed-out one.
+    Unknown,
+    SignedOut,
+    SignedIn(mj_core::slopcop::SlopcopLogin),
+}
+
+/// A test reader: the host's login is never known, so no session copy changes.
+#[cfg(test)]
+pub(super) fn unknown_slopcop_login() -> Result<Option<mj_core::slopcop::SlopcopLogin>> {
+    bail!("tests do not read the host's slopcop login")
+}
+
 pub struct CredentialSyncCoordinator {
     pub(super) handle: CredentialSyncHandle,
     pub(super) results: mpsc::UnboundedReceiver<CredentialSyncResult>,
@@ -20,7 +41,7 @@ pub struct CredentialSyncCoordinator {
 impl CredentialSyncCoordinator {
     #[cfg(test)]
     pub fn spawn() -> Self {
-        Self::spawn_inner(SessionRelays::Direct, None, None)
+        Self::spawn_inner(SessionRelays::Direct, None, None, unknown_slopcop_login)
     }
 
     pub fn spawn_guarded(
@@ -28,13 +49,19 @@ impl CredentialSyncCoordinator {
         gate: Arc<crate::recovery_gate::RecoveryGate>,
         runtime: Arc<crate::daemon::RuntimeState>,
     ) -> Self {
-        Self::spawn_inner(SessionRelays::Actors(manager), Some(gate), Some(runtime))
+        Self::spawn_inner(
+            SessionRelays::Actors(manager),
+            Some(gate),
+            Some(runtime),
+            mj_core::slopcop::host_login,
+        )
     }
 
     fn spawn_inner(
         relays: SessionRelays,
         gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
         runtime: Option<Arc<crate::daemon::RuntimeState>>,
+        slopcop_login: SlopcopLoginSource,
     ) -> Self {
         let targets_tx = runtime
             .as_ref()
@@ -157,6 +184,7 @@ impl CredentialSyncCoordinator {
                                 triggered_by.as_deref(),
                                 gate.as_ref(),
                                 runtime.as_ref(),
+                                slopcop_login,
                             )
                             .await
                         })
@@ -218,7 +246,15 @@ pub(super) async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
 ) -> Vec<CredentialSyncOutcome> {
-    reconcile_profile_guarded(&SessionRelays::Direct, targets, triggered_by, None, None).await
+    reconcile_profile_guarded(
+        &SessionRelays::Direct,
+        targets,
+        triggered_by,
+        None,
+        None,
+        unknown_slopcop_login,
+    )
+    .await
 }
 
 /// Reconcile one profile with every live session that runs it.
@@ -238,9 +274,49 @@ pub(super) async fn reconcile_profile_guarded(
     triggered_by: Option<&str>,
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
     runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    slopcop_login: SlopcopLoginSource,
 ) -> Vec<CredentialSyncOutcome> {
     let Some(first) = targets.first().cloned() else {
         return Vec::new();
+    };
+    // Read once per pass, and only when a session needs a copy: a raw
+    // localhost session reads the host's own login.
+    let slopcop_login = if targets.iter().any(syncs_slopcop_login) {
+        match tokio::task::spawn_blocking(slopcop_login)
+            .await
+            .context("slopcop login task stopped")
+            .and_then(|result| result)
+        {
+            Ok(Some(login)) => HostSlopcopLogin::SignedIn(login),
+            Ok(None) => HostSlopcopLogin::SignedOut,
+            Err(error) => {
+                tracing::warn!(
+                    profile_id = %first.profile_id,
+                    "could not read the host's slopcop login; session copies stay as they are: {error:#}"
+                );
+                HostSlopcopLogin::Unknown
+            }
+        }
+    } else {
+        HostSlopcopLogin::Unknown
+    };
+    let aws_credentials = match targets
+        .iter()
+        .find_map(|target| target.aws_credentials.clone())
+    {
+        Some(source) => {
+            let exported = tokio::task::spawn_blocking(move || {
+                crate::aws_credentials::export(
+                    &source,
+                    &crate::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
+                )
+            })
+            .await
+            .context("AWS credential export task stopped")
+            .and_then(|result| result);
+            exported.map(Some)
+        }
+        None => Ok(None),
     };
     // Targets share a profile but can differ in host CLI access. Collect off
     // scheduler threads once per wire format, then derive both scoped trees.
@@ -255,6 +331,23 @@ pub(super) async fn reconcile_profile_guarded(
     for pass in 0..2 {
         let mut pulled = false;
         for target in targets {
+            let aws_credentials = if target.aws_credentials.is_some() {
+                match &aws_credentials {
+                    Ok(credentials) => credentials.as_ref(),
+                    Err(error) => {
+                        outcomes.insert(
+                            target.session_id.clone(),
+                            CredentialSyncOutcome {
+                                session_id: target.session_id.clone(),
+                                outcome: Err(format!("{error:#}")),
+                            },
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let result = match gate {
                 Some(gate) => gate
                     .run_background(&target.session_id, async {
@@ -284,13 +377,21 @@ pub(super) async fn reconcile_profile_guarded(
                         let github_token = if target.sync_github_token {
                             crate::controller::github_token_for_session(
                                 target.session_id.clone(),
-                                target.github_app_configured,
+                                target.github.clone(),
                             )
                             .await?
                         } else {
                             None
                         };
-                        reconcile_session(relays, target, &skills, github_token.as_deref()).await
+                        reconcile_session(
+                            relays,
+                            target,
+                            &skills,
+                            github_token.as_deref(),
+                            aws_credentials,
+                            &slopcop_login,
+                        )
+                        .await
                     })
                     .await
                     .unwrap_or_else(|| Ok(None)),
@@ -298,7 +399,7 @@ pub(super) async fn reconcile_profile_guarded(
                     let github_token = if target.sync_github_token {
                         crate::controller::github_token_for_session(
                             target.session_id.clone(),
-                            target.github_app_configured,
+                            target.github.clone(),
                         )
                         .await
                     } else {
@@ -306,8 +407,15 @@ pub(super) async fn reconcile_profile_guarded(
                     };
                     match github_token {
                         Ok(github_token) => {
-                            reconcile_session(relays, target, &skills, github_token.as_deref())
-                                .await
+                            reconcile_session(
+                                relays,
+                                target,
+                                &skills,
+                                github_token.as_deref(),
+                                aws_credentials,
+                                &slopcop_login,
+                            )
+                            .await
                         }
                         Err(error) => Err(error),
                     }
@@ -446,6 +554,8 @@ pub(super) struct SessionCanonical {
     pub(super) credential_bytes: Vec<u8>,
     pub(super) skills: Arc<CanonicalSkills>,
     pub(super) github_token: Option<String>,
+    pub(super) aws_credentials: Option<mj_core::aws_credentials::AwsCredentials>,
+    pub(super) slopcop_login: HostSlopcopLogin,
 }
 
 impl SessionCanonical {
@@ -471,6 +581,8 @@ impl SessionCanonical {
             credential_bytes,
             skills,
             github_token: github_token.map(ToOwned::to_owned),
+            aws_credentials: None,
+            slopcop_login: HostSlopcopLogin::Unknown,
         })
     }
 }
@@ -483,8 +595,12 @@ pub(super) async fn reconcile_session(
     target: &CredentialSyncTarget,
     skills: &Arc<CanonicalSkills>,
     github_token: Option<&str>,
+    aws_credentials: Option<&mj_core::aws_credentials::AwsCredentials>,
+    slopcop_login: &HostSlopcopLogin,
 ) -> Result<Option<Vec<CredentialSyncAction>>> {
-    let canonical = SessionCanonical::read(target, skills.clone(), github_token)?;
+    let mut canonical = SessionCanonical::read(target, skills.clone(), github_token)?;
+    canonical.aws_credentials = aws_credentials.cloned();
+    canonical.slopcop_login = slopcop_login.clone();
     match relays {
         SessionRelays::Actors(manager) => {
             let Some(handle) = manager.find_session(target.session_id.clone()).await? else {
@@ -539,19 +655,38 @@ pub(super) async fn reconcile_on(
     target: &CredentialSyncTarget,
     canonical: &SessionCanonical,
 ) -> Result<Vec<CredentialSyncAction>> {
+    let mut actions = Vec::new();
+    if let Some(credentials) = &canonical.aws_credentials {
+        let expected = mj_core::aws_credentials::snapshot(&credentials.encode()?);
+        if client.aws_credentials_state().await? != expected {
+            let installed = client.install_aws_credentials(credentials).await?;
+            anyhow::ensure!(
+                installed == expected,
+                "session AWS credentials do not match the controller after installation"
+            );
+            actions.push(CredentialSyncAction::Pushed);
+        }
+    }
     let skills = canonical
         .skills
         .for_format(client.skills_archive_format(), target.skills_scope)?;
-    reconcile_connected(
-        client,
-        target,
-        &canonical.credential_path,
-        &canonical.credential,
-        &canonical.credential_bytes,
-        skills,
-        canonical.github_token.as_deref(),
-    )
-    .await
+    actions.extend(
+        reconcile_connected(
+            client,
+            target,
+            &canonical.credential_path,
+            &canonical.credential,
+            &canonical.credential_bytes,
+            skills,
+            canonical.github_token.as_deref(),
+        )
+        .await?,
+    );
+    // Last, so a slopcop failure cannot hold back the harness's own login.
+    if let Some(action) = reconcile_slopcop_login(client, target, &canonical.slopcop_login).await? {
+        actions.push(action);
+    }
+    Ok(actions)
 }
 
 /// One session's reconciliation, run by its actor on the actor's connection.
@@ -745,6 +880,63 @@ pub(super) async fn reconcile_github_token(
                 );
             }
             Ok(Some(CredentialSyncAction::GithubTokenRemoved))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Whether a session gets a copy of the host's slopcop login: only one that
+/// cannot read the host's own, decided by its target's skills scope.
+fn syncs_slopcop_login(target: &CredentialSyncTarget) -> bool {
+    target.skills_scope == mj_core::skills::SkillsScope::Isolated
+}
+
+/// Converge an isolated session's copy of the slopcop login onto the host's.
+/// Sync is the copy's only writer, and it writes only isolated sessions; a
+/// raw localhost session's home is staged without one and reads the host's
+/// own login.
+pub(super) async fn reconcile_slopcop_login(
+    client: &mut RelayClient,
+    target: &CredentialSyncTarget,
+    host: &HostSlopcopLogin,
+) -> Result<Option<CredentialSyncAction>> {
+    let wanted = match host {
+        _ if !syncs_slopcop_login(target) => return Ok(None),
+        HostSlopcopLogin::Unknown => return Ok(None),
+        HostSlopcopLogin::SignedOut => None,
+        HostSlopcopLogin::SignedIn(login) => Some(login),
+    };
+    if !client.supports_slopcop_login_sync() {
+        tracing::debug!(
+            session_id = %target.session_id,
+            protocol = client.protocol_version(),
+            "worker predates slopcop login sync; it gets the login once the current worker replaces it"
+        );
+        return Ok(None);
+    }
+    let session = client.slopcop_login_state().await?;
+    match wanted {
+        Some(login) => {
+            let wanted = login.snapshot();
+            if session == wanted {
+                return Ok(None);
+            }
+            let installed = client.install_slopcop_login(login).await?;
+            anyhow::ensure!(
+                installed == wanted,
+                "session {} slopcop login does not match the host's after install",
+                target.session_id
+            );
+            Ok(Some(CredentialSyncAction::SlopcopLoginPushed))
+        }
+        None if session.present => {
+            let removed = client.remove_slopcop_login().await?;
+            anyhow::ensure!(
+                !removed.present,
+                "session {} kept its slopcop login after removal",
+                target.session_id
+            );
+            Ok(Some(CredentialSyncAction::SlopcopLoginRemoved))
         }
         None => Ok(None),
     }

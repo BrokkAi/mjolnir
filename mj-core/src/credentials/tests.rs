@@ -172,7 +172,12 @@ fn every_harness_reports_expiry_only_where_hel_can_refresh_ahead_of_it() {
             Some(1_756_000_000_000),
             None,
         ),
-        (HarnessKind::Muse, b"{}".to_vec(), None, None),
+        (
+            HarnessKind::Muse,
+            br#"{"schema_version":1,"providers":{"meta":{"access_token":"a","refresh_token":"r","expires_at":1756000000,"mechanism":"oauth"}}}"#.to_vec(),
+            Some(1_756_000_000_000),
+            Some(1_756_000_000_000),
+        ),
         // DSH has no login; a file in its place orders nothing.
         (
             HarnessKind::Dsh,
@@ -457,7 +462,7 @@ fn a_codex_refresh_failure_is_an_auth_failure() {
 
 #[test]
 fn only_harness_observations_request_credential_sync() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         ContentBlock, ContentChunk, SessionUpdate, ToolCall, ToolCallUpdate, ToolCallUpdateFields,
     };
 
@@ -573,8 +578,8 @@ fn a_typed_login_failure_record_asks_for_a_credential_sync() {
             "severity": "error", "title": title, "actions": []}}}});
         event(RelayObservation::SessionUpdate {
             update: Box::new(
-                agent_client_protocol::schema::v1::SessionUpdate::SessionInfoUpdate(
-                    agent_client_protocol::schema::v1::SessionInfoUpdate::new()
+                agent_client_protocol::v1::schema::SessionUpdate::SessionInfoUpdate(
+                    agent_client_protocol::v1::schema::SessionInfoUpdate::new()
                         .meta(meta.as_object().cloned()),
                 ),
             ),
@@ -612,6 +617,7 @@ fn an_api_key_profile_reports_that_it_has_no_interactive_login() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        muse_auto_review: None,
         codex_profile: None,
     };
     let error = login_command(&profile)
@@ -776,6 +782,7 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        muse_auto_review: None,
         codex_profile: None,
     };
     let result = |reason, outcomes: Vec<CredentialSyncOutcome>, failure: Option<&str>| {

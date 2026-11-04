@@ -1,10 +1,11 @@
-//! One owner for BASH_ENV, including the user's original startup hook.
+//! Session shell hooks and safely published executable wrappers.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
+use mj_core::targets::posix_quote;
 
 pub(super) fn configure(path: &Path, environment: &mut BTreeMap<String, String>) -> Result<()> {
     const ORIGINAL: &str = "MJ_ORIGINAL_BASH_ENV";
@@ -54,5 +55,37 @@ fi
     // Bash expands BASH_ENV before opening it. Indirection prevents dollar
     // signs or command substitutions in a directory name from being expanded.
     environment.insert("BASH_ENV".into(), REFERENCE.into());
+    Ok(())
+}
+
+pub(super) fn write_executable(path: &Path, contents: &str) -> Result<()> {
+    let staging = tempfile::tempdir_in(path.parent().context("launcher has no parent")?)?;
+    let temporary = staging.path().join("launcher");
+    // Never open an executable for writing in this multithreaded process.
+    // An unrelated fork can inherit even a CLOEXEC writer until it execs,
+    // making the published launcher fail with ETXTBSY after our own close.
+    // This single-threaded shell uses only builtins, so it cannot pass the
+    // writer to another process. Reaping it ends every writable description
+    // before we publish the inode. Keep the body on stdin, without ARG_MAX.
+    let script = format!(
+        "umask 077\nprintf '%s' {} > \"$1\"\n",
+        posix_quote(contents)
+    );
+    let output = mj_core::subprocess::run_with_input(
+        std::process::Command::new("/bin/sh")
+            .args(["-s", "--"])
+            .arg(&temporary),
+        script.as_bytes(),
+    )
+    .with_context(|| format!("write launcher {}", path.display()))?;
+    ensure!(
+        output.status.success(),
+        "write launcher {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::rename(&temporary, path)
+        .with_context(|| format!("publish launcher {}", path.display()))?;
     Ok(())
 }

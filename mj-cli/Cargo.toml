@@ -26,8 +26,10 @@ mj-client.workspace = true
 mj-controller.workspace = true
 mj-chat.workspace = true
 mj-tui.workspace = true
-agent-client-protocol.workspace = true
+# `mj acp` serves the protocol on its own standard input and output.
+agent-client-protocol = { workspace = true, features = ["stdio"] }
 anyhow.workspace = true
+getrandom.workspace = true
 # Encodes the PowerShell script that posts Windows desktop notifications.
 base64.workspace = true
 chrono.workspace = true
@@ -38,10 +40,13 @@ futures = "0.3"
 libc.workspace = true
 ratatui.workspace = true
 reqwest = { workspace = true, features = ["json", "query"] }
+url.workspace = true
 # The API client pins the certificate the daemon publishes for its viewer.
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Names the daemon container after its specification.
+sha2.workspace = true
 sysinfo.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tokio-stream.workspace = true
@@ -54,6 +59,8 @@ tracing-subscriber.workspace = true
 windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
 
 [dev-dependencies]
+# The ACP adapter test launches `mj acp` as an agent subprocess.
+agent-client-protocol = { workspace = true, features = ["process"] }
 mj-core = { workspace = true, features = ["test-hooks", "golden"] }
 # The API client test answers itself from a canned in-process router.
 axum.workspace = true

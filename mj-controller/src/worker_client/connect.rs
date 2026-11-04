@@ -113,7 +113,13 @@ impl RelayClient {
         request_timeout: Duration,
         handshake_timeout: Duration,
     ) -> std::result::Result<Self, ConnectFailure> {
-        let Some(destination) = spec.ssh_destination.clone() else {
+        let Some(destination) = spec
+            .ssh_destination
+            .clone()
+            // SSH runs on the node, which leases the session and the
+            // admission slot itself, beside the connection it shares.
+            .filter(|_| mj_core::targets::command_host(spec).is_none())
+        else {
             return Self::spawn_and_handshake(
                 spec,
                 expected_session_id,
@@ -168,31 +174,24 @@ impl RelayClient {
         permit: Option<SshPermit>,
         ssh_session: Option<SshSessionLease>,
     ) -> std::result::Result<Self, ConnectFailure> {
-        let mut child = Command::new(&spec.program)
-            .args(&spec.args)
-            .envs(&spec.env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            // Never inherit: the controller owns a TUI alternate screen, so a
-            // child writing to the shared stderr corrupts the display outside
-            // the renderer's buffer. Drain it into the log instead.
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("start session relay proxy for {}", spec.purpose))
-            .map_err(|error| {
-                tracing::warn!(
-                    session_id = %expected_session_id,
-                    operation = "connect",
-                    purpose = %spec.purpose,
-                    error = %error,
-                    "could not start relay proxy"
-                );
-                error
-            })?;
+        let proxy::ProxyStdio {
+            child,
+            stdin: input,
+            stdout: output,
+            stderr: errors,
+        } = proxy::spawn_proxy(spec).await.map_err(|error| {
+            tracing::warn!(
+                session_id = %expected_session_id,
+                operation = "connect",
+                purpose = %spec.purpose,
+                error = %format!("{error:#}"),
+                "could not start relay proxy"
+            );
+            error
+        })?;
         let stderr_tail: ProxyStderrTail = Default::default();
         let handshake_done = Arc::new(AtomicBool::new(false));
-        let draining = child.stderr.take().map(|errors| {
+        let draining = Some({
             let purpose = spec.purpose.clone();
             let session_id = expected_session_id.to_owned();
             let tail = stderr_tail.clone();
@@ -205,34 +204,6 @@ impl RelayClient {
                 handshake_done,
             ))
         });
-        let input = child
-            .stdin
-            .take()
-            .context("relay proxy stdin unavailable")
-            .map_err(|error| {
-                tracing::warn!(
-                    session_id = %expected_session_id,
-                    operation = "connect",
-                    purpose = %spec.purpose,
-                    error = %error,
-                    "relay proxy did not provide stdin"
-                );
-                error
-            })?;
-        let output = child
-            .stdout
-            .take()
-            .context("relay proxy stdout unavailable")
-            .map_err(|error| {
-                tracing::warn!(
-                    session_id = %expected_session_id,
-                    operation = "connect",
-                    purpose = %spec.purpose,
-                    error = %error,
-                    "relay proxy did not provide stdout"
-                );
-                error
-            })?;
         let mut nonce_bytes = [0_u8; 8];
         getrandom::fill(&mut nonce_bytes).map_err(|error| {
             let error = anyhow!("generate relay request nonce: {error}");
@@ -263,6 +234,7 @@ impl RelayClient {
             latest_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
             subagent_acknowledged: None,
             subagent_queue: BTreeMap::new(),
+            subagent_publication: None,
             ssh_session,
         };
         match client
@@ -301,7 +273,9 @@ impl RelayClient {
                 };
                 let tail = Self::proxy_stderr_tail(draining, &stderr_tail).await;
                 let stderr = tail.join("\n");
-                let refusal = permit
+                // Only an SSH launch can be turned away by the transport.
+                let refusal = spec
+                    .ssh_destination
                     .as_ref()
                     .and(status)
                     .and_then(|status| ssh_refusal(status, &stderr));

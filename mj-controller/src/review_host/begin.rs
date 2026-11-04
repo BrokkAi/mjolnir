@@ -24,7 +24,14 @@ impl HostState {
         let parents: Vec<_> = self
             .reviews
             .iter()
-            .filter(|(_, slot)| slot.state.child_session_id.as_deref() == Some(&session_id))
+            .filter(|(_, slot)| {
+                slot.state.active_group.as_ref().is_some_and(|group| {
+                    group
+                        .registrations
+                        .iter()
+                        .any(|item| item.child_session_id.as_deref() == Some(&session_id))
+                })
+            })
             .map(|(parent, _)| parent.clone())
             .collect();
         for parent in parents {
@@ -44,6 +51,14 @@ impl HostState {
                 && matches!(watch.execution, MaterializedExecutionState::Running { .. })
         }) && matches!(execution, MaterializedExecutionState::Idle);
         if !finished_turn || !(self.config)(&session_id).arms_turn_review() {
+            return;
+        }
+        if !self.startup_ready {
+            self.deferred_admissions.push(HostEvent::Start {
+                session_id,
+                manual: false,
+                reply: None,
+            });
             return;
         }
         self.begin(session_id, false, None);
@@ -68,7 +83,7 @@ impl HostState {
             answer(reply, Err(refusal));
             return;
         }
-        if self.preparing.contains(&session_id) {
+        if self.preparing.contains_key(&session_id) {
             answer(
                 reply,
                 Err(StartRefusal("a review is already starting".to_owned())),
@@ -85,9 +100,12 @@ impl HostState {
         // `prepare` reads the actor view; every later prompt sees this hold.
         hold_prompts(&session_id);
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.preparation_cancellation
-            .insert(session_id.clone(), cancelled.clone());
-        self.preparing.insert(session_id.clone());
+        self.preparing.insert(
+            session_id.clone(),
+            PreparingOperation::Review {
+                cancelled: cancelled.clone(),
+            },
+        );
         self.publish(&session_id);
         tokio::spawn(async move {
             let prepared =
@@ -104,6 +122,7 @@ impl HostState {
     pub(super) fn begin_push(
         &mut self,
         session_id: String,
+        path: Option<String>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     ) {
         let refusal = if !(self.config)(&session_id).is_push() {
@@ -111,7 +130,7 @@ impl HostState {
         } else if crate::controller::move_session::move_owns_session(&session_id) {
             Some("session is moving")
         } else if self.reviews.contains_key(&session_id)
-            || self.preparing.contains(&session_id)
+            || self.preparing.contains_key(&session_id)
             || self.recovery_candidates.contains(&session_id)
             || self.recovery_in_flight.contains(&session_id)
         {
@@ -128,9 +147,12 @@ impl HostState {
         let environment = self.environment.clone();
         let events = self.events.clone();
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.preparation_cancellation
-            .insert(session_id.clone(), cancelled.clone());
-        self.preparing.insert(session_id.clone());
+        self.preparing.insert(
+            session_id.clone(),
+            PreparingOperation::Review {
+                cancelled: cancelled.clone(),
+            },
+        );
         self.publish(&session_id);
         tokio::spawn(async move {
             let prepared = tokio::time::timeout(
@@ -142,6 +164,7 @@ impl HostState {
                     config,
                     cancelled.clone(),
                     mj_core::relay::CaptureScope::PushableCommits,
+                    path.map(|path| vec![std::path::PathBuf::from(path)]),
                 ),
             )
             .await;
@@ -189,7 +212,7 @@ impl HostState {
         if !self.recovery_candidates.contains(session_id)
             || self.recovery_in_flight.contains(session_id)
             || self.reviews.contains_key(session_id)
-            || self.preparing.contains(session_id)
+            || self.preparing.contains_key(session_id)
         {
             return;
         }
@@ -227,7 +250,12 @@ impl HostState {
         match prepared {
             Ok(Some(prepared)) => {
                 self.recovery_candidates.remove(&session_id);
-                self.preparing.insert(session_id.clone());
+                self.preparing.insert(
+                    session_id.clone(),
+                    PreparingOperation::Review {
+                        cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    },
+                );
                 self.prepared(session_id, false, None, Ok(prepared));
             }
             Ok(None) => {
@@ -252,13 +280,16 @@ impl HostState {
         if let Some(slot) = self.reviews.get(session_id) {
             // Name what the open review waits for when it waits on a person,
             // since that is what lets the next one start.
-            let question = slot
-                .state
-                .child_session_id
-                .as_ref()
-                .and_then(|child| self.sessions.get(child))
-                .and_then(|watch| watch.materialized.as_ref())
-                .and_then(|session| session.pending_elicitations.first());
+            let question = slot.state.active_group.as_ref().and_then(|group| {
+                group
+                    .registrations
+                    .iter()
+                    .filter_map(|item| item.child_session_id.as_ref())
+                    .filter_map(|child| self.sessions.get(child))
+                    .filter_map(|watch| watch.materialized.as_ref())
+                    .flat_map(|session| session.pending_elicitations.iter())
+                    .next()
+            });
             return Some(StartRefusal(match question {
                 Some(question) => format!(
                     "the previous review is waiting for your answer to a question ({}); \

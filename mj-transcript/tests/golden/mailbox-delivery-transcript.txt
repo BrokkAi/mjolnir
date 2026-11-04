@@ -44,3 +44,6 @@ The second item arrives in the same acknowledgment.
 22: Mailbox events:
   - Review comment on your PR #4623 by gina: A late review note arrives mid-turn.
 24: Responding after delivery.
+26: Not shown because you were away: Claude Code requests permission: touch afk-created.txt
+27: Mailbox events:
+  - Told the agent you are back

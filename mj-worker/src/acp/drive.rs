@@ -78,10 +78,9 @@ where
     let permission_tool_content = tool_content;
     let notification_goal = spec.goal_recovery.clone();
     let notification_harness = spec.harness;
+    let notification_policy = spec.execution_policy;
     let claude_sdk_events = events.clone();
     let claude_sdk_harness = spec.harness;
-    let claude_result_count = ClaudeResultCount::default();
-    let claude_sdk_result_count = claude_result_count.clone();
     let permission_events = events.clone();
     let permission_parent_context = spec.turn_context.clone();
     let permission_activity = spec.acp_activity.clone();
@@ -94,7 +93,7 @@ where
     let ext_step_clock = spec.step_clock.clone();
     let ext_harness = spec.harness;
     let elicitation_events = events.clone();
-    let pending_elicitations = PendingElicitations::default();
+    let pending_elicitations = spec.operator_away.pending_for_bridge();
     let handler_elicitations = pending_elicitations.clone();
     let permission_elicitations = pending_elicitations.clone();
     let permission_review_ids = Arc::new(AtomicU64::new(1));
@@ -151,10 +150,32 @@ where
     let release_parent_router = native_agents.clone();
     let ext_parent_router = native_agents.clone();
     Client
-        .builder()
+        .v1()
         .on_receive_notification(
             async move |notification: RawSessionNotification, _cx| {
                 notification_activity.mark();
+                if matches!(notification_harness, HarnessKind::Claude | HarnessKind::Codex) {
+                    match air_task_update(&notification.update) {
+                        Ok(Some(update)) => {
+                            if let Some(mut update) = update {
+                                if let AirTaskUpdate::TurnSpawned { replayed, .. } = &mut update {
+                                    *replayed = !notification_live_history_enabled.load(Ordering::Acquire);
+                                }
+                                notification_events.send(RuntimeEvent::AirTaskChanged {
+                                    session_id: notification.session_id.to_string(), update,
+                                }).await.map_err(|_| relay_event_channel_error())?;
+                            }
+                            return Ok(());
+                        }
+                        Ok(None) => {}
+                        Err(message) => {
+                            notification_events.send(RuntimeEvent::Warning {
+                                message: format!("ignored malformed AIR async task update: {message}"),
+                            }).await.map_err(|_| relay_event_channel_error())?;
+                            return Ok(());
+                        }
+                    }
+                }
                 if matches!(notification_harness, HarnessKind::Claude | HarnessKind::Codex) {
                     let routed = native_agents.lock().expect("native agent router poisoned")
                         .route(&notification.session_id.to_string(), &notification.update);
@@ -164,44 +185,11 @@ where
                                 .map_err(|_| relay_event_channel_error())?;
                             return Ok(());
                         }
-                        Ok(native_agents::Routed::Ignored) => return Ok(()),
                         Ok(native_agents::Routed::Parent) => {}
                         Err(error) => {
                             notification_events.send(RuntimeEvent::Warning {
                                 message: format!("native agent update: {error:#}"),
                             }).await.map_err(|_| relay_event_channel_error())?;
-                            return Ok(());
-                        }
-                    }
-                }
-                if notification_harness == HarnessKind::Claude {
-                    match claude_async_task_control_update(&notification.update) {
-                        Ok(Some(ClaudeAsyncTaskControlUpdate::Set {
-                            task_id,
-                            can_stop,
-                            settled,
-                        })) => {
-                            notification_events
-                                .send(RuntimeEvent::ClaudeAsyncTaskControlChanged {
-                                    task_id,
-                                    can_stop,
-                                    settled,
-                                })
-                                .await
-                                .map_err(|_| relay_event_channel_error())?;
-                            return Ok(());
-                        }
-                        Ok(Some(ClaudeAsyncTaskControlUpdate::Ignore)) => return Ok(()),
-                        Ok(None) => {}
-                        Err(message) => {
-                            notification_events
-                                .send(RuntimeEvent::Warning {
-                                    message: format!(
-                                        "ignored malformed Claude async task update: {message}"
-                                    ),
-                                })
-                                .await
-                                .map_err(|_| relay_event_channel_error())?;
                             return Ok(());
                         }
                     }
@@ -220,7 +208,7 @@ where
                         "coerced an out-of-spec ACP tool status to failed"
                     );
                 }
-                let update = match serde_json::from_value::<SessionUpdate>(raw_update.clone()) {
+                let mut update = match serde_json::from_value::<SessionUpdate>(raw_update.clone()) {
                     Ok(update) => update,
                     Err(error) => match salvage_tool_call_update(&raw_update) {
                         Some(update) => {
@@ -239,10 +227,15 @@ where
                         }
                     },
                 };
-                if !notification_live_history_enabled.load(Ordering::Acquire)
-                    && !session_update_is_session_state(&update) {
-                    return Ok(());
+                if !notification_live_history_enabled.load(Ordering::Acquire) {
+                    if !session_update_is_session_state(&update) {
+                        return Ok(());
+                    }
+                    // Session state can carry historical failures alongside
+                    // current metadata. Do not timestamp those as new errors.
+                    remove_session_failure(&mut update);
                 }
+                suppress_codex_sandbox_warning(notification_harness, notification_policy, &mut update);
                 notification_goal.lock().expect("goal lock poisoned").state.apply(&update)
                     .map_err(|e| agent_client_protocol::Error::invalid_params().data(serde_json::json!(e.to_string())))?;
                 notification_step_clock.observe(&update);
@@ -286,8 +279,7 @@ where
                 // coordinator records everything the adapter sent before the
                 // result ahead of it.
                 match ClaudeTurnResult::from_sdk_message(&notification.message) {
-                    Ok(Some(mut result)) => {
-                        result.received = claude_sdk_result_count.stamp();
+                    Ok(Some(result)) => {
                         // A result ends a model cycle, and Claude Code has
                         // written that cycle to the session's transcript.
                         // Report the transition once, so the worker can
@@ -315,28 +307,6 @@ where
                         return Ok(());
                     }
                 }
-                let tasks = match claude_background_tasks(&notification.message) {
-                    Ok(Some(tasks)) => tasks,
-                    Ok(None) => return Ok(()),
-                    Err(error) => {
-                        claude_sdk_events
-                            .send(RuntimeEvent::Warning {
-                                message: format!(
-                                    "ignored malformed Claude background task level: {error}"
-                                ),
-                            })
-                            .await
-                            .map_err(|_| relay_event_channel_error())?;
-                        // A malformed level cannot establish which provider
-                        // tasks are still live, so keep the last known level
-                        // until a valid replacement arrives.
-                        return Ok(());
-                    }
-                };
-                claude_sdk_events
-                    .send(RuntimeEvent::ClaudeBackgroundTasksChanged { tasks })
-                    .await
-                    .map_err(|_| relay_event_channel_error())?;
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -408,6 +378,21 @@ where
                     );
                     return responder.respond(response);
                 }
+                if !plan_permission && !claude_plan_approval
+                    && let Some(response) = gh_permission_response(
+                        &request,
+                        permission_tool_input(&request.tool_call, &permission_tool_content).as_ref(),
+                    )
+                {
+                    tracing::debug!(
+                        harness = %permission_harness.display_name(),
+                        session_id = %request.session_id,
+                        tool_call_id = %request.tool_call.tool_call_id,
+                        selected_option = ?response.outcome,
+                        "automatically approved a gh invocation"
+                    );
+                    return responder.respond(response);
+                }
                 // Preserve Muse's Guardian forms; YOLO plans use plan review.
                 let prefer_form_over_plan_review = permission_harness == HarnessKind::Muse
                     && !permission_policy.is_unconstrained();
@@ -428,11 +413,7 @@ where
                     let approved_plan = plan_review_proposal(&review).unwrap_or_default().to_owned();
                     let implementation = permission_implementation_slot
                         .lock().expect("plan implementation lock poisoned").clone();
-                    let (answer, answer_rx) = oneshot::channel();
-                    permission_elicitations
-                        .lock()
-                        .expect("pending elicitation lock poisoned")
-                        .insert(id.clone(), PendingElicitation { question: review.clone(), answer });
+                    let answer_rx = permission_elicitations.register(review.clone(), String::new(), AwayRequest::Plan);
                     let pending = permission_elicitations.clone();
                     let events = permission_events.clone();
                     let cancellation = responder.cancellation();
@@ -442,10 +423,7 @@ where
                             .await
                             .is_err()
                         {
-                            pending
-                                .lock()
-                                .expect("pending elicitation lock poisoned")
-                                .remove(&id);
+                            pending.remove(&id);
                             if let Err(error) =
                                 responder.respond_with_error(relay_event_channel_error())
                             {
@@ -463,13 +441,13 @@ where
                         ).await;
                         let action = response
                             .as_ref()
-                            .map_or("cancel", ElicitationResponse::action_name)
+                            .map_or("cancel", PendingAnswer::action_name)
                             .to_owned();
                         if let Err(error) = events
                             .send(RuntimeEvent::ElicitationResolved {
                                 elicitation_id: id.clone(),
                                 action,
-                                reply: response.as_ref().map(|response| review.reply_text(response)),
+                                reply: response.as_ref().and_then(PendingAnswer::human).map(|response| review.reply_text(response)),
                             })
                             .await
                         {
@@ -484,7 +462,7 @@ where
                         let mut handoff_completion = None;
                         let selection = response.map_or_else(
                             || Ok(PlanPermissionAnswer::Native(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled))),
-                            |response| policy_plan_permission_answer(&request, response, permission_harness, permission_policy),
+                            |response| policy_plan_permission_answer(&request, response.harness_response(), permission_harness, permission_policy),
                         ).and_then(|selection| match selection {
                             PlanPermissionAnswer::Native(answer) => Ok(answer),
                             PlanPermissionAnswer::ContinueInBypass => {
@@ -586,9 +564,12 @@ where
                     record_delegated_question(&permission_events, form).await?;
                     return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
                 }
-                let (answer, answer_rx) = oneshot::channel();
-                permission_elicitations.lock().expect("pending elicitation lock poisoned")
-                    .insert(id.clone(), PendingElicitation { question: form.clone(), answer });
+                let identity = if plan_permission || claude_plan_approval {
+                    AwayRequest::Plan
+                } else {
+                    away_permission_identity(&request, permission_tool_input(&request.tool_call, &permission_tool_content))
+                };
+                let answer_rx = permission_elicitations.register(form.clone(), if native_child { request.session_id.to_string() } else { String::new() }, identity);
                 let pending = permission_elicitations.clone();
                 let events = permission_events.clone();
                 let cancellation = responder.cancellation();
@@ -596,7 +577,7 @@ where
                     let response = if events.send(RuntimeEvent::ElicitationRequested { request: form.clone() }).await.is_ok() {
                         await_elicitation_response(&pending, &id, answer_rx, cancellation.cancelled()).await
                     } else {
-                        pending.lock().expect("pending elicitation lock poisoned").remove(&id);
+                        pending.remove(&id);
                         None
                     };
                     // ACP keeps `cancelled` for a cancelled turn. Skip is a
@@ -606,24 +587,27 @@ where
                     // turn is running.
                     let selected = match &response {
                         _ if cancellation.is_cancelled() => None,
-                        Some(ElicitationResponse::Accept { content }) => match content.get("choice") {
+                        Some(PendingAnswer::Human(ElicitationResponse::Accept { content })) => match content.get("choice") {
                             Some(ElicitationValue::String(value)) => choices.iter()
                                 .find(|choice| choice.option_id.to_string() == *value)
                                 .map(|choice| choice.option_id.clone()),
                             _ => None,
                         },
-                        Some(ElicitationResponse::Decline) => skip,
-                        Some(ElicitationResponse::Cancel) | None => None,
+                        Some(PendingAnswer::Human(ElicitationResponse::Decline) | PendingAnswer::OperatorAway) => skip,
+                        Some(PendingAnswer::Human(ElicitationResponse::Cancel)) | None => None,
                     };
                     let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |option_id|
                         RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)));
-                    if let Err(error) = responder.respond(RequestPermissionResponse::new(outcome)) {
+                    let answer = if matches!(response, Some(PendingAnswer::OperatorAway)) && (plan_permission || claude_plan_approval) {
+                        permission_plan_response(&request, ElicitationResponse::Decline)
+                    } else { RequestPermissionResponse::new(outcome) };
+                    if let Err(error) = responder.respond(answer) {
                         tracing::debug!(%error, "harness permission responder closed");
                     }
                     if let Err(error) = events.send(RuntimeEvent::ElicitationResolved {
                         elicitation_id: id,
-                        action: response.as_ref().map_or("cancel", ElicitationResponse::action_name).into(),
-                        reply: response.as_ref().map(|response| form.reply_text(response)),
+                        action: response.as_ref().map_or("cancel", PendingAnswer::action_name).into(),
+                        reply: response.as_ref().and_then(PendingAnswer::human).map(|response| form.reply_text(response)),
                     }).await {
                         tracing::debug!(%error, "harness permission result receiver closed");
                     }
@@ -822,6 +806,7 @@ where
                             );
                         }
                     };
+                    let requesting_agent = child.clone().unwrap_or_default();
                     if let Some(child) = child {
                         request.message = format!("Native agent {child}: {}", request.message);
                     }
@@ -829,11 +814,7 @@ where
                         record_delegated_question(&elicitation_events, request).await?;
                         return responder.respond(serde_json::json!({"action":"cancel"}));
                     }
-                    let (answer, answer_rx) = oneshot::channel();
-                    handler_elicitations
-                        .lock()
-                        .expect("pending elicitation lock poisoned")
-                        .insert(id.clone(), PendingElicitation { question: request.clone(), answer });
+                    let answer_rx = handler_elicitations.register(request.clone(), requesting_agent, AwayRequest::Question);
                     let pending = handler_elicitations.clone();
                     let events = elicitation_events.clone();
                     let cancellation = responder.cancellation();
@@ -843,10 +824,7 @@ where
                             .await
                             .is_err()
                         {
-                            pending
-                                .lock()
-                                .expect("pending elicitation lock poisoned")
-                                .remove(&id);
+                            pending.remove(&id);
                             if let Err(error) =
                                 responder.respond_with_error(relay_event_channel_error())
                             {
@@ -864,13 +842,13 @@ where
                         ).await;
                         let action = response
                             .as_ref()
-                            .map_or("cancel", ElicitationResponse::action_name)
+                            .map_or("cancel", PendingAnswer::action_name)
                             .to_owned();
                         if let Err(error) = events
                             .send(RuntimeEvent::ElicitationResolved {
                                 elicitation_id: id.clone(),
                                 action,
-                                reply: response.as_ref().map(|response| request.reply_text(response)),
+                                reply: response.as_ref().and_then(PendingAnswer::human).map(|response| request.reply_text(response)),
                             })
                             .await
                         {
@@ -882,7 +860,7 @@ where
                             );
                         }
                         match response {
-                            Some(response) => match serde_json::to_value(response) {
+                            Some(response) => match serde_json::to_value(response.harness_response()) {
                                 Ok(response) => {
                                     if let Err(error) = responder.respond(response) {
                                         tracing::debug!(
@@ -933,11 +911,11 @@ where
                         record_delegated_question(&ext_events, review).await?;
                         return responder.respond(serde_json::json!({"outcome":"cancelled"}));
                     }
-                    let (answer, answer_rx) = oneshot::channel();
-                    handler_elicitations
-                        .lock()
-                        .expect("pending elicitation lock poisoned")
-                        .insert(id.clone(), PendingElicitation { question: review.clone(), answer });
+                    let requesting_agent = request.params().get("sessionId")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|id| ext_parent_router.lock().expect("native agent router poisoned").is_child(id))
+                        .unwrap_or_default().to_owned();
+                    let answer_rx = handler_elicitations.register(review.clone(), requesting_agent, AwayRequest::Plan);
                     let pending = handler_elicitations.clone();
                     let events = ext_events.clone();
                     let cancellation = responder.cancellation();
@@ -947,10 +925,7 @@ where
                             .await
                             .is_err()
                         {
-                            pending
-                                .lock()
-                                .expect("pending elicitation lock poisoned")
-                                .remove(&id);
+                            pending.remove(&id);
                             if let Err(error) =
                                 responder.respond_with_error(relay_event_channel_error())
                             {
@@ -968,13 +943,13 @@ where
                         ).await;
                         let action = response
                             .as_ref()
-                            .map_or("cancel", ElicitationResponse::action_name)
+                            .map_or("cancel", PendingAnswer::action_name)
                             .to_owned();
                         if let Err(error) = events
                             .send(RuntimeEvent::ElicitationResolved {
                                 elicitation_id: id.clone(),
                                 action,
-                                reply: response.as_ref().map(|response| review.reply_text(response)),
+                                reply: response.as_ref().and_then(PendingAnswer::human).map(|response| review.reply_text(response)),
                             })
                             .await
                         {
@@ -987,7 +962,7 @@ where
                         }
                         if let Err(error) = responder.respond(response.map_or_else(
                             || serde_json::json!({ "outcome": "cancelled" }),
-                            grok::plan_response,
+                            |response| grok::plan_response(response.harness_response()),
                         )) {
                             tracing::debug!(
                                 %id,
@@ -1024,7 +999,6 @@ where
                 opened,
                 agent_output_count,
                 last_agent_message,
-                claude_result_count,
                 live_history_enabled,
                 resume_required,
                 native_session_used,
@@ -1082,8 +1056,8 @@ impl ToolCallContentInput {
         if matches!(
             status,
             Some(
-                agent_client_protocol::schema::v1::ToolCallStatus::Completed
-                    | agent_client_protocol::schema::v1::ToolCallStatus::Failed
+                agent_client_protocol::v1::schema::ToolCallStatus::Completed
+                    | agent_client_protocol::v1::schema::ToolCallStatus::Failed
             )
         ) {
             texts.remove(&id);
@@ -1105,10 +1079,10 @@ impl ToolCallContentInput {
 }
 
 fn single_text_content(
-    content: &[agent_client_protocol::schema::v1::ToolCallContent],
+    content: &[agent_client_protocol::v1::schema::ToolCallContent],
 ) -> Option<&str> {
     match content {
-        [agent_client_protocol::schema::v1::ToolCallContent::Content(block)] => {
+        [agent_client_protocol::v1::schema::ToolCallContent::Content(block)] => {
             match &block.content {
                 ContentBlock::Text(text) => Some(&text.text),
                 _ => None,
@@ -1128,7 +1102,7 @@ fn json_object_text(text: &str) -> Option<serde_json::Value> {
 /// else the JSON its content spells out, in the request itself or streamed
 /// for the same call before it.
 pub(super) fn permission_tool_input(
-    tool_call: &agent_client_protocol::schema::v1::ToolCallUpdate,
+    tool_call: &agent_client_protocol::v1::schema::ToolCallUpdate,
     streamed: &ToolCallContentInput,
 ) -> Option<serde_json::Value> {
     tool_call
@@ -1191,29 +1165,11 @@ pub(super) fn cancel_prompt_turn(
     sent
 }
 
-/// Whether an answer stops the running turn instead of answering its form:
-/// Cancel on a pending tool permission request.
-pub(super) fn answer_cancels_turn(
-    pending: &PendingElicitations,
-    elicitation_id: &str,
-    response: &ElicitationResponse,
-) -> bool {
-    *response == ElicitationResponse::Cancel
-        && elicitation_id.starts_with(TOOL_PERMISSION_ID_PREFIX)
-        && pending
-            .lock()
-            .expect("pending elicitation lock poisoned")
-            .contains_key(elicitation_id)
-}
-
 /// Drops the answer channel of every pending tool permission request. Each
 /// request's task then answers the agent with `cancelled` and reports the
 /// elicitation resolved, which closes its form.
 pub(super) fn withdraw_tool_permissions(pending: &PendingElicitations) {
-    pending
-        .lock()
-        .expect("pending elicitation lock poisoned")
-        .retain(|id, _| !id.starts_with(TOOL_PERMISSION_ID_PREFIX));
+    pending.retain(|id| !id.starts_with(TOOL_PERMISSION_ID_PREFIX));
 }
 
 /// The id prefix of a permission request shown as a form.
@@ -1476,12 +1432,11 @@ fn failed_turn_stop_reason(
 }
 
 /// The stop reason and warning of a turn the bridge answered as an ordinary
-/// end of turn but with a typed failure record (codex-acp does this for every
-/// failed turn once Mjolnir asks for `sessionFailure`; issue 1217). The
+/// end of turn but with a typed failure record (Claude and Codex do this
+/// once Mjolnir asks for `sessionFailure`; issue 1217). The
 /// bridge no longer streams the error as agent text, so the warning line is
 /// the only place the conversation shows it.
 pub(super) fn session_failure_outcome(
-    harness: HarnessKind,
     diagnostic: &mj_core::diagnostic::TurnDiagnostic,
 ) -> (String, String) {
     let label = if diagnostic.is_usage_limit() {
@@ -1490,7 +1445,11 @@ pub(super) fn session_failure_outcome(
         "prompt failed"
     };
     (
-        failed_turn_stop_reason(harness, diagnostic),
+        if diagnostic.is_usage_limit() {
+            mj_core::diagnostic::QUOTA_STOP_REASON.to_owned()
+        } else {
+            PROMPT_ERROR_STOP_REASON.to_owned()
+        },
         format!("{label}: {}", single_spaced(&diagnostic.message)),
     )
 }
@@ -1510,7 +1469,7 @@ pub(super) fn prompt_failure_warning(
     // A usage limit is named as one before anything else: Kimi sends its
     // weekly limit as ACP `auth_required` with a 403 message (R4-7), and the
     // credential marker would both mislabel it and ask for a credential sync.
-    if error.code == agent_client_protocol::ErrorCode::AuthRequired {
+    if error.code == agent_client_protocol::ErrorCode::AUTH_REQUIRED {
         if mj_core::diagnostic::TurnDiagnostic::from_acp(error).is_usage_limit() {
             return format!("prompt failed (usage limit reached): {error}");
         }
@@ -1611,26 +1570,6 @@ impl LastAgentMessage {
     }
 }
 
-/// How many Claude Code SDK results one ACP connection has received.
-///
-/// The notification handler stamps each result with its position, and the
-/// prompt loop reads the count just before it sends `session/prompt`. A result
-/// stamped at or below that count arrived before the prompt was sent, so it
-/// cannot be the prompt's answer however late the coordinator relays it.
-#[derive(Clone, Default)]
-pub(super) struct ClaudeResultCount(Arc<AtomicU64>);
-
-impl ClaudeResultCount {
-    /// Count one more result and return its position, starting at one.
-    pub(super) fn stamp(&self) -> u64 {
-        self.0.fetch_add(1, Ordering::AcqRel) + 1
-    }
-
-    pub(super) fn get(&self) -> u64 {
-        self.0.load(Ordering::Acquire)
-    }
-}
-
 /// What the person is told when the harness ended a turn without answering.
 ///
 /// It leads with the stable marker `mj_core::credentials` matches on, then
@@ -1676,7 +1615,6 @@ pub(super) async fn drive_connection(
     opened: Arc<Mutex<Option<OpenedSession>>>,
     agent_output_count: AgentOutputCount,
     last_agent_message: LastAgentMessage,
-    claude_result_count: ClaudeResultCount,
     live_history_enabled: Arc<AtomicBool>,
     resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
@@ -1697,7 +1635,6 @@ pub(super) async fn drive_connection(
         opened,
         &agent_output_count,
         &last_agent_message,
-        &claude_result_count,
         &live_history_enabled,
         resume_required,
         native_session_used,
@@ -1705,10 +1642,7 @@ pub(super) async fn drive_connection(
         &grok_usage,
     )
     .await;
-    pending_elicitations
-        .lock()
-        .expect("pending elicitation lock poisoned")
-        .clear();
+    pending_elicitations.close();
     terminals.shutdown(events).await;
     result
 }
@@ -1748,7 +1682,7 @@ pub(super) async fn apply_cancel(
 pub(super) const SESSION_STEERING_METHOD: &str = "_session/steering";
 
 pub(super) fn steering_supported_from_meta(
-    meta: Option<&agent_client_protocol::schema::v1::Meta>,
+    meta: Option<&agent_client_protocol::v1::schema::Meta>,
 ) -> bool {
     meta.and_then(|meta| meta.get("steering"))
         .and_then(|steering| steering.get("supported"))
@@ -1845,10 +1779,10 @@ pub(super) async fn settle_steer(
         _ if outcome.as_ref().is_err_and(|error| {
             !matches!(
                 error.code,
-                agent_client_protocol::ErrorCode::InvalidRequest
-                    | agent_client_protocol::ErrorCode::InvalidParams
-                    | agent_client_protocol::ErrorCode::MethodNotFound
-                    | agent_client_protocol::ErrorCode::AuthRequired
+                agent_client_protocol::ErrorCode::INVALID_REQUEST
+                    | agent_client_protocol::ErrorCode::INVALID_PARAMS
+                    | agent_client_protocol::ErrorCode::METHOD_NOT_FOUND
+                    | agent_client_protocol::ErrorCode::AUTH_REQUIRED
             )
         }) || outcome.as_ref().is_ok_and(|v| {
             !matches!(
@@ -1916,46 +1850,6 @@ pub(super) async fn settle_steer_at_turn_end(
     }
 }
 
-/// Keep the harness's `session/prompt` request alive after Mj ends its tracked
-/// turn, and discard the reply when it comes.
-///
-/// Dropping the reply future before the reply arrives makes the ACP crate send
-/// `$/cancel_request`, which can cancel a still-running harness turn. The
-/// connection-scoped task keeps that response tied to its original request, so
-/// it cannot complete a later tracked prompt. The task ends with the connection.
-pub(super) fn detach_prompt_reply(
-    connection: &ConnectionTo<Agent>,
-    reply: ActivePrompt,
-    request_id: String,
-    recorded_stop_reason: String,
-) {
-    let task_request_id = request_id.clone();
-    let spawned = connection.spawn(async move {
-        match reply.await {
-            Ok(response) => tracing::debug!(
-                request_id = %task_request_id,
-                recorded_stop_reason,
-                reply_stop_reason = ?response.stop_reason,
-                "discarded the adapter's reply to a prompt that ended at its result"
-            ),
-            Err(error) => tracing::debug!(
-                request_id = %task_request_id,
-                recorded_stop_reason,
-                %error,
-                "discarded the adapter's failed reply to a prompt that ended at its result"
-            ),
-        }
-        Ok(())
-    });
-    if let Err(error) = spawned {
-        tracing::warn!(
-            %request_id,
-            %error,
-            "could not keep the adapter's prompt reply open; the connection is closing"
-        );
-    }
-}
-
 /// Discard requests left in the channel by the bridge that just restarted. See
 /// the call site in [`serve_session`] for why nothing is reported back.
 pub(super) fn drain_requests_from_the_previous_bridge(
@@ -1978,7 +1872,6 @@ pub(super) fn drain_requests_from_the_previous_bridge(
             CommandRequest::Steer { request_id, .. } => ("Steer", Some(request_id)),
             CommandRequest::Cancel { request_id, .. } => ("Cancel", Some(request_id)),
             CommandRequest::Close { request_id } => ("Close", Some(request_id)),
-            CommandRequest::ReleasePrompt { request_id, .. } => ("ReleasePrompt", Some(request_id)),
             CommandRequest::ResolveElicitation { .. } => ("ResolveElicitation", None),
             CommandRequest::StopBackgroundTask { resolved, .. } => {
                 let _ = resolved.send(Err("ACP bridge restarted before stopping task".into()));
@@ -2006,17 +1899,21 @@ pub(super) fn harness_reports_missing_native_session(
     let Some(existing) = spec.resume_session.as_deref() else {
         return false;
     };
-    mj_core::acp::error_reports_missing_native_session(
-        spec.harness,
-        existing,
-        &format!("{error:#}"),
-    )
+    mj_core::acp::error_reports_missing_native_session(spec.harness, existing, error)
 }
 
 /// The original ACP responder closes the form; no later RPC can cancel a reused id.
 async fn record_delegated_question(
     events: &mpsc::Sender<RuntimeEvent>,
     request: ElicitationRequest,
+) -> std::result::Result<(), agent_client_protocol::Error> {
+    record_refused_question(events, request, "cancel").await
+}
+
+async fn record_refused_question(
+    events: &mpsc::Sender<RuntimeEvent>,
+    request: ElicitationRequest,
+    action: &str,
 ) -> std::result::Result<(), agent_client_protocol::Error> {
     let elicitation_id = request.id.clone();
     events
@@ -2026,7 +1923,7 @@ async fn record_delegated_question(
     events
         .send(RuntimeEvent::ElicitationResolved {
             elicitation_id,
-            action: "cancel".into(),
+            action: action.into(),
             reply: None,
         })
         .await

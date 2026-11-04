@@ -29,6 +29,7 @@ use mj_core::review::driver::{Resolution, RoleState, TurnReviewPhase};
 
 use super::reviewer_pane::ReviewerPane;
 use super::viewport::RowViewport;
+use std::collections::BTreeMap;
 
 /// Which of the review's actions the keyboard is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,8 +95,10 @@ pub(super) struct TurnReview {
     /// The daemon's latest word on this review. Replaced wholesale on every
     /// snapshot, so nothing here can drift from what is actually running.
     pub(super) view: RuntimeReviewView,
-    /// The single reviewer's conversation.
-    pane: ReviewerPane,
+    /// Each child keeps its own transcript rows and scroll position.
+    panes: BTreeMap<String, ReviewerPane>,
+    empty_pane: ReviewerPane,
+    selected_child: Option<String>,
     /// Which review tab is selected. The compact Overview is the first tab
     /// while the review runs; transcripts and a verdict remain tab stops.
     tab: ReviewTab,
@@ -156,6 +159,7 @@ impl TurnReview {
 
     #[must_use]
     pub(super) fn new(view: RuntimeReviewView) -> Self {
+        let selected_child = view.reviewer_children().next().map(str::to_owned);
         Self {
             tab: if view
                 .verdict
@@ -168,7 +172,9 @@ impl TurnReview {
             },
             action: Self::preferred_action(&view),
             view,
-            pane: ReviewerPane::default(),
+            panes: BTreeMap::new(),
+            empty_pane: ReviewerPane::default(),
+            selected_child,
             verdict_viewport: RowViewport::default(),
             verdict_total_rows: 0,
             verdict_viewport_height: 0,
@@ -183,13 +189,18 @@ impl TurnReview {
 
     /// Takes the daemon's newer view of the same review.
     pub(super) fn update(&mut self, view: RuntimeReviewView) -> bool {
-        if self.view.child_session_id != view.child_session_id {
-            self.pane = ReviewerPane::default();
+        self.panes.retain(|child, _| view.owns_reviewer(child));
+        if self
+            .selected_child
+            .as_deref()
+            .is_some_and(|child| !view.owns_reviewer(child))
+        {
+            self.selected_child = None;
         }
         let changed = self.view != view;
         let verdict_changed = self.view.verdict.as_ref().map(|verdict| verdict.kind)
             != view.verdict.as_ref().map(|verdict| verdict.kind);
-        if self.tab == ReviewTab::Transcript && view.roles.is_empty() {
+        if self.tab == ReviewTab::Transcript && view.reviewer_children().next().is_none() {
             self.tab = if view.verdict.is_some() {
                 ReviewTab::Verdict
             } else {
@@ -214,19 +225,41 @@ impl TurnReview {
             self.action = Self::preferred_action(&view);
         }
         self.view = view;
+        if self.selected_child.is_none() {
+            self.selected_child = self.view.reviewer_children().next().map(str::to_owned);
+        }
         changed
     }
 
-    /// The reviewer pane remains available before its transcript arrives.
+    /// The selected reviewer's pane remains available before its transcript arrives.
     pub(super) fn pane(&mut self) -> &mut ReviewerPane {
-        &mut self.pane
+        match self.selected_child.as_ref() {
+            Some(child) => self.panes.entry(child.clone()).or_default(),
+            None => &mut self.empty_pane,
+        }
+    }
+
+    pub(super) fn pane_for(&mut self, child: &str) -> Option<&mut ReviewerPane> {
+        self.view
+            .owns_reviewer(child)
+            .then(|| self.panes.entry(child.to_owned()).or_default())
+    }
+
+    fn transcript_children(&self) -> Vec<String> {
+        self.view.reviewer_children().map(str::to_owned).collect()
+    }
+
+    fn selected_pane(&self) -> Option<&ReviewerPane> {
+        self.selected_child
+            .as_ref()
+            .and_then(|id| self.panes.get(id))
     }
 
     #[must_use]
     pub(super) fn pane_is_empty(&self) -> bool {
         match self.tab {
             ReviewTab::Overview | ReviewTab::Verdict => true,
-            ReviewTab::Transcript => self.pane.is_empty(),
+            ReviewTab::Transcript => self.selected_pane().is_none_or(ReviewerPane::is_empty),
         }
     }
 
@@ -243,18 +276,37 @@ impl TurnReview {
     /// Moves between the overview, the reviewer transcript, and the verdict.
     pub(super) fn cycle_selection(&mut self) -> bool {
         let before_tab = self.tab;
-        let has_reviewer = !self.view.roles.is_empty();
+        let before_child = self.selected_child.clone();
+        let children = self.transcript_children();
         let verdict = self.verdict_text().is_some();
         self.tab = match self.tab {
-            ReviewTab::Overview if has_reviewer => ReviewTab::Transcript,
+            ReviewTab::Overview if !children.is_empty() => {
+                self.selected_child = children.first().cloned();
+                ReviewTab::Transcript
+            }
             ReviewTab::Overview if verdict => ReviewTab::Verdict,
             ReviewTab::Overview => ReviewTab::Overview,
-            ReviewTab::Transcript if verdict => ReviewTab::Verdict,
-            ReviewTab::Transcript => ReviewTab::Overview,
-            ReviewTab::Verdict if has_reviewer => ReviewTab::Transcript,
+            ReviewTab::Transcript => {
+                let next = children
+                    .iter()
+                    .position(|child| Some(child) == self.selected_child.as_ref())
+                    .and_then(|index| children.get(index + 1));
+                if let Some(next) = next {
+                    self.selected_child = Some(next.clone());
+                    ReviewTab::Transcript
+                } else if verdict {
+                    ReviewTab::Verdict
+                } else {
+                    ReviewTab::Overview
+                }
+            }
+            ReviewTab::Verdict if !children.is_empty() => {
+                self.selected_child = children.first().cloned();
+                ReviewTab::Transcript
+            }
             ReviewTab::Verdict => ReviewTab::Overview,
         };
-        before_tab != self.tab
+        before_tab != self.tab || before_child != self.selected_child
     }
 
     /// Forms the reviewer's pending requests with the role that asked, because
@@ -266,21 +318,11 @@ impl TurnReview {
         let TurnReviewPhase::Running { .. } = &self.view.phase else {
             return Vec::new();
         };
-        let Some(role) = self.view.roles.first() else {
-            return Vec::new();
-        };
-        self.pane
-            .pending_elicitations()
+        self.view
+            .questions
             .iter()
-            .map(|request| {
-                (
-                    self.view
-                        .child_session_id
-                        .clone()
-                        .unwrap_or_else(|| role.role.clone()),
-                    request.clone(),
-                )
-            })
+            .filter(|question| self.view.owns_reviewer(&question.role))
+            .map(|question| (question.role.clone(), question.request.clone()))
             .collect()
     }
 
@@ -354,7 +396,7 @@ impl TurnReview {
         } else if self.tab == ReviewTab::Verdict {
             self.scroll_verdict(delta)
         } else if self.tab == ReviewTab::Transcript {
-            self.pane.scroll_by(delta, height)
+            self.pane().scroll_by(delta, height)
         } else {
             false
         }
@@ -388,23 +430,35 @@ fn review_form() -> Form<ReviewControl> {
 }
 
 fn review_tab_index(review: &TurnReview) -> usize {
-    let has_reviewer = !review.view.roles.is_empty();
+    let children = review.transcript_children();
+    let has_reviewer = !children.is_empty();
     let has_overview = !has_reviewer || review.verdict_text().is_none();
     match review.tab {
         ReviewTab::Overview => 0,
-        ReviewTab::Transcript => usize::from(has_overview),
-        ReviewTab::Verdict => usize::from(has_overview) + usize::from(has_reviewer),
+        ReviewTab::Transcript => {
+            usize::from(has_overview)
+                + children
+                    .iter()
+                    .position(|child| Some(child) == review.selected_child.as_ref())
+                    .unwrap_or(0)
+        }
+        ReviewTab::Verdict => usize::from(has_overview) + children.len(),
     }
 }
 
 fn review_tab_labels(review: &TurnReview) -> Vec<String> {
     let mut labels = Vec::new();
-    let has_reviewer = !review.view.roles.is_empty();
+    let has_reviewer = review.view.reviewer_children().next().is_some();
     let has_overview = !has_reviewer || review.verdict_text().is_none();
     if has_overview {
         labels.push("Overview".to_owned());
     }
-    if let Some(role) = review.view.roles.first() {
+    for role in review
+        .view
+        .roles
+        .iter()
+        .filter(|role| role.child_session_id.is_some())
+    {
         labels.push(format!("{} {}", role.label, role.state.label()));
     }
     if review.verdict_text().is_some() {
@@ -414,18 +468,23 @@ fn review_tab_labels(review: &TurnReview) -> Vec<String> {
 }
 
 fn select_review_tab(review: &mut TurnReview, selected: usize) {
-    let has_reviewer = !review.view.roles.is_empty();
+    let children = review.transcript_children();
+    let has_reviewer = !children.is_empty();
     let has_overview = !has_reviewer || review.verdict_text().is_none();
     if has_overview && selected == 0 {
         review.tab = ReviewTab::Overview;
         return;
     }
     let reviewer_tab = usize::from(has_overview);
-    if has_reviewer && selected == reviewer_tab {
+    if let Some(child) = selected
+        .checked_sub(reviewer_tab)
+        .and_then(|index| children.get(index))
+    {
+        review.selected_child = Some(child.clone());
         review.tab = ReviewTab::Transcript;
         return;
     }
-    if review.verdict_text().is_some() && selected == reviewer_tab + usize::from(has_reviewer) {
+    if review.verdict_text().is_some() && selected == reviewer_tab + children.len() {
         review.tab = ReviewTab::Verdict;
     }
 }
@@ -448,7 +507,11 @@ impl super::ChatState {
     ) -> Option<String> {
         self.turn_review.as_ref().and_then(|review| {
             (review.tab == ReviewTab::Transcript)
-                .then(|| review.pane.selection_text(range))
+                .then(|| {
+                    review
+                        .selected_pane()
+                        .and_then(|pane| pane.selection_text(range))
+                })
                 .flatten()
         })
     }
@@ -814,7 +877,7 @@ fn render_review_overview(
             Style::default().fg(theme::palette().muted),
         )));
     } else {
-        if let Some(role) = review.view.roles.first() {
+        for role in &review.view.roles {
             let color = role_state_color(role.state);
             lines.push(Line::from(vec![
                 Span::raw(format!("  {}", role.label)),
@@ -954,7 +1017,6 @@ pub(super) fn render_turn_review_actions(
 /// The one-line strip above the reviewer transcript.
 #[must_use]
 pub(super) fn role_strip(review: &TurnReview) -> Option<Line<'static>> {
-    let role = review.view.roles.first();
     let verdict = review.verdict_text().is_some();
     let overview = !verdict;
     let mut spans = Vec::new();
@@ -970,13 +1032,15 @@ pub(super) fn role_strip(review: &TurnReview) -> Option<Line<'static>> {
             },
         ));
     }
-    if let Some(role) = role {
-        if overview {
+    for role in &review.view.roles {
+        if !spans.is_empty() {
             spans.push(Span::raw("  "));
         }
         let color = role_state_color(role.state);
         let mut style = Style::default().fg(color);
-        if review.tab == ReviewTab::Transcript {
+        if review.tab == ReviewTab::Transcript
+            && role.child_session_id.as_ref() == review.selected_child.as_ref()
+        {
             style = style.add_modifier(Modifier::REVERSED);
         }
         spans.push(Span::styled(
@@ -1040,25 +1104,84 @@ mod tests {
     #[test]
     fn changing_the_reviewer_child_discards_the_previous_childs_pending_form() {
         let mut view = running_view();
-        view.child_session_id = Some("old-reviewer".into());
-        let mut review = TurnReview::new(view.clone());
-        let mut old = mj_core::state::MaterializedSession::empty("old-reviewer");
-        old.pending_elicitations
-            .push(mj_core::elicitation::ElicitationRequest {
+        view.roles[0].child_session_id = Some("old-reviewer".into());
+        view.questions.push(mj_client::review::ReviewerQuestion {
+            role: "old-reviewer".into(),
+            request: mj_core::elicitation::ElicitationRequest {
                 id: "permission-1".into(),
                 message: "Allow this tool?".into(),
                 title: None,
                 description: None,
                 fields: Vec::new(),
                 tool_permission: None,
-            });
-        review.pane().replace_snapshot(old);
+            },
+        });
+        let mut review = TurnReview::new(view.clone());
         assert_eq!(review.pending_elicitations()[0].0, "old-reviewer");
-        view.child_session_id = Some("new-reviewer".into());
+        view.roles[0].child_session_id = Some("new-reviewer".into());
+        view.questions.clear();
         review.update(view);
         assert!(
             review.pending_elicitations().is_empty(),
             "a reused elicitation id must not be answered on the replacement child"
+        );
+    }
+
+    #[test]
+    fn reviewer_tabs_keep_each_childs_pane_and_drop_late_children() {
+        let mut view = running_view();
+        let mut second = view.roles[0].clone();
+        second.role = "reviewer-2".into();
+        second.label = "Reviewer 2".into();
+        second.child_session_id = Some("child-2".into());
+        view.roles.push(second);
+        let mut review = TurnReview::new(view.clone());
+        review.pane_for("reviewer").unwrap();
+        review.pane_for("child-2").unwrap();
+        assert_eq!(review.panes.len(), 2);
+        assert_eq!(review_tab_labels(&review).len(), 3);
+        select_review_tab(&mut review, 2);
+        assert_eq!(review.selected_child.as_deref(), Some("child-2"));
+        assert_eq!(review_tab_index(&review), 2);
+
+        view.roles.remove(0);
+        review.update(view);
+        assert_eq!(review.selected_child.as_deref(), Some("child-2"));
+        assert!(review.pane_for("reviewer").is_none());
+        assert!(!review.panes.contains_key("reviewer"));
+        assert!(review.panes.contains_key("child-2"));
+    }
+
+    #[test]
+    fn questions_from_parallel_reviewers_keep_their_child_owners() {
+        let mut view = running_view();
+        let mut second = view.roles[0].clone();
+        second.role = "reviewer-2".into();
+        second.child_session_id = Some("child-2".into());
+        view.roles.push(second);
+        let request = mj_core::elicitation::ElicitationRequest {
+            id: "permission-1".into(),
+            message: "Allow this tool?".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+            tool_permission: None,
+        };
+        view.questions = ["reviewer", "child-2", "stale-child"]
+            .into_iter()
+            .map(|child| mj_client::review::ReviewerQuestion {
+                role: child.into(),
+                request: request.clone(),
+            })
+            .collect();
+        let review = TurnReview::new(view);
+        assert_eq!(
+            review
+                .pending_elicitations()
+                .into_iter()
+                .map(|(child, _)| child)
+                .collect::<Vec<_>>(),
+            vec!["reviewer", "child-2"]
         );
     }
 
@@ -1076,12 +1199,14 @@ mod tests {
                     role: "reviewer".to_owned(),
                     label: "Reviewer".to_owned(),
                     state: RoleState::Running,
+                    child_session_id: Some("reviewer".to_owned()),
                 }],
             },
             roles: vec![RoleStatus {
                 role: "reviewer".to_owned(),
                 label: "Reviewer".to_owned(),
                 state: RoleState::Running,
+                child_session_id: Some("reviewer".to_owned()),
             }],
             status: "the reviewer is reading the change…".to_owned(),
             verdict: None,

@@ -132,6 +132,10 @@ pub struct CommandSpec {
     /// Replace ambient process variables with the explicitly supplied environment.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_env: bool,
+    /// Output carries credentials and must not be inspected by diagnostic
+    /// observers. Executor-local, never persisted in command plans.
+    #[serde(skip)]
+    pub sensitive_output: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<std::path::PathBuf>,
     pub purpose: String,
@@ -182,6 +186,11 @@ pub struct CommandSpec {
     /// environment, serialized plan, or debug representation.
     #[serde(skip)]
     sensitive_stdin: Option<SensitiveCommandInput>,
+    /// The command works on the daemon's own data (its checkpoint archives,
+    /// its store), so it runs where the daemon runs rather than on the node.
+    /// Executor-local, never serialized.
+    #[serde(skip)]
+    in_daemon: bool,
 }
 
 impl CommandSpec {
@@ -196,6 +205,7 @@ impl CommandSpec {
             args: args.into_iter().map(Into::into).collect(),
             env: BTreeMap::new(),
             clear_env: false,
+            sensitive_output: false,
             cwd: None,
             purpose: String::new(),
             stage: None,
@@ -207,6 +217,7 @@ impl CommandSpec {
             ssh_session: None,
             ssh_session_probe: false,
             sensitive_stdin: None,
+            in_daemon: false,
         }
     }
 
@@ -318,6 +329,13 @@ impl CommandSpec {
         self.sensitive_stdin = Some(SensitiveCommandInput(input));
         self
     }
+
+    /// Run where the daemon runs: the command reads or writes the daemon's own
+    /// data, which only the daemon can reach.
+    pub fn in_daemon(mut self) -> Self {
+        self.in_daemon = true;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -366,6 +384,111 @@ impl SessionCommand<'_> {
     pub fn into_parts(self) -> (CommandSpec, Option<SshSessionLease>) {
         (self.command.into_owned(), self.lease)
     }
+}
+
+/// A [`CommandSpec`] as it travels to a node, carrying the executor-local
+/// fields that its own serialization leaves out. Only the node protocol uses
+/// this form; plans and stores keep the redacted one.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeRun {
+    pub spec: CommandSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arg0: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sensitive_output: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preserve_children_on_cancel: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitive_stdin: Option<Vec<u8>>,
+    /// The caller streams stdin after the description; otherwise the child's
+    /// stdin is empty (or `sensitive_stdin`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub streamed_stdin: bool,
+}
+
+impl std::fmt::Debug for NodeRun {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NodeRun")
+            .field("spec", &self.spec)
+            .field("streamed_stdin", &self.streamed_stdin)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CommandSpec {
+    /// The command with every field a node needs to run it exactly as this
+    /// process would.
+    pub fn to_node_run(&self, streamed_stdin: bool) -> NodeRun {
+        NodeRun {
+            spec: self.clone(),
+            #[cfg(unix)]
+            arg0: self.arg0.clone(),
+            #[cfg(not(unix))]
+            arg0: None,
+            sensitive_output: self.sensitive_output,
+            preserve_children_on_cancel: self.preserve_children_on_cancel,
+            sensitive_stdin: self.sensitive_stdin.as_ref().map(|input| input.0.clone()),
+            streamed_stdin,
+        }
+    }
+}
+
+impl NodeRun {
+    pub fn into_spec(self) -> CommandSpec {
+        let mut spec = self.spec;
+        #[cfg(unix)]
+        {
+            spec.arg0 = self.arg0;
+        }
+        spec.sensitive_output = self.sensitive_output;
+        spec.preserve_children_on_cancel = self.preserve_children_on_cancel;
+        spec.sensitive_stdin = self.sensitive_stdin.map(SensitiveCommandInput);
+        spec
+    }
+}
+
+/// Where this process's commands run. In the daemon that is its node, the
+/// process on the computer holding the user's files; everywhere else it is
+/// unset and commands run here. Installed once at daemon startup, so every
+/// executor in the daemon makes the same choice and none runs a command
+/// locally behind the node's back.
+pub trait CommandHost: Send + Sync {
+    /// Run `command` to completion with `input` as its stdin (or none),
+    /// abandoning it once `is_cancelled` turns true. Errors keep the text the
+    /// executing side gave them, so "operation cancelled" stays recognisable.
+    fn run(
+        &self,
+        command: &CommandSpec,
+        input: Option<&mut (dyn Read + Send)>,
+        is_cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<CommandOutput>;
+
+    /// Start `command` as a live stream: stdin, stdout and stderr flow while
+    /// it runs. Long-lived proxies run this way.
+    fn open_stream<'a>(
+        &'a self,
+        command: &CommandSpec,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<crate::node::NodeExec>> + Send + 'a>,
+    >;
+}
+
+static COMMAND_HOST: std::sync::OnceLock<Arc<dyn CommandHost>> = std::sync::OnceLock::new();
+
+/// Send every command this process runs to `host`. Only the daemon calls
+/// this, once, before it runs any command.
+pub fn install_command_host(host: Arc<dyn CommandHost>) -> Result<()> {
+    COMMAND_HOST
+        .set(host)
+        .map_err(|_| anyhow::anyhow!("a command host is already installed"))
+}
+
+/// The host that runs `command`, or `None` to run it in this process. Every
+/// caller that starts a process asks this, so none decides on its own.
+pub fn command_host(command: &CommandSpec) -> Option<&'static Arc<dyn CommandHost>> {
+    COMMAND_HOST.get().filter(|_| !command.in_daemon)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -783,7 +906,9 @@ fn finished_command(
         stdout,
         stderr,
     };
-    storage::observe_command_output(command, &output);
+    if !command.sensitive_output {
+        storage::observe_command_output(command, &output);
+    }
     output
 }
 
@@ -824,6 +949,9 @@ impl CommandExecutor for ProcessExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
+            if let Some(host) = command_host(command) {
+                return host.run(command, None, &|| false);
+            }
             with_ssh_admission(command, self, &|| false, |command| self.run_once(command))
         })
     }
@@ -835,6 +963,9 @@ impl CommandExecutor for ProcessExecutor {
     ) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
+            if let Some(host) = command_host(command) {
+                return host.run(command, Some(input), &|| false);
+            }
             // A caller's stream cannot be replayed, so this path takes a
             // session and a permit but never retries.
             let session = command.open_ssh_session(self)?;
@@ -1332,6 +1463,12 @@ impl CommandExecutor for CancellableProcessExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
+            if let Some(host) = command_host(command) {
+                return self.describe_cancellation(
+                    command,
+                    host.run(command, None, &|| self.is_cancelled()),
+                );
+            }
             self.describe_cancellation(
                 command,
                 with_ssh_admission(command, self, &|| self.is_cancelled(), |command| {
@@ -1350,6 +1487,9 @@ impl CommandExecutor for CancellableProcessExecutor {
             command,
             crate::runtime::off_async_worker(|| {
                 let _running = BlockingOperation::command(command);
+                if let Some(host) = command_host(command) {
+                    return host.run(command, Some(input), &|| self.is_cancelled());
+                }
                 // A caller's stream cannot be replayed, so this path takes a
                 // session and a permit but never retries.
                 let session = command.open_ssh_session(self)?;

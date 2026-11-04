@@ -1,5 +1,102 @@
 use super::*;
 
+/// Fold the ACP v1 display-terminal extension into the same durable records
+/// used for client-owned terminals. Metadata on updates is not part of
+/// `ToolCallUpdateFields`, so `ToolCall::update` alone loses these bytes.
+pub(super) fn apply_terminal_metadata(
+    item: &mut TranscriptItem,
+    meta: Option<&serde_json::Map<String, Value>>,
+) {
+    let Some(meta) = meta else { return };
+    let TranscriptBody::Tool {
+        terminal_outputs,
+        terminal_refs,
+        ..
+    } = &mut item.body
+    else {
+        return;
+    };
+
+    #[derive(Deserialize)]
+    struct Output {
+        terminal_id: String,
+        data: String,
+    }
+    #[derive(Deserialize)]
+    struct Exit {
+        terminal_id: String,
+        exit_code: Option<u32>,
+        signal: Option<String>,
+    }
+    let exit = meta.get("terminal_exit").and_then(|value| {
+        serde_json::from_value::<Exit>(value.clone())
+            .inspect_err(|error| tracing::warn!(%error, "invalid ACP terminal exit metadata"))
+            .ok()
+    });
+    for key in ["terminal_output", "terminal_output_delta", "terminal_exit"] {
+        let Some(value) = meta.get(key) else { continue };
+        let output = if key == "terminal_exit" {
+            None
+        } else {
+            match serde_json::from_value::<Output>(value.clone()) {
+                Ok(output) => Some(output),
+                Err(error) => {
+                    tracing::warn!(%error, key, "invalid ACP terminal output metadata");
+                    continue;
+                }
+            }
+        };
+        let Some(id) = output
+            .as_ref()
+            .map(|output| &output.terminal_id)
+            .or_else(|| exit.as_ref().map(|exit| &exit.terminal_id))
+        else {
+            continue;
+        };
+        if !terminal_refs.contains(id) {
+            terminal_refs.push(id.clone());
+        }
+        let record = match terminal_outputs
+            .iter()
+            .position(|record| &record.terminal_id == id)
+        {
+            Some(index) => &mut terminal_outputs[index],
+            None => {
+                terminal_outputs.push(TerminalOutputRecord {
+                    terminal_id: id.clone(),
+                    output: String::new(),
+                    truncated: false,
+                    exit_code: None,
+                    signal: None,
+                });
+                terminal_outputs
+                    .last_mut()
+                    .expect("just inserted terminal output")
+            }
+        };
+        if let Some(output) = output {
+            // Older Codex bridges use terminal_output for streamed chunks,
+            // then send an exit without output. Output accompanying an exit
+            // is a final snapshot; the explicit delta channel always appends.
+            if key == "terminal_output"
+                && exit
+                    .as_ref()
+                    .is_some_and(|exit| exit.terminal_id == record.terminal_id)
+            {
+                record.output = output.data;
+                record.truncated = false;
+            } else {
+                record.output.push_str(&output.data);
+            }
+            record.truncated |=
+                mj_core::transcript::truncate_string_start(&mut record.output, 4 * 1024 * 1024);
+        } else if let Some(exit) = &exit {
+            record.exit_code = exit.exit_code;
+            record.signal = exit.signal.clone();
+        }
+    }
+}
+
 /// Stable id of the standalone item that holds a terminal's output until a
 /// tool call refers to it.
 pub(super) fn terminal_item_id(terminal_id: &str) -> String {

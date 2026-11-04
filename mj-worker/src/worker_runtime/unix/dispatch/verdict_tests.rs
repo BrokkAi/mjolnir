@@ -129,11 +129,11 @@ async fn completed_turn_response(
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "test").unwrap();
     durable.set_turn_verdict_harness(HarnessKind::Claude);
-    durable.set_background_work_policy(crate::relay::BackgroundWorkPolicy::ClaudeTasks);
+    durable.set_background_work_policy(crate::relay::BackgroundWorkPolicy::AirTasks);
     durable
-        .claude_background_tasks_changed(
+        .set_air_tasks(
             (0..tasks)
-                .map(|id| crate::acp::ClaudeBackgroundTask {
+                .map(|id| crate::relay::AirTaskFixture {
                     task_id: id.to_string(),
                     description: "Old provisioning wait".into(),
                 })
@@ -148,8 +148,8 @@ async fn completed_turn_response(
             request: RelayRequest::Submit {
                 command_id: id.into(),
                 command: RelayCommand::Prompt {
-                    prompt: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
-                        agent_client_protocol::schema::v1::TextContent::new("Do the work"),
+                    prompt: vec![agent_client_protocol::v1::schema::ContentBlock::Text(
+                        agent_client_protocol::v1::schema::TextContent::new("Do the work"),
                     )],
                 },
             },

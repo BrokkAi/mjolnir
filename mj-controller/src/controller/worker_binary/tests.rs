@@ -1,6 +1,8 @@
 use super::launch::*;
 use super::*;
 
+use crate::targets::tests::unwrapped_remote_line;
+
 fn stamped_worker(body: &[u8]) -> Vec<u8> {
     let mut bytes = body.to_vec();
     bytes.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
@@ -565,6 +567,7 @@ fn node_preflight_accepts_a_managed_runtime_when_node_is_missing() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     preflight_harness(
         &mj_core::config::TargetTemplate::LocalBare,
@@ -591,6 +594,7 @@ fn node_preflight_explains_when_the_target_has_no_managed_runtime() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     let error = format!(
         "{:#}",
@@ -633,6 +637,7 @@ fn dsh_preflight_accepts_only_its_native_binary_without_node_or_curl() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     preflight_harness(
@@ -748,6 +753,7 @@ fn blank_claude_auth_environment_values_do_not_count_as_logins() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     let mut environment = BTreeMap::from([
         (CLAUDE_OAUTH_TOKEN_ENV.to_owned(), " \n ".to_owned()),
@@ -825,6 +831,7 @@ fn an_apple_container_takes_macs_claude_keychain_login_unless_a_setup_token_does
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     let backend = targets::TargetLocator::AppleContainer {
         borrowed_from: None,
@@ -1211,6 +1218,13 @@ fn a_probe_that_prints_something_else_is_an_error() {
 // Hard-won: a6ad3cc: concurrent checkpoint, upgrade, and recovery paths shared worker launch logs
 #[test]
 fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
+    let token_dir = tempfile::tempdir().unwrap();
+    let token_path = token_dir.path().join("agent-pat");
+    std::fs::write(&token_path, "github_pat_at_start").unwrap();
+    let github = mj_core::config::GithubConfig {
+        session_token_path: Some(token_path),
+        ..Default::default()
+    };
     struct RecordingExecutor {
         commands: RefCell<Vec<CommandSpec>>,
     }
@@ -1249,10 +1263,22 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
             &executor,
             &locator,
             &targets::worker_root(&locator, "13131313131313131313131313131313").unwrap(),
+            &github,
         )
         .unwrap();
 
         let commands = executor.commands.borrow();
+        assert_eq!(
+            commands[0].purpose,
+            "install configured session GitHub token"
+        );
+        assert!(
+            commands[1]
+                .args
+                .iter()
+                .any(|arg| arg.contains("worker-launch.XXXXXXXX"))
+        );
+        assert!(!format!("{commands:?}").contains("github_pat_at_start"));
         let script = commands
             .iter()
             .flat_map(|command| command.args.iter())
@@ -1315,7 +1341,7 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
         commands[0]
             .args
             .last()
-            .is_some_and(|remote| remote.starts_with("'sh' '-c' ")),
+            .is_some_and(|remote| unwrapped_remote_line(remote).starts_with("'sh' '-c' ")),
         "raw SSH worker management must not source login profiles: {commands:?}"
     );
     let script = commands[0]
@@ -2146,8 +2172,8 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
 #[test]
 fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     use mj_core::harness_runtime::{
-        CLAUDE_CLI_VERSION, DSH_ACP_PACKAGE, DSH_ACP_VERSION, MIMO_CLI_VERSION, MUSE_ACP_PACKAGE,
-        MUSE_ACP_VERSION,
+        CLAUDE_CLI_VERSION, DSH_ACP_PACKAGE, DSH_ACP_VERSION, GROK_VERSION, KIMI_VERSION,
+        MIMO_VERSION, MUSE_ACP_PACKAGE, MUSE_ACP_VERSION, OPENCODE_VERSION,
     };
 
     const CONTAINERFILE: &str = include_str!("../../../../containers/Containerfile.agent-dev");
@@ -2190,15 +2216,37 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
         "containers/Containerfile.agent-dev must check the installed adapter is \
              {MUSE_ACP_VERSION}; a stale check fails only when the image is published"
     );
-    let mimo = format!("@mimo-ai/cli@{MIMO_CLI_VERSION}");
+    // The image installs MiMo Code from the managed runtime's own metadata, so
+    // both run the pinned release with the pinned digest.
     assert!(
-        CONTAINERFILE.contains(&mimo),
-        "containers/Containerfile.agent-dev must install {mimo}"
+        CONTAINERFILE.contains("COPY mj-core/assets/mimo/runtime.json")
+            && CONTAINERFILE.contains("install-mimo.py"),
+        "containers/Containerfile.agent-dev must install MiMo Code from mj-core/assets/mimo/runtime.json"
     );
+    let mimo: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../mj-core/assets/mimo/runtime.json")).unwrap();
+    assert_eq!(mimo["version"], MIMO_VERSION);
     assert!(CONTAINERFILE.contains("ENV MIMOCODE_DISABLE_AUTOUPDATE=1"));
+    assert!(CONTAINERFILE.contains("OPENCODE_DISABLE_AUTOUPDATE=1"));
 
-    // DSH has no managed installation or image layer; its only launch path is
-    // the npm bootstrap, which must name the pinned package version.
+    for package in [
+        format!("@moonshot-ai/kimi-code@{KIMI_VERSION}"),
+        format!("@xai-official/grok@{GROK_VERSION}"),
+        format!("@opencode/cli@{OPENCODE_VERSION}"),
+    ] {
+        assert!(
+            CONTAINERFILE.contains(&package),
+            "containers/Containerfile.agent-dev must install {package}"
+        );
+    }
+
+    // DSH has no managed installation. The image installs the pinned npm
+    // package, and the launch otherwise fetches that same version through npx.
+    let dsh = format!("{DSH_ACP_PACKAGE}@{DSH_ACP_VERSION}");
+    assert!(
+        CONTAINERFILE.contains(&dsh),
+        "containers/Containerfile.agent-dev must install {dsh}"
+    );
     let (command, arguments) =
         bridge_launch(HarnessKind::Dsh, ExecutionPolicy::ConfiguredApprovals);
     assert_eq!(command, "sh");
@@ -2228,24 +2276,6 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
             version
         );
     }
-
-    let package: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../mj-core/assets/harnesses/mimo/package.json"
-    ))
-    .unwrap();
-    let lock: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../mj-core/assets/harnesses/mimo/package-lock.json"
-    ))
-    .unwrap();
-    assert_eq!(package["dependencies"]["@mimo-ai/cli"], MIMO_CLI_VERSION);
-    assert_eq!(
-        lock["packages"][""]["dependencies"]["@mimo-ai/cli"],
-        MIMO_CLI_VERSION
-    );
-    assert_eq!(
-        lock["packages"]["node_modules/@mimo-ai/cli"]["version"],
-        MIMO_CLI_VERSION
-    );
 }
 
 /// Runs a default bridge script with `launcher` in the target's home and no
@@ -2340,6 +2370,7 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     let refusal = |error: anyhow::Error| {
         let refusal = mj_core::refusal::Refusal::of(&error).expect("a refusal for the client");
@@ -2582,6 +2613,7 @@ fn a_session_without_project_memory_launches_without_memory() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let launch = |no_project_memory: bool| {
             let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
@@ -2663,6 +2695,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
         session.harness_kind = kind;
@@ -2749,6 +2782,7 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     }
 }
 
@@ -2772,6 +2806,7 @@ fn staging_a_muse_profile_hands_its_saved_model_list_to_the_session_data_directo
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     let staged = tempfile::tempdir().unwrap();
     let staged_home = staged.path().join("muse");
@@ -3057,6 +3092,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     }
 }
 
@@ -3136,6 +3172,7 @@ fn an_inline_token_provider_stages_its_catalog_and_guardian_reviewer() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     let asked = std::cell::RefCell::new(Vec::new());
 
@@ -3202,6 +3239,7 @@ fn stage_grok_profile_copies_authentication_and_agent_identity() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3235,6 +3273,7 @@ fn stage_claude_profile_preserves_rollout_identity() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3281,6 +3320,7 @@ fn stage_claude_profile_follows_symlinked_entries() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3322,6 +3362,7 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3434,6 +3475,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -3514,6 +3556,7 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3577,6 +3620,7 @@ fn stage_claude_profile_skips_dangling_allowlist_symlinks() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3793,6 +3837,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     }
 }
 
@@ -3949,6 +3994,7 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     for (target, launch) in launches_on_every_target(&claude) {
         if target == "localhost" {
@@ -4050,6 +4096,7 @@ fn an_api_key_codex_launch_keeps_its_key_on_every_target() {
     }
 }
 
+// Hard-won: #1385: selecting AWS_PROFILE did not provision credentials into isolated workers.
 #[test]
 fn a_bedrock_codex_launch_passes_aws_settings_to_every_target() {
     let home = tempfile::tempdir().unwrap();
@@ -4084,6 +4131,7 @@ fn a_bedrock_codex_launch_passes_aws_settings_to_every_target() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     for (target, launch) in launches_on_every_target(&profile) {
@@ -4105,6 +4153,36 @@ fn a_bedrock_codex_launch_passes_aws_settings_to_every_target() {
             mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT.map(str::to_owned),
             "{target}"
         );
+    }
+
+    // A profile without its own target credential source must use the
+    // controller-provisioned process provider in each isolated staged home.
+    for kind in [HarnessKind::Claude, HarnessKind::Codex] {
+        let mut profile = profile.clone();
+        profile.kind = kind;
+        profile.environment = BTreeMap::from([
+            ("AWS_PROFILE".into(), "bedrock".into()),
+            ("AWS_REGION".into(), "us-east-1".into()),
+            ("CLAUDE_CODE_USE_BEDROCK".into(), "1".into()),
+        ])
+        .into();
+        for (target, launch) in launches_on_every_target(&profile) {
+            let isolated = target != "localhost";
+            assert_eq!(
+                launch.environment.contains_key("AWS_CONFIG_FILE"),
+                isolated,
+                "{target}"
+            );
+            if isolated {
+                assert_eq!(
+                    launch.environment["AWS_CONFIG_FILE"],
+                    mj_core::target_path::text(&mj_core::target_path::join(
+                        &launch.harness_home,
+                        Path::new("aws-config")
+                    ))
+                );
+            }
+        }
     }
 }
 
@@ -4246,9 +4324,10 @@ fn staged_muse_settings(body: &str) -> (tempfile::TempDir, PathBuf) {
 }
 
 // Hard-won: a24070f: Muse launches failed when staged settings retained the shipped :auto-review profile.
-// Both policies stage `:ask-me`: `allowAll`/`/:unrestricted` emits no
-// permission requests, so the adapter's client-side auto-review would never
-// fire. Unconstrained Muse differs only by disabling the sandbox.
+// Both policies stage `:ask-me`. Unconstrained Muse additionally runs
+// `allowAll` approvals with auto-review off (plus `--disable-sandbox`), so
+// no permission requests are emitted and the staged profile never matters;
+// a profile with `muse_auto_review = true` opts back into the reviewer.
 #[test]
 fn muse_staged_settings_replace_the_auto_review_profile_under_every_policy() {
     for (policy, profile) in [
@@ -4304,6 +4383,7 @@ fn raw_local_muse_launches_with_guardian_approvals() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     let (launch, _, _) = worker_launch_config(
@@ -4351,6 +4431,7 @@ fn stage_kimi_profile_preserves_device_identity() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -4385,6 +4466,7 @@ fn staged_kimi_profile_binds_history_tools_to_the_target_runtime() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
     stage_profile(&profile, staged.path()).unwrap();
     let memory = ProjectMemoryLaunchConfig {
@@ -4481,6 +4563,7 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
+        muse_auto_review: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -4507,6 +4590,105 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
     assert_eq!(
         std::fs::read_to_string(home.path().join("SYSTEM.md")).unwrap(),
         system_override
+    );
+}
+
+#[test]
+fn container_attachment_guidance_matches_engine_permissions_and_harness_instruction_files() {
+    struct MountExecutor;
+    impl CommandExecutor for MountExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.purpose, "inspect session container storage");
+            assert!(command.args.iter().any(|arg| arg == "{{json .Mounts}}"));
+            Ok(CommandOutput {
+                status: 0,
+                // Recorded from a disposable Podman container with ro/O/rw
+                // mounts; only host paths have been normalized.
+                stdout: include_bytes!("../../../tests/fixtures/container-attachment-mounts.json")
+                    .to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let attachments = [
+        ("/reference", targets::MountAccess::Ro),
+        ("/scratch", targets::MountAccess::Cow),
+        ("/shared", targets::MountAccess::Rw),
+    ]
+    .map(|(destination, access)| targets::AdditionalMount {
+        source: "/host/external".into(),
+        destination: destination.into(),
+        access,
+    });
+    let mut output = String::new();
+    for (name, target, attachments) in [
+        (
+            "Podman",
+            targets::TargetLocator::LocalPodman {
+                borrowed_from: None,
+                container_id: "container".into(),
+                workspace_storage: Default::default(),
+            },
+            attachments.to_vec(),
+        ),
+        (
+            "Docker with a downgraded overlay",
+            targets::TargetLocator::LocalDocker {
+                borrowed_from: None,
+                container_id: "container".into(),
+            },
+            vec![targets::AdditionalMount {
+                access: targets::MountAccess::Cow,
+                ..attachments[0].clone()
+            }],
+        ),
+        (
+            "Apple container",
+            targets::TargetLocator::AppleContainer {
+                borrowed_from: None,
+                container_id: "container".into(),
+            },
+            attachments.to_vec(),
+        ),
+        (
+            "Container without external attachments",
+            targets::TargetLocator::LocalDocker {
+                borrowed_from: None,
+                container_id: "container".into(),
+            },
+            Vec::new(),
+        ),
+    ] {
+        let storage =
+            targets::inspect_container_storage(&target, &attachments, &MountExecutor).unwrap();
+        let mut expected = None;
+        for harness in HarnessKind::ALL {
+            let staged = tempfile::tempdir().unwrap();
+            append_hel_target_environment(harness, staged.path(), &target).unwrap();
+            append_container_storage_guidance(
+                harness,
+                staged.path(),
+                &target,
+                None,
+                storage.managed_temporary_volume,
+                &storage.attachments,
+            )
+            .unwrap();
+            let text =
+                std::fs::read_to_string(staged.path().join(harness.agent_instructions_file()))
+                    .unwrap();
+            if let Some(expected) = &expected {
+                assert_eq!(&text, expected, "{harness:?}");
+            } else {
+                output.push_str(&format!("=== {name} ===\n{text}\n"));
+                expected = Some(text);
+            }
+        }
+    }
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "container-attachment-instructions",
+        &output,
     );
 }
 
@@ -4565,6 +4747,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         commands: RefCell::new(Vec::new()),
     };
     let launch = WorkerLaunchConfig {
+        initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
@@ -4701,6 +4884,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         borrowed_from: None,
     };
     let launch = WorkerLaunchConfig {
+        initial_commands: Vec::new(),
         reviewer_launch: None,
         goal_resume_request: None,
         run_mode: Default::default(),
@@ -4807,6 +4991,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         launch: RefCell::new(None),
     };
     let launch = WorkerLaunchConfig {
+        initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
@@ -5262,6 +5447,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -5358,7 +5544,15 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
                 "expires_at": format!("2026-10-{:02}T09:00:00Z", 10 + generation),
             }
         }),
-        HarnessKind::Muse => serde_json::json!({ "token": format!("token-{generation}") }),
+        HarnessKind::Muse => serde_json::json!({
+            "schema_version": 1,
+            "providers": {"meta": {
+                "access_token": format!("access-{generation}"),
+                "refresh_token": format!("refresh-{generation}"),
+                "expires_at": 1_790_000_000_i64 + generation,
+                "mechanism": "oauth",
+            }}
+        }),
         // A staged OpenCode home carries its logins as `auth export` prints
         // them.
         HarnessKind::OpenCode => serde_json::json!([{
@@ -5418,6 +5612,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let canonical = profile.authentication_marker();
         let database = home.join(".data/opencode/opencode.db");
@@ -5476,10 +5671,9 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             "{kind:?}"
         );
         // Muse's staged root lies under the data directory; the rest of the
-        // exchange is the same for it, except that Muse stores no refresh
-        // time, so the sync never orders two different Muse copies. DSH has
-        // no login to rotate: its key comes from its environment.
-        if kind == HarnessKind::Muse || kind.api_key_variable().is_some() {
+        // exchange is the same for it. DSH has no login to rotate: its key
+        // comes from its environment.
+        if kind.api_key_variable().is_some() {
             continue;
         }
         // OpenCode's logins live in its database: the sync pushes its export
@@ -5568,6 +5762,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let marker = profile.authentication_marker();
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();

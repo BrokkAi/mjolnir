@@ -99,6 +99,9 @@ async fn continuation_checks_run_concurrently_and_defer_review_until_each_settle
     let reviews = Arc::new(Mutex::new(Vec::new()));
     let enabled = Arc::new(AtomicBool::new(true));
     let environment = Environment {
+        start_quota_move: Arc::new(|_, _, _| {
+            Box::pin(async { anyhow::bail!("unexpected Move start") })
+        }),
         quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
         profile: Arc::new(|_| Some("test".into())),
         log: Some(decision_log),
@@ -222,6 +225,9 @@ async fn continuation_does_not_revive_old_idle_sessions_and_new_input_cancels_a_
     let log_dir = tempfile::tempdir().unwrap();
     let log = mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap();
     let environment = Environment {
+        start_quota_move: Arc::new(|_, _, _| {
+            Box::pin(async { anyhow::bail!("unexpected Move start") })
+        }),
         quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
         profile: Arc::new(|_| Some("test".into())),
         log: Some(log),
@@ -299,6 +305,9 @@ async fn continuation_submits_a_guarded_prompt_and_reviews_only_after_the_chain(
         let log = mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap();
         let reviews = Arc::new(Mutex::new(Vec::new()));
         let environment = Environment {
+            start_quota_move: Arc::new(|_, _, _| {
+                Box::pin(async { anyhow::bail!("unexpected Move start") })
+            }),
             quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
             profile: Arc::new(|_| Some("test".into())),
             log: Some(log),
@@ -485,13 +494,18 @@ async fn quota_classification_survives_exhausted_allowance_and_unusable_authoriz
         project_memory: None,
     }]);
     let environment = Environment {
+        start_quota_move: Arc::new(|_, _, _| {
+            Box::pin(async { anyhow::bail!("unexpected Move start") })
+        }),
         log: None,
         control: remote.control,
         allowed: Arc::new(|_| true),
         live: Arc::new(|| ["one".into()].into()),
         review: Arc::new(|_, _| {}),
         profile: Arc::new(|_| Some("test".into())),
-        quota: Arc::new(|_, view| Box::pin(async move { Ok(recovery_for(&view, None)) })),
+        quota: Arc::new(|_, view| {
+            Box::pin(async move { Ok(quota::Plan::Wait(recovery_for(&view, None))) })
+        }),
     };
     let classifier: Classifier = Arc::new(|evidence, _| {
         Box::pin(async move {
@@ -569,7 +583,7 @@ async fn quota_classification_survives_exhausted_allowance_and_unusable_authoriz
 
 #[tokio::test]
 async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
-    for case in ["future", "unknown", "due", "disabled"] {
+    for case in ["future", "unknown", "due", "disabled", "moving", "moved"] {
         let mut remote = spawn_remote_session_manager().unwrap();
         remote.targets.send_replace(vec![RelaySessionTarget {
             session_id: "one".into(),
@@ -577,14 +591,26 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
             worker_recovery: None,
             project_memory: None,
         }]);
-        let enabled = case != "disabled";
+        let enabled = !matches!(case, "disabled" | "moving");
         let environment = Environment {
+            start_quota_move: Arc::new(|_, _, _| {
+                Box::pin(async { anyhow::bail!("unexpected Move start") })
+            }),
             log: None,
             control: remote.control,
             allowed: Arc::new(move |_| enabled),
             live: Arc::new(|| ["one".into()].into()),
             review: Arc::new(|_, _| panic!("quota-blocked turn must not be reviewed")),
-            profile: Arc::new(|_| Some("test".into())),
+            profile: Arc::new(move |_| {
+                Some(
+                    if case == "moved" {
+                        "destination"
+                    } else {
+                        "test"
+                    }
+                    .into(),
+                )
+            }),
             quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
         };
         let classifier: Classifier = Arc::new(|_, _| {
@@ -599,7 +625,7 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
         );
         let mut recovered = view("one", true);
         let deadline = match case {
-            "unknown" => None,
+            "unknown" | "moving" | "moved" => None,
             "future" => Some(mj_core::clock::epoch_millis() + 60_000),
             _ => Some(mj_core::clock::epoch_millis() - 1),
         };
@@ -617,7 +643,7 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
             .await
             .unwrap();
         receive(&mut updates).await;
-        if matches!(case, "future" | "unknown") {
+        if matches!(case, "future" | "unknown" | "moving") {
             assert!(
                 tokio::time::timeout(Duration::from_millis(250), remote.requests.recv())
                     .await
@@ -626,7 +652,7 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
         } else {
             let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
                 .await
-                .unwrap()
+                .unwrap_or_else(|_| panic!("{case}: no recovery request within 3 s"))
                 .unwrap();
             let RemoteSessionRequest::Submit {
                 command,
@@ -637,7 +663,7 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
             else {
                 panic!("expected guarded recovery");
             };
-            if enabled {
+            if enabled && case != "moved" {
                 assert_eq!(command_id, "quota-retry-3");
                 assert!(matches!(command, RelayCommand::ResumeAfterQuota { .. }));
             } else {
@@ -668,6 +694,9 @@ async fn a_due_recovery_that_cannot_be_submitted_says_which_fact_refused_it() {
     }]);
     let log_dir = tempfile::tempdir().unwrap();
     let environment = Environment {
+        start_quota_move: Arc::new(|_, _, _| {
+            Box::pin(async { anyhow::bail!("unexpected Move start") })
+        }),
         log: Some(mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap()),
         control: remote.control,
         allowed: Arc::new(|_| true),
@@ -782,13 +811,18 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
         let log_dir = tempfile::tempdir().unwrap();
         let log = mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap();
         let environment = Environment {
+            start_quota_move: Arc::new(|_, _, _| {
+                Box::pin(async { anyhow::bail!("unexpected Move start") })
+            }),
             log: Some(log),
             control: remote.control,
             allowed: Arc::new(|_| true),
             live: Arc::new(|| ["one".into()].into()),
             review: Arc::new(|_, _| {}),
             profile: Arc::new(|_| Some("test".into())),
-            quota: Arc::new(|_, view| Box::pin(async move { Ok(recovery_for(&view, None)) })),
+            quota: Arc::new(|_, view| {
+                Box::pin(async move { Ok(quota::Plan::Wait(recovery_for(&view, None))) })
+            }),
         };
         let (calls, mut checks) = mpsc::unbounded_channel();
         let classifier: Classifier = Arc::new(move |evidence, _| {
@@ -934,6 +968,9 @@ async fn background_work_defers_continuation_and_its_end_brings_a_fresh_check() 
     let log_dir = tempfile::tempdir().unwrap();
     let log = mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap();
     let environment = Environment {
+        start_quota_move: Arc::new(|_, _, _| {
+            Box::pin(async { anyhow::bail!("unexpected Move start") })
+        }),
         log: Some(log),
         control: remote.control,
         allowed: Arc::new(|_| true),
@@ -1057,6 +1094,9 @@ async fn a_due_recovery_resumes_a_usage_limited_goal_and_leaves_a_spent_budget_a
             project_memory: None,
         }]);
         let environment = Environment {
+            start_quota_move: Arc::new(|_, _, _| {
+                Box::pin(async { anyhow::bail!("unexpected Move start") })
+            }),
             log: None,
             control: remote.control,
             allowed: Arc::new(|_| true),
@@ -1163,6 +1203,9 @@ async fn handoff_defers_a_completion_without_consuming_its_trigger() {
         project_memory: None,
     }]);
     let environment = Environment {
+        start_quota_move: Arc::new(|_, _, _| {
+            Box::pin(async { anyhow::bail!("unexpected Move start") })
+        }),
         quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
         profile: Arc::new(|_| Some("test".into())),
         log: None,
@@ -1226,6 +1269,9 @@ fn idle_feed(
     cancellation: CancellationToken,
 ) -> UpdateFeed {
     let environment = Environment {
+        start_quota_move: Arc::new(|_, _, _| {
+            Box::pin(async { anyhow::bail!("unexpected Move start") })
+        }),
         log: None,
         control,
         allowed: Arc::new(|_| false),
@@ -1289,4 +1335,259 @@ async fn a_session_manager_that_stops_without_a_shutdown_request_is_an_error() {
     cancellation.cancel();
     feed.join().await.unwrap();
     remote.shutdown.shutdown().await.unwrap();
+}
+
+#[test]
+fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
+    use crate::server::api::{CandidateQuota, SubagentCandidate};
+    use mj_core::config::{Config, HarnessKind, HarnessProfile};
+    let mut config = Config::default();
+    let candidates: Vec<_> = [
+        "source",
+        "api",
+        "healthy",
+        "unknown",
+        "empty",
+        "unhealthy",
+        "other",
+        "wrong-model",
+    ]
+    .into_iter()
+    .map(|id| {
+        let kind = if id == "other" {
+            HarnessKind::Claude
+        } else {
+            HarnessKind::Codex
+        };
+        config.profiles.insert(
+            id.into(),
+            HarnessProfile {
+                enabled: true,
+                kind,
+                home: Default::default(),
+                environment: Default::default(),
+                context_window_bytes: None,
+                legacy_subagents: Default::default(),
+                guardian_review_model: None,
+                codex_profile: None,
+                muse_auto_review: None,
+            },
+        );
+        let model = if id == "wrong-model" {
+            "another-model"
+        } else {
+            "model"
+        };
+        let mut unhealthy = BTreeMap::new();
+        if id == "unhealthy" {
+            unhealthy.insert(
+                "model".into(),
+                crate::profile_health::Unhealthy {
+                    fault: crate::profile_health::ProfileFault::QuotaExhausted,
+                    until: std::time::SystemTime::now() + Duration::from_secs(60),
+                    message: "quota".into(),
+                },
+            );
+        }
+        SubagentCandidate {
+            profile_id: id.into(),
+            harness: kind,
+            choices: mj_core::worker_launch::ProfileConfig {
+                model: Some(model.into()),
+                models: vec![mj_core::acp::SessionConfigChoice {
+                    value: model.into(),
+                    name: model.into(),
+                    description: None,
+                }],
+                efforts: vec![],
+                observed_at: 1,
+            },
+            quota: match id {
+                "api" => CandidateQuota::UsagePriced,
+                "unknown" => CandidateQuota::Unknown,
+                _ => CandidateQuota::Windows(vec![crate::quota::QuotaWindow {
+                    label: "Week".into(),
+                    remaining_percent: Some(if id == "empty" { 0 } else { 10 }),
+                    duration_seconds: None,
+                    model_scope: None,
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: None,
+                }]),
+            },
+            unhealthy,
+        }
+    })
+    .collect();
+    let ordered = quota::destinations(
+        &config,
+        "source",
+        HarnessKind::Codex,
+        "model",
+        candidates,
+        1,
+    );
+    assert_eq!(
+        ordered
+            .iter()
+            .map(|c| c.profile_id.as_str())
+            .collect::<Vec<_>>(),
+        ["healthy", "unknown", "api"]
+    );
+}
+
+fn quota_move_request() -> mj_core::state::MoveSessionRequest {
+    // This fixture crosses the continuation coordinator / Move admission boundary.
+    serde_json::from_value(json!({
+        "preparation": {
+            "selection": {"session_id":"one", "profile_id":"destination", "target_template_id":null,
+                "additional_mounts":null, "resource_allocation":null},
+            "source_profile_id":"test", "source_target_template_id":"local",
+            "cross_harness":false, "active":false, "in_place":true,
+            "queued_commands":[], "fingerprint":"test", "operation_id":"quota-move-test"
+        }, "queue":"start", "acknowledge_interruption":false
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn quota_schedule_writes_abstention_before_one_move_and_restores_deadline_on_refusal() {
+    for case in ["weekly", "goal", "refused", "five-hour"] {
+        let mut remote = spawn_remote_session_manager().unwrap();
+        remote.targets.send_replace(vec![RelaySessionTarget {
+            session_id: "one".into(),
+            spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let environment = Environment {
+            log: None,
+            control: remote.control,
+            allowed: Arc::new(|_| true),
+            live: Arc::new(|| ["one".into()].into()),
+            review: Arc::new(|_, _| {}),
+            profile: Arc::new(|_| Some("test".into())),
+            quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
+            start_quota_move: {
+                let calls = calls.clone();
+                Arc::new(move |request, reason, continuation| {
+                    assert_eq!(
+                        request.preparation.selection.profile_id.as_deref(),
+                        Some("destination")
+                    );
+                    assert_eq!(reason, "the weekly quota is exhausted");
+                    assert_eq!(
+                        continuation,
+                        if case == "goal" {
+                            mj_core::state::QuotaMoveContinuation::ResumeGoal
+                        } else {
+                            mj_core::state::QuotaMoveContinuation::Prompt
+                        }
+                    );
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move {
+                        if case == "refused" {
+                            anyhow::bail!("lifecycle busy")
+                        }
+                        Ok(())
+                    })
+                })
+            },
+        };
+        let mut blocked = view("one", true);
+        if case == "goal" {
+            let snapshot = blocked.snapshot.as_mut().unwrap();
+            snapshot.operational.goal = serde_json::from_value(serde_json::json!({
+                "known": true,
+                "capability": {"version": 1, "controlMethod": "_session/goal", "actions": ["resume"]},
+                "snapshot": {"objective": "Finish the interrupted work", "status": "limited", "createdAt": 42,
+                    "controlMethod": "_session/goal", "limitReason": "usage"},
+                "execution": {"version": 1, "status": "idle"}
+            })).unwrap();
+        }
+        remote
+            .publisher
+            .publish("one".into(), blocked.clone())
+            .await
+            .unwrap();
+        let fallback = recovery_for(&blocked, Some(mj_core::clock::epoch_millis() + 18_060_000));
+        let plan = if case == "five-hour" {
+            quota::Plan::Wait(fallback.clone())
+        } else {
+            let mut abstention = fallback.clone();
+            abstention.reset_at_ms = None;
+            abstention.retry_at_ms = None;
+            abstention.notice = "Moving to destination because weekly quota is exhausted".into();
+            quota::Plan::Move {
+                request: Box::new(quota_move_request()),
+                destination: "destination".into(),
+                reason: "the weekly quota is exhausted".into(),
+                abstention,
+                fallback: fallback.clone(),
+            }
+        };
+        let task = tokio::spawn(async move {
+            quota::schedule(&environment, "one", blocked.clone(), plan).await
+        });
+        for step in 0..if case == "refused" { 2 } else { 1 } {
+            let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let RemoteSessionRequest::Submit { command, reply, .. } = request else {
+                panic!("expected recovery")
+            };
+            let RelayCommand::SetQuotaRecovery {
+                recovery: Some(recovery),
+                ..
+            } = command
+            else {
+                panic!("expected recovery record")
+            };
+            if step == 0 && case != "five-hour" {
+                assert!(recovery.retry_at_ms.is_none());
+                assert!(recovery.reset_at_ms.is_none());
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(recovery.retry_at_ms, fallback.retry_at_ms);
+                if case == "refused" {
+                    assert!(recovery.notice.contains("lifecycle busy"));
+                }
+            }
+            blocked = view("one", true);
+            blocked
+                .snapshot
+                .as_mut()
+                .unwrap()
+                .operational
+                .continuation
+                .quota_recovery = Some(*recovery);
+            remote
+                .publisher
+                .publish("one".into(), blocked.clone())
+                .await
+                .unwrap();
+            reply.send(Ok(4 + step)).unwrap();
+            let sync = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let RemoteSessionRequest::Sync { reply, .. } = sync else {
+                panic!("expected sync")
+            };
+            reply.send(Ok(())).unwrap();
+        }
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            usize::from(case != "five-hour")
+        );
+        assert!(!matches!(
+            tokio::time::timeout(Duration::from_millis(150), remote.requests.recv()).await,
+            Ok(Some(_))
+        ));
+        remote.shutdown.shutdown().await.unwrap();
+    }
 }

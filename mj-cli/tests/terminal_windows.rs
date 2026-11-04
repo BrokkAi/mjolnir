@@ -20,8 +20,8 @@ use pty_screen::{PTY_COLUMNS, PTY_ROWS, PtyOutput};
 
 /// Empty-session text that appears after the combined dashboard is ready.
 const READY_MARKER: &str = "No live session";
-const REATTACH_MESSAGE: &str =
-    "Active sessions will continue working; Mjolnir will reattach to them on your next invocation.";
+const REATTACH_MESSAGE: &str = "The Mjolnir daemon is still running with no active sessions. \
+     `mj --instance windows-terminal daemon stop` stops it.";
 // Startup includes the daemon's first initialization of the store.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const TIMEOUT: Duration = Duration::from_secs(15);

@@ -138,6 +138,7 @@ impl ChatState {
     /// id arrives.
     pub fn adopt_session_id(&mut self, session_id: &str) {
         self.session_id = session_id.to_owned();
+        self.bind_composer_session(Some(session_id));
     }
 
     /// Installs the stable session-list columns used by the conversation title.
@@ -207,8 +208,6 @@ impl ChatState {
         self.turn_control_submitting
             || self.turn_control_awaiting_state.is_some()
             || self.cancelling_prompt_id.is_some()
-            // Another surface, or the worker itself, may be steering.
-            || self.steering.as_ref().is_some_and(|s| s.holds_queue())
     }
 
     pub(super) fn turn_control_intent(&self) -> TurnControlIntent {
@@ -513,8 +512,9 @@ impl ChatState {
     }
 
     /// Mirrors the session's own review choice, which `mj new` can set.
-    pub fn set_session_review(&mut self, review: Option<mj_core::config::SessionReview>) {
-        self.session_review = review;
+    pub fn set_session_review(&mut self, session: &mj_core::state::SessionRecord) {
+        self.session_review = session.review.clone();
+        self.review_unavailable = session.review_unavailable();
     }
 
     /// `[review]` as it applies to this session.

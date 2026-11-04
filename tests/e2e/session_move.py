@@ -8,6 +8,7 @@ import pathlib
 import sqlite3
 import sys
 import time
+import tomllib
 import traceback
 
 import reliability_lab
@@ -37,6 +38,17 @@ def run(lab):
     client.wait_for("Workspaces")
     client.send(b"\r\r")
     client.wait_for("Sessions")
+    # Detaching joins the TUI's discovery task before the fixture edits its
+    # profile list; later CLI/API actions cannot import host profiles again.
+    client.quit()
+    # Setup discovers host installations. Delegation probes every enabled
+    # profile, so keep this scenario on its two deterministic ACP profiles.
+    configured = config_path.read_text()
+    for profile_id in tomllib.loads(configured)["profiles"]:
+        if profile_id not in {"fake", "destination"}:
+            section = f"[profiles.{profile_id}]\n"
+            configured = configured.replace(section, section + "enabled = false\n")
+    config_path.write_text(configured)
     code, _ = lab.wait_daemon_status(port)
     assert lab.request("POST", "/auth/session", {"code": code})[0] == 204
     workspace = lab.snapshot()["workspaces"][0]["id"]
@@ -135,6 +147,9 @@ def run(lab):
             selected = database.execute("SELECT json_extract(record_json, '$.model'), json_extract(record_json, '$.effort') FROM subagent_sessions WHERE child_session_id=?", (child,)).fetchone()
         assert selected == (model, effort), (task_type, selected)
         lab.command("destroy", "--session", child)
+        lab.wait_snapshot(lambda _: lab.daemon_request({
+            "action": "session_record", "arguments": {"session_id": child},
+        })["value"] is None, "sub-agent destruction completes")
     logs = (lab.runtime_root / "fake-acp.log").read_text()
     assert "discard-this-pending-prompt" not in logs, "discarded prompt ran on a harness"
     # A profile-only move goes back to the deliberately slow source profile.
@@ -179,6 +194,33 @@ def run(lab):
     torn_down = [line for line in swap_log.splitlines()
                  if "remove exact local Mjolnir worker state" in line]
     assert not torn_down, torn_down
+
+    # Restart must take the same bounded handoff as the compatible Move above.
+    # A full checkpoint would reject this file; no workspace bytes need moving.
+    oversized = checkout / "restart-large-build-output"
+    with oversized.open("wb") as handle:
+        handle.truncate(9 * 1024 * 1024 * 1024)
+    staged_home = worker_root / "profile"
+    staged_identity = staged_home.stat().st_ino
+    native_marker = staged_home / "restart-retained-native-state"
+    native_marker.write_text("retained native state\n")
+    before_restart = record()
+    restart_started = time.monotonic()
+    lab.daemon_request({"action": "restart_session", "arguments": {
+        "session_id": session_id,
+    }}, timeout=90)
+    lab.record_action("restart", elapsed_seconds=round(time.monotonic() - restart_started, 3))
+    after_restart = record()
+    assert after_restart["state"] == "running", after_restart
+    assert after_restart["target"] == before_restart["target"]
+    assert after_restart["native_session_id"] == before_restart["native_session_id"]
+    assert after_restart.get("checkpoint") == before_restart.get("checkpoint")
+    assert checkout.stat().st_ino == checkout_identity, "Restart recreated its checkout"
+    assert staged_home.stat().st_ino == staged_identity, "Restart restaged its native home"
+    assert native_marker.read_text() == "retained native state\n"
+    assert oversized.stat().st_size == 9 * 1024 * 1024 * 1024
+    assert ignored.read_bytes() == b"warm build cache", "Restart lost ignored build output"
+    oversized.unlink()
     prompt("interrupted-start")
     lab.wait_snapshot(lambda s: (lab.session(s, session_id) or {}).get("chat_phase") == "running", "second active source turn")
     prompt("start-pending-one")
@@ -201,7 +243,6 @@ def run(lab):
         "acknowledge_unpublished_work": True,
     })[0] == 202
     lab.wait_snapshot(lambda s: (lab.session(s, session_id) or {}).get("state") == "suspended", "final cleanup")
-    client.quit()
     lab.stop_daemon()
     lab.integrity()
     assert not lab.owned_pids(), "owned worker processes remained"

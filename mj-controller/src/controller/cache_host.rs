@@ -208,12 +208,7 @@ impl CacheHost {
     pub(super) fn command(&self, remote: Vec<String>, purpose: impl Into<String>) -> CommandSpec {
         let command = match self {
             Self::Local => CommandSpec::new(remote[0].clone(), remote[1..].iter().cloned()),
-            Self::Ssh(ssh) => {
-                let mut args = ssh.ssh_args.clone();
-                args.push(ssh.destination.clone());
-                args.push(targets::join_remote_command(&remote));
-                CommandSpec::new("ssh", args).ssh_session(ssh)
-            }
+            Self::Ssh(ssh) => targets::ssh_command_owned(ssh, remote),
         };
         command.purpose(purpose)
     }

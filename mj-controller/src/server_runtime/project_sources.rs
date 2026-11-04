@@ -57,7 +57,7 @@ pub(super) struct PhoneProjectSources {
     pub(super) entries: std::collections::BTreeMap<String, ProjectSourceEntry>,
     pub(super) jobs: tokio::task::JoinSet<ProjectSourceResolved>,
     records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
-    relations: mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentRecord>,
+    relations: mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentMetadata>,
     config: Option<Config>,
     pending: std::collections::BTreeSet<String>,
     retries: std::collections::BTreeSet<(Instant, String)>,
@@ -123,7 +123,9 @@ impl PhoneProjectSources {
         }
         self.records = state.sessions.clone();
         self.relations = state.subagents.clone();
-        self.config = Some(controller.config.clone());
+        if self.config.as_ref() != Some(&controller.config) {
+            self.config = Some(controller.config.clone());
+        }
         let now = Instant::now();
         while self
             .retries

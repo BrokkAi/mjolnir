@@ -27,8 +27,7 @@ use mj_controller::import::{
 use mj_tui::{ImportProfileOption, ImportSessionOption};
 
 const IMPORT_CANCELLED_MESSAGE: &str = "Import cancelled; no Mjolnir files were changed.";
-const DIRTY_IMPORT_WARNING: &str =
-    "These Git roots are dirty; Mjolnir will archive their complete current state:";
+const DIRTY_IMPORT_WARNING: &str = "These Git checkouts have uncommitted changes:";
 const IMPORT_RUNTIME_CONTEXT: &str = "import persistence requires the Mjolnir async runtime";
 
 #[derive(Debug, Args)]
@@ -89,6 +88,9 @@ pub(crate) struct NativeImportArgs {
     /// Review every turn of the imported session at this reasoning effort.
     #[arg(long)]
     review_effort: Option<String>,
+    /// Independent reviewers per review. 1–3 is reasonable; more has diminishing returns.
+    #[arg(long)]
+    review_count: Option<std::num::NonZeroUsize>,
     /// Deprecated compatibility option; the value is ignored.
     #[arg(long, hide = true, value_parser = ["quick", "extended"])]
     review_tier: Option<String>,
@@ -223,6 +225,7 @@ pub(crate) fn import_named_native_session(
             allow_omitted_non_git: false,
             review_model: None,
             review_effort: None,
+            review_count: None,
             review_tier: None,
             review: None,
             workspace: crate::WorkspaceName::default(),
@@ -281,8 +284,9 @@ fn import_native(
     let transcript = read_native_transcript(harness, &located.source_path)?;
     println!("Original cwd: {}", transcript.cwd.display());
 
-    let mut state = mj_controller::database::load_state()?;
-    state.validate()?;
+    // Import only adds its session; the daemon persists it. The store is the
+    // daemon's alone.
+    let mut state = State::default();
     let targets = session_edit_targets(&transcript, &home)?;
     if !confirm_import_safety(&targets, args.allow_dirty_local, args.allow_omitted_non_git)? {
         println!("{IMPORT_CANCELLED_MESSAGE}");
@@ -320,6 +324,7 @@ fn import_native(
         args.review_model.as_deref(),
         args.review_effort.as_deref(),
         args.review_tier.as_deref(),
+        args.review_count,
     );
     persist_imported_session(session)?;
     println!("{}", import_success_message(&imported));
@@ -328,11 +333,8 @@ fn import_native(
 
 fn import_success_message(imported: &ImportedClaudeSession) -> String {
     format!(
-        "Imported {} as Mjolnir session {} (bundle {}, archive {})",
-        imported.native_session_id,
-        imported.session_id,
-        imported.bundle_id,
-        imported.archive_path.display()
+        "Imported {} as Mjolnir session {} (bundle {})",
+        imported.native_session_id, imported.session_id, imported.bundle_id
     )
 }
 
@@ -423,7 +425,6 @@ pub(crate) struct PendingDashboardImport {
 pub(crate) struct DashboardImportSafety {
     pub(crate) create_managed_worktree: Option<bool>,
     pub(crate) accepted: bool,
-    pub(crate) include_untracked: bool,
 }
 
 pub(crate) struct ImportBundlePrompt {
@@ -431,7 +432,6 @@ pub(crate) struct ImportBundlePrompt {
     pub(crate) dirty_git_roots: Vec<String>,
     pub(crate) omitted_non_git_dirs: Vec<String>,
     pub(crate) scratch_git_roots: Vec<String>,
-    pub(crate) has_untracked_files: bool,
 }
 
 pub(crate) struct DashboardImportSuccess {
@@ -490,6 +490,7 @@ pub(crate) fn discover_import_profile(
     };
     // A harness whose sessions cannot be listed yet is not an error to report.
     if !native_sessions_enumerable(harness_kind) {
+        profile.scan_progress = Some((0, 0));
         publish(&profile);
         return profile;
     }
@@ -700,29 +701,21 @@ fn report_import_archive_progress(
         ImportArchiveProgress::Repository { current, total, id } => report(
             current,
             Some(total),
-            &format!("Snapshotting repository {current}/{total}: {id}"),
+            &format!("Preparing repository {current}/{total}: {id}"),
             true,
         ),
         ImportArchiveProgress::UntrackedFile {
-            repository_id,
             current,
             total,
             path,
+            ..
         } => report(
             current,
             Some(total),
-            &format!(
-                "Repository {repository_id}: archiving untracked file {current}/{total}: {}",
-                path.display()
-            ),
+            &format!("Preparing file {current}/{total}: {}", path.display()),
             current == 1 || current == total,
         ),
-        ImportArchiveProgress::WritingArchive => report(
-            1,
-            None,
-            "Writing, syncing, and verifying the archive…",
-            true,
-        ),
+        ImportArchiveProgress::WritingArchive => report(1, None, "Saving imported session…", true),
     }
 }
 
@@ -779,7 +772,6 @@ fn resolve_background_import_bundle(
                     .into_iter()
                     .map(|path| path.display().to_string())
                     .collect(),
-                has_untracked_files: issues.has_untracked_files,
             },
         ));
     }
@@ -825,7 +817,7 @@ fn import_session_from_profile(
     let control = ImportControl {
         cancelled,
         progress: &archive_progress,
-        include_untracked: safety.include_untracked,
+        include_untracked: false,
     };
     let imported = import_native_session(
         &controller.config,
@@ -863,6 +855,93 @@ fn import_session_from_profile(
 mod tests {
     use super::*;
     use clap::Parser;
+
+    // Hard-won: 9ca25dbd2: Sessions Open kept scanning forever after skipping DSH's native store.
+    #[test]
+    fn native_discovery_settles_the_dialog_without_local_history() {
+        use std::collections::BTreeMap;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use mj_client::daemon::{WikiIndexState, WikiSearchPage, WikiStatus};
+        use mj_tui::DashboardState;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("profile");
+        std::fs::create_dir(&home).unwrap();
+        let profiles = [
+            ("bedrock-claude".to_owned(), HarnessKind::Claude),
+            ("dsh".to_owned(), HarnessKind::Dsh),
+        ];
+        let mut dashboard =
+            DashboardState::new(Config::default(), State::default(), BTreeMap::new());
+        dashboard.show_resume_dialog(1, mj_tui::resume_profile_placeholders(profiles.clone()));
+        dashboard.apply_resume_candidates(1, Ok(Default::default()));
+        let request = dashboard.resume_search_request_id().unwrap();
+        dashboard.apply_wiki_search(
+            request,
+            WikiSearchPage {
+                rows: Vec::new(),
+                status: WikiStatus {
+                    state: WikiIndexState::Ready,
+                    topping_up: false,
+                },
+            },
+        );
+        for _ in 0..2 {
+            dashboard.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+        let render = |dashboard: &mut DashboardState| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            terminal
+                .draw(|frame| {
+                    mj_tui::render_combined(
+                        frame,
+                        dashboard,
+                        &mut BTreeMap::new(),
+                        &BTreeMap::new(),
+                        false,
+                    );
+                })
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        assert!(render(&mut dashboard).contains("scanning"));
+        let cache = NativeScanCache::new();
+        for (profile_id, kind) in profiles {
+            let completed = discover_import_profile(profile_id, kind, home.clone(), &cache, |_| {});
+            assert!(completed.error.is_none(), "{completed:?}");
+            dashboard.apply_resume_profile(1, completed);
+        }
+        let rendered = render(&mut dashboard);
+        assert!(rendered.contains("No importable sessions"), "{rendered}");
+        assert!(!rendered.to_lowercase().contains("scanning"), "{rendered}");
+        assert!(!rendered.contains("Scan failed"), "{rendered}");
+
+        // An absent store is empty; an existing, unreadable store still fails visibly.
+        std::fs::write(home.join("projects"), "not a directory").unwrap();
+        let failed = discover_import_profile(
+            "bedrock-claude".into(),
+            HarnessKind::Claude,
+            home,
+            &cache,
+            |_| {},
+        );
+        assert!(failed.error.is_some());
+        dashboard.apply_resume_profile(1, failed);
+        let rendered = render(&mut dashboard);
+        assert!(
+            rendered.contains("Scan failed for bedrock-claude"),
+            "{rendered}"
+        );
+        assert!(!rendered.to_lowercase().contains("scanning"), "{rendered}");
+    }
 
     // Hard-won: 1fe0c7aa4f: Launch finding I2-16 saw one native Grok session twice in import discovery; this checks the deduplicated session listing.
     #[test]
@@ -978,6 +1057,7 @@ mod tests {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            muse_auto_review: None,
             codex_profile: None,
         };
         let mut config = Config::default();
@@ -1030,6 +1110,8 @@ mod tests {
             "gpt-6-luna",
             "--review-effort",
             "max",
+            "--review-count",
+            "4",
             "--review-tier",
             "extended",
         ]);
@@ -1039,8 +1121,10 @@ mod tests {
                 args.review_model.as_deref(),
                 args.review_effort.as_deref(),
                 args.review_tier.as_deref(),
+                args.review_count,
             ),
             Some(mj_core::config::SessionReview::Turn {
+                count: std::num::NonZeroUsize::new(4),
                 model: Some("gpt-6-luna".into()),
                 effort: Some("max".into()),
                 tier: None,
@@ -1056,9 +1140,14 @@ mod tests {
                 "--review",
                 trigger,
             ]);
-            let choice =
-                crate::api_commands::session_review(args.review.as_deref(), None, None, None)
-                    .unwrap();
+            let choice = crate::api_commands::session_review(
+                args.review.as_deref(),
+                None,
+                None,
+                None,
+                args.review_count,
+            )
+            .unwrap();
             assert_eq!(choice.trigger().to_string(), trigger);
         }
         let (_, plain) = parse_import(&["mj", "import", "codex", "--session", "native-1"]);
@@ -1068,6 +1157,7 @@ mod tests {
                 plain.review_model.as_deref(),
                 plain.review_effort.as_deref(),
                 plain.review_tier.as_deref(),
+                plain.review_count,
             ),
             None,
             "an import that names nothing follows [review]"
@@ -1087,8 +1177,10 @@ mod tests {
                 tier_only.review_model.as_deref(),
                 tier_only.review_effort.as_deref(),
                 tier_only.review_tier.as_deref(),
+                tier_only.review_count,
             ),
             Some(mj_core::config::SessionReview::Turn {
+                count: None,
                 model: None,
                 effort: None,
                 tier: None,
@@ -1118,10 +1210,10 @@ mod tests {
     }
 
     #[test]
-    fn clean_raw_imports_require_a_worktree_choice_and_keep_it_when_imported() {
+    fn raw_imports_offer_worktree_choice_and_report_dirty_source_changes() {
         if crate::test_support::rerun_in_isolated_child(
             "MJ_TEST_IMPORT_WORKTREE_CHOICE",
-            "import::tests::clean_raw_imports_require_a_worktree_choice_and_keep_it_when_imported",
+            "import::tests::raw_imports_offer_worktree_choice_and_report_dirty_source_changes",
         ) {
             return;
         }
@@ -1143,6 +1235,22 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+        std::fs::write(root.join("tracked.txt"), "committed\n").unwrap();
+        let mut command = std::process::Command::new("git");
+        command.arg("-C").arg(&root).args(["add", "tracked.txt"]);
+        let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
+        assert!(output.status.success());
+        let mut command = std::process::Command::new("git");
+        command
+            .arg("-C")
+            .arg(&root)
+            .args(["commit", "-m", "tracked file"]);
+        let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let home = directory.path().join("codex");
         let native_id = "11111111-2222-4333-8444-555555555555";
         let rollout = home
@@ -1176,6 +1284,7 @@ mod tests {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                muse_auto_review: None,
                 codex_profile: None,
             },
         );
@@ -1190,7 +1299,6 @@ mod tests {
             "Imported",
             DashboardImportSafety {
                 accepted: false,
-                include_untracked: true,
                 create_managed_worktree: None,
             },
             &AtomicBool::new(false),
@@ -1215,7 +1323,6 @@ mod tests {
                 "Imported",
                 DashboardImportSafety {
                     accepted: true,
-                    include_untracked: true,
                     create_managed_worktree: Some(choice),
                 },
                 &AtomicBool::new(false),
@@ -1239,5 +1346,56 @@ mod tests {
                 Some(choice)
             );
         }
+
+        std::fs::write(root.join("tracked.txt"), "modified\n").unwrap();
+        std::fs::write(root.join("untracked.txt"), "untracked\n").unwrap();
+        let result = import_session_from_profile(
+            Controller {
+                config: config.clone(),
+                state: State::default(),
+            },
+            "codex",
+            native_id,
+            "Imported",
+            DashboardImportSafety {
+                accepted: false,
+                create_managed_worktree: None,
+            },
+            &AtomicBool::new(false),
+            |_, _, _, _| {},
+        )
+        .unwrap();
+        let DashboardImportTaskResult::NeedsBundle(prompt) = result else {
+            panic!("dirty import must report changes and offer worktree choice")
+        };
+        assert_eq!(prompt.dirty_git_roots.len(), 1);
+        assert!(prompt.dirty_git_roots[0].contains("1 tracked change"));
+        assert!(prompt.dirty_git_roots[0].contains("1 untracked path"));
+
+        let result = import_session_from_profile(
+            Controller {
+                config,
+                state: State::default(),
+            },
+            "codex",
+            native_id,
+            "Imported",
+            DashboardImportSafety {
+                accepted: true,
+                create_managed_worktree: Some(false),
+            },
+            &AtomicBool::new(false),
+            |_, _, _, _| {},
+        )
+        .unwrap();
+        assert!(matches!(result, DashboardImportTaskResult::Imported(_)));
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "modified\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("untracked.txt")).unwrap(),
+            "untracked\n"
+        );
     }
 }

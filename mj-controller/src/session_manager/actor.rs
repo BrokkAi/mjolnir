@@ -106,7 +106,10 @@ pub(super) async fn run_session_actor(
             event = async {
                 tokio::select! {
                     completed = reviewer_tasks.join_next(), if !reviewer_tasks.is_empty() => Event::Reviewer(completed),
-                    () = tokio::time::sleep_until(schedule.deadline) => Event::Tick,
+                    // A definitive missing target has no relay to poll. The
+                    // daemon owns persistence; a changed desired target
+                    // retires this actor and starts a fresh one.
+                    () = tokio::time::sleep_until(schedule.deadline), if !matches!(view_tx.borrow().error.as_ref(), Some(ViewError::TargetMissing(_))) => Event::Tick,
                     command = commands.recv() => Event::Command(command.map(Box::new)),
                     changed = retirement.changed() => Event::Retirement(changed),
                     changed = storage.changed(), if storage_wait.is_some() => Event::Storage(changed),
@@ -510,7 +513,6 @@ pub(super) async fn run_session_actor(
                                                 .into(),
                                         )),
                                     }, &view_tx, &updates);
-                                    schedule.after(RECONNECT_BACKOFF_CEILING);
                                 }
                                 Ok(WorkerRecoveryOutcome::WorkspaceMissing(directory)) => {
                                     let snapshot = view_tx.borrow().snapshot.clone();
@@ -527,7 +529,6 @@ pub(super) async fn run_session_actor(
                                         &view_tx,
                                         &updates,
                                     );
-                                    schedule.after(RECONNECT_BACKOFF_CEILING);
                                 }
                                 Err(recovery_error) => {
                                     tracing::warn!(
@@ -568,6 +569,20 @@ pub(super) async fn run_session_actor(
                         "rejecting relay operation while session target changes"
                     );
                     command.reject(&target.session_id, "session target is changing");
+                    continue;
+                }
+                if let Some(ViewError::TargetMissing(detail)) = view_tx.borrow().error.as_ref()
+                    && !matches!(
+                        command,
+                        ActorCommand::Lease {
+                            idle_harness: None,
+                            ..
+                        }
+                    )
+                {
+                    // A lifecycle lease may attach to a worker it explicitly
+                    // restored; its returned connection clears this view.
+                    command.reject(&target.session_id, detail);
                     continue;
                 }
                 match command {
@@ -864,25 +879,35 @@ pub(super) async fn run_session_actor(
                             sync_actor_connection(&target, &mut connection).await?;
                             let connection =
                                 connection.as_mut().context("relay is disconnected")?;
-                            connection.install_prompt_context(text).await
+                            connection.install_prompt_context(text).await?;
+                            connection.sync().await
                         }
                         .await;
-                        // Installing context changes nothing the projection
-                        // shows, so there is no view to publish; a transport
-                        // failure still drops the connection for a reconnect.
-                        if let Err(ref error) = result {
-                            if !is_final_rejection(error) {
-                                connection = None;
+                        match &result {
+                            Ok(snapshot) => publish_view(
+                                &target.session_id,
+                                ManagedSessionView {
+                                    snapshot: Some(snapshot.clone()),
+                                    connected: true,
+                                    error: None,
+                                },
+                                &view_tx,
+                                &updates,
+                            ),
+                            Err(error) => {
+                                if !is_final_rejection(error) {
+                                    connection = None;
+                                }
+                                tracing::warn!(
+                                    session_id = %target.session_id,
+                                    operation = "install_prompt_context",
+                                    error = %error,
+                                    "installing relay prompt context failed"
+                                );
                             }
-                            tracing::warn!(
-                                session_id = %target.session_id,
-                                operation = "install_prompt_context",
-                                error = %error,
-                                "installing relay prompt context failed"
-                            );
                         }
                         if reply
-                            .send(result.map_err(|error| format!("{error:#}")))
+                            .send(result.map(|_| ()).map_err(|error| format!("{error:#}")))
                             .is_err()
                         {
                             tracing::debug!(
@@ -1422,8 +1447,14 @@ pub(super) async fn drive_reviewer(
 ) -> Result<ReviewerOutcome> {
     let role = role.as_deref();
     Ok(match action {
-        ReviewerAction::CaptureDelta { baselines, scope } => ReviewerOutcome::Delta {
-            repositories: client.capture_review_delta(role, baselines, scope).await?,
+        ReviewerAction::CaptureDelta {
+            baselines,
+            scope,
+            repositories,
+        } => ReviewerOutcome::Delta {
+            repositories: client
+                .capture_review_delta(role, baselines, scope, repositories)
+                .await?,
         },
         ReviewerAction::RecordReviewed { trees } => {
             client.record_reviewed(role, trees).await?;
@@ -1564,7 +1595,7 @@ async fn reopen_subagent_admission_after_move(
             let queue_enabled = crate::controller::move_session::worker_subagent_queue_enabled(
                 &session.subagents.clone().unwrap_or_default(),
                 session.harness_kind,
-                subagent.as_ref(),
+                subagent.as_ref().map(|child| child.handback_tool),
                 true,
             );
             let move_active = crate::database::has_active_in_place_move(&id)?;

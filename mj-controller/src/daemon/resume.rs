@@ -20,12 +20,15 @@ impl RuntimeState {
             Ok(requested_allocation.or_else(|| session.resource_allocation.clone()))
         })
         .await?;
-        self.reserve_container_capacity_for_launch(
-            &request.session_id,
+        self.admit_container_launch(
             &request.target_template_id,
             allocation,
+            Some(&request.session_id),
+            BTreeSet::new(),
+            None,
         )
         .await
+        .map(capacity::ContainerAdmission::into_lease)
     }
 
     /// Resume a session, and return nothing.

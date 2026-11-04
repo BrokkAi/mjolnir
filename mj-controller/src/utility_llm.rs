@@ -33,8 +33,11 @@ const MAX_SUMMARY_BYTES: usize = 8 * 1024;
 /// being a bet, and the pages are already independent and concurrent.
 pub const MAX_PAGE_BYTES: usize = 1024 * 1024;
 
+/// Ordered worst first. A usage-priced (API) profile bills each request, so
+/// it ranks after every subscription that still has, or may have, quota.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UtilityQuotaClass {
+    UsagePriced,
     Unknown,
     Reserve,
     Healthy,
@@ -207,7 +210,9 @@ impl UtilityLlmRuntime {
                         now.saturating_sub(report.refreshed_at_epoch_seconds) > QUOTA_FRESH_SECONDS
                     })
                 })
-                .map(|(id, profile)| quota_request(id, profile))
+                .map(|(id, profile)| {
+                    quota_request(id, profile, crate::quota::QuotaRuntimeConfig::of(config))
+                })
                 .collect::<Vec<_>>()
         };
         // The daemon's poller keeps the stored report of each profile current;
@@ -497,17 +502,22 @@ impl CompactionBackend for UtilityCompactionBackend {
     }
 }
 
-fn quota_request(profile_id: &str, profile: &HarnessProfile) -> QuotaRefreshRequest {
+fn quota_request(
+    profile_id: &str,
+    profile: &HarnessProfile,
+    runtime: crate::quota::QuotaRuntimeConfig,
+) -> QuotaRefreshRequest {
     QuotaRefreshRequest::for_profile(
         profile_id,
         profile,
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        runtime,
     )
 }
 
 pub(crate) fn classify_quota(report: &ProfileQuota) -> Option<(UtilityQuotaClass, u8)> {
     if report.is_usage_priced() {
-        return Some((UtilityQuotaClass::Healthy, 100));
+        return Some((UtilityQuotaClass::UsagePriced, 100));
     }
     if report.error.is_some() {
         return Some((UtilityQuotaClass::Unknown, 0));
@@ -806,6 +816,7 @@ mod tests {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         let backend = backend_for_profile(&profile).unwrap().unwrap();
         assert_eq!(backend.list_models().await.unwrap(), vec!["kimi-k2.5"]);
@@ -828,6 +839,7 @@ mod tests {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
             },
         );
         let runtime = UtilityLlmRuntime::default();
@@ -886,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn utility_order_keeps_quota_class_then_provider_priority() {
+    fn utility_order_keeps_quota_class_then_provider_priority_and_api_last() {
         let mut candidates = [
             // A Codex profile pointed at DeepSeek ranks with DeepSeek, not with
             // the Codex harness it runs under.
@@ -918,6 +930,13 @@ mod tests {
                 UtilityQuotaClass::Reserve,
                 10,
             ),
+            candidate_for(
+                "codex-api",
+                HarnessKind::Codex,
+                UtilityFamily::Codex,
+                UtilityQuotaClass::UsagePriced,
+                100,
+            ),
         ];
         candidates.sort_by(candidate_order);
         assert_eq!(
@@ -925,7 +944,7 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.profile_id.as_str())
                 .collect::<Vec<_>>(),
-            ["codex", "muse", "deepseek", "grok-reserve"]
+            ["codex", "muse", "deepseek", "grok-reserve", "codex-api"]
         );
     }
 
@@ -948,6 +967,7 @@ mod tests {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         };
         assert_eq!(utility_family(&profile), Some(UtilityFamily::DeepSeek));
         assert!(
@@ -1027,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_quota_is_excluded_and_api_is_healthy() {
+    fn zero_quota_is_excluded_and_api_ranks_last() {
         let mut report = ProfileQuota {
             banked_resets: None,
             profile_id: "p".into(),
@@ -1040,12 +1060,14 @@ mod tests {
         };
         assert_eq!(
             classify_quota(&report),
-            Some((UtilityQuotaClass::Healthy, 100))
+            Some((UtilityQuotaClass::UsagePriced, 100))
         );
         report.extra = None;
         report.windows.push(crate::quota::QuotaWindow {
             label: "weekly".into(),
             remaining_percent: Some(0),
+            duration_seconds: None,
+            model_scope: None,
             used: None,
             limit: None,
             resets: None,

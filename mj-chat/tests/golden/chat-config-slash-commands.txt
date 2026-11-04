@@ -22,7 +22,7 @@
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: SetConfig { key: "model", value: "gpt-5.6-luna" }
 
 === effort selector (100x24) ===
@@ -49,7 +49,7 @@ action: SetConfig { key: "model", value: "gpt-5.6-luna" }
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: SetConfig { key: "effort", value: "xhigh" }
 
 === fast toggles on (100x24) ===
@@ -76,7 +76,7 @@ action: SetConfig { key: "effort", value: "xhigh" }
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: SetConfig { key: "fast-mode", value: "on" }
 
 === fast toggles off (100x24) ===
@@ -103,7 +103,7 @@ action: SetConfig { key: "fast-mode", value: "on" }
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: SetConfig { key: "fast-mode", value: "off" }
 
 === fast argument usage (100x24) ===
@@ -130,7 +130,7 @@ usage: /fast
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
 
 === fast unavailable for active model (100x24) ===
@@ -157,7 +157,7 @@ action: None
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
 
 === busy model command usage (100x24) ===
@@ -184,7 +184,7 @@ The agent does not advertise model values; usage: /model <value>
 │> Add a follow-up while the agent works…                                                          │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
 
 === busy agent accepts queued config update (100x24) ===
@@ -211,7 +211,7 @@ action: None
 │                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: SetConfig { key: "model", value: "sonnet" }
 draft cleared: true
 
@@ -239,7 +239,7 @@ draft cleared: true
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None
 
 === missing model value shows usage (100x24) ===
@@ -266,5 +266,5 @@ The agent does not advertise model values; usage: /model <value>
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 action: None

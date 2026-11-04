@@ -101,6 +101,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        muse_auto_review: None,
         codex_profile: None,
     }
 }
@@ -131,6 +132,7 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        muse_auto_review: None,
         codex_profile: None,
     };
     let every_name = CODEX_CREDENTIAL_ENVIRONMENT.map(str::to_owned).to_vec();
@@ -257,6 +259,7 @@ fn a_bedrock_codex_profile_uses_the_aws_chain_without_an_api_key_or_login_file()
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        muse_auto_review: None,
         codex_profile: None,
     };
 
@@ -301,6 +304,7 @@ fn an_inline_token_codex_profile_is_authenticated_without_a_login_file() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        muse_auto_review: None,
         codex_profile: None,
     };
 
@@ -387,6 +391,126 @@ fn a_codex_profile_inherits_its_provider_key_from_the_environment_mjolnir_runs_i
         .to_string();
     assert!(error.contains("export ZAI_API_KEY"), "{error}");
     assert!(error.contains("from_secret"), "{error}");
+}
+
+/// A DSH profile authenticates with the key saved in DSH itself first, then
+/// the exported key, then the DSH home's `.env`, then Mjolnir's own secret.
+/// The store is read as DSH writes it: comments, grant records it does not
+/// interpret, and a file it refuses when others can read it.
+// Hard-won: b526c21ff: DSH sessions ignored the key saved in DSH and refused to start
+#[test]
+fn a_dsh_profile_takes_its_key_from_dsh_before_the_environment_and_secrets() {
+    let home = tempfile::tempdir().expect("temporary DSH home");
+    let credentials = home.path().join(".credentials.yaml");
+    let dotenv = home.path().join(".env");
+    let write_private = |path: &Path, text: &str| {
+        fs::write(path, text).expect("write DSH file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("chmod 600");
+        }
+    };
+    // The layout from dsh-credentials-local's README, as the Models settings
+    // write it.
+    write_private(
+        &credentials,
+        "version: 1\n\n\
+         refs:\n  \
+           # saved from the Models page\n  \
+           DEEPSEEK_API_KEY: sk-saved-in-dsh\n  \
+           OPENAI_API_KEY: sk-other\n\n\
+         records:\n  \
+           llm-pi-ai/openai-codex:\n    \
+             kind: grant\n    \
+             payload:\n      \
+               type: oauth\n      \
+               access: eyJhbGciOi\n",
+    );
+    fs::write(
+        &dotenv,
+        "export DEEPSEEK_API_KEY=\"sk-from-dotenv\" # home\n",
+    )
+    .expect("write .env");
+    let text = format!(
+        "version = {CONFIG_VERSION}\n\n[profiles.dsh]\nkind = \"dsh\"\nhome = {:?}\n\n\
+         [profiles.dsh.environment]\nDEEPSEEK_API_KEY = {{ from_secret = \"DEEPSEEK_API_KEY\" }}\n",
+        home.path().to_string_lossy()
+    );
+    let read = |process: &[(&str, &str)]| -> Config {
+        let process = process
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        let secrets = BTreeMap::from([(
+            "DEEPSEEK_API_KEY".to_owned(),
+            "sk-mjolnir-secret".to_owned(),
+        )]);
+        with_secret_resolver(SecretResolver::fixed(process, secrets), || {
+            toml::from_str(&text)
+        })
+        .expect("read the configuration")
+    };
+    let key = |config: &Config| config.profiles["dsh"].environment["DEEPSEEK_API_KEY"].clone();
+    let exported = [("DEEPSEEK_API_KEY", "sk-exported")];
+
+    let saved = read(&exported);
+    assert_eq!(key(&saved), "sk-saved-in-dsh");
+    saved.profiles["dsh"].ensure_ready("dsh").expect("ready");
+    let written = toml::to_string(&saved).expect("serialize");
+    assert!(!written.contains("sk-saved-in-dsh"), "{written}");
+    assert!(written.contains("from_secret"), "{written}");
+
+    fs::remove_file(&credentials).expect("remove DSH's store");
+    assert_eq!(key(&read(&exported)), "sk-exported");
+    assert_eq!(key(&read(&[])), "sk-from-dotenv");
+    fs::remove_file(&dotenv).expect("remove .env");
+    assert_eq!(key(&read(&[])), "sk-mjolnir-secret");
+
+    // A browser sign-in is no key dsh-acp can send; say so rather than
+    // reporting the key as simply missing.
+    write_private(
+        &credentials,
+        "version: 1\nrecords:\n  deepseek-account-platform/default:\n    kind: grant\n    payload:\n      version: 1\n      token: account-token\n      issuer: https://platform.deepseek.com\n",
+    );
+    let text_without_secret = text.replace(
+        "\n[profiles.dsh.environment]\nDEEPSEEK_API_KEY = { from_secret = \"DEEPSEEK_API_KEY\" }\n",
+        "",
+    );
+    let signed_in_config = |text: &str| -> Config {
+        with_secret_resolver(
+            SecretResolver::fixed(BTreeMap::new(), BTreeMap::new()),
+            || toml::from_str(text),
+        )
+        .expect("read the configuration")
+    };
+    let signed_in = signed_in_config(&text_without_secret);
+    let error = signed_in.profiles["dsh"]
+        .ensure_ready("dsh")
+        .expect_err("no API key")
+        .to_string();
+    assert!(error.contains("signed in to a DeepSeek account"), "{error}");
+    assert!(!error.contains("account-token"), "{error}");
+
+    // DSH refuses a store others can read, so its key is never used. A key
+    // from another source still works, because the session sends only the
+    // key; with none, the refusal says how to fix the file.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        write_private(
+            &credentials,
+            "version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-saved-in-dsh\n",
+        );
+        fs::set_permissions(&credentials, fs::Permissions::from_mode(0o644)).expect("chmod 644");
+        assert_eq!(key(&read(&exported)), "sk-exported");
+        let error = signed_in_config(&text_without_secret).profiles["dsh"]
+            .ensure_ready("dsh")
+            .expect_err("readable by others")
+            .to_string();
+        assert!(error.contains("chmod 600"), "{error}");
+        assert!(!error.contains("sk-saved-in-dsh"), "{error}");
+    }
 }
 
 /// OpenCode signs in to a provider from a key in its environment, with no
@@ -532,7 +656,21 @@ fn saving_keeps_the_files_comments_and_order() {
 
     let saved = fs::read_to_string(&path).unwrap();
     assert_eq!(saved, original.replace("bell = true", "bell = false"));
+    assert_eq!(config.advanced.auto_afk_minutes, 0);
+    assert!(!saved.contains("auto_afk_minutes"));
     assert_eq!(Config::load_from(&path).unwrap(), config);
+
+    config.advanced.auto_afk_minutes = u32::MAX;
+    config.save_to(&path).unwrap();
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("auto_afk_minutes = 4294967295")
+    );
+    assert_eq!(
+        Config::load_from(&path).unwrap().advanced.auto_afk_minutes,
+        u32::MAX
+    );
 
     // A version 12 file is marked as this build's, in place.
     fs::write(&path, "# keep me\nversion = 12 # the file format\n").unwrap();
@@ -695,14 +833,17 @@ fn sample_config() -> Config {
         spinner: SpinnerStyle::default(),
         theme: Default::default(),
         phone: PhoneConfig::default(),
+        daemon: Default::default(),
         github: GithubConfig::default(),
         continuation: Default::default(),
         review: ReviewConfig::default(),
         sessionwiki: SessionWikiConfig::default(),
         subagents: SubagentConfig::default(),
         jev: Default::default(),
+        quota: Default::default(),
         legacy_startup: (),
         default_targets: Default::default(),
+        disabled_targets: Default::default(),
         machines: BTreeMap::new(),
         profiles: BTreeMap::from([(
             "codex-1".into(),
@@ -714,6 +855,7 @@ fn sample_config() -> Config {
                 environment: BTreeMap::from([("RUST_LOG".into(), "info".into())]).into(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                muse_auto_review: None,
                 codex_profile: None,
             },
         )]),
@@ -859,16 +1001,14 @@ fn unconstrained_enforcement_splits_acp_modes_from_launch_controls() {
         .execution_enforcement(ExecutionPolicy::Unconstrained)
         .unwrap();
     // allowAll emits no permission requests, so the adapter's client-side
-    // auto-review would never fire. Unconstrained Muse reviews instead.
-    assert_eq!(muse.acp_mode(), Some("promptUnmatched"));
-    assert_eq!(
-        muse.label(),
-        "promptUnmatched / auto-review / sandbox-off / :ask-me"
-    );
-    assert_eq!(muse.acp_setting(), Some(("auto_review", "on")));
+    // auto-review would have nothing to decide: isolated targets run Muse
+    // without permission checks, like OpenCode's `permission = "allow"`.
+    assert_eq!(muse.acp_mode(), Some("allowAll"));
+    assert_eq!(muse.label(), "allowAll / no-review / sandbox-off / :ask-me");
+    assert_eq!(muse.acp_setting(), Some(("auto_review", "off")));
     assert_eq!(
         muse.launch_environment(),
-        Some(("MUSE_APPROVAL_MODE", "promptUnmatched"))
+        Some(("MUSE_APPROVAL_MODE", "allowAll"))
     );
     assert_eq!(
         muse.launch_argument(),
@@ -940,6 +1080,116 @@ fn configured_approvals_preserve_other_profiles_and_select_guardians() {
             "{kind:?}"
         );
     }
+}
+
+/// Unconstrained Muse runs without permission checks by default, like
+/// OpenCode's `permission = "allow"`. A Muse profile opts back into
+/// auto-review with `muse_auto_review = true`; guardian targets always
+/// review, so the toggle changes nothing there.
+#[test]
+fn muse_auto_review_defaults_off_and_opts_back_into_review() {
+    let mut muse = sample_config().profiles["codex-1"].clone();
+    muse.kind = HarnessKind::Muse;
+    muse.home = PathBuf::from("/home/test/.config/muse");
+    muse.codex_profile = None;
+    muse.guardian_review_model = None;
+
+    // Default: no permission checks in isolated targets.
+    assert_eq!(muse.muse_auto_review, None);
+    let enforcement = muse
+        .execution_enforcement(ExecutionPolicy::Unconstrained)
+        .expect("Muse enforces an execution policy");
+    assert_eq!(enforcement.acp_mode(), Some("allowAll"));
+    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
+    assert_eq!(
+        enforcement.label(),
+        "allowAll / no-review / sandbox-off / :ask-me"
+    );
+    assert_eq!(
+        enforcement.launch_environment(),
+        Some(("MUSE_APPROVAL_MODE", "allowAll"))
+    );
+
+    // Explicit false matches the default.
+    muse.muse_auto_review = Some(false);
+    let enforcement = muse
+        .execution_enforcement(ExecutionPolicy::Unconstrained)
+        .expect("Muse enforces an execution policy");
+    assert_eq!(enforcement.acp_mode(), Some("allowAll"));
+    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
+
+    // Opt-in restores the reviewer inside the container boundary.
+    muse.muse_auto_review = Some(true);
+    assert!(muse.muse_auto_review_unconstrained());
+    let enforcement = muse
+        .execution_enforcement(ExecutionPolicy::Unconstrained)
+        .expect("Muse enforces an execution policy");
+    assert_eq!(enforcement.acp_mode(), Some("promptUnmatched"));
+    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "on")));
+    assert_eq!(
+        enforcement.label(),
+        "promptUnmatched / auto-review / sandbox-off / :ask-me"
+    );
+    assert_eq!(
+        enforcement.launch_environment(),
+        Some(("MUSE_APPROVAL_MODE", "promptUnmatched"))
+    );
+
+    // The launch environment follows the toggle; only the sandbox is ever
+    // disabled.
+    muse.muse_auto_review = None;
+    let mut environment = BTreeMap::new();
+    muse.configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
+        .unwrap();
+    assert_eq!(
+        environment.get("MUSE_APPROVAL_MODE").map(String::as_str),
+        Some("allowAll")
+    );
+    assert_eq!(
+        environment.get("MUSE_SERVE_ARGS").map(String::as_str),
+        Some("--disable-sandbox")
+    );
+    muse.muse_auto_review = Some(true);
+    let mut environment = BTreeMap::new();
+    muse.configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
+        .unwrap();
+    assert_eq!(
+        environment.get("MUSE_APPROVAL_MODE").map(String::as_str),
+        Some("promptUnmatched")
+    );
+
+    // Guardian targets always review, whatever the toggle says.
+    for review in [None, Some(true), Some(false)] {
+        muse.muse_auto_review = review;
+        let enforcement = muse
+            .execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
+            .expect("Muse guardian enforces an execution policy");
+        assert_eq!(enforcement.acp_mode(), Some("promptUnmatched"));
+        assert_eq!(enforcement.acp_setting(), Some(("auto_review", "on")));
+    }
+}
+
+/// `muse_auto_review` is a Muse-only setting: any other harness rejects it
+/// when the configuration loads.
+#[test]
+fn muse_auto_review_applies_only_to_a_muse_profile() {
+    let text = format!(
+        "version = {CONFIG_VERSION}\n[profiles.muse]\nkind = \"muse\"\n\
+         home = \"/home/test/.config/muse\"\nmuse_auto_review = true\n"
+    );
+    let config: Config = toml::from_str(&text).expect("read the Muse profile");
+    assert_eq!(config.profiles["muse"].muse_auto_review, Some(true));
+    config.validate().expect("Muse accepts the toggle");
+
+    let text = text.replace("kind = \"muse\"", "kind = \"codex\"");
+    let config: Config = toml::from_str(&text).expect("read the Codex profile");
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("applies only to a Muse profile")
+    );
 }
 
 // Hard-won: #1278: guardian Muse kept a stale --disable-sandbox in MUSE_SERVE_ARGS
@@ -1152,6 +1402,7 @@ fn github_app_configuration_is_optional_and_round_trips() {
             GithubPermissionLevel::Read,
         )])),
     });
+    configured.github.session_token_path = Some(PathBuf::from("~/.secrets/gh_agents_pat"));
     configured.github.watch.interval_seconds = 30;
     configured.github.watch.api_base = "http://127.0.0.1:9411".into();
     configured.github.watch.enabled = false;
@@ -1228,6 +1479,9 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
     // the editor opened. The review save must start from this newer file.
     let mut latest = Config::load_from(&path).unwrap();
     latest.phone.enabled = false;
+    latest.daemon.runtime = DaemonRuntime::Podman;
+    latest.daemon.image = Some("example.test/daemon:fixture".into());
+    latest.daemon.mounts = vec![PathBuf::from("/srv/review-projects")];
     latest
         .profiles
         .get_mut("codex-1")
@@ -1235,16 +1489,28 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
         .environment
         .insert("LATEST_SETTING".into(), "kept".into());
     latest.save_to(&path).unwrap();
+    let current = fs::read_to_string(&path).unwrap();
+    let previous_version = format!("version = {CONFIG_VERSION}");
+    assert!(current.contains(&previous_version));
+    fs::write(
+        &path,
+        current.replacen(&previous_version, "version = 20", 1),
+    )
+    .unwrap();
 
     let review = ReviewConfig {
         trigger: ReviewTrigger::Turn,
+        count: std::num::NonZeroUsize::new(3).unwrap(),
         tier: None,
         profile: Some("codex-1".into()),
         model: Some("review-model".into()),
         effort: Some("high".into()),
     };
     let saved = Config::save_review_to(&path, review.clone()).unwrap();
+    assert_eq!(saved.version, CONFIG_VERSION);
     assert_eq!(saved.review, review);
+    assert_eq!(saved.review.count.get(), 3);
+    assert_eq!(saved.daemon, latest.daemon);
     assert!(!saved.phone.enabled);
     assert_eq!(
         saved.profiles["codex-1"].environment.get("LATEST_SETTING"),
@@ -1649,6 +1915,79 @@ fn version_seven_profiles_upgrade_enabled_and_disabled_round_trips_explicitly() 
     assert!(!Config::load_from(&path).unwrap().profiles["work"].enabled);
 }
 
+/// A runtime switched off stays configured and off through every save, so
+/// detection, which adds only kinds a machine does not run yet, never adds
+/// it back. That includes a standard local runtime, which the file names
+/// only once the user switches it off.
+#[test]
+fn a_runtime_switched_off_stays_off_through_loads_saves_and_updates() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        "version = 18\n\
+         [machines.box]\nkind = \"ssh\"\nhost = \"box.example.test\"\n\
+         [targets.box]\nkind = \"bare\"\nmachine = \"box\"\nenabled = false\n\
+         [targets.box-docker]\nkind = \"docker\"\nmachine = \"box\"\nimage = \"a:1\"\nenabled = false\n\
+         [targets.box-podman]\nkind = \"podman\"\nmachine = \"box\"\nimage = \"a:1\"\nenabled = true\n",
+    )
+    .unwrap();
+
+    let config = Config::load_from(&path).unwrap();
+    assert_eq!(
+        config.disabled_targets,
+        BTreeSet::from(["box".to_owned(), "box-docker".to_owned()])
+    );
+    assert_eq!(
+        config
+            .enabled_targets()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        ["box-podman"]
+    );
+    let refusal = config.ensure_target_enabled("box-docker").unwrap_err();
+    assert!(refusal.to_string().contains("turned off"), "{refusal:#}");
+
+    // A fresh write names the switch only where it is off.
+    let fresh = directory.path().join("fresh.toml");
+    config.save_to(&fresh).unwrap();
+    let saved = fs::read_to_string(&fresh).unwrap();
+    assert!(
+        saved.starts_with(&format!("version = {CONFIG_VERSION}")),
+        "{saved}"
+    );
+    assert_eq!(saved.matches("enabled = false").count(), 2, "{saved}");
+    assert!(!saved.contains("enabled = true"), "{saved}");
+    assert_eq!(Config::load_from(&fresh).unwrap(), config);
+
+    let (_, ()) = Config::update_with_local_targets_at(&path, |config| {
+        config.disabled_targets.insert("docker".to_owned());
+        Ok(())
+    })
+    .unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("[targets.docker]"), "{saved}");
+    assert!(!saved.contains("[targets.podman]"), "{saved}");
+    assert!(
+        Config::load_from(&path)
+            .unwrap()
+            .with_local_targets()
+            .enabled_target("docker")
+            .is_none()
+    );
+
+    fs::write(
+        &path,
+        format!("version = {CONFIG_VERSION}\n[targets.x]\nkind = \"docker\"\nenabled = \"no\"\n"),
+    )
+    .unwrap();
+    let error = Config::load_from(&path).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("write true or false"),
+        "{error:#}"
+    );
+}
+
 /// The global `[subagents] enabled` switch was removed; whether a session
 /// uses Mjolnir sub-agents is now stored per session. A config file left
 /// over from before the removal must still load, and a save must drop the
@@ -1961,6 +2300,7 @@ fn a_disabled_profile_loads_instead_of_failing() {
 fn a_session_review_choice_is_stored_in_a_stable_shape() {
     // Stored in `sessions.review_json`; older and newer releases read it.
     let on = SessionReview::Turn {
+        count: None,
         model: Some("gpt-6-astra".into()),
         effort: None,
         tier: None,
@@ -1976,6 +2316,7 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
     assert_eq!(
         serde_json::from_str::<SessionReview>(r#"{"mode":"on"}"#).unwrap(),
         SessionReview::Turn {
+            count: None,
             model: None,
             effort: None,
             tier: None,
@@ -1988,12 +2329,14 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
         )
         .unwrap(),
         SessionReview::Turn {
+            count: None,
             model: Some("gpt-6-luna".into()),
             effort: Some("max".into()),
             tier: None,
         }
     );
     let extended = SessionReview::Turn {
+        count: None,
         model: None,
         effort: None,
         tier: Some("extended".into()),
@@ -2014,6 +2357,16 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
             ReviewConfig::default().for_session(Some(&choice)).trigger,
             choice.trigger()
         );
+        let global = ReviewConfig {
+            count: std::num::NonZeroUsize::new(4).unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(global.for_session(Some(&choice)).count, global.count);
+        let explicit =
+            format!(r#"{{"mode":"{trigger}","count":3,"model":"astra","effort":"high"}}"#);
+        let counted: SessionReview = serde_json::from_str(&explicit).unwrap();
+        assert_eq!(serde_json::to_string(&counted).unwrap(), explicit);
+        assert_eq!(global.for_session(Some(&counted)).count.get(), 3);
     }
     assert_eq!(
         serde_json::from_str::<SessionReview>(r#"{"mode":"off"}"#).unwrap(),
@@ -2779,6 +3132,7 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        muse_auto_review: None,
         codex_profile: codex_profile.map(str::to_owned),
     };
     let mut config = Config::default();
@@ -2882,6 +3236,7 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            muse_auto_review: None,
             codex_profile: None,
         };
         let mut configured = Config::default();

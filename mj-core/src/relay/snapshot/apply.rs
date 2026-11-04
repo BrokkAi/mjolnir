@@ -433,6 +433,18 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         }
                     }
                 }
+                RelayCommand::DismissQuestion { question } => {
+                    let assessment = snapshot
+                        .assessment
+                        .as_mut()
+                        .filter(|a| a.inferred_question().as_ref() == Some(question))
+                        .ok_or_else(|| {
+                            anyhow!("dismissed question no longer matches the completed turn")
+                        })?;
+                    assessment.status = crate::assessment::Status::Superseded;
+                    assessment.reason = "question_dismissed".into();
+                    assessment.retry_at_ms = None;
+                }
                 RelayCommand::SeedAssessmentContext { context, .. } => {
                     snapshot.assessment_context = Some((**context).clone());
                     if let Some(a) = snapshot.assessment.as_mut().filter(|a| {
@@ -827,6 +839,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 (RelayCommand::RestoreExecutionMode, RelayCommandOutcome::Configured) => {}
                 (
                     RelayCommand::SeedAssessmentContext { .. }
+                    | RelayCommand::DismissQuestion { .. }
                     | RelayCommand::InstallPromptContext { .. },
                     RelayCommandOutcome::NoticeRecorded,
                 ) => {}

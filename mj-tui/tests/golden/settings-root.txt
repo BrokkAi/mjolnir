@@ -12,11 +12,13 @@
 │                     │   Projects                        hel                                                        │                     │
 │                     │   Runtimes                        podman                                                     │                     │
 │                     │   Machines                        local                                                      │                     │
+│                     │   Daemon                          Host                                                       │                     │
 │                     │                                                                                              │                     │
 │                     │   Sessions                                                                                   │                     │
 │                     │   Code Review                     Off                                                        │                     │
 │                     │   Continuation                    On · 3 continuations plus quota recovery                   │                     │
 │                     │   Sub-agents                      Up to 6 at once                                            │                     │
+│                     │   Quota checks                    Auto · container when available                            │                     │
 │                     │   SessionWiki                     Keeps every session                                        │                     │
 │                     │   Web Access                      On · 127.0.0.1:3765                                        │                     │
 │                     │                                                                                              │                     │
@@ -24,14 +26,12 @@
 │                     │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │                     │
 │                     │   Notifications                   Terminal                                                   │                     │
 │                     │   Advanced                        All off                                                    │                     │
-│                     │                                                                                              │                     │
-│                     │   Privacy                                                                                    │                     │
-│                     │   Jev (hosted service)            On · sends turn text for classification                    │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │   Other                                                                                      │                     │
-│                     │   GitHub events                   On · GitHub activity                                       │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │   Privacy                                                                                    │  ───────────────────╮
+│                     │   Jev (hosted service)            On · sends turn text for classification                    │                     │
+│                     │                                                                                              │                     │
+│                     │   Other                                                                                      │  ───────────────────╯
+│                     │   GitHub events                   On · GitHub activity                                       │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │   Save and Close                                                                             │  ──────────── ▁   ▄ ╮
@@ -40,7 +40,7 @@
 │                                                                                                                                          │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 root footer alignment: save=(24,35); body=(26,11)
 
 === virtual Interface page (100x30) ===
@@ -152,11 +152,13 @@ draft paths: theme="light"; interface.theme present=false; keys.prefix="ctrl+b"
   │   Projects                        hel                                                        │
   │   Runtimes                        podman                                                     │
   │   Machines                        local                                                      │
+  │   Daemon                          Host                                                       │
   │                                                                                              │
   │   Sessions                                                                                   │
   │   Code Review                     Off                                                        │
   │   Continuation                    On · 3 continuations plus quota recovery                   │
   │   Sub-agents                      Up to 6 at once                                            │
+  │   Quota checks                    Auto · container when available                            │
   │   SessionWiki                     Keeps every session                                        │
   │   Web Access                      On · 127.0.0.1:3765                                        │
   │                                                                                              │
@@ -165,8 +167,6 @@ draft paths: theme="light"; interface.theme present=false; keys.prefix="ctrl+b"
   │   Notifications                   Terminal                                                   │
   │   Advanced                        All off                                                    │
   │                                                                                              │
-  │   Privacy                                                                                    │
-  │   Jev (hosted service)            On · sends turn text for classification                    │
   │   Save and Close                                                                             │
   ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
@@ -244,7 +244,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
   ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
   │ Settings › Advanced                                                                          │
-  │ Display options: activity clocks, session order, symbols, and how tool calls show.           │
+  │ Display options, activity clocks, session order, symbols, tool calls, and automatic AFK.     │
   │                                                                                              │
   │                                                                                              │
   │ ☐ Detailed activity clocks                                                                   │
@@ -252,7 +252,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Symbols                           Default (Follows the terminal) ▾                           │
   │ Tool calls                        Grouped ▾                                                  │
   │ Tool output lines                 5                                                          │
-  │                                                                                              │
+  │ Auto-AFK after (minutes)          0                                                          │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -313,14 +313,14 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │Profile   Auto ▾                                                                              │
   │Model     Auto policy ▾                                                                       │
   │Effort    Auto policy ▾                                                                       │
+  │Reviewers 2                                                                                   │
   │                                                                                              │
   │                                                                                              │
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
-  │Auto prefers another provider, then another profile, then the primary.                        │
-  │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
-  │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
-  │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
+  │1–3 reviewers are reasonable; more have diminishing returns.                                  │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -350,11 +350,13 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │   Projects                        hel                                                        │
   │   Runtimes                        podman                                                     │
   │   Machines                        local                                                      │
+  │   Daemon                          Host                                                       │
   │                                                                                              │
   │   Sessions                                                                                   │
   │   Code Review                     Off                                                        │
   │   Continuation                    On · 3 continuations plus quota recovery                   │
   │   Sub-agents                      Up to 6 at once                                            │
+  │   Quota checks                    Auto · container when available                            │
   │   SessionWiki                     Keeps every session                                        │
   │   Web Access                      On · 127.0.0.1:3765                                        │
   │                                                                                              │
@@ -363,8 +365,6 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │   Notifications                   Terminal                                                   │
   │   Advanced                        All off                                                    │
   │                                                                                              │
-  │   Privacy                                                                                    │
-  │   Jev (hosted service)            On · sends turn text for classification                    │
   │   Save and Close                                                                             │
   ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
@@ -378,7 +378,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │
   │ run.                                                                                         │
   │                                                                                              │
-  │   podman                          9 settings  ›                            Add               │
+  │   podman                          10 settings  ›                           Add               │
   │                                                                            Detect runtimes   │
   │                                                                                              │
   │                                                                                              │
@@ -538,7 +538,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │
   │ run.                                                                                         │
   │                                                                                              │
-  │   podman                          9 settings  ›                            Add               │
+  │   podman                          10 settings  ›                           Add               │
   │                                                                            Detect runtimes   │
   │                                                                                              │
   │                                                                                              │
@@ -570,7 +570,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │
   │ run.                                                                                         │
   │                                                                                              │
-  │   podman                          9 settings  ›                            Add               │
+  │   podman                          10 settings  ›                           Add               │
   │                                                                            Detect runtimes   │
   │                                                                                              │
   │                                                                                              │

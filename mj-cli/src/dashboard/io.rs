@@ -1,14 +1,13 @@
 //! One-shot background jobs the dashboard starts and the updates they report.
 //!
-//! Each job runs on a blocking task and answers over the dashboard's single
-//! [`DashboardIoUpdate`] channel, so no filesystem, database, or process work
-//! ever happens on the render loop. Failures travel as `Err` payloads rather
-//! than being dropped.
+//! Network jobs run as async tasks; synchronous work uses blocking tasks.
+//! Both answer over the dashboard's single [`DashboardIoUpdate`] channel,
+//! keeping work off the render loop and reporting failures as `Err` payloads.
 
 mod spawn;
 pub(crate) use spawn::*;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -37,22 +36,20 @@ use tokio::task::{JoinError, JoinHandle};
 use crate::daemon;
 use crate::dashboard::{CriticalOperationTracker, DashboardContext};
 use crate::import::{DashboardImportSuccess, PendingDashboardImport, persist_imported_session};
-use crate::pollers::{
-    DashboardLifecycleUpdate, LifecycleSuccess, WorkerRecordPersistence,
-    WorkerRecordPersistenceOutcome,
-};
+use crate::pollers::{DashboardLifecycleUpdate, LifecycleSuccess};
 use crate::short_id;
 
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
     RuntimeConfirmationMissing(String),
+    OperatorAway {
+        away: bool,
+        revision: u64,
+        result: Result<(), String>,
+    },
     ProfileHydration {
         key: String,
         result: std::result::Result<(), String>,
-    },
-    HelpSearchFinished {
-        generation: u64,
-        result: std::result::Result<mj_core::help_search::HelpSearchResponse, String>,
     },
     SessionUsageFinished {
         generation: u64,
@@ -87,13 +84,14 @@ pub(crate) enum DashboardIoUpdate {
         result:
             std::result::Result<BTreeMap<String, mj_core::workspace::ConversationLayout>, String>,
     },
-    WorkerRecordPersistence {
-        operation: WorkerRecordPersistence,
-        result: std::result::Result<WorkerRecordPersistenceOutcome, String>,
-    },
     MaterializedSessionProjection {
         session_id: String,
         result: std::result::Result<Box<PreparedMaterializedSessionDetail>, String>,
+    },
+    QuestionDismissed {
+        session_id: String,
+        question: mj_core::assessment::InferredQuestion,
+        result: std::result::Result<u64, String>,
     },
     /// A bounded tail of a resumed session's stored transcript, loaded off the
     /// event loop so the conversation is not blank while the poller catches up.
@@ -102,6 +100,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     StoredSessionSummary {
         session_id: String,
+        generation: u64,
         result: std::result::Result<PreparedMaterializedSessionSummary, String>,
     },
     /// The stored tail of a stopped sub-agent's conversation, which is read
@@ -179,29 +178,32 @@ pub(crate) enum DashboardIoUpdate {
     },
     /// A prompt typed into a standby composer and handed to the daemon for
     /// delivery once the session is live.
+    MoveOriginPrepared {
+        session_id: String,
+        move_operation_id: String,
+        operation: Arc<AtomicBool>,
+    },
+    StartupPromptOutcomes {
+        session_id: String,
+        result:
+            std::result::Result<BTreeMap<String, mj_client::daemon::StartupPromptOutcome>, String>,
+    },
     StartupPromptQueued {
         session_id: String,
-        text: String,
+        prompt: mj_chat::chat::StartupPrompt,
         result: std::result::Result<(), String>,
+        definitely_unaccepted: bool,
     },
     /// The daemon's answer to taking a recalled prompt back: `Ok(true)` it is
     /// withdrawn, `Ok(false)` it had already been sent.
     StartupPromptWithdrawn {
         session_id: String,
-        text: String,
+        prompt: mj_chat::chat::StartupPrompt,
         result: std::result::Result<bool, String>,
     },
     ContainerSettings {
         session_id: String,
         result: std::result::Result<DashboardMetadata, String>,
-    },
-    TargetReadiness {
-        generation: u64,
-        target_id: String,
-        result: std::result::Result<(), String>,
-        /// The configuration checked, when the check found its local
-        /// engine's command not installed.
-        absent_engine: Option<mj_core::config::TargetTemplate>,
     },
     /// Whether a configured project's local directory exists; `None` when
     /// the check could not tell.
@@ -291,7 +293,6 @@ pub(crate) enum DashboardIoUpdate {
     FirstRunStarted,
     FirstRunConfigured(mj_controller::setup::SetupReport),
     FirstRunChecked(std::result::Result<Option<Vec<String>>, String>),
-    StartupProfilesDetected(std::result::Result<Vec<String>, String>),
     SetupSaved {
         generation: u64,
         result: std::result::Result<Config, String>,
@@ -306,9 +307,9 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         result: std::result::Result<BTreeMap<String, mj_core::credentials::LoginStatus>, String>,
     },
-    MachineRuntimesChecked {
+    AvailabilityChecked {
         generation: u64,
-        result: std::result::Result<mj_tui::MachineRuntimesChecked, String>,
+        result: std::result::Result<mj_tui::AvailabilityChecked, String>,
     },
     BuildCachePreviewed {
         generation: u64,
@@ -430,13 +431,20 @@ pub(crate) enum DashboardIoUpdate {
         context: String,
         directory: String,
         result: std::result::Result<
-            (std::path::PathBuf, mj_core::state::ManagedWorktreeOptions),
+            (
+                std::path::PathBuf,
+                mj_core::state::ManagedWorktreeOptions,
+                bool,
+            ),
             String,
         >,
     },
     /// Clipboard providers may use a blocking desktop IPC call. The result
     /// is delivered here after that work finishes on a blocking task.
-    ClipboardText(std::result::Result<String, String>),
+    ClipboardText {
+        target: mj_tui::DashboardPasteTarget,
+        result: std::result::Result<String, String>,
+    },
     /// A copied selection reached the desktop clipboard, or did not. Only a
     /// failure needs reporting: the notice for a successful copy is already
     /// on screen.
@@ -537,13 +545,22 @@ pub(crate) struct DashboardMetadata {
     container_sizes: mj_core::snapshot_map::SnapshotMap<String, mj_core::state::HostContainerSize>,
 }
 
-impl From<Controller> for DashboardMetadata {
-    fn from(controller: Controller) -> Self {
+impl From<mj_client::daemon::StoredSessionMetadata> for DashboardMetadata {
+    fn from(stored: mj_client::daemon::StoredSessionMetadata) -> Self {
         Self {
-            mount_history: controller.state.mount_history,
-            container_sizes: controller.state.container_sizes,
+            mount_history: stored.mount_history,
+            container_sizes: stored.container_sizes,
         }
     }
+}
+
+/// The store's session metadata, read by the daemon, which alone opens the store.
+pub(crate) async fn stored_session_metadata() -> Result<DashboardMetadata> {
+    crate::daemon::connect_or_start()
+        .await?
+        .stored_session_metadata()
+        .await
+        .map(DashboardMetadata::from)
 }
 
 impl DashboardMetadata {
@@ -637,11 +654,11 @@ impl DashboardContext {
             return;
         }
         match update {
+            DashboardIoUpdate::OperatorAway { away, revision, result } => {
+                self.dashboard.operator_away_request_finished(away, revision, result);
+            }
             DashboardIoUpdate::RuntimeConfirmationMissing(error) => {
                 self.dashboard.set_failure_notice(error)
-            }
-            DashboardIoUpdate::HelpSearchFinished { generation, result } => {
-                self.dashboard.apply_help_search_result(generation, result);
             }
             DashboardIoUpdate::SessionUsageFinished { generation, result } => {
                 self.dashboard
@@ -797,50 +814,11 @@ impl DashboardContext {
                     None => self.dashboard.set_notice(message),
                 }
             }
-            DashboardIoUpdate::WorkerRecordPersistence { operation, result } => {
-                match (operation, result) {
-                    (WorkerRecordPersistence::AcpTitle { .. }, Err(error)) => self
-                        .dashboard
-                        .set_notice(format!("Could not save harness title: {error}")),
-                    (
-                        WorkerRecordPersistence::TargetMissing {
-                            session_id,
-                            detail: _,
-                            updated_at: _,
-                        },
-                        Ok(WorkerRecordPersistenceOutcome::TargetMissing(state)),
-                    ) => {
-                        let name = self.session_notice_name(&session_id);
-                        let notice = match state {
-                            SessionState::Error => format!(
-                                "Session {name} cannot reach its managed target; its last verified checkpoint is ready to resume"
-                            ),
-                            SessionState::Lost => format!("Session {name} lost its managed target"),
-                            _ => unreachable!("target-missing result is error or lost"),
-                        };
-                        self.dashboard.set_notice(notice);
-                    }
-                    (WorkerRecordPersistence::TargetMissing { session_id, .. }, Err(error)) => {
-                        self.dashboard.set_notice(format!(
-                            "Could not record missing target for {}: {error}",
-                            self.session_notice_name(&session_id)
-                        ))
-                    }
-                    (
-                        WorkerRecordPersistence::AcpTitle { .. },
-                        Ok(WorkerRecordPersistenceOutcome::Saved),
-                    )
-                    | (
-                        WorkerRecordPersistence::TargetMissing { .. },
-                        Ok(WorkerRecordPersistenceOutcome::Unchanged),
-                    ) => {}
-                    (operation, Ok(outcome)) => {
-                        unreachable!("persistence operation {operation:?} returned {outcome:?}")
-                    }
-                }
-            }
             DashboardIoUpdate::MaterializedSessionProjection { session_id, result } => {
                 self.finish_materialized_projection(session_id, result);
+            }
+            DashboardIoUpdate::QuestionDismissed { session_id, question, result } => {
+                self.dashboard.question_dismissal_finished(&session_id, question, result);
             }
             DashboardIoUpdate::TranscriptTailSeed { materialized } => {
                 let viewed_through_event_ordinal = self
@@ -849,13 +827,19 @@ impl DashboardContext {
                     .sessions
                     .get(&materialized.session_id)
                     .map_or(0, |session| session.viewed_through_event_ordinal);
-                self.request_materialized_projection(*materialized, viewed_through_event_ordinal);
+                self.request_materialized_projection(
+                    (*materialized).into(),
+                    viewed_through_event_ordinal,
+                );
             }
             DashboardIoUpdate::StoppedSubagentTranscript { session_id, result } => {
                 self.dashboard
                     .set_stopped_subagent_transcript(&session_id, result);
             }
-            DashboardIoUpdate::StoredSessionSummary { session_id, result } => {
+            DashboardIoUpdate::StoredSessionSummary { session_id, generation, result } => {
+                if !self.summary_reads.finish(&session_id, generation) {
+                    return;
+                }
                 match result {
                     Ok(summary) => {
                         self.dashboard
@@ -927,20 +911,18 @@ impl DashboardContext {
                         // Whatever the user typed into the standby composer
                         // while this attach ran is the newest draft, so it
                         // wins over the copy captured when the open started.
-                        let chat = if let Some(text) =
-                            self.dashboard.take_standby_prompt_draft(&session_id)
-                        {
-                            chat.with_draft(text)
-                        } else if let Some(draft) = self.composer_drafts.get(&session_id) {
-                            chat.with_draft(draft.text.clone())
-                        } else {
-                            chat
-                        };
-                        let mut chat = chat.open_replacing(self.chats.get(&session_id));
+                        let composer = self.dashboard.take_standby_composer(&session_id)
+                            .or_else(|| self.chats.get_mut(&session_id).and_then(|chat| chat.take_live_composer()));
+                        let chat = if composer.is_none() {
+                            if let Some(draft) = self.composer_drafts.get(&session_id) { chat.with_draft(draft.text.clone()) } else { chat }
+                        } else { chat };
+                        let mut chat = chat.open();
+                        if let Some(composer) = composer { chat.adopt_live_composer(composer); }
                         if let Some(position) = self.transcript_positions.get(&session_id) {
                             chat.restore_transcript_position(position.clone());
                         }
                         self.restore_question_draft(&session_id, &mut chat);
+                        for (prompt,inherited_draft) in chat.startup_retry_prompts() {self.startup_prompts.resume(session_id.clone(),prompt,inherited_draft,self.dashboard_io_tx.clone(),self.critical_operations.clone());}
                         self.chats.insert(session_id.clone(), chat);
                         // The context travelled with the attach, which is
                         // asynchronous; anything the surface learned while it
@@ -1052,48 +1034,48 @@ impl DashboardContext {
                     }
                 }
             }
-            DashboardIoUpdate::StartupPromptQueued {
-                session_id,
-                text,
-                result,
-            } => {
-                // A queued prompt shows as a preview already, so success needs
-                // no notice. A refusal puts the text back in the composer.
-                if let Err(error) = result {
-                    self.dashboard.restore_standby_prompt(&session_id, &text);
-                    self.dashboard.set_failure_notice(format!(
-                        "Could not queue the prompt for session {}: {error}",
-                        self.session_notice_name(&session_id)
-                    ));
+            DashboardIoUpdate::MoveOriginPrepared {session_id,move_operation_id,operation} => {
+                if self.lifecycle_operations.get(&session_id).is_some_and(|current|Arc::ptr_eq(&current.cancelled,&operation)) {
+                    self.startup_prompts.prepare_move(&session_id,Some(move_operation_id));
+                    let origin=self.startup_prompts.move_origin(&session_id);
+                    self.dashboard.set_standby_move_origin(&session_id,origin);
                 }
             }
-            DashboardIoUpdate::StartupPromptWithdrawn {
-                session_id,
-                text,
-                result,
-            } => {
-                let name = self.session_notice_name(&session_id);
+            DashboardIoUpdate::StartupPromptOutcomes {session_id, result} => {
+                self.startup_prompts.outcomes(&session_id, result.is_ok());
                 match result {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        let dropped = self.dashboard.standby_prompt_was_sent(&session_id, &text);
-                        self.dashboard.set_notice(if dropped {
-                            format!(
-                                "That prompt had already been sent to session {name}, so it is not in the composer any more."
-                            )
-                        } else {
-                            format!(
-                                "That prompt had already been sent to session {name}; the composer still holds your edit, and Enter sends it as a new prompt."
-                            )
-                        });
+                    Err(error) => { tracing::warn!(%session_id, %error, "could not check startup prompt outcomes; retrying with backoff"); }
+                    Ok(outcomes) => self.startup_prompts.apply_outcomes(&session_id, outcomes, &mut self.dashboard, &mut self.chats),
+                }
+            }
+            DashboardIoUpdate::StartupPromptQueued { session_id, prompt, result, definitely_unaccepted } => {
+                if self.startup_prompts.is_settled(&session_id, &prompt.command_id) {return;}
+                if let Err(error) = result {
+                    if !self.startup_prompts.admission_failed(&session_id, &prompt.command_id, &error, definitely_unaccepted) {
+                        self.dashboard.set_failure_notice(if definitely_unaccepted {
+                            format!("The prompt was not queued: {error}; the recalled draft is kept.")
+                        } else {format!("Could not confirm whether the prompt was queued: {error}; checking its status.")});
+                        return;
                     }
-                    Err(error) => {
-                        self.dashboard
-                            .standby_prompt_withdrawal_unconfirmed(&session_id, &text);
-                        self.dashboard.set_failure_notice(format!(
-                            "Could not take the prompt back from session {name} ({error}); it is still queued and will be sent when the session is live."
-                        ));
-                    }
+                    let restored = if let Some(chat) = self.chats.get_mut(&session_id).filter(|_| !self.dashboard.has_standby_composer(&session_id)) {
+                        chat.restore_startup_prompt(prompt)
+                    } else { self.dashboard.restore_startup_prompt(&session_id, prompt) };
+                    let recovery = restored.err().map(|error| format!("; restoring the draft failed: {error:#}")).unwrap_or_default();
+                    self.dashboard.set_failure_notice(format!("Could not queue the prompt for session {}: {error}{recovery}", self.session_notice_name(&session_id)));
+                }
+            }
+            DashboardIoUpdate::StartupPromptWithdrawn { session_id, prompt, result } => {
+                if self.startup_prompts.withdrawal_needs_receipt(&session_id, &prompt.command_id) { return; }
+                let already_sent = matches!(&result, Ok(false));
+                let applied = if let Some(chat) = self.chats.get_mut(&session_id).filter(|_| !self.dashboard.has_standby_composer(&session_id)) {
+                    chat.startup_prompt_withdrawn(prompt, result)
+                } else { self.dashboard.startup_prompt_withdrawn(&session_id, prompt, result) };
+                match applied {
+                    Ok(dropped) if already_sent => self.dashboard.set_notice(if dropped {
+                        "That prompt had already been sent, so its unchanged copy was removed from the composer."
+                    } else { "That prompt had already been sent; Enter sends your edited draft as a new prompt." }),
+                    Ok(_) => {},
+                    Err(error) => self.dashboard.set_failure_notice(format!("Could not take the prompt back ({error:#}); it is still queued.")),
                 }
             }
             DashboardIoUpdate::RenameSession { title, result } => match result {
@@ -1184,33 +1166,6 @@ impl DashboardContext {
                     tracing::warn!(%error, "could not refresh recent project directories");
                 }
             },
-            DashboardIoUpdate::TargetReadiness {
-                generation,
-                target_id,
-                result,
-                absent_engine,
-            } => {
-                if let (Some(template), Err(message)) = (&absent_engine, &result)
-                    && self
-                        .absent_engines
-                        .record(&target_id, template, message.clone())
-                {
-                    tracing::info!(
-                        target_id,
-                        reason = %message,
-                        "the target's container engine is not installed; the dashboard checks it \
-                         again only when its configuration changes or the engine is installed"
-                    );
-                }
-                match (&absent_engine, result) {
-                    (Some(_), Err(message)) => self
-                        .dashboard
-                        .apply_target_runtime_missing(generation, target_id, message),
-                    (_, result) => self
-                        .dashboard
-                        .apply_target_readiness(generation, target_id, result),
-                }
-            }
             DashboardIoUpdate::ProjectDirectory { path, exists } => {
                 self.dashboard.apply_project_directory_check(path, exists);
             }
@@ -1369,31 +1324,25 @@ impl DashboardContext {
                     tracing::warn!(%error, "could not read profile sign-in status");
                 }
             },
-            DashboardIoUpdate::MachineRuntimesChecked { generation, result } => self
+            DashboardIoUpdate::AvailabilityChecked { generation, result } => self
                 .dashboard
-                .apply_machine_runtime_check(generation, result),
+                .apply_availability_check(generation, result),
             DashboardIoUpdate::FirstRunStarted => self.dashboard.begin_welcome(),
             DashboardIoUpdate::FirstRunConfigured(report) => {
                 let no_agents = report.agents.is_empty();
                 self.dashboard.welcome_configured(report.summary());
                 self.dashboard.welcome_managed_setup_available(no_agents);
             }
-            DashboardIoUpdate::StartupProfilesDetected(result) => match result {
-                Ok(added) if added.is_empty() => {}
-                Ok(added) => self
-                    .dashboard
-                    .set_notice(format!("Added agent profiles: {}.", added.join(", "))),
-                Err(error) => self
-                    .dashboard
-                    .set_failure_notice(format!("Detecting agent profiles failed: {error}")),
-            },
-            DashboardIoUpdate::FirstRunChecked(result) => match result {
+            DashboardIoUpdate::FirstRunChecked(result) => {
+                self.dashboard.release_availability_check();
+                match result {
                 Ok(Some(errors)) => self.dashboard.welcome_checked(errors),
                 Ok(None) => {}
                 Err(error) => self.dashboard.welcome_checked(vec![format!(
                     "Setup could not finish: {error}. Run `mj setup` to retry."
                 )]),
-            },
+                }
+            }
             DashboardIoUpdate::SetupSaved {
                 generation,
                 result,
@@ -1463,10 +1412,10 @@ impl DashboardContext {
                     ));
                 }
             }
-            DashboardIoUpdate::ClipboardText(result) => {
+            DashboardIoUpdate::ClipboardText {target, result} => {
                 self.clipboard_read_in_flight = false;
                 match result {
-                    Ok(text) => self.dashboard.handle_paste(&text),
+                    Ok(text) => { self.dashboard.apply_clipboard_text(&target, &text); },
                     Err(error) => self.dashboard.set_notice(format!("Paste failed: {error}")),
                 }
             }
@@ -1780,10 +1729,6 @@ impl DashboardContext {
                 if let Some((host, size)) = registered.remembered_container_size {
                     self.controller.state.remember_container_size(&host, size);
                 }
-                let activate = self.dashboard.launch_standby_capturing();
-                if activate {
-                    self.dashboard.select_active_session(&session_id);
-                }
                 self.resolve_project_sources();
                 let still_launching = self
                     .controller
@@ -1797,25 +1742,6 @@ impl DashboardContext {
                         SessionOperationKind::Launching,
                         None,
                     );
-                }
-                // Anything typed while the launch was being prepared belongs to
-                // this session now: its composer becomes the session's standby,
-                // and each prompt already entered there goes to the daemon to
-                // be delivered when the harness is ready.
-                for text in self.dashboard.adopt_launch_standby(&session_id) {
-                    spawn_startup_prompt(
-                        session_id.clone(),
-                        text,
-                        None,
-                        self.dashboard_io_tx.clone(),
-                        self.critical_operations.clone(),
-                    );
-                }
-                // The next thing the person does with a launching session is
-                // write its first message, so the keyboard starts where the
-                // type-ahead composer is.
-                if activate {
-                    self.dashboard.focus_prompt();
                 }
                 let notice_name = self.session_notice_name(&session_id);
                 self.dashboard
@@ -1866,6 +1792,23 @@ impl DashboardContext {
                 .as_ref()
                 .map(|operation| operation.notice_name.as_str()),
         );
+        if operation
+            .as_ref()
+            .is_some_and(|operation| operation.kind == SessionOperationKind::Moving)
+        {
+            let completed = match &update.result {
+                Ok(LifecycleSuccess::Moved(outcome))
+                    if outcome.outcome != "failed" && outcome.outcome != "cancelled" =>
+                {
+                    Some(outcome.operation_id.clone())
+                }
+                _ => None,
+            };
+            self.startup_prompts.finish_move(&session_id, completed);
+            if update.result.is_err() {
+                self.dashboard.keep_standby_submission_as_draft(&session_id);
+            }
+        }
         let loaded = match reloaded.result {
             Ok(loaded) => loaded,
             Err(error) => {
@@ -1877,15 +1820,11 @@ impl DashboardContext {
         self.apply_controller_metadata(loaded);
         self.dashboard.set_state(self.controller.state.clone());
         self.resolve_project_sources();
-        // A lifecycle may finish after the user changed tabs. Its durable
-        // record still belongs in the global controller, but completion must
-        // not move the visible selection or replace another workspace's chat.
-        let focus_session = self.session_in_active_workspace(&session_id);
+        // Navigation owns pane assignments. Completion retires the old
+        // attachment; reconciliation reconnects only panes still showing it.
         let retirement = operation
             .as_ref()
             .and_then(|operation| operation.retirement.as_ref());
-        let owns_chat = retirement
-            .is_some_and(|retirement| retirement.is_current(&self.chats, &self.attachments));
         if update.result.is_ok()
             && let Some(retirement) = retirement
         {
@@ -1893,9 +1832,6 @@ impl DashboardContext {
         }
         match update.result {
             Ok(LifecycleSuccess::Created) => {
-                if focus_session {
-                    self.dashboard.finish_new_session(&session_id);
-                }
                 self.dashboard
                     .set_notice(format!("Session {} is ready", name));
                 // No quota probe here. Creating, resuming or moving a session
@@ -1911,17 +1847,15 @@ impl DashboardContext {
                 // keeps `TAIL_SEED_ITEMS` and discards everything before it,
                 // so reading the whole projection was work proportional to
                 // history for a result that was thrown away.
-                if focus_session && owns_chat {
+                if self.dashboard.pane_for_session(&session_id).is_some() {
                     self.request_transcript_tail_seed(&session_id);
-                    self.open_chat_session(&session_id);
                 }
                 self.dashboard
                     .set_notice(format!("Resumed {} with {profile_id} on {target_id}", name));
             }
             Ok(LifecycleSuccess::Moved(outcome)) => {
-                if focus_session && owns_chat {
+                if self.dashboard.pane_for_session(&session_id).is_some() {
                     self.request_transcript_tail_seed(&session_id);
-                    self.open_chat_session(&session_id);
                 }
                 let destination = format!("{}/{}", outcome.profile_id, outcome.target_template_id);
                 self.dashboard
@@ -1981,6 +1915,21 @@ impl DashboardContext {
         episode_id: u64,
         result: std::result::Result<Option<String>, String>,
     ) {
+        if !self
+            .controller
+            .state
+            .sessions
+            .get(&session_id)
+            .is_some_and(mj_controller::pollers::session_target_is_pollable)
+        {
+            self.worker_diagnoses.observe(&session_id, true, None);
+            self.worker_diagnoses.finish(&session_id, episode_id);
+            self.dashboard.clear_session_unreachable(&session_id);
+            if let Err(error) = result {
+                tracing::warn!(%session_id, "retired worker diagnosis task failed: {error}");
+            }
+            return;
+        }
         let completion = self.worker_diagnoses.finish(&session_id, episode_id);
         if let Some(error) = completion.display_error {
             let mut message = format!("relay unreachable: {error}");
@@ -1996,8 +1945,6 @@ impl DashboardContext {
                 }
             }
             tracing::warn!(%session_id, "{message}");
-            self.dashboard
-                .report_session_unreachable(&session_id, false);
         } else if let Err(error) = &result {
             tracing::warn!(%session_id, "stale worker diagnosis task failed: {error}");
         }
@@ -2460,6 +2407,68 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
+    // Hard-won: 0bd61a289: summary hydration exhausted the blocking pool while awaiting nested metadata reads.
+    #[test]
+    fn stored_summary_bursts_leave_the_blocking_pool_available() {
+        const CHILD: &str = "MJ_TEST_SUMMARY_BLOCKING_POOL";
+        const TEST: &str =
+            "dashboard::io::tests::stored_summary_bursts_leave_the_blocking_pool_available";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        // Refuse before startup can launch anything. Even this refusal needs
+        // connection metadata, just as successful summary reads do.
+        let metadata = daemon::DaemonMetadata {
+            protocol_version: daemon::PROTOCOL_VERSION + 1,
+            pid: std::process::id(),
+            address: "127.0.0.1:1".parse().unwrap(),
+            token: "summary-pool-test".into(),
+            started_at: "2026-11-04T00:00:00Z".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+        };
+        std::fs::write(
+            daemon::metadata_path(),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let completed = runtime.block_on(async {
+            let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
+            let permits = Arc::new(tokio::sync::Semaphore::new(4));
+            for id in 0..64 {
+                spawn_stored_session_summary(
+                    id.to_string(),
+                    0,
+                    id,
+                    Arc::clone(&permits),
+                    updates.clone(),
+                );
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                for _ in 0..64 {
+                    let Some(DashboardIoUpdate::StoredSessionSummary { result, .. }) =
+                        results.recv().await
+                    else {
+                        panic!("expected a summary result")
+                    };
+                    assert!(result.is_err(), "the newer daemon must be refused");
+                }
+                // Attachment renewal and chat preparation need this pool too.
+                tokio::task::spawn_blocking(|| ()).await.unwrap();
+            })
+            .await
+        });
+        // A regression must fail without hanging runtime shutdown on the
+        // deadlocked blocking task.
+        runtime.shutdown_timeout(Duration::from_secs(1));
+        completed.expect("summary network waits must not starve connection metadata reads");
+    }
+
     #[test]
     fn asynchronous_saves_leave_the_blocking_pool_available_for_connection_metadata() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -2655,125 +2664,6 @@ mod tests {
             "app-2"
         );
         assert_eq!(config.bundles.len(), 2);
-    }
-
-    const LIFECYCLE_RELOAD_CHILD: &str = "MJ_TEST_LIFECYCLE_RELOAD_CHILD";
-
-    /// A load started before a runtime update must not resurrect old records
-    /// or remove a newer session when the lifecycle completion arrives.
-    #[tokio::test]
-    async fn a_lifecycle_reload_preserves_newer_runtime_records() {
-        if crate::test_support::rerun_in_isolated_child(
-            LIFECYCLE_RELOAD_CHILD,
-            "dashboard::io::tests::a_lifecycle_reload_preserves_newer_runtime_records",
-        ) {
-            return;
-        }
-        let _writer = mj_controller::database::install_isolated_test_writer();
-
-        let mut config = Config::default();
-        config.profiles.insert(
-            "codex".into(),
-            mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Codex,
-                home: PathBuf::from("/home/dev/.codex"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-            },
-        );
-        config.bundles.insert(
-            "project".into(),
-            ProjectBundle {
-                primary_repo: "project".into(),
-                repositories: vec![ProjectRepository {
-                    id: "project".into(),
-                    github: Some("owner/project".into()),
-                    local: None,
-                    destination: PathBuf::from("project"),
-                    git_ref: None,
-                }],
-            },
-        );
-        config.targets.insert(
-            "podman".into(),
-            mj_core::config::TargetTemplate::LocalPodman {
-                container: mj_core::config::ContainerTemplate {
-                    build_cache: None,
-                    image: "example.invalid/hel-test:latest".into(),
-                    pull_policy: Default::default(),
-                    platform: None,
-                    cpus: None,
-                    memory: None,
-                    environment: Default::default(),
-                    workspace_storage: Default::default(),
-                },
-            },
-        );
-        config.save().unwrap();
-
-        let database = mj_controller::database::database_path();
-        let alpha = mj_controller::database::create_workspace_at(&database, "alpha").unwrap();
-        let beta = mj_controller::database::create_workspace_at(&database, "beta").unwrap();
-        mj_controller::database::save_session(&lifecycle_session(
-            "session-alpha-live",
-            &alpha.id,
-            SessionState::Running,
-        ))
-        .unwrap();
-        mj_controller::database::save_session(&lifecycle_session(
-            "session-alpha-stopped",
-            &alpha.id,
-            SessionState::Stopped,
-        ))
-        .unwrap();
-        mj_controller::database::save_session(&lifecycle_session(
-            "session-beta-live",
-            &beta.id,
-            SessionState::Running,
-        ))
-        .unwrap();
-
-        let (updates_tx, mut updates_rx) =
-            tokio::sync::mpsc::unbounded_channel::<DashboardIoUpdate>();
-        spawn_lifecycle_reload(
-            LifecycleReload {
-                update: DashboardLifecycleUpdate {
-                    session_id: "session-beta-live".into(),
-                    result: Ok(LifecycleSuccess::Created),
-                    operation: Arc::new(AtomicBool::new(false)),
-                },
-                operation: None,
-            },
-            beta.id.clone(),
-            "client-1".into(),
-            updates_tx,
-        );
-
-        let DashboardIoUpdate::LifecycleReloaded(reloaded) =
-            updates_rx.recv().await.expect("the reload reports back")
-        else {
-            panic!("the reload reports through LifecycleReloaded");
-        };
-        let loaded = reloaded.result.expect("the reload succeeds");
-        let mut current = State::default();
-        current.sessions.insert(
-            "newer-session".into(),
-            lifecycle_session("newer-session", &beta.id, SessionState::Running),
-        );
-        loaded.apply(&mut current);
-        assert_eq!(
-            current
-                .sessions
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec!["newer-session"],
-            "a completed background load cannot replace newer runtime records"
-        );
     }
 
     fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {

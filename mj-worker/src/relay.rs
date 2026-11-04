@@ -17,6 +17,8 @@
 
 pub use mj_core::relay::*;
 mod background;
+#[cfg(test)]
+pub(crate) use background::AirTaskFixture;
 mod checkpoint_hold;
 #[cfg(test)]
 mod checkpoint_hold_tests;
@@ -31,7 +33,7 @@ mod reviewer_admission;
 pub(crate) use reviewer_admission::ReviewerAdmission;
 mod serving;
 mod verdict;
-use background::{KimiProvisionalTask, KimiTaskEntry, is_agent_output};
+use background::{AirTaskEntry, KimiProvisionalTask, KimiTaskEntry, is_agent_output};
 use commands::validate_identifier;
 pub use replay::{DeferredRelayAttach, RelayReplayPlan};
 pub use serving::serve_relay_json_lines;
@@ -45,7 +47,7 @@ use std::io::Read;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
-use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate};
+use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate};
 use anyhow::{Context, Result, anyhow, bail};
 
 use journal::{
@@ -83,21 +85,16 @@ pub const HARNESS_TURN_STOP_GRACE: std::time::Duration = std::time::Duration::fr
 
 /// Where this relay learns about commands the agent left running.
 ///
-/// Claude reports its own background tasks. Kimi uses Hel's terminals for
-/// shells and its native task journal for detached agents. Codex runs shells
-/// itself and only reports them as tool cards, so for Codex the evidence is a
-/// card whose result carries no exit code.
+/// The authoritative source of agent-owned background commands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BackgroundWorkPolicy {
     /// Live terminals Hel spawned for the agent.
     #[default]
     HostedTerminals,
-    /// Claude's live background-task set, together with hosted terminals.
-    ClaudeTasks,
+    /// AIR tasks announced by Claude or Codex, together with hosted terminals.
+    AirTasks,
     /// Kimi's native detached-agent set, together with hosted terminals.
     KimiTasks,
-    /// `exec_command` cards whose result has an explicitly null exit code.
-    CodexExecCards,
 }
 
 /// Durable, session-side ACP store-and-forward relay.
@@ -106,6 +103,12 @@ pub enum BackgroundWorkPolicy {
 /// observations newer than the last frontier covered by both a durable
 /// controller acknowledgement and a verified checkpoint.
 pub struct DurableRelay {
+    /// Immutable input supplied when this worker was created; execution and
+    /// completion live exclusively in the ordinary durable command queue.
+    initial_commands: Vec<mj_core::worker_launch::InitialWorkerCommand>,
+    // Only the Unix worker runtime updates this from SetOperatorAway.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) operator_away: crate::acp::OperatorAway,
     root: PathBuf,
     relay_version: String,
     /// Content address of the executable serving this relay, reported in
@@ -160,7 +163,7 @@ pub struct DurableRelay {
     journal_generation: u64,
     acp_activity: AcpActivityClock,
     step_clock: crate::acp::StepClock,
-    /// Whether agent output arriving with no prompt in flight opens a turn.
+    /// Whether harness announcements or output with no prompt open a turn.
     /// The runtime sets this from the configured harness right after `open`.
     harness_turns: HarnessTurnPolicy,
     /// Where commands the agent left running are read from.
@@ -176,20 +179,13 @@ pub struct DurableRelay {
     turn_context: mj_transcript::turn_context::TurnContext,
     verdict_harness: Option<mj_core::config::HarnessKind>,
     replied_verdict: verdict::RepliedVerdictState,
-    /// Codex tool calls explicitly introduced as execute cards, with the
-    /// command needed if a later partial update says the process is detached.
-    codex_execute_tools: BTreeMap<String, String>,
-    /// Commands a Codex exec card reported without an exit code, keyed by the
-    /// tool call id so a later card for the same call clears it. In memory,
-    /// like the terminals: it describes processes that are alive now.
-    background_exec_cards: BTreeMap<String, BackgroundCommand>,
-    /// Claude's process-local background-task level, replaced on every update.
-    claude_background_tasks: BTreeMap<String, BackgroundCommand>,
+    /// Adapter-owned tasks, keyed by their owning session and task identity.
+    air_tasks: BTreeMap<String, AirTaskEntry>,
     /// Claude tasks whose stop this process requested and the adapter has not
     /// yet acknowledged. The adapter answers a stop with a plain agent chunk
     /// and no model cycle, so no result would settle a harness turn opened
     /// for that chunk.
-    claude_pending_stops: BTreeSet<String>,
+    claude_pending_stops: BTreeMap<String, BTreeSet<String>>,
     /// The first ordinal of the Claude harness turn a stop was applied to,
     /// while that turn is still open. Claude Code answers a stop of a running
     /// cycle with the cycle's result; a turn it never ran gets no answer, so
@@ -205,8 +201,8 @@ pub struct DurableRelay {
     /// Whether Kimi's provider-owned background work is synchronized. Other
     /// policies leave this absent.
     background_work_known: Option<bool>,
-    /// Claude AIR tasks that the adapter currently says can be stopped.
-    claude_stoppable_tasks: BTreeSet<String>,
+    /// Agent output observed during the current process-local harness turn.
+    harness_turn_output_seen: bool,
     /// Whether the daemon will act on a `Continue` verdict. Off when the
     /// launch environment says automatic continuation is disabled.
     continuation_enabled: bool,
@@ -247,7 +243,7 @@ impl DurableRelay {
         session_id: impl Into<String>,
         relay_version: impl Into<String>,
     ) -> Result<Self> {
-        Self::open_with_harness(root, session_id, relay_version, false, None)
+        Self::open_with_harness(root, session_id, relay_version, false, None, &[])
     }
 
     /// Open a live relay with its harness delivery mode established before
@@ -257,8 +253,16 @@ impl DurableRelay {
         session_id: impl Into<String>,
         relay_version: impl Into<String>,
         harness: mj_core::config::HarnessKind,
+        initial_commands: &[mj_core::worker_launch::InitialWorkerCommand],
     ) -> Result<Self> {
-        Self::open_with_harness(root, session_id, relay_version, false, Some(harness))
+        Self::open_with_harness(
+            root,
+            session_id,
+            relay_version,
+            false,
+            Some(harness),
+            initial_commands,
+        )
     }
 
     /// Open existing durable state without promoting work onto a harness.
@@ -272,7 +276,7 @@ impl DurableRelay {
             root.join(RELAY_STATE_FILE).is_file(),
             "checkpoint recovery requires existing relay state"
         );
-        Self::open_with_harness(root, session_id, relay_version, true, None)
+        Self::open_with_harness(root, session_id, relay_version, true, None, &[])
     }
 
     fn open_with_harness(
@@ -281,11 +285,12 @@ impl DurableRelay {
         relay_version: impl Into<String>,
         checkpoint_only: bool,
         harness: Option<mj_core::config::HarnessKind>,
+        initial_commands: &[mj_core::worker_launch::InitialWorkerCommand],
     ) -> Result<Self> {
         let root = root.into();
         let session_id = session_id.into();
         validate_identifier(&session_id, "session ID")?;
-        fs::create_dir_all(root.join(RELAY_JOURNAL_DIR))
+        mj_core::config::create_owner_only_directory(&root.join(RELAY_JOURNAL_DIR))
             .with_context(|| format!("create relay state directory {}", root.display()))?;
 
         let state_path = root.join(RELAY_STATE_FILE);
@@ -474,6 +479,7 @@ impl DurableRelay {
         )?;
 
         let mut relay = Self {
+            operator_away: Default::default(),
             root,
             relay_version: relay_version.into(),
             worker_build: Some(mj_core::worker_build::WORKER_BUILD_ID.to_owned()),
@@ -483,6 +489,7 @@ impl DurableRelay {
             reviewer_admissions: BTreeMap::new(),
             next_reviewer_admission: 0,
             steering_supported: None,
+            initial_commands: initial_commands.to_vec(),
             automatic_steering: false,
             steering_delivery_mode: match harness {
                 Some(mj_core::config::HarnessKind::Claude) => SteeringDeliveryMode::ClaudeTurnEnd,
@@ -502,17 +509,15 @@ impl DurableRelay {
             turn_context: Default::default(),
             verdict_harness: None,
             replied_verdict: Default::default(),
-            codex_execute_tools: BTreeMap::new(),
-            background_exec_cards: BTreeMap::new(),
-            claude_background_tasks: BTreeMap::new(),
-            claude_pending_stops: BTreeSet::new(),
+            air_tasks: BTreeMap::new(),
+            claude_pending_stops: BTreeMap::new(),
             harness_turn_stop: None,
             kimi_background_tasks: BTreeMap::new(),
             kimi_provisional_tasks: BTreeMap::new(),
             kimi_observed_task_ids: BTreeSet::new(),
             kimi_observed_tool_ids: BTreeSet::new(),
             background_work_known: None,
-            claude_stoppable_tasks: BTreeSet::new(),
+            harness_turn_output_seen: false,
             continuation_enabled: true,
             task_settled_at_ms: None,
             active_agent_terminals: BTreeMap::new(),
@@ -603,9 +608,72 @@ impl DurableRelay {
             relay.persist_snapshot()?;
         }
         relay.adopt_unqueued_queue_commands()?;
+        relay.seed_initial_commands()?;
         relay.recover_nonterminal_commands()?;
+        relay.ensure_initial_commands_succeeded()?;
         relay.promote_next_queued_command()?;
         Ok(relay)
+    }
+
+    /// Complete the creation prefix before publishing any control endpoint.
+    /// The final prompt's receipt proves the entire prefix was journaled. Once
+    /// a turn has run, receipt compaction must never cause initialization again.
+    fn seed_initial_commands(&mut self) -> Result<()> {
+        self.ensure_initial_commands_succeeded()?;
+        let Some(last) = self.initial_commands.last() else {
+            return Ok(());
+        };
+        if self.snapshot.native_session_used
+            || self
+                .snapshot
+                .handled_commands
+                .contains_key(&last.command_id)
+        {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            matches!(last.command, RelayCommand::Prompt { .. }) && !last.optional,
+            "initial input must end with the original prompt"
+        );
+        let commands = self.initial_commands.clone();
+        for (position, initial) in commands.iter().enumerate() {
+            anyhow::ensure!(
+                position + 1 == commands.len()
+                    || matches!(initial.command, RelayCommand::SetConfig { .. }),
+                "initial input before the brief must be configuration"
+            );
+            self.submit_command(&initial.command_id, initial.command.clone())?
+                .map_err(|error| {
+                    anyhow!(
+                        "initialize worker command {}: {}",
+                        initial.command_id,
+                        error.message
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    /// A failed required creation command cannot release the original brief
+    /// or any follow-up. Its journaled failure also stops a restarted worker.
+    fn ensure_initial_commands_succeeded(&self) -> Result<()> {
+        for initial in self.initial_commands.iter().filter(|initial| {
+            !initial.optional && matches!(initial.command, RelayCommand::SetConfig { .. })
+        }) {
+            if let Some(failure) = self
+                .snapshot
+                .handled_commands
+                .get(&initial.command_id)
+                .and_then(|receipt| receipt.failure.as_deref())
+            {
+                anyhow::bail!(
+                    "initial worker command {} ({:?}) failed: {failure}",
+                    initial.command_id,
+                    initial.command.kind()
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Adopt queueable commands that an earlier relay format accepted outside
@@ -1029,6 +1097,12 @@ impl DurableRelay {
         let Some(observation) = self.hold_observation(observation)? else {
             return Ok(self.snapshot.latest_ordinal);
         };
+        if let RelayObservation::NativeAgent {
+            event: mj_core::native_agent::NativeAgentEvent::Update { session_id, update },
+        } = &observation
+        {
+            self.consume_claude_stop_acknowledgement(Some(session_id), update);
+        }
         let acp_ready = match &observation {
             RelayObservation::SessionConfigured { .. } => Some(true),
             RelayObservation::AgentInitialized { .. }
@@ -1103,10 +1177,8 @@ impl DurableRelay {
         // A stop we requested is acknowledged with a plain chunk and nothing
         // else: no model cycle runs, so no result would ever settle a turn
         // opened for it. Consume the expectation and keep the line.
-        let ack = claude && self.is_claude_stop_acknowledgement(&update);
-        if ack {
-            self.claude_pending_stops.pop_first();
-        }
+        let owner = self.snapshot.native_session_id.clone();
+        let ack = claude && self.consume_claude_stop_acknowledgement(owner.as_deref(), &update);
         // The adapter publishes notices as agent text at times no model cycle
         // runs. Such text is a notice row of its own, so it neither opens a
         // turn that nothing would end nor joins the previous reply.
@@ -1117,22 +1189,15 @@ impl DurableRelay {
             return self.record_observation(RelayObservation::Notice { message });
         }
         if claude && !ack && self.opens_harness_turn(&update) {
-            // The turn a settled task promised has arrived.
-            self.task_settled_at_ms = None;
-            self.append_relay_event(
-                None,
-                RelayObservation::HarnessTurnStarted {
-                    started_at_ms: epoch_millis(),
-                },
-            )?;
+            self.open_harness_turn_if_allowed()?;
+        }
+        if claude && !ack && self.snapshot.harness_turn.is_some() && is_agent_output(&update) {
+            self.harness_turn_output_seen = true;
         }
         self.foreground_tools.observe_with_start(
             &update,
             self.step_clock.started_at_ms().unwrap_or_else(epoch_millis),
         );
-        if self.background_work == BackgroundWorkPolicy::CodexExecCards {
-            self.track_codex_exec_card(&update);
-        }
         if self.background_work == BackgroundWorkPolicy::KimiTasks {
             self.track_agent_terminal_tool_call(&update);
             self.track_kimi_background_agent(&update);
@@ -1155,7 +1220,22 @@ impl DurableRelay {
     /// is its boundary, whatever started the cycle.
     pub fn claude_turn_result(&mut self, result: &mj_core::acp::ClaudeTurnResult) -> Result<()> {
         if self.harness_turns != HarnessTurnPolicy::ClaudeAdapter
+            || self.snapshot.active_prompt.is_some()
             || self.snapshot.harness_turn.is_none()
+        {
+            return Ok(());
+        }
+        // claude-agent-acp 0.97.0 dist/acp-agent.js (4906–4911, 5230–5238):
+        // successful zero-turn results precede the coalesced task follow-up.
+        if result.num_turns == 0
+            && !result.is_error
+            && self.air_tasks.values().any(|entry| {
+                entry.turn_ordinal().is_some_and(|ordinal| {
+                    self.snapshot
+                        .harness_turn
+                        .is_some_and(|turn| turn.first_ordinal == ordinal)
+                })
+            })
         {
             return Ok(());
         }
@@ -1238,8 +1318,6 @@ impl DurableRelay {
     /// confirmed. Independently tracked background work survives into idle.
     fn finish_turn_activity(&mut self) -> Result<()> {
         self.foreground_tools.clear();
-        self.codex_execute_tools
-            .retain(|tool_call_id, _| self.background_exec_cards.contains_key(tool_call_id));
         self.persist_activity_transition()
     }
 
@@ -1280,9 +1358,14 @@ impl DurableRelay {
             // stopped this tool call before it ran.") after the result, and no
             // cycle would end a turn opened for that status. Checked against
             // claude-agent-acp 0.94.0 `dist/tool-calls/renderer.js`
-            // (`unfinished`) on 2026-10-23.
+            // (`unfinished`) on 2026-10-23; the file is unchanged in 0.97.0.
             && !matches!(update, SessionUpdate::ToolCallUpdate(_))
-            && self.snapshot.active_prompt.is_none()
+            && self.can_open_harness_turn()
+    }
+
+    /// The shared admission decision for Claude output and autonomous spawns.
+    fn can_open_harness_turn(&self) -> bool {
+        self.snapshot.active_prompt.is_none()
             && self.snapshot.harness_turn.is_none()
             && !self.session_setup
             && !self.configuration_request_in_flight()
@@ -1290,6 +1373,27 @@ impl DurableRelay {
                 self.snapshot.execution,
                 RelayExecutionState::Closing | RelayExecutionState::Closed
             )
+    }
+
+    /// Open the one durable boundary shared by output and turn announcements.
+    fn open_harness_turn_if_allowed(&mut self) -> Result<()> {
+        if !self.can_open_harness_turn() {
+            return Ok(());
+        }
+        // New work invalidates a ready checkpoint cut. Replaying earlier held
+        // writes may itself open a turn, so ask the owner again afterwards.
+        self.end_checkpoint_hold()?;
+        if self.can_open_harness_turn() {
+            self.task_settled_at_ms = None;
+            self.harness_turn_output_seen = false;
+            self.append_relay_event(
+                None,
+                RelayObservation::HarnessTurnStarted {
+                    started_at_ms: epoch_millis(),
+                },
+            )?;
+        }
+        Ok(())
     }
 
     fn digest_at(&self, ordinal: u64) -> Result<Option<String>> {

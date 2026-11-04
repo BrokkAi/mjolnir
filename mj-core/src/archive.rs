@@ -43,6 +43,9 @@ pub const ARCHIVE_SCHEMA_VERSION_REVIEW_REFS: u32 = 10;
 /// Mjolnir's private Git refs: review baselines, review points and reviewed
 /// trees. They are bookkeeping, never pushed, and some name a bare tree.
 pub const MJOLNIR_REF_NAMESPACE: &str = "refs/mj/";
+/// Shared diagnostic identity across the target export's stderr boundary.
+pub const NESTED_REPOSITORY_CHECKPOINT_ERROR: &str =
+    "cannot checkpoint nested Git repository directory at ";
 pub const ARCHIVE_FORMAT: &str = "hel-session";
 pub const EVENT_FRONTIER_GENESIS_DIGEST: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -584,7 +587,7 @@ fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()>
             }
             CanonicalTranscriptBody::User { content } => {
                 for (index, block) in content.iter().enumerate() {
-                    serde_json::from_value::<agent_client_protocol::schema::v1::ContentBlock>(
+                    serde_json::from_value::<agent_client_protocol::v1::schema::ContentBlock>(
                         block.clone(),
                     )
                     .with_context(|| {
@@ -598,7 +601,7 @@ fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()>
             CanonicalTranscriptBody::Agent { chunks, .. }
             | CanonicalTranscriptBody::Thought { chunks, .. } => {
                 for (index, chunk) in chunks.iter().enumerate() {
-                    serde_json::from_value::<agent_client_protocol::schema::v1::ContentChunk>(
+                    serde_json::from_value::<agent_client_protocol::v1::schema::ContentChunk>(
                         chunk.clone(),
                     )
                     .with_context(|| {
@@ -615,7 +618,7 @@ fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()>
                 terminal_refs,
                 ..
             } => {
-                serde_json::from_value::<agent_client_protocol::schema::v1::ToolCall>(call.clone())
+                serde_json::from_value::<agent_client_protocol::v1::schema::ToolCall>(call.clone())
                     .with_context(|| {
                         format!(
                             "canonical transcript item '{}' has invalid ACP tool call",
@@ -637,7 +640,7 @@ fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()>
                 validate_canonical_terminal_output(record, &item.stable_id)?;
             }
             CanonicalTranscriptBody::Plan { plan } => {
-                serde_json::from_value::<agent_client_protocol::schema::v1::Plan>(plan.clone())
+                serde_json::from_value::<agent_client_protocol::v1::schema::Plan>(plan.clone())
                     .with_context(|| {
                         format!(
                             "canonical transcript item '{}' has invalid ACP plan",
@@ -681,7 +684,7 @@ fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()>
             );
         }
         for (index, content) in prompt.content.iter().enumerate() {
-            serde_json::from_value::<agent_client_protocol::schema::v1::ContentBlock>(
+            serde_json::from_value::<agent_client_protocol::v1::schema::ContentBlock>(
                 content.clone(),
             )
             .with_context(|| {

@@ -30,6 +30,7 @@ pub(super) fn append_container_storage_guidance(
     target: &targets::TargetLocator,
     workspace: Option<&Path>,
     native_temporary_storage: bool,
+    attachments: &[targets::AdditionalMount],
 ) -> Result<()> {
     let podman_workspace = match target {
         targets::TargetLocator::LocalPodman {
@@ -41,6 +42,8 @@ pub(super) fn append_container_storage_guidance(
         targets::TargetLocator::LocalDocker { .. } | targets::TargetLocator::SshDocker { .. } => {
             None
         }
+        targets::TargetLocator::AppleContainer { .. }
+        | targets::TargetLocator::SshAppleContainer { .. } => None,
         _ => return Ok(()),
     };
     let heading = "## Mjolnir container storage\n\n";
@@ -62,8 +65,33 @@ pub(super) fn append_container_storage_guidance(
         }
         guidance.push_str("Keep durable results inside the project repository directories; arbitrary files elsewhere on the workspace volume are not checkpointed.\n");
     }
-    if guidance == heading {
+    if guidance != heading {
+        append_staged_instructions(harness, destination, &guidance)?;
+    }
+    if attachments.is_empty() {
         return Ok(());
+    }
+    let mut guidance = String::from(
+        "## Mjolnir external attachments\n\nThese host directories are attached at the container paths listed below. External attachments are not included in project workspace checkpoints.\n\n",
+    );
+    for attachment in attachments {
+        let behavior = match attachment.access {
+            targets::MountAccess::Ro => {
+                "read-only; you can read these files but cannot change them"
+            }
+            targets::MountAccess::Cow => {
+                "copy-on-write; changes are private to this container, never change the host directory, and are lost when the container is removed or recreated"
+            }
+            targets::MountAccess::Rw => {
+                "read-write; changes write directly to the host directory and persist after the container is removed"
+            }
+        };
+        guidance.push_str(&format!(
+            "- Container `{}` from host `{}`: `{}` ({behavior}).\n",
+            attachment.destination.display(),
+            attachment.source.display(),
+            attachment.access.label(),
+        ));
     }
     append_staged_instructions(harness, destination, &guidance)
 }
@@ -691,6 +719,13 @@ pub(super) fn link_legacy_mbx_configuration(
     }
 }
 
+pub(super) struct StagedWorkerProfile<'a> {
+    pub launch: &'a Path,
+    pub ownership: &'a Path,
+    pub profile: &'a Path,
+    pub shared_login: Option<&'a SharedLogin>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn install_worker_files(
     executor: &impl CommandExecutor,
@@ -707,6 +742,36 @@ pub(super) fn install_worker_files(
     if let Some(binary) = worker.host_binary() {
         verify_worker_build(binary)?;
     }
+    install_worker_profile_files(
+        executor,
+        locator,
+        session_id,
+        worker_root,
+        profile_home,
+        StagedWorkerProfile {
+            launch: launch_config,
+            ownership,
+            profile: profile_stage,
+            shared_login,
+        },
+    )?;
+    install_worker_binary(executor, locator, session_id, worker, "hel")
+}
+
+pub(super) fn install_worker_profile_files(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    worker_root: &str,
+    profile_home: &str,
+    staged: StagedWorkerProfile<'_>,
+) -> Result<()> {
+    let StagedWorkerProfile {
+        launch: launch_config,
+        ownership,
+        profile: profile_stage,
+        shared_login,
+    } = staged;
     match locator {
         targets::TargetLocator::LocalBare { .. } => {
             if profile_stage.is_dir() {
@@ -911,10 +976,16 @@ pub(super) fn install_worker_files(
                     format!("{upload}/ownership.json"),
                     format!("{container_id}:{ownership_installed}"),
                 ],
+                // Apple's `container cp` copies a relative `dir/.` as `dir`
+                // itself, nesting the profile one level too deep; only an
+                // absolute source copies the contents, as Docker and Podman
+                // do for either form. The staging path is home-relative.
                 vec![
+                    "sh".into(),
+                    "-c".into(),
+                    r#"exec "$0" cp "$HOME/$1/." "$2""#.into(),
                     engine.into(),
-                    "cp".into(),
-                    format!("{upload}/profile/."),
+                    format!("{upload}/profile"),
                     format!("{container_id}:{profile_home}"),
                 ],
                 std::iter::once(engine.to_owned())
@@ -947,7 +1018,69 @@ pub(super) fn install_worker_files(
             }
         }
     }
-    install_worker_binary(executor, locator, session_id, worker, "hel")
+    Ok(())
+}
+
+/// Refresh configuration without removing native history or skills the harness
+/// maintains itself. Absent destination settings must not inherit the source's.
+pub(super) fn clear_profile_configuration(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    home: &str,
+    harness: HarnessKind,
+) -> Result<()> {
+    let mut paths = profile_configuration_paths(harness);
+    paths.push(harness.credential_file_name());
+    paths.extend([
+        mj_core::aws_credentials::SHARED_CREDENTIALS_FILE,
+        mj_core::aws_credentials::CONFIG_FILE,
+        mj_core::aws_credentials::EMPTY_CREDENTIALS_FILE,
+    ]);
+    match harness {
+        HarnessKind::Codex => paths.push(STAGED_CATALOG_FILE),
+        HarnessKind::Mimo => paths.push("config"),
+        _ => {}
+    }
+    paths.sort_unstable();
+    paths.dedup();
+    let mut script = String::from("set -eu\n");
+    for relative in paths {
+        let path = mj_core::target_path::join(Path::new(home), Path::new(relative));
+        let quoted = targets::posix_quote(&mj_core::target_path::text(&path));
+        let protected = harness
+            .harness_owned_skill_paths()
+            .iter()
+            .filter_map(|owned| {
+                Path::new(owned)
+                    .strip_prefix(relative)
+                    .ok()
+                    .and_then(|tail| tail.components().next())
+                    .map(|name| targets::posix_quote(&name.as_os_str().to_string_lossy()))
+            })
+            .collect::<Vec<_>>();
+        if protected.is_empty() {
+            script.push_str(&format!("rm -rf -- {quoted}\n"));
+        } else {
+            script.push_str(&format!(
+                "if [ -L {quoted} ]; then rm -f -- {quoted}; else\n\
+                 for entry in {quoted}/* {quoted}/.[!.]* {quoted}/..?*; do\n\
+                 case \"${{entry##*/}}\" in {}) continue ;; esac\n\
+                 rm -rf -- \"$entry\"\ndone\nfi\n",
+                protected.join("|"),
+            ));
+        }
+    }
+    execute_checked(
+        executor,
+        targets::command_on_locator(
+            locator,
+            session_id,
+            vec!["sh".into(), "-c".into(), script],
+            "replace profile configuration while retaining native state",
+        )?,
+    )?;
+    Ok(())
 }
 
 /// Install the session-private SSH metadata; binary installation is shared

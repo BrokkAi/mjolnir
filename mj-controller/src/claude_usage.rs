@@ -1,4 +1,4 @@
-//! Claude Code `/usage` polling and parsing.
+//! Claude Code quota polling, OAuth renewal, and `/usage` parsing.
 //!
 //! The Claude ACP agent exposes token usage over ACP, but the subscription
 //! quota shown by Claude Code lives behind its local `/usage` command.  Keep
@@ -17,6 +17,7 @@ use crate::targets::{CancellableProcessExecutor, CommandExecutor, CommandOutput,
 
 const USAGE_TIMEOUT: Duration = Duration::from_secs(20);
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+const REFRESH_LOCK_WAIT: Duration = Duration::from_secs(10);
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 // The reset-grant endpoint uses the CLI surface to determine eligibility.
 const USAGE_USER_AGENT: &str = "claude-cli/2.1.283 (external, cli)";
@@ -29,11 +30,13 @@ pub struct ClaudeUsageReport {
     pub banked_resets: Option<u64>,
     pub five_hour: Option<ClaudeUsageWindow>,
     pub week: Option<ClaudeUsageWindow>,
+    pub scoped_weeks: Vec<(String, ClaudeUsageWindow)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeUsageWindow {
     pub remaining_percent: u8,
+    pub duration_seconds: Option<i64>,
     /// Text following `reset` in Claude Code output, without the word itself.
     pub reset_context: Option<String>,
 }
@@ -73,15 +76,23 @@ impl fmt::Display for ClaudeUsageError {
 /// the credentials in the Keychain, where only Claude Code itself reads them.
 /// The API has no token to send there, so its print-mode `/usage` output is
 /// the only quota macOS can report.
+///
+/// With `container`, a login refresh runs the agent-dev image's `claude`
+/// instead of one on this host. macOS never uses it: the image cannot read
+/// the Keychain.
 pub async fn query(
     home: PathBuf,
     environment: HashMap<String, String>,
+    container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    let executor = Arc::new(CancellableProcessExecutor::with_timeout(REFRESH_TIMEOUT));
+    let executor = Arc::new(CancellableProcessExecutor::with_timeout(
+        USAGE_TIMEOUT + REFRESH_LOCK_WAIT + REFRESH_TIMEOUT,
+    ));
+    let _cancel = executor.cancel_on_drop();
     if cfg!(target_os = "macos") {
         return query_cli_with(environment, executor).await;
     }
-    query_with(home, environment, USAGE_URL, executor).await
+    query_with_runtime(home, environment, USAGE_URL, executor, container).await
 }
 
 /// Read the quota out of Claude Code's own `/usage` output.
@@ -120,11 +131,22 @@ async fn query_cli_with(
     Err(ClaudeUsageError::Parse)
 }
 
+#[cfg(test)]
 async fn query_with(
     home: PathBuf,
     environment: HashMap<String, String>,
     usage_url: &str,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
+) -> Result<ClaudeUsageReport, ClaudeUsageError> {
+    query_with_runtime(home, environment, usage_url, executor, None).await
+}
+
+async fn query_with_runtime(
+    home: PathBuf,
+    environment: HashMap<String, String>,
+    usage_url: &str,
+    executor: Arc<dyn CommandExecutor + Send + Sync>,
+    container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
     let client = reqwest::Client::builder()
         .timeout(USAGE_TIMEOUT)
@@ -141,13 +163,23 @@ async fn query_with(
                     environment,
                     executor,
                     Some(token.to_owned()),
+                    container,
                 )
                 .await
             }
             result => result,
         },
         Err(ClaudeUsageError::LoginExpired) if oauth_has_refresh_token(&credentials) => {
-            refresh_and_retry(&client, usage_url, home, environment, executor, None).await
+            refresh_and_retry(
+                &client,
+                usage_url,
+                home,
+                environment,
+                executor,
+                None,
+                container,
+            )
+            .await
         }
         Err(error) => Err(error),
     }
@@ -208,26 +240,74 @@ async fn refresh_and_retry(
     environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
     rejected_token: Option<String>,
+    container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    let refresh_error = run_claude_refresh(environment, executor).await.err();
+    // Claude 2.1.312 takes these two proper-lockfile directory locks during
+    // its own refresh. auth login's explicit exchange does not take them.
+    let canonical_home = tokio::fs::canonicalize(&home)
+        .await
+        .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
+    let mut legacy_path = canonical_home.as_os_str().to_os_string();
+    legacy_path.push(".lock");
+    let mut locks = Vec::new();
+    let deadline = tokio::time::Instant::now() + REFRESH_LOCK_WAIT;
+    for path in [
+        canonical_home.join(".oauth_refresh.lock"),
+        PathBuf::from(legacy_path),
+    ] {
+        locks.push(
+            crate::oauth_lock::OAuthRefreshLock::acquire(
+                path,
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                Duration::from_secs(60),
+                Duration::from_secs(5),
+            )
+            .await
+            .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?,
+        );
+    }
+    let active = read_credentials(&home).await?;
+    if let Ok(token) = oauth_access_token(&active, mj_core::clock::epoch_millis())
+        && rejected_token.as_deref() != Some(token)
+    {
+        drop(locks);
+        return query_api(client, usage_url, token).await;
+    }
+    let before = active
+        .pointer("/claudeAiOauth/accessToken")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut environment = environment;
+    environment.insert(
+        "CLAUDE_CONFIG_DIR".into(),
+        home.to_string_lossy().into_owned(),
+    );
+    let refresh_error = run_claude_refresh(active, environment, executor, locks, container)
+        .await
+        .err();
     let credentials = match read_credentials(&home).await {
         Ok(credentials) => credentials,
         Err(error) => return Err(refresh_error.unwrap_or(error)),
     };
     let token = match oauth_access_token(&credentials, mj_core::clock::epoch_millis()) {
         Ok(token) => token,
-        Err(error) => return Err(refresh_error.unwrap_or(error)),
+        Err(error) => {
+            return Err(refresh_error.unwrap_or_else(|| {
+                ClaudeUsageError::Refresh(format!(
+                    "Claude auth login left no usable access token: {error}"
+                ))
+            }));
+        }
     };
-    if rejected_token.as_deref() == Some(token)
-        && let Some(error) = refresh_error
-    {
-        return Err(error);
+    if before.as_deref() == Some(token) {
+        return Err(refresh_error.unwrap_or_else(|| {
+            ClaudeUsageError::Refresh("Claude auth login did not renew the access token".to_owned())
+        }));
     }
     query_api(client, usage_url, token).await
 }
 
-/// Run Claude Code's `/usage` in print mode. The refresh path wants only the
-/// exit status out of it; macOS reads the quota from its stdout.
+/// On macOS, read Claude's quota through its Keychain-aware CLI.
 async fn run_claude_usage(
     environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
@@ -250,12 +330,78 @@ async fn run_claude_usage(
 }
 
 async fn run_claude_refresh(
-    environment: HashMap<String, String>,
+    credentials: Value,
+    mut environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
+    locks: Vec<crate::oauth_lock::OAuthRefreshLock>,
+    container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<(), ClaudeUsageError> {
-    let output = run_claude_usage(environment, executor, "refresh Claude login")
-        .await
-        .map_err(ClaudeUsageError::Refresh)?;
+    let oauth = &credentials["claudeAiOauth"];
+    let refresh = oauth["refreshToken"]
+        .as_str()
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| ClaudeUsageError::Refresh("stored refresh token is missing".into()))?;
+    let scopes = oauth["scopes"]
+        .as_array()
+        .filter(|scopes| !scopes.is_empty())
+        .and_then(|scopes| scopes.iter().map(Value::as_str).collect::<Option<Vec<_>>>())
+        .filter(|scopes| scopes.iter().all(|scope| !scope.is_empty()))
+        .ok_or_else(|| {
+            ClaudeUsageError::Refresh("stored OAuth scopes are missing or invalid".into())
+        })?;
+    environment.insert("CLAUDE_CODE_OAUTH_REFRESH_TOKEN".into(), refresh.to_owned());
+    environment.insert("CLAUDE_CODE_OAUTH_SCOPES".into(), scopes.join(" "));
+    // An empty client ID selects Claude's default and overrides an ambient ID
+    // belonging to another account's automation.
+    environment.insert(
+        "CLAUDE_CODE_OAUTH_CLIENT_ID".into(),
+        oauth["clientId"].as_str().unwrap_or_default().to_owned(),
+    );
+    let (mut command, quota_container) = match &container {
+        None => {
+            let mut command = CommandSpec::new(
+                if cfg!(windows) {
+                    "claude.cmd"
+                } else {
+                    "claude"
+                },
+                ["auth", "login"],
+            );
+            command.env.extend(environment);
+            (command, None)
+        }
+        Some(check) => {
+            check
+                .runtime
+                .ensure_image_async()
+                .await
+                .map_err(|error| ClaudeUsageError::Refresh(format!("{error:#}")))?;
+            let launch = check.launch(
+                "claude",
+                &["auth", "login"],
+                &environment.into_iter().collect(),
+            );
+            let mut command =
+                CommandSpec::new(mj_core::target_path::text(&launch.program), launch.args);
+            command.env.extend(launch.env);
+            (command, Some(launch.container))
+        }
+    };
+    command.purpose = "refresh Claude login".to_owned();
+    command.sensitive_output = true;
+    let output = tokio::task::spawn_blocking(move || {
+        // Keep the leases until the executor has reaped its child, even if
+        // the async caller is cancelled while this thread is still running.
+        let _locks = locks;
+        executor.execute(&command)
+    })
+    .await;
+    if let Some(container) = quota_container {
+        container.remove().await;
+    }
+    let output = output
+        .map_err(|error| ClaudeUsageError::Refresh(format!("worker failed: {error}")))?
+        .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
     successful_refresh_output(output)
 }
 
@@ -264,7 +410,7 @@ fn successful_refresh_output(output: CommandOutput) -> Result<(), ClaudeUsageErr
         Ok(())
     } else {
         Err(ClaudeUsageError::Refresh(format!(
-            "Claude /usage exited with status {}",
+            "Claude auth login exited with status {}",
             output.status
         )))
     }
@@ -302,21 +448,31 @@ fn oauth_has_refresh_token(credentials: &Value) -> bool {
 
 fn parse_api_usage(payload: &Value) -> Option<ClaudeUsageReport> {
     let mut five_hour = None;
-    let mut weekly = Vec::new();
+    let mut week = None;
+    let mut scoped_weeks = Vec::new();
 
     if let Some(limits) = payload.get("limits").and_then(Value::as_array) {
         for limit in limits {
             let Some(kind) = limit.get("kind").and_then(Value::as_str) else {
                 continue;
             };
-            let Some(window) = api_window(limit, "percent") else {
+            let Some(mut window) = api_window(limit, "percent") else {
                 continue;
             };
             match kind {
-                "session" => five_hour = Some(window),
-                "weekly_all" => weekly.push(window),
-                "weekly_scoped" if api_scope_name(limit).is_some_and(|name| name == "fable") => {
-                    weekly.push(window);
+                "session" => {
+                    window.duration_seconds = Some(5 * 60 * 60);
+                    five_hour = Some(window);
+                }
+                "weekly_all" => {
+                    window.duration_seconds = Some(7 * 24 * 60 * 60);
+                    week = Some(window);
+                }
+                "weekly_scoped" => {
+                    if let Some(scope) = api_scope_name(limit) {
+                        window.duration_seconds = Some(7 * 24 * 60 * 60);
+                        scoped_weeks.push((scope, window));
+                    }
                 }
                 _ => {}
             }
@@ -326,24 +482,29 @@ fn parse_api_usage(payload: &Value) -> Option<ClaudeUsageReport> {
             .get("five_hour")
             .filter(|value| !value.is_null())
             .and_then(|value| api_window(value, "utilization"));
-        for key in ["seven_day", "seven_day_fable"] {
-            if let Some(window) = payload
-                .get(key)
-                .filter(|value| !value.is_null())
-                .and_then(|value| api_window(value, "utilization"))
-            {
-                weekly.push(window);
-            }
+        if let Some(mut window) = payload
+            .get("seven_day")
+            .filter(|value| !value.is_null())
+            .and_then(|value| api_window(value, "utilization"))
+        {
+            window.duration_seconds = Some(7 * 24 * 60 * 60);
+            week = Some(window);
+        }
+        if let Some(mut window) = payload
+            .get("seven_day_fable")
+            .filter(|value| !value.is_null())
+            .and_then(|value| api_window(value, "utilization"))
+        {
+            window.duration_seconds = Some(7 * 24 * 60 * 60);
+            scoped_weeks.push(("fable".to_owned(), window));
         }
     }
 
-    let week = weekly
-        .into_iter()
-        .min_by_key(|window| window.remaining_percent);
-    (five_hour.is_some() || week.is_some()).then(|| ClaudeUsageReport {
+    (five_hour.is_some() || week.is_some() || !scoped_weeks.is_empty()).then(|| ClaudeUsageReport {
         banked_resets: parse_banked_resets(payload, mj_core::clock::epoch_millis() / 1000),
         five_hour,
         week,
+        scoped_weeks,
     })
 }
 
@@ -388,6 +549,7 @@ fn api_window(value: &Value, percent_key: &str) -> Option<ClaudeUsageWindow> {
     let used = used.round().clamp(0.0, 100.0) as u8;
     Some(ClaudeUsageWindow {
         remaining_percent: 100 - used,
+        duration_seconds: None,
         reset_context: value
             .get("resets_at")
             .and_then(Value::as_str)
@@ -412,7 +574,8 @@ fn api_window(value: &Value, percent_key: &str) -> Option<ClaudeUsageWindow> {
 /// unparsed rather than reporting backwards.
 fn parse_cli_usage(output: &str) -> Option<ClaudeUsageReport> {
     let mut five_hour = None;
-    let mut weekly = Vec::new();
+    let mut week = None;
+    let mut scoped_weeks = Vec::new();
 
     for line in strip_ansi(output).lines() {
         let Some((label, rest)) = line.split_once(':') else {
@@ -422,27 +585,35 @@ fn parse_cli_usage(output: &str) -> Option<ClaudeUsageReport> {
         if label != "current session" && !label.starts_with("current week") {
             continue;
         }
-        let Some(window) = cli_window(rest) else {
+        let Some(mut window) = cli_window(rest) else {
             continue;
         };
         if label == "current session" {
+            window.duration_seconds = Some(5 * 60 * 60);
             five_hour = Some(window);
+        } else if label == "current week (all models)" || label == "current week" {
+            window.duration_seconds = Some(7 * 24 * 60 * 60);
+            week = Some(window);
         } else {
-            weekly.push(window);
+            let Some(scope) = label
+                .strip_prefix("current week (")
+                .and_then(|label| label.strip_suffix(')'))
+            else {
+                continue;
+            };
+            window.duration_seconds = Some(7 * 24 * 60 * 60);
+            scoped_weeks.push((scope.to_owned(), window));
         }
     }
 
-    // Two weekly windows can be in force at once, as an overall limit and a
-    // per-model one. The binding limit is the one with the least left, which
-    // is also what the API path reports.
-    let week = weekly
-        .into_iter()
-        .min_by_key(|window| window.remaining_percent);
-    (five_hour.is_some() || week.is_some()).then_some(ClaudeUsageReport {
-        banked_resets: None,
-        five_hour,
-        week,
-    })
+    (five_hour.is_some() || week.is_some() || !scoped_weeks.is_empty()).then_some(
+        ClaudeUsageReport {
+            banked_resets: None,
+            five_hour,
+            week,
+            scoped_weeks,
+        },
+    )
 }
 
 /// One window from the text after a `/usage` line's label.
@@ -454,6 +625,7 @@ fn cli_window(rest: &str) -> Option<ClaudeUsageWindow> {
     }
     Some(ClaudeUsageWindow {
         remaining_percent: 100 - (used.round().clamp(0.0, 100.0) as u8),
+        duration_seconds: None,
         reset_context: tail
             .split_once("resets ")
             .map(|(_, context)| context.trim().to_owned())
@@ -595,13 +767,42 @@ Last 7d · 5966 requests · 78 sessions
             five_hour.reset_context.as_deref(),
             Some("Sep 18 at 6:20pm (Europe/Paris)")
         );
-        // 40% used is the weekly limit that binds first, not 30%.
+        // The all-models limit remains distinct from the Fable limit.
         let week = report.week.expect("weekly window");
-        assert_eq!(week.remaining_percent, 60);
+        assert_eq!(week.remaining_percent, 70);
         assert_eq!(
             week.reset_context.as_deref(),
-            Some("Sep 20 at 2pm (Europe/Paris)")
+            Some("Sep 20 at 1:59pm (Europe/Paris)")
         );
+        assert_eq!(report.scoped_weeks.len(), 1);
+        assert_eq!(report.scoped_weeks[0].0, "fable");
+        assert_eq!(report.scoped_weeks[0].1.remaining_percent, 60);
+        assert_eq!(report.scoped_weeks[0].1.duration_seconds, Some(604_800));
+    }
+
+    #[test]
+    fn api_usage_keeps_all_and_scoped_weekly_windows_separate() {
+        let report = parse_api_usage(&serde_json::json!({
+            "limits": [
+                {"kind": "weekly_all", "percent": 30},
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Fable"}}, "percent": 40},
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Mythos"}}, "percent": 50}
+            ]
+        })).unwrap();
+        assert_eq!(report.week.unwrap().remaining_percent, 70);
+        assert_eq!(report.scoped_weeks.len(), 2);
+        assert_eq!(report.scoped_weeks[0].0, "fable");
+        assert_eq!(report.scoped_weeks[0].1.remaining_percent, 60);
+        assert_eq!(report.scoped_weeks[1].0, "mythos");
+
+        let legacy = parse_api_usage(&serde_json::json!({
+            "seven_day": {"utilization": 25},
+            "seven_day_fable": {"utilization": 100}
+        }))
+        .unwrap();
+        assert_eq!(legacy.week.unwrap().remaining_percent, 75);
+        assert_eq!(legacy.scoped_weeks[0].0, "fable");
+        assert_eq!(legacy.scoped_weeks[0].1.remaining_percent, 0);
     }
 
     /// The later sections are full of percentages that are not quota.
@@ -642,6 +843,15 @@ Last 7d · 5966 requests · 78 sessions
 
     impl CommandExecutor for RefreshExecutor {
         fn execute(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
+            assert_eq!(command.args, ["auth", "login"]);
+            assert_eq!(
+                command.env["CLAUDE_CONFIG_DIR"],
+                self.home.to_string_lossy()
+            );
+            assert!(self.home.join(".oauth_refresh.lock").is_dir());
+            let mut legacy_path = self.home.canonicalize().unwrap().into_os_string();
+            legacy_path.push(".lock");
+            assert!(PathBuf::from(legacy_path).is_dir());
             self.commands.lock().unwrap().push(command.clone());
             if let Some(replacement) = &self.replacement {
                 std::fs::write(
@@ -718,6 +928,7 @@ Last 7d · 5966 requests · 78 sessions
         let mut oauth = serde_json::json!({
             "accessToken": token,
             "expiresAt": expires_at,
+            "scopes": ["user:profile", "user:inference"],
         });
         if let Some(refresh) = refresh {
             oauth["refreshToken"] = Value::String(refresh.to_owned());
@@ -786,15 +997,14 @@ Last 7d · 5966 requests · 78 sessions
         }
     }
 
+    // Hard-won: 958aba5ce: successful /usage stopped renewing expired OAuth tokens.
     #[tokio::test]
-    async fn expired_login_asks_claude_to_refresh_without_persisting_a_session() {
+    async fn expired_login_exchanges_its_refresh_token_without_starting_a_session() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join(".credentials.json");
-        std::fs::write(
-            &path,
-            serde_json::to_vec(&credentials("old", Some("refresh"), 1)).unwrap(),
-        )
-        .unwrap();
+        let mut old = credentials("old", Some("refresh"), 1);
+        old["claudeAiOauth"]["clientId"] = "custom-client".into();
+        std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
         let fresh = credentials(
             "fresh",
             Some("rotated"),
@@ -808,7 +1018,7 @@ Last 7d · 5966 requests · 78 sessions
             commands: commands.clone(),
         };
         let (usage_url, server_state, server) = spawn_usage_server(false).await;
-        let environment = HashMap::from([(
+        let mut environment = HashMap::from([(
             "CLAUDE_CONFIG_DIR".to_owned(),
             home.path().to_string_lossy().into_owned(),
         )]);
@@ -826,10 +1036,13 @@ Last 7d · 5966 requests · 78 sessions
         assert_eq!(report.five_hour.unwrap().remaining_percent, 75);
         let commands = commands.lock().unwrap();
         assert_eq!(commands.len(), 1);
-        assert_eq!(
-            commands[0].args,
-            ["-p", "/usage", "--no-session-persistence"]
+        assert_eq!(commands[0].args, ["auth", "login"]);
+        environment.insert("CLAUDE_CODE_OAUTH_REFRESH_TOKEN".into(), "refresh".into());
+        environment.insert(
+            "CLAUDE_CODE_OAUTH_SCOPES".into(),
+            "user:profile user:inference".into(),
         );
+        environment.insert("CLAUDE_CODE_OAUTH_CLIENT_ID".into(), "custom-client".into());
         assert_eq!(commands[0].env, environment.into_iter().collect());
         assert_eq!(
             server_state.authorizations.lock().unwrap().as_slice(),
@@ -865,12 +1078,222 @@ Last 7d · 5966 requests · 78 sessions
         .await
         .unwrap();
 
-        assert_eq!(commands.lock().unwrap().len(), 1);
+        let commands = commands.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].env["CLAUDE_CODE_OAUTH_CLIENT_ID"], "");
         assert_eq!(
             server_state.authorizations.lock().unwrap().as_slice(),
             ["Bearer old", "Bearer fresh"]
         );
         server.abort();
+    }
+
+    struct BlockedRefreshExecutor {
+        inner: RefreshExecutor,
+        started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        finish: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl CommandExecutor for BlockedRefreshExecutor {
+        fn execute(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
+            if let Some(started) = self.started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            self.finish
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))?;
+            self.inner.execute(command)
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_quota_readers_reuse_the_token_renewed_under_claudes_lock() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".credentials.json"),
+            serde_json::to_vec(&credentials("old", Some("refresh"), 1)).unwrap(),
+        )
+        .unwrap();
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let executor = Arc::new(BlockedRefreshExecutor {
+            inner: RefreshExecutor {
+                home: home.path().to_path_buf(),
+                replacement: Some(credentials(
+                    "fresh",
+                    Some("rotated"),
+                    mj_core::clock::epoch_millis() + 60_000,
+                )),
+                status: 0,
+                commands: commands.clone(),
+            },
+            started: Mutex::new(Some(started_tx)),
+            finish: Mutex::new(finish_rx),
+        });
+        let (usage_url, server_state, server) = spawn_usage_server(false).await;
+        let first_home = home.path().to_path_buf();
+        let first_url = usage_url.clone();
+        let first_executor = executor.clone();
+        let first = tokio::spawn(async move {
+            query_with(first_home, HashMap::new(), &first_url, first_executor).await
+        });
+        started_rx.await.unwrap();
+        let second = query_with(
+            home.path().to_path_buf(),
+            HashMap::new(),
+            &usage_url,
+            executor,
+        );
+        // Poll the second reader while the first remains inside its exchange.
+        tokio::pin!(second);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut second)
+                .await
+                .is_err()
+        );
+        finish_tx.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        second.await.unwrap();
+        assert_eq!(commands.lock().unwrap().len(), 1);
+        assert_eq!(
+            server_state.authorizations.lock().unwrap().as_slice(),
+            ["Bearer fresh", "Bearer fresh"]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_quota_reader_keeps_its_refresh_lock_until_the_child_finishes() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".credentials.json"),
+            serde_json::to_vec(&credentials("old", Some("refresh"), 1)).unwrap(),
+        )
+        .unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let executor = Arc::new(BlockedRefreshExecutor {
+            inner: RefreshExecutor {
+                home: home.path().to_path_buf(),
+                replacement: None,
+                status: 1,
+                commands: Arc::new(Mutex::new(Vec::new())),
+            },
+            started: Mutex::new(Some(started_tx)),
+            finish: Mutex::new(finish_rx),
+        });
+        let path = home.path().to_path_buf();
+        let task = tokio::spawn(async move {
+            query_with(path, HashMap::new(), "http://127.0.0.1:1/unused", executor).await
+        });
+        started_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let lock = home.path().join(".oauth_refresh.lock");
+        assert!(
+            lock.is_dir(),
+            "the cancelled wait still has a running child"
+        );
+        finish_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while lock.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    // Hard-won: 85b96a6d5: full-suite load could delay lock acquisition past the test's 150ms wait.
+    #[tokio::test]
+    async fn a_legacy_claude_lock_delays_refresh_and_the_waiter_rereads_the_renewed_token() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".credentials.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&credentials("old", Some("refresh"), 1)).unwrap(),
+        )
+        .unwrap();
+        let mut legacy = home.path().canonicalize().unwrap().into_os_string();
+        legacy.push(".lock");
+        let legacy = PathBuf::from(legacy);
+        std::fs::create_dir(&legacy).unwrap();
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let executor = Arc::new(RefreshExecutor {
+            home: home.path().to_path_buf(),
+            replacement: None,
+            status: 0,
+            commands: commands.clone(),
+        });
+        let (url, state, server) = spawn_usage_server(false).await;
+        let query = query_with(home.path().to_path_buf(), HashMap::new(), &url, executor);
+        tokio::pin!(query);
+        let lock = home.path().join(".oauth_refresh.lock");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                _ = &mut query => panic!("quota reader finished while the legacy lock was held"),
+                () = async {
+                    while !lock.is_dir() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                } => {}
+            }
+        })
+        .await
+        .expect("quota reader did not acquire its first refresh lock");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut query)
+                .await
+                .is_err()
+        );
+        assert!(commands.lock().unwrap().is_empty());
+        assert!(lock.is_dir());
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&credentials(
+                "fresh",
+                Some("rotated"),
+                mj_core::clock::epoch_millis() + 60_000,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::remove_dir(legacy).unwrap();
+        query.await.unwrap();
+        assert!(commands.lock().unwrap().is_empty());
+        assert_eq!(
+            state.authorizations.lock().unwrap().as_slice(),
+            ["Bearer fresh"]
+        );
+        server.abort();
+    }
+
+    // Hard-won: 958aba5ce: a successful CLI exit did not prove that credentials were renewed.
+    #[tokio::test]
+    async fn successful_cli_without_token_renewal_is_reported_as_a_refresh_failure() {
+        for expires_at in [1, mj_core::clock::epoch_millis() + 60_000] {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::write(
+                home.path().join(".credentials.json"),
+                serde_json::to_vec(&credentials("old", Some("refresh"), expires_at)).unwrap(),
+            )
+            .unwrap();
+            let executor = Arc::new(RefreshExecutor {
+                home: home.path().to_path_buf(),
+                replacement: None,
+                status: 0,
+                commands: Arc::new(Mutex::new(Vec::new())),
+            });
+            let (url, _, server) = spawn_usage_server(true).await;
+            let error = query_with(home.path().to_path_buf(), HashMap::new(), &url, executor)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, ClaudeUsageError::Refresh(_)), "{error}");
+            assert!(!home.path().join(".oauth_refresh.lock").exists());
+            server.abort();
+        }
     }
 
     #[tokio::test]

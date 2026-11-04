@@ -33,7 +33,7 @@ action: SelectWorkspace { workspace_id: "alpha" }
 │                                      ││  codex-1   Codex        refreshing…                                │
 │                                      ││  codex-2   Codex        refreshing…                                │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 action: SelectWorkspace { workspace_id: "beta" }
 
 === dashboard after selecting a numbered workspace (110x32) ===
@@ -68,7 +68,7 @@ action: SelectWorkspace { workspace_id: "beta" }
 │                                      ││  codex-1   Codex        refreshing…                                │
 │                                      ││  codex-2   Codex        refreshing…                                │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 action: LoadWorkspaceManagement { generation: 1 }
 
 === workspace manager list (110x32) ===
@@ -103,7 +103,7 @@ action: LoadWorkspaceManagement { generation: 1 }
 │                                                                                                            │
 │                                                                                                            │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 action: None
 
 === drafts for the selected workspace (110x32) ===
@@ -138,7 +138,7 @@ action: None
 │                                                                                                            │
 │                                                                                                            │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 action: None
 
 === second draft selected (110x32) ===
@@ -173,7 +173,7 @@ action: None
 │                                                                                                            │
 │                                                                                                            │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 action: RecoverWorkspaceDraft { generation: 1, draft_id: "draft-web" }
 
 === draft recovery completed (110x32) ===
@@ -208,4 +208,4 @@ action: RecoverWorkspaceDraft { generation: 1, draft_id: "draft-web" }
 │                                                                                                            │
 │                                                                                                            │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette

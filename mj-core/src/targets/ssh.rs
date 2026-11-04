@@ -55,7 +55,7 @@ pub fn ssh_command(
 pub fn ssh_command_owned(ssh: &SshTarget, remote_args: Vec<String>) -> CommandSpec {
     let mut args = ssh.ssh_args.clone();
     args.push(ssh.destination.clone());
-    args.push(join_remote_command(&remote_args));
+    args.push(remote_command_line(&remote_args));
     CommandSpec::new("ssh", args).ssh_session(ssh)
 }
 
@@ -128,6 +128,12 @@ fn scp_command(ssh: &SshTarget, args: Vec<String>) -> CommandSpec {
 /// cover a whole provision.
 #[cfg(unix)]
 const CONTROL_PERSIST: &str = "60";
+
+/// The master's `ServerAliveInterval` seconds and `ServerAliveCountMax`: a
+/// host silent for a minute is gone. Patient enough that a stall of a few
+/// seconds does not drop the sessions on the connection.
+#[cfg(unix)]
+const MASTER_KEEPALIVE: (u32, u32) = (15, 4);
 
 /// Environment override that turns connection sharing off. Any of `0`, `off`,
 /// `false`, or `no` disables it.
@@ -322,6 +328,33 @@ fn control_socket_name(ssh: &SshTarget, shard: usize) -> String {
     name
 }
 
+/// The `-o` value that points `ssh` at `socket`.
+///
+/// An `ssh` option is one line of config, and `ssh` splits that line on
+/// whitespace unless the value stands inside double quotes. A socket path with
+/// a space in it -- macOS keeps its data in `~/Library/Application
+/// Support/mjolnir` -- therefore ends the option early and `ssh` refuses the
+/// whole command line with "keyword controlpath extra arguments at end of
+/// line". `%` starts a token expansion in `ControlPath` (and in the other
+/// filename options), so it is doubled. A path that needs neither is passed
+/// exactly as it always was.
+///
+/// This is not unix-gated: [`push_session_args`] reaches it on every platform,
+/// because a lease's options are compiled there too. Nothing else can produce
+/// a socket on Windows, so the Windows path never runs.
+fn control_path_option(socket: &Path) -> String {
+    let path = socket.display().to_string().replace('%', "%%");
+    let path = if path.contains(|character: char| {
+        character.is_whitespace() || character == '"' || character == '\\'
+    }) {
+        // Inside the quotes OpenSSH unescapes only these two.
+        format!("\"{}\"", path.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        path
+    };
+    format!("ControlPath={path}")
+}
+
 /// Whether the user's own `ssh` arguments already configure connection
 /// sharing. OpenSSH keeps the first value it sees, so Mjolnir cannot add its
 /// own sharing options without either overriding the user or being
@@ -369,18 +402,50 @@ pub fn push_connection_reuse_args(args: &mut Vec<String>, ssh: &SshTarget) {
             "-o".to_owned(),
             "ControlMaster=no".to_owned(),
             "-o".to_owned(),
-            format!("ControlPath={}", socket.display()),
+            control_path_option(&socket),
         ]);
     }
     #[cfg(not(unix))]
     let _ = (args, ssh);
 }
 
+/// `args` quoted for a POSIX shell, joined into one line.
 pub fn join_remote_command(args: &[String]) -> String {
     args.iter()
         .map(|arg| posix_quote(arg))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The command line an `ssh` invocation sends for `args`: each argument
+/// quoted, run under [`with_macos_system_path`]. Every builder of an SSH
+/// remote command uses this, so a Mac host finds the same programs whatever
+/// the command is.
+pub fn remote_command_line(args: &[String]) -> String {
+    join_remote_command(&with_macos_system_path(args.to_vec()))
+}
+
+/// Run `args` with, on a Mac, the directories macOS lists in /etc/paths and
+/// /etc/paths.d and Homebrew's Apple-silicon prefix after the session's own
+/// PATH, so a directory the account already chose still comes first. Another
+/// host, which has no `path_helper`, runs `args` unchanged.
+///
+/// An OpenSSH command session on macOS gets /usr/bin:/bin:/usr/sbin:/sbin
+/// only: macOS adds /etc/paths in login shells, and Homebrew's installer adds
+/// /opt/homebrew/bin through the login shell's profile. Apple's `container`
+/// (/usr/local/bin) and Homebrew's `docker`, `podman` and `colima` would
+/// otherwise not be found.
+pub fn with_macos_system_path(args: Vec<String>) -> Vec<String> {
+    [
+        "/bin/sh".to_owned(),
+        "-c".to_owned(),
+        r#"if [ -x /usr/libexec/path_helper ]; then session=$PATH; eval "$(PATH= /usr/libexec/path_helper -s)"; PATH=${session:+$session:}$PATH:/opt/homebrew/bin:/opt/homebrew/sbin; fi; exec "$@""#
+            .to_owned(),
+        "sh".to_owned(),
+    ]
+    .into_iter()
+    .chain(args)
+    .collect()
 }
 
 /// Check whether a directory exists on the configured SSH host.
@@ -599,7 +664,7 @@ pub fn ssh_validation_command(
         "-o".into(),
         "ServerAliveCountMax=1".into(),
     ]);
-    args.extend([ssh.destination.clone(), join_remote_command(&remote_args)]);
+    args.extend([ssh.destination.clone(), remote_command_line(&remote_args)]);
     CommandSpec::new("ssh", args)
         .ssh_probe_session(ssh)
         .purpose(purpose)
@@ -1326,12 +1391,15 @@ fn ensure_master(ssh: &SshTarget, socket: &Path, executor: &dyn CommandExecutor)
 /// The lock file sits beside the socket as `<socket>.lock`; `ssh` binds a
 /// new master at `<socket>.<16 random characters>`, so the names never meet.
 #[cfg(all(unix, test))]
-fn lock_master_opening(socket: &Path) -> Result<fs::File> {
+fn lock_master_opening(socket: &Path) -> Result<crate::file_lock::FileLock> {
     lock_master_opening_unless(socket, &|| false)
 }
 
 #[cfg(unix)]
-fn lock_master_opening_unless(socket: &Path, cancelled: &dyn Fn() -> bool) -> Result<fs::File> {
+fn lock_master_opening_unless(
+    socket: &Path,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<crate::file_lock::FileLock> {
     let mut path = socket.as_os_str().to_owned();
     path.push(".lock");
     let path = PathBuf::from(path);
@@ -1357,10 +1425,11 @@ fn lock_master_opening_unless(socket: &Path, cancelled: &dyn Fn() -> bool) -> Re
                     .with_context(|| format!("lock SSH master lock {}", path.display()));
             }
         }
+        let file = crate::file_lock::FileLock::new(file);
         // The daemon removes stale locks when it starts. A lock taken on a
         // file removed meanwhile serializes nothing, so take the one at the
         // path now.
-        if is_file_at(&file, &path) {
+        if is_file_at(file.file(), &path) {
             return Ok(file);
         }
     }
@@ -1403,7 +1472,8 @@ fn remove_stale_master_locks_in(dir: &Path) {
         if file.try_lock().is_err() {
             continue;
         }
-        if fs::symlink_metadata(&socket).is_ok() || !is_file_at(&file, &lock) {
+        let file = crate::file_lock::FileLock::new(file);
+        if fs::symlink_metadata(&socket).is_ok() || !is_file_at(file.file(), &lock) {
             continue;
         }
         match fs::remove_file(&lock) {
@@ -1437,7 +1507,7 @@ fn master_check_command(ssh: &SshTarget, socket: &Path) -> CommandSpec {
     let mut args = ssh.ssh_args.clone();
     args.extend([
         "-o".to_owned(),
-        format!("ControlPath={}", socket.display()),
+        control_path_option(socket),
         "-O".to_owned(),
         "check".to_owned(),
         ssh.destination.clone(),
@@ -1452,6 +1522,13 @@ fn master_check_command(ssh: &SshTarget, socket: &Path) -> CommandSpec {
 /// its last session has been gone that long. `BatchMode=yes` keeps the daemon
 /// from ever waiting on a password prompt. This is a real connection, so it
 /// is admitted and retried like one.
+///
+/// Without a keepalive the master never notices a host that dropped off the
+/// network: every multiplexed session on it, a destroy's container removal
+/// included, waits until the host comes back and resets the connection.
+/// [`MASTER_KEEPALIVE`] makes the master give up on a silent host within
+/// about a minute, which fails each of its sessions with status 255. The
+/// user's own `ssh_args` come first and so still win.
 #[cfg(unix)]
 fn master_open_command(ssh: &SshTarget, socket: &Path) -> CommandSpec {
     let mut args = ssh.ssh_args.clone();
@@ -1460,12 +1537,16 @@ fn master_open_command(ssh: &SshTarget, socket: &Path) -> CommandSpec {
         "BatchMode=yes".to_owned(),
         "-o".to_owned(),
         "ConnectTimeout=10".to_owned(),
+        "-o".to_owned(),
+        format!("ServerAliveInterval={}", MASTER_KEEPALIVE.0),
+        "-o".to_owned(),
+        format!("ServerAliveCountMax={}", MASTER_KEEPALIVE.1),
         "-f".to_owned(),
         "-N".to_owned(),
         "-o".to_owned(),
         "ControlMaster=yes".to_owned(),
         "-o".to_owned(),
-        format!("ControlPath={}", socket.display()),
+        control_path_option(socket),
         "-o".to_owned(),
         format!("ControlPersist={CONTROL_PERSIST}"),
         ssh.destination.clone(),
@@ -1657,7 +1738,7 @@ pub fn push_session_args(args: &mut Vec<String>, lease: &SshSessionLease) {
             "-o".to_owned(),
             "ControlMaster=no".to_owned(),
             "-o".to_owned(),
-            format!("ControlPath={}", socket.display()),
+            control_path_option(socket),
         ]);
         #[cfg(unix)]
         let probe = lease.probe;
@@ -1783,6 +1864,41 @@ mod tests {
             "{:?}",
             command.args
         );
+    }
+
+    /// An OpenSSH command session on macOS starts with only the base system
+    /// directories on PATH, so every remote line must bring in /usr/local/bin
+    /// (Apple's `container`, Docker Desktop) and /opt/homebrew/bin (Homebrew's
+    /// `docker` and `podman`) by itself, after the directories the session
+    /// already had. Another host runs the command with its PATH unchanged.
+    #[cfg(unix)]
+    // Hard-won: f6b68bcc9: SSH Apple container probes ran `container` without /usr/local/bin and exited 127.
+    #[test]
+    fn remote_lines_run_under_the_macos_system_path() {
+        let session = "/usr/bin:/bin:/usr/sbin:/sbin";
+        let probe = remote_command_line(&[
+            "sh".into(),
+            "-c".into(),
+            "printf '%s|%s' \"$*\" \"$PATH\"".into(),
+            "probe".into(),
+            "two words".into(),
+        ]);
+        let mut command = CommandSpec::new("/bin/sh", ["-c", probe.as_str()]);
+        command.clear_env = true;
+        command.env.insert("PATH".into(), session.into());
+        let output = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(output.status, 0, "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let (args, path) = stdout.split_once('|').unwrap();
+        assert_eq!(args, "two words");
+        if cfg!(target_os = "macos") {
+            assert!(path.starts_with(&format!("{session}:")), "{path}");
+            for directory in ["/usr/local/bin", "/opt/homebrew/bin"] {
+                assert!(path.split(':').any(|entry| entry == directory), "{path}");
+            }
+        } else {
+            assert_eq!(path, session);
+        }
     }
 
     /// Launch finding R3-11: `*.lock` files stayed in the instance's socket
@@ -1938,6 +2054,7 @@ mod tests {
             ],
         };
         let command = ssh_command(&ssh, ["true"]);
+        let remote = remote_command_line(&["true".to_owned()]);
         assert_eq!(
             command.args,
             [
@@ -1946,7 +2063,7 @@ mod tests {
                 "-o",
                 "ProxyCommand=nc %h %p",
                 "session-options-host",
-                "'true'"
+                remote.as_str()
             ],
             "stored arguments never contain sharing options"
         );
@@ -1973,7 +2090,7 @@ mod tests {
                 "-o".to_owned(),
                 "ProxyCommand=nc %h %p".to_owned(),
                 "session-options-host".to_owned(),
-                "'true'".to_owned(),
+                remote,
             ]
         );
         assert_eq!(masters.openers(), 1);
@@ -1982,6 +2099,54 @@ mod tests {
                 &fs::metadata(socket_dir.path()).expect("socket directory")
             ) & 0o777,
             0o700
+        );
+    }
+
+    /// A control socket is the value of an `ssh` option, and `ssh` splits an
+    /// unquoted value on whitespace. On macOS the sockets sit below
+    /// `~/Library/Application Support/mjolnir`, so every option line Mjolnir
+    /// wrote was refused with "keyword controlpath extra arguments at end of
+    /// line" and no Mac target answered at all. `ssh -G` resolves options
+    /// without connecting, so this holds the value we emit against ssh's own
+    /// parser. `%` is expanded even inside the quotes, so it is doubled.
+    #[test]
+    #[cfg(unix)]
+    fn a_control_path_with_a_space_reaches_ssh_intact() {
+        let _guard = SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let socket_dir = sharing_socket_dir();
+        let dir = socket_dir.path().join("Application Support/%h");
+        let ssh = SshTarget {
+            destination: "socket-spaces.invalid".to_owned(),
+            ssh_args: Vec::new(),
+        };
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(dir.clone())));
+        let mut args = Vec::new();
+        push_connection_reuse_args(&mut args, &ssh);
+        set_ssh_connection_sharing_for_test(None);
+
+        let Ok(resolved) = std::process::Command::new("ssh")
+            .args(["-F", "/dev/null", "-G"])
+            .args(&args)
+            .arg(&ssh.destination)
+            .output()
+        else {
+            return; // no ssh client on this machine
+        };
+        let stderr = String::from_utf8_lossy(&resolved.stderr);
+        assert!(
+            resolved.status.success(),
+            "ssh refused the options we built: {stderr}\n{args:?}"
+        );
+        let expected = format!(
+            "controlpath {}",
+            dir.join(control_socket_name(&ssh, 0)).display()
+        );
+        let stdout = String::from_utf8_lossy(&resolved.stdout);
+        assert!(
+            stdout.lines().any(|line| line == expected),
+            "expected {expected:?}:\n{stdout}"
         );
     }
 
@@ -2196,7 +2361,13 @@ mod tests {
         };
         let masters = FakeMasters::default();
         let args = spawned_args(&ssh_command(&ssh, ["true"]), Some(&long), &masters);
-        assert_eq!(args, ["long-path-host", "'true'"]);
+        assert_eq!(
+            args,
+            [
+                "long-path-host".to_owned(),
+                remote_command_line(&["true".to_owned()])
+            ]
+        );
         assert_eq!(masters.commands(), 0);
         assert!(!long.exists(), "an unusable directory must not be created");
     }
@@ -2229,13 +2400,7 @@ mod tests {
             .execute(&master_check_command(&ssh, &socket))
             .expect("ssh -O check must run");
         let exit = std::process::Command::new("ssh")
-            .args([
-                "-O",
-                "exit",
-                "-o",
-                &format!("ControlPath={}", socket.display()),
-                &host,
-            ])
+            .args(["-O", "exit", "-o", &control_path_option(&socket), &host])
             .output();
         let output = output.expect("ssh must run");
         assert_eq!(
@@ -2286,13 +2451,7 @@ mod tests {
         let exit_all = || {
             for socket in &sockets {
                 let _ = std::process::Command::new("ssh")
-                    .args([
-                        "-O",
-                        "exit",
-                        "-o",
-                        &format!("ControlPath={}", socket.display()),
-                        &host,
-                    ])
+                    .args(["-O", "exit", "-o", &control_path_option(socket), &host])
                     .output();
             }
         };

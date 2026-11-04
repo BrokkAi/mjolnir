@@ -101,19 +101,29 @@ pub enum GitSnapshotProgress {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UntrackedFiles {
+    Include,
+    Exclude,
+    /// Explicit user consent to omit untracked nested Git repositories.
+    IgnoreNestedRepositories,
+}
+
 pub fn collect_git_snapshot(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     spec: &GitCollectionSpec,
 ) -> Result<RepositorySnapshot> {
-    collect_git_snapshot_with_progress(runner, repository, spec, true, &|_| Ok(()))
+    collect_git_snapshot_with_progress(runner, repository, spec, UntrackedFiles::Include, &|_| {
+        Ok(())
+    })
 }
 
 pub fn collect_git_snapshot_with_progress(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     spec: &GitCollectionSpec,
-    include_untracked: bool,
+    untracked_files: UntrackedFiles,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
 ) -> Result<RepositorySnapshot> {
     validate_component(&spec.id, "repository id")?;
@@ -152,7 +162,7 @@ pub fn collect_git_snapshot_with_progress(
         identity,
         history,
         &unmerged_paths,
-        include_untracked,
+        untracked_files,
         progress,
     );
     if let Some(state) = clone_state {
@@ -633,15 +643,19 @@ fn git_directories(runner: &dyn GitCommandRunner, repository: &Path) -> Result<(
     let output = git_text(
         runner,
         repository,
-        ["rev-parse", "--absolute-git-dir", "--git-common-dir"],
+        [
+            "rev-parse",
+            "--path-format=absolute",
+            "--absolute-git-dir",
+            "--git-common-dir",
+        ],
     )
     .context("locate the Git directories")?;
     let mut lines = output.lines();
     let (Some(git_dir), Some(common_dir)) = (lines.next(), lines.next()) else {
         bail!("git rev-parse named no common directory: {output}");
     };
-    // `--git-common-dir` may be relative to the directory Git ran in.
-    Ok((PathBuf::from(git_dir), repository.join(common_dir)))
+    Ok((PathBuf::from(git_dir), PathBuf::from(common_dir)))
 }
 
 fn same_directory(left: &Path, right: &Path) -> Result<bool> {
@@ -1801,7 +1815,7 @@ fn collect_git_contents(
     identity: CollectedGitIdentity,
     history: GitHistorySelection,
     unmerged_paths: &[PathBuf],
-    include_untracked: bool,
+    untracked_files: UntrackedFiles,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
 ) -> Result<RepositorySnapshot> {
     let repository = checkout.top_level.as_path();
@@ -1863,7 +1877,7 @@ fn collect_git_contents(
                     )
                 },
                 || {
-                    if !include_untracked {
+                    if untracked_files == UntrackedFiles::Exclude {
                         return Ok(Vec::new());
                     }
                     let untracked = git_bytes(
@@ -1873,7 +1887,7 @@ fn collect_git_contents(
                         &[],
                         "list nonignored untracked files",
                     )?;
-                    build_untracked_tar(repository, &untracked, progress)
+                    build_untracked_tar(repository, &untracked, untracked_files, progress)
                 },
             )
         },
@@ -2354,7 +2368,7 @@ fn ensure_branch_available_for_checkout(
         );
     }
 
-    // Git 2.25 has no `worktree list -z`. A branch line holds a ref name,
+    // Git 2.31 has no `worktree list -z`. A branch line holds a ref name,
     // which cannot contain a newline.
     let worktrees = run_git(runner, repository, ["worktree", "list", "--porcelain"], &[])?;
     ensure!(
@@ -2477,8 +2491,8 @@ fn git_failure(action: &str, output: &GitOutput) -> anyhow::Error {
 /// checked and restored under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WorktreeTar {
-    /// Untracked files. Credential-like names are left out, a symbolic link
-    /// must point inside the checkout, and a restore never replaces a file.
+    /// Untracked files. A symbolic link must point inside the checkout, and a
+    /// restore never replaces a file.
     Untracked,
     /// The working-tree files of unmerged paths. They are tracked content and
     /// travel as exactly as the patches carry the rest of the tracked tree:
@@ -2499,6 +2513,7 @@ impl WorktreeTar {
 pub(super) fn build_untracked_tar(
     repository: &Path,
     nul_paths: &[u8],
+    policy: UntrackedFiles,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
 ) -> Result<Vec<u8>> {
     let paths = nul_paths
@@ -2512,11 +2527,6 @@ pub(super) fn build_untracked_tar(
         for (index, raw_path) in paths.into_iter().enumerate() {
             let relative = mj_core::path_input::from_git_bytes(raw_path)?;
             validate_worktree_relative_path(&relative)?;
-            // In addition to Git's ignore rules, skip conventional credential
-            // paths so they can never enter the untracked payload.
-            if ensure_not_secret_path(&relative).is_err() {
-                continue;
-            }
             progress(GitSnapshotProgress::UntrackedFile {
                 current: index + 1,
                 total,
@@ -2526,6 +2536,11 @@ pub(super) fn build_untracked_tar(
             ensure_no_symlink_ancestors(repository, &relative)?;
             let metadata = fs::symlink_metadata(&source)
                 .with_context(|| format!("stat untracked path {}", source.display()))?;
+            if policy == UntrackedFiles::IgnoreNestedRepositories
+                && is_nested_repository(&source, &metadata)?
+            {
+                continue;
+            }
             append_worktree_entry(
                 &mut builder,
                 repository,
@@ -2577,6 +2592,16 @@ pub(super) fn build_conflicted_worktree_tar(
     Ok((output, missing))
 }
 
+fn is_nested_repository(source: &Path, metadata: &fs::Metadata) -> Result<bool> {
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    source
+        .join(".git")
+        .try_exists()
+        .with_context(|| format!("inspect nested repository directory {}", source.display()))
+}
+
 fn append_worktree_entry(
     builder: &mut tar::Builder<&mut Vec<u8>>,
     repository: &Path,
@@ -2605,10 +2630,25 @@ fn append_worktree_entry(
         let mut file = File::open(&source)
             .with_context(|| format!("open {} file {}", kind.label(), source.display()))?;
         builder.append_data(&mut header, relative, &mut file)?;
+    } else if metadata.is_dir() {
+        if kind == WorktreeTar::Untracked && is_nested_repository(&source, metadata)? {
+            bail!(
+                "{NESTED_REPOSITORY_CHECKPOINT_ERROR}{}: \
+                 for a disposable scratch worktree, exclude this path using the outer \
+                 repository's .git/info/exclude; otherwise preserve its work separately",
+                source.display()
+            );
+        }
+        bail!(
+            "unsupported {} directory at {}",
+            kind.label(),
+            source.display()
+        );
     } else {
         bail!(
-            "unsupported {} file type at {}",
+            "unsupported {} file type {:?} at {}",
             kind.label(),
+            metadata.file_type(),
             source.display()
         );
     }
@@ -2643,9 +2683,6 @@ fn validate_worktree_tar_reader(reader: impl Read, kind: WorktreeTar) -> Result<
             .path()
             .with_context(|| format!("read {label}-file tar path"))?;
         validate_worktree_relative_path(&relative)?;
-        if kind == WorktreeTar::Untracked {
-            ensure_not_secret_path(&relative)?;
-        }
         let entry_type = entry.header().entry_type();
         ensure!(
             entry_type.is_file() || entry_type.is_symlink(),

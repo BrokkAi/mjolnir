@@ -16,22 +16,24 @@ Auto is the default. In `config.toml`, omit `profile`, `model`, and `effort`:
 trigger = "turn"
 ```
 
-Auto first tries profiles from a different provider, then other profiles from the primary provider, then the primary profile itself. Within each group it ranks healthy quota before reserve quota before unknown quota, then uses provider order **Codex → Claude → DeepSeek → Kimi**. Remaining quota and profile ID break ties. A known 0% quota window excludes a profile, 1–10% is reserve, above 10% is healthy, API billing is healthy, and missing or failed quota readings remain eligible as unknown.
+Auto uses this priority list, always at **High** reasoning effort:
 
-| Provider | Auto reviewer |
-| --- | --- |
-| OpenAI Codex | Astra / medium |
-| Claude | Fable / medium |
-| DeepSeek | Flash / max |
-| Kimi | Newest K-series / max |
-| Other review-capable providers | Manual selection, or a session's `--review-model` |
+1. GPT Terra
+2. DeepSeek Flash
+3. Claude Haiku
+4. Grok
 
-Model families resolve to the newest advertised matching model. DeepSeek through a Codex harness counts as DeepSeek, not OpenAI. Effort values must be supported exactly. Auto skips unusable candidates and explains why if none can run. A manually selected profile fails visibly instead of changing profiles.
+It first tries these families on subscriptions, then the same list on usage-priced API profiles. Within either group it moves the primary session's model family to the end: a Terra primary prefers Flash, and a Flash primary prefers Terra. A subscription option still wins over an API option even when it shares the primary's family. Each family resolves to its newest advertised version, such as GPT 6.1 Terra when that is the newest available Terra.
+
+If none of the preferred families can run, Auto tries the other advertised models by estimated price, while preferring a different model from the primary. Price compares equal amounts of ordinary input and output tokens using the same base API rates as usage reports. Unknown prices sort after known prices; if only unpriced models can run, the reviewer selection says `price unavailable`.
+
+An exhausted quota window excludes the models it applies to. Missing or failed quota readings stay eligible; quota headroom does not change the priority list. Auto checks exact model and `high` effort support, skips unusable candidates, and explains why if none can run. Discovery remains cancellable. A manually selected profile fails visibly instead of changing profiles.
 
 To choose a profile, model, or effort manually:
 
 ```toml
 [review]
+count = 2
 profile = "reviewer"
 # model = "provider-model-id"
 # effort = "high"
@@ -40,9 +42,10 @@ profile = "reviewer"
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `trigger` | `"off"` | `"off"` disables automatic review, `"turn"` reviews completed turns, and `"push"` reviews commits before push. |
+| `count` | `2` | Independent reviewer sessions per review. 1–3 reviewers are reasonable; more have diminishing returns. Counts above 3 are allowed. |
 | `profile` | Auto | Omit for Auto or name an enabled review-capable profile. |
 | `model` | harness default for a named profile | Optional reviewer model override. `[review]` accepts it only with a named profile; a session's `--review-model` also works with Auto. |
-| `effort` | harness default for a named profile | Optional reviewer effort override. `[review]` accepts it only with a named profile; a session's `--review-effort` also works with Auto. |
+| `effort` | harness default for a named profile | Optional reviewer effort override for a named profile. Auto always uses `high`, including when a session specifies another effort. |
 
 The old `tier` configuration field is deprecated and ignored. Existing
 `quick` and `extended` values remain readable for compatibility.
@@ -54,20 +57,24 @@ An older configuration with `enabled = true` still loads as `trigger = "turn"`; 
 `mj new` and `mj import <harness>` can override these settings for one session:
 
 - `--review off|turn|push` selects that session's trigger, overriding `[review]`.
-- `--review-model <model>` and `--review-effort <effort>` replace the reviewer model and effort for that session. If you omit `--review`, either option selects `turn`. With Auto, a named model lets Auto choose any enabled profile that offers it, including a profile whose provider has no Auto policy, such as DSH.
+- `--review-count <count>` selects the number of independent reviewers. Used alone, it selects turn review; an explicit `--review off` keeps review off.
+- `--review-model <model>` pins the reviewer model for that session. With Auto, any enabled profile offering it can qualify; Auto still tries subscriptions before API billing and always uses High effort. `--review-effort <effort>` overrides effort for a named reviewer profile; Auto keeps High. If you omit `--review`, either option selects `turn`.
 - `--review-tier quick|extended` is deprecated. It still accepts either value
   and selects `turn` when you omit `--review`, but the value has no effect.
 
 The choice is stored with the session and kept when it resumes. A session created without these flags follows `[review]`.
 
 Review needs a committed Git checkout to capture changes. A local bare session
-whose directory is not a committed checkout must use `--review off`; enabling
-automatic review for that session is refused, and `/review` reports that it
-cannot capture the directory's changes.
+whose directory is not a committed checkout is created with review off for that
+session. The New Session review page and `mj new` say so, `/review status`
+gives the reason, and `/review` reports that it cannot capture the directory's
+changes.
 
 ## What the reviewer reads
 
-The reviewer follows the Codex `/review` rubric and returns Codex's JSON review format. Mj renders that output as readable findings text before displaying or storing it. An empty findings list is a clean review; findings include their title, location, and explanation.
+Each reviewer follows the Codex `/review` rubric and answers in plain text. The exact reply `No findings.` means that reviewer found no issues. Any other non-empty reply is findings, and an empty reply is a failed review.
+
+By default, two separate reviewer sessions inspect the same captured change in parallel using the same resolved profile and model. The primary receives every reviewer's findings, labeled with its session. Reports may contain redundant findings; Mjolnir keeps them separate. Multiple clean results become one clean verdict only after every reviewer finishes cleanly. If a reviewer fails, completed findings still reach the primary, but the review remains incomplete and coverage does not advance.
 
 The initial prompt includes the user's messages and a per-file diffstat, not the full diff. For each repository it gives the reviewer the root, the baseline tree, the captured tree, and the command:
 
@@ -91,9 +98,11 @@ With `trigger = "push"`, Claude Code, Codex, and DSH sessions get the `request_r
 
 The review starts from the last cleanly reviewed commit when that commit is still in the current history and is not older than the merge base with the default branch. Otherwise, it starts from that merge base. Mjolnir uses `origin/HEAD` to find the default branch, then tries `main`, then `master`. If the session is on the default branch, or no default branch is available, it uses the commit that was checked out when the session started.
 
-The verdict arrives later as a message in the agent's conversation. A clean verdict records the reviewed tree in the Git ref `refs/mj/reviewed/<tree>`. A move keeps every ref under `refs/mj/`: these records, the session's start commit and the turn-review baseline. A managed checkout's checkpoint carries them with their objects. A raw session's checkpoint records their names and object IDs, and restoring it recreates each ref whose object the repository still has. A findings verdict tells the agent to fix the findings, commit the changes, and call `request_review` again. Push review does not hold prompts or send findings as a corrective prompt.
+The verdict arrives later as a message in the agent's conversation. The group is clean only when every reviewer finishes cleanly; a failed or missing reviewer keeps the gate blocked. A clean verdict records the reviewed tree in the Git ref `refs/mj/reviewed/<tree>`. A move keeps every ref under `refs/mj/`: these records, the session's start commit and the turn-review baseline. A managed checkout's checkpoint carries them with their objects. A raw session's checkpoint records their names and object IDs, and restoring it recreates each ref whose object the repository still has. A findings verdict tells the agent to fix the findings, commit the changes, and call `request_review` again. Push review does not hold prompts or send findings as a corrective prompt.
 
-Mjolnir installs a pre-push hook in the session checkout. For pushes made by the agent, the hook refuses any commit tree that has not passed review and prints `mj: <ref> (tree <short>) has not been reviewed.` The hook is enabled only in the harness environment, so pushes from your own terminal are not affected. If the repository already has a pre-push hook, Mjolnir keeps it as `pre-push.before-mj` and runs it after its own check. If `core.hooksPath` points to a directory inside the work tree that Git does not ignore, Mjolnir skips installing the gate and reports that in the transcript. The gate can be skipped with `git push --no-verify`; the agent must follow the request to call `request_review`.
+If the agent judges the findings incorrect or unreasonable, it can call `override_review` with a reason. The override applies to the whole findings verdict and only to the same reviewed trees captured for that verdict. Before the reviewed refs are unlocked, Mjolnir records an “override requested” notice in the session transcript with the reason and findings, so that record remains visible even if a later operation fails. An override is refused while a review is running or when a reviewer failed and the group is incomplete.
+
+Mjolnir installs a pre-push hook in the session checkout. For pushes made by the agent, the hook refuses any commit tree that has not passed review or been accepted through a recorded override, and prints `mj: <ref> (tree <short>) has not been reviewed.` The hook is enabled only in the harness environment, so pushes from your own terminal are not affected. If the repository already has a pre-push hook, Mjolnir keeps it as `pre-push.before-mj` and runs it after its own check. If `core.hooksPath` points to a directory inside the work tree that Git does not ignore, Mjolnir skips installing the gate and reports that in the transcript. The gate can be skipped with `git push --no-verify`; the agent must follow the request to call `request_review`.
 
 Other harnesses do not receive `request_review` or the push gate. Push mode continues without review, and Mjolnir adds a notice to the transcript.
 
@@ -144,7 +153,7 @@ Suspending a session while a review is open preserves its result for reference. 
 
 While a review is preparing or running, Mjolnir starts no recovery copy or worker upgrade for that session; a copy already running when the review begins is finished first. Deferred copies and upgrades start as soon as the review closes.
 
-If Mjolnir restarts during a review, it clears the interrupted in-flight marker, releases the prompt hold, and leaves the reviewed boundary unchanged. The next review therefore covers the same changes instead of silently skipping them.
+If Mjolnir restarts during a review, the reviewer workers keep running. The replacement daemon restores the captured target, reviewer sessions, and completed results, then continues the group. A repeated result does not duplicate findings or approve the tree twice. Reviews interrupted before their group could be saved remain unreviewed rather than advancing coverage.
 
 Review traffic is charged through the selected reviewer profile. A different profile ID may still share account-level limits with the primary profile. See [configuration](/configuration/#automatic-review-review) for schema details.
 

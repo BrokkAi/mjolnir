@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use agent_client_protocol::schema::ProtocolVersion as AcpProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AgentCapabilities, AvailableCommand, ContentBlock, Implementation, SessionConfigOption,
     SessionModeState, SessionUpdate,
 };
@@ -56,6 +56,10 @@ pub enum RelayCommand {
     SeedAssessmentContext {
         expected: RelayCursor,
         context: Box<crate::assessment::ContextHistory>,
+    },
+    /// Dismiss only the inferred question belonging to this completed turn.
+    DismissQuestion {
+        question: crate::assessment::InferredQuestion,
     },
     /// Start an empty native conversation, preserving the logical session.
     ClearContext,
@@ -198,6 +202,7 @@ impl RelayCommand {
 
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::DismissQuestion { .. } => super::RELAY_DISMISS_QUESTION_PROTOCOL,
             Self::ApplyQueuedFor { .. } => super::RELAY_TURN_CONTROLS_PROTOCOL,
             Self::SetSubagentWait { .. } => super::RELAY_SUBAGENT_WAIT_PROTOCOL,
             Self::DeliverMailboxEvent { event } => event.body.minimum_relay_protocol(),
@@ -255,6 +260,7 @@ impl RelayCommand {
                 | Self::RecordNotice { .. }
                 | Self::SetQuotaRecovery { .. }
                 | Self::SeedAssessmentContext { .. }
+                | Self::DismissQuestion { .. }
                 | Self::InstallPromptContext { .. }
                 | Self::DeliverMailboxEvent { .. }
         )
@@ -320,6 +326,7 @@ impl RelayCommand {
             | Self::SetSubagentWait { .. }
             | Self::SetQuotaRecovery { .. }
             | Self::SeedAssessmentContext { .. }
+            | Self::DismissQuestion { .. }
             | Self::InstallPromptContext { .. }
             | Self::DeliverMailboxEvent { .. } => RelayCommandKind::RecordNotice,
         }
@@ -470,7 +477,7 @@ pub struct BackgroundCommand {
 pub enum BackgroundTaskStopTarget {
     NativeAgent { session_id: String },
     HostedTerminal { terminal_id: String },
-    ClaudeAsyncTask { task_id: String },
+    AirAsyncTask { session_id: String, task_id: String },
 }
 
 /// A turn the harness started on its own, with no prompt in flight.
@@ -856,7 +863,7 @@ impl RelayOperationalState {
                     .map(|started_at_ms| crate::activity::InFlightToolCall {
                         tool_call_id: String::new(),
                         title: None,
-                        status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
+                        status: agent_client_protocol::v1::schema::ToolCallStatus::InProgress,
                         started_at_ms,
                     })
                     .into_iter()
@@ -1222,8 +1229,8 @@ pub enum RelayObservation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         steering: Option<MailboxHookSteering>,
     },
-    /// The harness began working. Claude records this when output arrives
-    /// without a prompt in flight; Codex records native execution starts,
+    /// The harness began working. Claude records this on an autonomous turn
+    /// announcement or output without a prompt; Codex records native execution starts,
     /// including ordinary replies. Only starts outside a user turn add an
     /// autonomous-turn transcript marker.
     HarnessTurnStarted {

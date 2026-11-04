@@ -114,18 +114,18 @@ pub fn managed_harness_manifest_matches(
 }
 
 pub const CODEX_ACP_PACKAGE: &str = "@brokkai/codex-acp";
-pub const CODEX_ACP_VERSION: &str = "1.13.7";
-pub const CODEX_CLI_VERSION: &str = "0.160.1";
-pub const CLAUDE_ACP_VERSION: &str = "0.94.0";
-pub const CLAUDE_CLI_VERSION: &str = "2.1.306";
-pub const KIMI_VERSION: &str = "2.3.1";
-pub const GROK_VERSION: &str = "1.0.40";
+pub const CODEX_ACP_VERSION: &str = "1.15.0";
+pub const CODEX_CLI_VERSION: &str = "0.165.0";
+pub const CLAUDE_ACP_VERSION: &str = "0.99.0";
+pub const CLAUDE_CLI_VERSION: &str = "2.1.308";
+pub const KIMI_VERSION: &str = "2.4.0";
+pub const GROK_VERSION: &str = "1.0.70";
 pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
-pub const MUSE_ACP_VERSION: &str = "0.16.0";
-pub const MUSE_VERSION: &str = "1.4.12-R6909.1";
-pub const OPENCODE_VERSION: &str = "2.1.2";
-pub const MIMO_CLI_VERSION: &str = "0.1.15";
-pub const DSH_ACP_VERSION: &str = "0.4.0";
+pub const MUSE_ACP_VERSION: &str = "0.20.0";
+pub const MUSE_VERSION: &str = "1.4.14-R7309.1";
+pub const OPENCODE_VERSION: &str = "2.2.1";
+pub const MIMO_VERSION: &str = "0.1.16";
+pub const DSH_ACP_VERSION: &str = "0.5.0";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
 
 /// The shell commands that start OpenCode's ACP server with the executable
@@ -389,17 +389,13 @@ pub const fn npm_bridge(kind: HarnessKind) -> Option<NpmBridge> {
 
 /// Whether preparing this harness may need Node.js, npm, and npx.
 ///
-/// Kimi, Grok, and OpenCode install and launch native executables. Codex,
-/// Claude, Muse, and MiMo install npm packages or adapters. DSH itself is not
+/// Kimi, Grok, OpenCode, and MiMo install and launch native executables.
+/// Codex, Claude, and Muse install npm packages or adapters. DSH itself is not
 /// managed, but its fallback fetches the pinned package through npx.
 pub const fn harness_uses_node_runtime(kind: HarnessKind) -> bool {
     matches!(
         kind,
-        HarnessKind::Codex
-            | HarnessKind::Claude
-            | HarnessKind::Muse
-            | HarnessKind::Mimo
-            | HarnessKind::Dsh
+        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Muse | HarnessKind::Dsh
     )
 }
 
@@ -468,14 +464,14 @@ pub struct HarnessPin {
 pub const fn pin(kind: HarnessKind) -> HarnessPin {
     match kind {
         HarnessKind::Muse => HarnessPin {
-            install_id: "muse-acp-0.16.0_muse-1.4.12-R6909.1",
-            display_version: "muse-acp 0.16.0 + Muse Code 1.4.12-R6909.1",
+            install_id: "muse-acp-0.20.0_muse-1.4.14-R7309.1",
+            display_version: "muse-acp 0.20.0 + Muse Code 1.4.14-R7309.1",
             entrypoint: "bin/muse",
             cli_entrypoint: "bin/muse",
         },
         HarnessKind::Codex => HarnessPin {
-            install_id: "brokkai-codex-acp-1.13.7_codex-0.160.1",
-            display_version: "@brokkai/codex-acp 1.13.7 + codex 0.160.1",
+            install_id: "brokkai-codex-acp-1.15.0_codex-0.165.0",
+            display_version: "@brokkai/codex-acp 1.15.0 + codex 0.165.0",
             entrypoint: "node_modules/.bin/codex-acp",
             cli_entrypoint: CODEX_CLI_ENTRYPOINT,
         },
@@ -483,38 +479,38 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             // pkg2: the asset lists @anthropic-ai/claude-code in allowScripts.
             // Installs made before that change kept the package's native-binary
             // stub, so their identity must not match this pin.
-            install_id: "claude-agent-acp-0.94.0_claude-2.1.306_pkg2",
-            display_version: "claude-agent-acp 0.94.0 + Claude Code 2.1.306",
+            install_id: "claude-agent-acp-0.99.0_claude-2.1.308_pkg2",
+            display_version: "claude-agent-acp 0.99.0 + Claude Code 2.1.308",
             entrypoint: "node_modules/.bin/claude-agent-acp",
             cli_entrypoint: "node_modules/.bin/claude",
         },
         HarnessKind::Kimi => HarnessPin {
-            install_id: "kimi-2.3.1",
-            display_version: "Kimi Code 2.3.1",
+            install_id: "kimi-2.4.0",
+            display_version: "Kimi Code 2.4.0",
             entrypoint: "bin/kimi",
             cli_entrypoint: "bin/kimi",
         },
         HarnessKind::Grok => HarnessPin {
-            install_id: "grok-1.0.40",
-            display_version: "Grok 1.0.40",
+            install_id: "grok-1.0.70",
+            display_version: "Grok 1.0.70",
             entrypoint: "bin/grok",
             cli_entrypoint: "bin/grok",
         },
         HarnessKind::OpenCode => HarnessPin {
-            install_id: "opencode-2.1.2",
-            display_version: "OpenCode 2.1.2",
+            install_id: "opencode-2.2.1",
+            display_version: "OpenCode 2.2.1",
             entrypoint: "opencode",
             cli_entrypoint: "opencode",
         },
         HarnessKind::Mimo => HarnessPin {
-            install_id: "mimo-cli-0.1.15",
-            display_version: "MiMo Code 0.1.15",
-            entrypoint: "node_modules/.bin/mimo",
-            cli_entrypoint: "node_modules/.bin/mimo",
+            install_id: "mimo-0.1.16",
+            display_version: "MiMo Code 0.1.16",
+            entrypoint: "bin/mimo",
+            cli_entrypoint: "bin/mimo",
         },
         HarnessKind::Dsh => HarnessPin {
-            install_id: "dsh-acp-0.4.0",
-            display_version: "dsh-acp 0.4.0",
+            install_id: "dsh-acp-0.5.0",
+            display_version: "dsh-acp 0.5.0",
             entrypoint: "dsh-acp",
             cli_entrypoint: "dsh-acp",
         },

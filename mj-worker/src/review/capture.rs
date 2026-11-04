@@ -173,14 +173,18 @@ pub enum PushBase {
     SessionStart {
         commit: String,
     },
+    /// HEAD shares no history with the session start or a default branch,
+    /// as on an orphan branch: every commit it holds is reviewed.
+    Root,
 }
 
 impl PushBase {
-    pub fn commit(&self) -> &str {
+    pub fn commit(&self) -> Option<&str> {
         match self {
             Self::ReviewPoint { commit }
             | Self::MergeBase { commit, .. }
-            | Self::SessionStart { commit } => commit,
+            | Self::SessionStart { commit } => Some(commit),
+            Self::Root => None,
         }
     }
 }
@@ -252,17 +256,21 @@ pub fn capture_pushable_commits(
         return Err(PushCaptureRefusal::DirtyTracked { files });
     }
     let head = resolve_head(runner, root)?.ok_or(PushCaptureRefusal::NoHead)?;
-    let mut base = PushBase::SessionStart {
-        commit: session_start_head.to_owned(),
-    };
-    if let Some(default_branch) = default_branch(runner, root)? {
-        let mb = checked_git_text(runner, root, &["merge-base", &head, &default_branch])?;
-        if mb != head {
-            base = PushBase::MergeBase {
-                default_branch,
-                commit: mb,
-            };
+    let mut base = if merge_base(runner, root, session_start_head, &head)?.is_some() {
+        PushBase::SessionStart {
+            commit: session_start_head.to_owned(),
         }
+    } else {
+        PushBase::Root
+    };
+    if let Some(default_branch) = default_branch(runner, root)?
+        && let Some(mb) = merge_base(runner, root, &head, &default_branch)?
+        && mb != head
+    {
+        base = PushBase::MergeBase {
+            default_branch,
+            commit: mb,
+        };
     }
     let refs = checked_git_text(
         runner,
@@ -276,7 +284,10 @@ pub fn capture_pushable_commits(
     )?;
     for commit in refs.lines() {
         if is_ancestor(runner, root, commit, &head)?
-            && is_ancestor(runner, root, base.commit(), commit)?
+            && match base.commit() {
+                Some(base) => is_ancestor(runner, root, base, commit)?,
+                None => true,
+            }
         {
             base = PushBase::ReviewPoint {
                 commit: commit.to_owned(),
@@ -284,15 +295,14 @@ pub fn capture_pushable_commits(
             break;
         }
     }
-    let baseline = checked_git_text(
-        runner,
-        root,
-        &[
-            "rev-parse",
-            "--verify",
-            &format!("{}^{{tree}}", base.commit()),
-        ],
-    )?;
+    let baseline = match base.commit() {
+        Some(commit) => checked_git_text(
+            runner,
+            root,
+            &["rev-parse", "--verify", &format!("{commit}^{{tree}}")],
+        )?,
+        None => mj_checkpoint::archive::empty_tree_id(runner, root)?,
+    };
     let current = checked_git_text(
         runner,
         root,
@@ -308,12 +318,13 @@ pub fn capture_pushable_commits(
         Vec::new(),
         None,
     );
-    delta.base_commit = Some(base.commit().to_owned());
+    delta.base_commit = base.commit().map(str::to_owned);
     delta.head_commit = Some(head.clone());
     delta.base_kind = Some(match &base {
         PushBase::ReviewPoint { .. } => "review point".into(),
         PushBase::MergeBase { default_branch, .. } => format!("merge base with {default_branch}"),
         PushBase::SessionStart { .. } => "session start".into(),
+        PushBase::Root => "no shared history".into(),
     });
     Ok(PushCapture {
         delta,
@@ -344,6 +355,24 @@ fn default_branch(runner: &dyn GitCommandRunner, root: &Path) -> Result<Option<S
     Ok(None)
 }
 
+/// The best common ancestor of two commits, or `None` when they share no history.
+fn merge_base(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    one: &str,
+    other: &str,
+) -> Result<Option<String>> {
+    let output = run(runner, root, &["merge-base", one, other])?;
+    match output.status {
+        0 => Ok(Some(String::from_utf8(output.stdout)?.trim().to_owned())),
+        1 => Ok(None),
+        _ => anyhow::bail!(
+            "find a merge base: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    }
+}
+
 fn is_ancestor(
     runner: &dyn GitCommandRunner,
     root: &Path,
@@ -361,7 +390,7 @@ fn is_ancestor(
     }
 }
 
-pub(super) fn checked_git(
+pub(crate) fn checked_git(
     runner: &dyn GitCommandRunner,
     root: &Path,
     args: &[&str],
@@ -566,6 +595,30 @@ pub fn session_start_head(
     resolve_commit(runner, root, &session_start_ref(runner, root, session)?)
 }
 
+/// Where push coverage starts in a linked worktree the session did not start
+/// in: the fork point of its HEAD with the session's start in `origin`, a
+/// workspace checkout of the same repository. Pinning the worktree's own start
+/// at its current HEAD would leave commits made before its first review with
+/// nothing to review when no default branch bounds them. Without a shared
+/// history the session start is returned as is, and the capture reviews
+/// every commit HEAD holds.
+pub fn linked_worktree_start(
+    runner: &dyn GitCommandRunner,
+    worktree: &Path,
+    origin: &Path,
+    session: &str,
+) -> Result<Option<String>> {
+    let (Some(head), Some(start)) = (
+        resolve_head(runner, worktree)?,
+        ensure_session_start_head(runner, origin, session)?,
+    ) else {
+        return ensure_session_start_head(runner, worktree, session);
+    };
+    Ok(Some(
+        merge_base(runner, worktree, &head, &start)?.unwrap_or(start),
+    ))
+}
+
 /// Preserves a recorded start, or starts coverage at the current HEAD when
 /// an older session or a restored checkout has no start ref.
 pub fn ensure_session_start_head(
@@ -588,6 +641,22 @@ pub fn ensure_session_start_head(
             .ok_or(error);
     }
     Ok(Some(head))
+}
+
+/// Whether every recorded repository retains a valid baseline owned by this session.
+pub fn session_holds_review_baselines(
+    git: &dyn GitCommandRunner,
+    repositories: &[PathBuf],
+    session: &str,
+) -> bool {
+    repositories.iter().all(|root| {
+        review_baseline_ref(git, root)
+            .ok()
+            .is_some_and(|reference| {
+                pinned_baseline(git, root, &reference)
+                    .is_some_and(|(_, point)| point.session.as_deref() == Some(session))
+            })
+    })
 }
 
 /// Pins the current worktree as `session`'s baseline for a fresh worker
@@ -764,7 +833,7 @@ pub fn discover_repositories(git: &dyn GitCommandRunner, roots: &[PathBuf]) -> V
     discovered
 }
 
-fn repository_root(git: &dyn GitCommandRunner, directory: &Path) -> Option<PathBuf> {
+pub(crate) fn repository_root(git: &dyn GitCommandRunner, directory: &Path) -> Option<PathBuf> {
     if !directory.is_dir() {
         return None;
     }
@@ -845,7 +914,7 @@ mod capture_tests {
             .unwrap();
         assert_eq!(start, head);
         let push = capture_pushable_commits(&SystemGit, root, &start).unwrap();
-        assert_eq!(push.base.commit(), head);
+        assert_eq!(push.base.commit(), Some(head.as_str()));
         assert!(push.delta.patch.contains("+reviewed work"));
         assert_eq!(git(root, &["rev-parse", "refs/mj/base"]), head);
     }
@@ -2379,7 +2448,10 @@ pub(super) mod push_tests {
         assert!(empty.delta.files.is_empty());
         assert_eq!(empty.delta.changed_lines, 0);
         commit(&root, "later");
-        assert_eq!(capture(&root, &start).base.commit(), reviewed);
+        assert_eq!(
+            capture(&root, &start).base.commit(),
+            Some(reviewed.as_str())
+        );
     }
 
     #[test]
@@ -2408,13 +2480,19 @@ pub(super) mod push_tests {
         let later = commit(&root, "reviewed with earlier clock");
         let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
         record_reviewed_tree(&SystemGit, &root, &tree, &later).unwrap();
-        assert_eq!(capture(&root, &start).base.commit(), newer_date);
+        assert_eq!(
+            capture(&root, &start).base.commit(),
+            Some(newer_date.as_str())
+        );
         git(&root, &["checkout", "-qb", "sibling", &start]);
         let sibling = commit(&root, "not an ancestor");
         let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
         record_reviewed_tree(&SystemGit, &root, &tree, &sibling).unwrap();
         git(&root, &["checkout", "-q", "feature"]);
-        assert_eq!(capture(&root, &start).base.commit(), newer_date);
+        assert_eq!(
+            capture(&root, &start).base.commit(),
+            Some(newer_date.as_str())
+        );
     }
 
     #[test]
@@ -2434,7 +2512,7 @@ pub(super) mod push_tests {
         git(&root, &["push", "-q", "origin", "main"]);
         git(&root, &["checkout", "-q", "feature"]);
         git(&root, &["rebase", "main"]);
-        assert_eq!(capture(&root, &old).base.commit(), mb);
+        assert_eq!(capture(&root, &old).base.commit(), Some(mb.as_str()));
     }
 
     #[test]

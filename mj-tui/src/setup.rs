@@ -47,6 +47,9 @@ pub enum DetectScope {
 /// reason so the Settings notice can name it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectedRuntime {
+    /// The runtime kind as a runtime stores it (`bare`, `podman`, `docker`,
+    /// `apple-container`).
+    pub kind: String,
     pub label: String,
     pub detail: String,
     pub remediation: Option<String>,
@@ -78,6 +81,7 @@ pub(crate) enum SetupControl {
     Apply,
     DetectProfiles,
     DetectRuntimes,
+    DetectionResults,
     ManagedSetup,
     ManagedContinue,
     SignIn,
@@ -263,6 +267,12 @@ pub(crate) struct SetupDialog {
     /// Where the notice was first shown. A status line belongs to the page
     /// or prompt that set it and goes when the dialog is no longer there.
     notice_anchor: Option<NoticeAnchor>,
+    /// Runtimes the last runtimes detection turned down. Stays until Settings
+    /// closes so the Detection results view can be read again without
+    /// re-probing every machine.
+    detection_rejected: Vec<RejectedRuntime>,
+    /// The open Detection results view and its scroll offset.
+    report: Option<ReportState>,
     /// One owner for each machine's cache resolution, retained across navigation.
     /// Each result is guarded by the settings it was requested for.
     build_cache_previews: BTreeMap<String, BuildCachePreviewState>,
@@ -333,10 +343,8 @@ enum BuildCachePreviewResult {
 
 impl SetupDialog {
     fn new(config: &Config) -> Self {
-        let mut draft = serde_json::to_value(config).expect("configuration serializes");
-        let original = draft.to_string();
-        ensure_local_machine(&mut draft);
-        schema::expand(&mut draft, &mut Vec::new());
+        let (original, draft) = mj_client::settings::draft::open(config);
+        let original = original.to_string();
         let saved_profile_values = draft
             .get("profiles")
             .and_then(Value::as_object)
@@ -386,6 +394,8 @@ impl SetupDialog {
             login_statuses,
             notice: None,
             notice_anchor: None,
+            detection_rejected: Vec::new(),
+            report: None,
             build_cache_previews: BTreeMap::new(),
             archive_space_preview: None,
             mbx_install: None,
@@ -404,6 +414,7 @@ mod page;
 mod paths;
 mod previews;
 mod render;
+mod report;
 mod results;
 
 use draft::*;
@@ -411,6 +422,7 @@ use page::*;
 use previews::*;
 pub(crate) use render::render_setup;
 use render::*;
+use report::*;
 use results::*;
 
 #[cfg(test)]

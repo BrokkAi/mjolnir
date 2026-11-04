@@ -735,26 +735,150 @@ for line in sys.stdin:
     let mut relay = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10))
         .await
         .expect("test worker relay connects");
+    let source = tempfile::tempdir().unwrap();
+    let token_path = source.path().join("agent-pat");
     let target = CredentialSyncTarget {
         session_id: SESSION_ID.into(),
         profile_id: "codex".into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: std::path::PathBuf::new(),
+        aws_credentials: None,
         skips_login_file_sync: true,
         sync_github_token: true,
-        github_app_configured: false,
+        github: mj_core::config::GithubConfig {
+            session_token_path: Some(token_path.clone()),
+            ..Default::default()
+        },
         skills_scope: mj_core::skills::SkillsScope::Isolated,
         spec,
     };
 
-    let action = credential_sync::reconcile_github_token(
-        &mut relay,
-        &target,
-        Some("refreshed-installation-token"),
-    )
-    .await
-    .unwrap();
-    assert_eq!(action, Some(CredentialSyncAction::GithubTokenPushed));
+    for token in ["initial-session-pat", "rotated-session-pat"] {
+        std::fs::write(&token_path, token).unwrap();
+        let selected = crate::controller::github_token_for_session(
+            target.session_id.clone(),
+            target.github.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.as_deref(), Some(token));
+        let action =
+            credential_sync::reconcile_github_token(&mut relay, &target, selected.as_deref())
+                .await
+                .unwrap();
+        assert_eq!(action, Some(CredentialSyncAction::GithubTokenPushed));
+    }
+}
+
+/// Plays a worker that speaks the protocol in its first argument and keeps
+/// the slopcop login it is sent at the path in its third. Any request it does
+/// not expect fails the exchange.
+#[cfg(unix)]
+const SLOPCOP_LOGIN_RELAY: &str = r#"
+import base64, hashlib, json, os, sys
+protocol, session, stored = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+def state():
+    if not os.path.exists(stored):
+        return {"present": False, "fingerprint": "", "freshness_epoch_ms": None}
+    with open(stored, "rb") as copy:
+        return {"present": True, "fingerprint": hashlib.sha256(copy.read()).hexdigest(), "freshness_epoch_ms": None}
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req["request"]["method"]
+    if method == "hello":
+        payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "slopcop-login-fixture", "session_id": session}}
+    elif method == "slopcop_login_state":
+        payload = {"type": "credential_state", "data": state()}
+    elif method == "install_slopcop_login":
+        with open(stored, "wb") as copy:
+            copy.write(base64.b64decode(req["request"]["params"]["data"]))
+        payload = {"type": "credential_state", "data": state()}
+    elif method == "remove_slopcop_login":
+        os.remove(stored)
+        payload = {"type": "credential_state", "data": state()}
+    else:
+        raise AssertionError(method)
+    print(json.dumps({"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}), flush=True)
+"#;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn slopcop_login_sync_converges_current_workers_and_never_asks_older_ones() {
+    use credential_sync::HostSlopcopLogin::{SignedIn, SignedOut, Unknown};
+    use mj_core::skills::SkillsScope;
+    use mj_core::slopcop::SlopcopLogin;
+
+    let scratch = tempfile::tempdir().unwrap();
+    let stored = scratch.path().join("slopcop-login");
+    let connect = |protocol: u32| {
+        let spec = CommandSpec::new(
+            "python3",
+            [
+                "-c".to_owned(),
+                SLOPCOP_LOGIN_RELAY.to_owned(),
+                protocol.to_string(),
+                SESSION_ID.to_owned(),
+                stored.to_string_lossy().into_owned(),
+            ],
+        )
+        .purpose("slopcop login sync test relay");
+        let mut target = skills_sync_target(scratch.path());
+        target.skills_scope = SkillsScope::Isolated;
+        target.spec = spec.clone();
+        async move {
+            let client =
+                RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10))
+                    .await
+                    .expect("test worker relay connects");
+            (client, target)
+        }
+    };
+    let login = SlopcopLogin::new("first-token", Some("https://slopcop.example")).unwrap();
+    let rotated = SlopcopLogin::new("rotated-token", None).unwrap();
+
+    // A worker from before the login requests cannot decode them, so it is
+    // never sent one; it gets the login once the current worker replaces it.
+    let (mut client, target) = connect(mj_core::relay::RELAY_SLOPCOP_LOGIN_PROTOCOL - 1).await;
+    let before = client.next_request;
+    let action =
+        credential_sync::reconcile_slopcop_login(&mut client, &target, &SignedIn(login.clone()))
+            .await
+            .unwrap();
+    assert_eq!(action, None);
+    assert_eq!(client.next_request, before);
+
+    let (mut client, target) = connect(RELAY_PROTOCOL_VERSION).await;
+    for (host, expected, copy) in [
+        (
+            SignedIn(login.clone()),
+            Some(CredentialSyncAction::SlopcopLoginPushed),
+            Some(&login),
+        ),
+        (SignedIn(login.clone()), None, Some(&login)),
+        (
+            SignedIn(rotated.clone()),
+            Some(CredentialSyncAction::SlopcopLoginPushed),
+            Some(&rotated),
+        ),
+        // An unreadable host login is not a signed-out one.
+        (Unknown, None, Some(&rotated)),
+        (
+            SignedOut,
+            Some(CredentialSyncAction::SlopcopLoginRemoved),
+            None,
+        ),
+        (SignedOut, None, None),
+    ] {
+        let action = credential_sync::reconcile_slopcop_login(&mut client, &target, &host)
+            .await
+            .unwrap();
+        assert_eq!(action, expected, "{host:?}");
+        assert_eq!(
+            std::fs::read(&stored).ok(),
+            copy.map(SlopcopLogin::encode),
+            "{host:?}"
+        );
+    }
 }
 
 #[test]
@@ -781,9 +905,10 @@ async fn publishing_new_targets_starts_reconciliation_without_waiting_for_the_ti
         profile_id: "work".into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: profile.path().to_path_buf(),
+        aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
-        github_app_configured: false,
+        github: Default::default(),
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     }]);
@@ -805,9 +930,10 @@ async fn publishing_changed_targets_reconciles_only_the_affected_profile() {
         profile_id: profile_id.into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: profile.path().to_path_buf(),
+        aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
-        github_app_configured: false,
+        github: Default::default(),
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     };
@@ -939,9 +1065,10 @@ fn skills_sync_target(profile_home: &std::path::Path) -> CredentialSyncTarget {
         profile_id: "work".into(),
         harness: mj_core::config::HarnessKind::Claude,
         profile_home: profile_home.to_path_buf(),
+        aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
-        github_app_configured: false,
+        github: Default::default(),
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     }
@@ -1104,9 +1231,16 @@ async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
         .purpose("skills archive format fixture");
 
         let skills = Arc::new(CanonicalSkills::collect(&target));
-        let actions = reconcile_session(&SessionRelays::Direct, &target, &skills, None)
-            .await
-            .unwrap();
+        let actions = reconcile_session(
+            &SessionRelays::Direct,
+            &target,
+            &skills,
+            None,
+            None,
+            &credential_sync::HostSlopcopLogin::Unknown,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             actions,
@@ -1218,7 +1352,12 @@ for line in sys.stdin:
         payload = {"type": "credential_state", "data": {"present": True, "fingerprint": fingerprint, "freshness_epoch_ms": freshness}}
     elif method == "skills_state":
         payload = {"type": "skills_state", "data": {"present": True, "fingerprint": skills}}
-    elif method == "install_credentials":
+    elif method == "aws_credentials_state":
+        import pathlib
+        current = pathlib.Path(received)
+        data = current.read_bytes() if current.exists() else b""
+        payload = {"type": "credential_state", "data": {"present": bool(data), "fingerprint": hashlib.sha256(data).hexdigest() if data else "", "freshness_epoch_ms": None}}
+    elif method in ("install_credentials", "install_aws_credentials"):
         data = base64.b64decode(req["request"]["params"]["data"])
         with open(received, "wb") as out:
             out.write(data)
@@ -1254,9 +1393,10 @@ fn codex_sync_target(
         profile_id: "codex4".into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: home.to_path_buf(),
+        aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
-        github_app_configured: false,
+        github: Default::default(),
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     };
@@ -1283,6 +1423,87 @@ fn codex_sync_target(
     )
     .purpose("credential sync fixture");
     target
+}
+
+// Hard-won: #1385: AWS reconciliation skipped credentials, and local sessions can share the same profile.
+#[cfg(unix)]
+#[tokio::test]
+async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let bin = scratch.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let aws = bin.join("aws");
+    // Recorded AWS process-format exports; the normal executor drains this
+    // helper's output while the coordinator and relay run as in production.
+    std::fs::write(
+        &aws,
+        "#!/bin/sh\nexec /bin/cat \"$MJ_AWS_EXPORT_FIXTURE\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let source_file = scratch.path().join("export.json");
+    let local_received = scratch.path().join("local");
+    let remote_received = scratch.path().join("remote");
+    let mut local = codex_sync_target(
+        home.path(),
+        "local",
+        "2026-09-25T20:00:00Z",
+        &local_received,
+    );
+    local.skips_login_file_sync = true;
+    let mut remote = codex_sync_target(
+        home.path(),
+        "remote",
+        "2026-09-25T20:00:00Z",
+        &remote_received,
+    );
+    remote.skips_login_file_sync = true;
+    remote.aws_credentials = Some(mj_core::aws_credentials::AwsCredentialSource {
+        environment: BTreeMap::from([
+            ("PATH".into(), bin.to_string_lossy().into_owned()),
+            ("AWS_PROFILE".into(), "bedrock".into()),
+            (
+                "MJ_AWS_EXPORT_FIXTURE".into(),
+                source_file.to_string_lossy().into_owned(),
+            ),
+        ]),
+    });
+    let targets = [local, remote];
+    for generation in ["initial", "renewed"] {
+        std::fs::write(
+            &source_file,
+            serde_json::to_vec(&serde_json::json!({
+                "Version": 1, "AccessKeyId": format!("key-{generation}"),
+                "SecretAccessKey": format!("secret-{generation}"),
+                "SessionToken": "s".repeat(70_000), "Expiration": "2099-01-01T00:00:00Z",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let outcomes = reconcile_profile(&targets, None).await;
+        assert_eq!(
+            outcomes,
+            [CredentialSyncOutcome {
+                session_id: "remote".into(),
+                outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            }]
+        );
+        let received: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&remote_received).unwrap()).unwrap();
+        assert_eq!(received["AccessKeyId"], format!("key-{generation}"));
+        assert!(!local_received.exists());
+        assert!(reconcile_profile(&targets, None).await.is_empty());
+    }
+    // A failed AWS source reports only the isolated session; the local
+    // session still completes its ordinary reconciliation.
+    std::fs::remove_file(&source_file).unwrap();
+    let outcomes = reconcile_profile(&targets, None).await;
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].session_id, "remote");
+    assert!(outcomes[0].outcome.is_err());
 }
 
 /// #1160: a sync that a session's auth failure asked for says whether it
@@ -1376,9 +1597,10 @@ async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result()
         profile_id: "work".into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: profile.path().to_path_buf(),
+        aws_credentials: None,
         skips_login_file_sync: false,
         sync_github_token: false,
-        github_app_configured: false,
+        github: Default::default(),
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("must-not-start-a-proxy", Vec::<String>::new()),
     };
@@ -1388,6 +1610,7 @@ async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result()
         Some(SESSION_ID),
         Some(&gate),
         None,
+        credential_sync::unknown_slopcop_login,
     )
     .await;
     assert!(
@@ -1474,4 +1697,210 @@ for line in sys.stdin:
             assert!(result.is_err(), "{code:?} must still fail the sync");
         }
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn project_memory_wire_format_tracks_worker_protocol_and_decodes_both_forms() {
+    use mj_core::project_memory::{ProjectMemorySnapshot, ReplicaReplaceOutcome, TreeVersion};
+    let tree = ProjectMemorySnapshot {
+        files: BTreeMap::from([("/MEMORY.md".into(), "memory notes\n".repeat(250_000))]),
+    };
+    // An independent Python peer checks both request variants and supplies
+    // each response encoding, even when it differs from the negotiated one.
+    let script = r#"
+import base64, gzip, json, sys
+protocol, session, response_compressed = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+tree = {"files": {"/MEMORY.md": "memory notes\n" * 250000}}
+def decode(wire):
+    if protocol < 44:
+        assert wire == tree
+        assert list(wire) == ["files"]
+        return wire
+    assert list(wire) == ["gzip"]
+    return {"files": json.loads(gzip.decompress(base64.b64decode(wire["gzip"])))}
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req["request"]["method"]
+    if method == "hello":
+        payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "memory-fixture", "session_id": session}}
+    elif method == "install_project_memory_snapshot":
+        assert decode(req["request"]["params"]["snapshot"]) == tree
+        payload = {"type": "project_memory_snapshot_installed"}
+    elif method == "replace_project_memory_tree":
+        assert decode(req["request"]["params"]["tree"]) == tree
+        payload = {"type": "project_memory_tree_replaced", "data": {"outcome": "replaced"}}
+    elif method == "project_memory_snapshot":
+        wire = {"gzip": base64.b64encode(gzip.compress(json.dumps(tree["files"]).encode())).decode()} if response_compressed else tree
+        payload = {"type": "project_memory_snapshot", "data": {"baseline": wire, "replica": wire}}
+    else:
+        raise AssertionError(method)
+    print(json.dumps({"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}), flush=True)
+"#;
+    for protocol in [43, 44] {
+        for response_compressed in [0, 1] {
+            let spec = CommandSpec::new(
+                "python3",
+                [
+                    "-c".to_owned(),
+                    script.to_owned(),
+                    protocol.to_string(),
+                    SESSION_ID.to_owned(),
+                    response_compressed.to_string(),
+                ],
+            )
+            .purpose("project memory protocol compatibility fixture");
+            let mut client =
+                RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10))
+                    .await
+                    .unwrap();
+            client
+                .install_project_memory_snapshot(tree.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                client
+                    .replace_project_memory_tree(TreeVersion("expected".into()), tree.clone())
+                    .await
+                    .unwrap(),
+                ReplicaReplaceOutcome::Replaced
+            );
+            assert_eq!(
+                client.project_memory_snapshot().await.unwrap(),
+                (tree.clone(), tree.clone())
+            );
+        }
+    }
+}
+
+// Hard-won: ac9d7ce9f: empty delegation deltas rebuilt and copied full queue payloads.
+#[cfg(unix)]
+#[tokio::test]
+async fn delegation_publications_share_empty_polls_and_recover_partial_pages() {
+    use mj_core::subagent::{
+        SubagentCompletion, SubagentQueueChange, SubagentQueuePage, SubagentToolAction,
+        SubagentToolRequest,
+    };
+    let completion = |id: &str| SubagentCompletion {
+        request_id: id.into(),
+        completed_at_ms: 100,
+        is_error: true,
+        input_delivery: Some(serde_json::json!({"error": "failure detail\n".repeat(10_000)})),
+        interrupted_wait: None,
+    };
+    let first = completion("first");
+    let second = completion("second");
+    let request = SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "second".into(),
+        created_at_ms: 100,
+        action: SubagentToolAction::SendMessage {
+            child_session_id: "child".into(),
+            message: "message detail\n".repeat(10_000),
+        },
+    };
+    let page = |sequence, changes, has_more| RelayResponseBody::Ok {
+        payload: RelayResponsePayload::SubagentQueue {
+            page: SubagentQueuePage {
+                sequence,
+                changes,
+                has_more,
+            },
+        },
+    };
+    let replies = vec![
+        page(
+            1,
+            vec![SubagentQueueChange::Completed(first.clone())],
+            false,
+        ),
+        page(2, vec![], false),
+        page(
+            3,
+            vec![
+                SubagentQueueChange::Retired {
+                    request_id: "first".into(),
+                },
+                SubagentQueueChange::Request(request.clone()),
+            ],
+            true,
+        ),
+        RelayResponseBody::Error {
+            error: RelayProtocolError {
+                code: RelayErrorCode::Internal,
+                message: "failure between queue pages".into(),
+                retryable: true,
+                detail: None,
+            },
+        },
+        page(4, vec![], false),
+        page(5, vec![], false),
+        page(
+            6,
+            vec![SubagentQueueChange::Completed(second.clone())],
+            false,
+        ),
+        page(
+            7,
+            vec![SubagentQueueChange::Retired {
+                request_id: "second".into(),
+            }],
+            false,
+        ),
+        page(8, vec![], false),
+    ];
+    let root = tempfile::tempdir().unwrap();
+    let fixture = root.path().join("queue-pages.json");
+    let encoded = serde_json::to_vec(&replies).unwrap();
+    assert!(encoded.len() > 64 * 1024);
+    std::fs::write(&fixture, encoded).unwrap();
+    let script = format!(
+        r#"
+import json, sys
+pages = iter(json.load(open(sys.argv[1])))
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request["request"]["method"]
+    if method == "hello":
+        body = {{"result": "ok", "payload": {{"type": "hello", "data": {{"negotiated": {protocol}, "relay_version": "queue-publication-fixture", "session_id": "{SESSION_ID}"}}}}}}
+    else:
+        assert method == "poll_subagent_queue", method
+        body = next(pages)
+    body.update(request_id=request["request_id"], protocol_version={protocol})
+    print(json.dumps(body), flush=True)
+"#,
+        protocol = RELAY_PROTOCOL_VERSION
+    );
+    let spec = CommandSpec::new("python3", ["-c", &script, &fixture.to_string_lossy()])
+        .purpose("delegation queue publication fixture");
+    let mut client = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let held = client.subagent_requests().await.unwrap();
+    assert_eq!(&*held.1, std::slice::from_ref(&first));
+    let unchanged = client.subagent_requests().await.unwrap();
+    assert!(held.0.ptr_eq(&unchanged.0) && held.1.ptr_eq(&unchanged.1));
+    let error = client.subagent_requests().await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("failure between queue pages"),
+        "{error:#}"
+    );
+    assert!(client.subagent_publication.is_none());
+    let recovered = client.subagent_requests().await.unwrap();
+    assert_eq!(&*recovered.0, &[request]);
+    assert!(recovered.1.is_empty());
+    assert_eq!(
+        &*held.1,
+        &[first],
+        "held completion stays immutable after retirement"
+    );
+    let unchanged = client.subagent_requests().await.unwrap();
+    assert!(recovered.0.ptr_eq(&unchanged.0) && recovered.1.ptr_eq(&unchanged.1));
+    let completed = client.subagent_requests().await.unwrap();
+    assert!(completed.0.is_empty());
+    assert_eq!(&*completed.1, &[second]);
+    let retired = client.subagent_requests().await.unwrap();
+    assert!(retired.0.is_empty() && retired.1.is_empty());
+    let unchanged = client.subagent_requests().await.unwrap();
+    assert!(retired.0.ptr_eq(&unchanged.0) && retired.1.ptr_eq(&unchanged.1));
 }

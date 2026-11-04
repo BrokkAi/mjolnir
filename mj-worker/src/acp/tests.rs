@@ -3,16 +3,18 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::*;
-use agent_client_protocol::schema::v1::ToolCallUpdate;
+use agent_client_protocol::v1::schema::ToolCallUpdate;
 use mj_core::subagent::SubagentMcpRole;
 
 // Hard-won: 61a1cfa: Codex replay dropped the current available-command catalogue and goal metadata, including on large history.
+// Hard-won: #1443: loading a session presented historical quota failures as new errors.
 #[cfg(unix)]
 #[tokio::test]
-async fn loading_native_history_preserves_current_commands_and_goal_metadata() {
-    let temp = tempfile::tempdir().unwrap();
-    let script = temp.path().join("load_metadata.py");
-    std::fs::write(&script, r#"
+async fn loading_native_history_preserves_current_metadata_without_replaying_failures() {
+    for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("load_metadata.py");
+        std::fs::write(&script, r#"
 import json, sys
 
 def emit(value):
@@ -23,28 +25,32 @@ def update(value):
 
 goal = {'objective':'finish', 'status':'complete', 'createdAt':1, 'tokensUsed':42}
 execution = {'version':1, 'revision':1, 'status':'idle'}
+failure = {'id':'quota-error','revision':1,'category':'limit','severity':'error',
+    'title':"You've hit your session limit · resets 5:20pm (UTC)",'actions':[]}
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get('method')
     ident = request.get('id')
     if method == 'initialize':
         result = {'protocolVersion':1, 'agentCapabilities':{'loadSession':True, 'sessionCapabilities':{'resume':{}}},
-            '_meta':{'jetbrains':{'air':{'version':1,'capabilities':['nativeSubagentSessions']}},
-                'goal':{'version':1,'controlMethod':'_session/goal','actions':['pause','resume','clear']}}}
+            '_meta':{'jetbrains':{'air':{'version':1,'capabilities':['nativeSubagentSessions'],
+                'goal':{'version':1,'controlMethod':'_session/goal','actions':['pause','resume','clear']}}}}}
     elif method in ('session/new', 'session/resume', 'session/load'):
         assert method == 'session/load', request
         update({'sessionUpdate':'agent_message_chunk', 'content':{'type':'text','text':'old history ' * 12000}})
         update({'sessionUpdate':'available_commands_update', 'availableCommands':[{'name':'goal','description':'Set a goal'}]})
         update({'sessionUpdate':'tool_call','toolCallId':'old-tool','title':'old call','status':'in_progress'})
-        update({'sessionUpdate':'session_info_update','title':'Current title','_meta':{'goal':goal,'execution':execution}})
+        update({'sessionUpdate':'session_info_update','_meta':{'jetbrains':{'air':{'sessionFailure':failure}}}})
+        update({'sessionUpdate':'session_info_update','title':'Current title','_meta':{'jetbrains':{'air':{'goal':goal,'sessionFailure':failure}},'execution':execution}})
         update({'sessionUpdate':'usage_update','used':100,'size':1000})
         update({'sessionUpdate':'config_option_update','configOptions':[
             {'id':'model','name':'Model','type':'select','currentValue':'astra','options':[{'value':'astra','name':'Astra'}]}]})
         update({'sessionUpdate':'current_mode_update','currentModeId':'agent'})
         update({'sessionUpdate':'plan','entries':[{'content':'old plan','priority':'medium','status':'completed'}]})
-        result = {'sessionId':'native', 'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'}]},
-            '_meta':{'goal':goal,'execution':execution}}
+        result = {'sessionId':'native', 'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'},{'id':'auto','name':'Auto'}]},
+            '_meta':{'jetbrains':{'air':{'goal':goal}},'execution':execution}}
     elif method == 'session/prompt':
+        update({'sessionUpdate':'session_info_update','_meta':{'jetbrains':{'air':{'sessionFailure':failure}}}})
         update({'sessionUpdate':'tool_call_update','toolCallId':'old-tool','status':'completed'})
         update({'sessionUpdate':'tool_call','toolCallId':'new-tool','title':'new call','status':'in_progress'})
         update({'sessionUpdate':'tool_call_update','toolCallId':'new-tool','status':'completed'})
@@ -55,130 +61,153 @@ for line in sys.stdin:
     if ident is not None:
         emit({'jsonrpc':'2.0','id':ident,'result':result})
 "#).unwrap();
-    let (request_tx, request_rx) = mpsc::channel(4);
-    let (event_tx, mut event_rx) = mpsc::channel(64);
-    let runtime = tokio::spawn(run(
-        LaunchSpec {
-            imported_logins: None,
-            bridge_spec_path: None,
-            subagent_policy: mj_core::subagent::SubagentPolicy::Native,
-            managed_subagent: false,
-            subagent_mcp_socket: None,
-            clear_context_request: None,
-            context_restore: None,
-            goal_recovery: Default::default(),
-            command: "python3".into(),
-            args: vec![script.to_string_lossy().into_owned()],
-            environment: BTreeMap::new(),
-            cwd: temp.path().to_path_buf(),
-            additional_directories: Vec::new(),
-            extra_mcp_servers: Vec::new(),
-            project_memory: None,
-            resume_session: Some("native".into()),
-            native_session_may_have_history: true,
-            accepted_config: Default::default(),
-            initial_model: None,
-            harness: HarnessKind::Codex,
-            execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            acp_activity: Default::default(),
-            step_clock: Default::default(),
-            tools_in_flight: Default::default(),
-            turn_context: Default::default(),
-            verdict: Some(crate::acp::VerdictSource::Direct {
-                key: String::new(),
-                endpoint: String::new(),
-            }),
-            stall_policy: None,
-        },
-        request_rx,
-        event_tx,
-    ));
-    let mut updates = Vec::new();
-    let mut started = false;
-    let mut replay_committed = false;
-    let mut before_load_response = Vec::new();
-    loop {
-        let event = tokio::time::timeout(Duration::from_secs(10), event_rx.recv())
-            .await
-            .expect("adapter must not stall on a full output pipe")
-            .expect("runtime remains connected");
-        match event {
-            RuntimeEvent::SessionUpdate { update } => {
-                if !replay_committed {
-                    before_load_response.push(update.clone());
+        let (request_tx, request_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let runtime = tokio::spawn(run(
+            LaunchSpec {
+                operator_away: Default::default(),
+                imported_logins: None,
+                bridge_spec_path: None,
+                subagent_policy: mj_core::subagent::SubagentPolicy::Native,
+                managed_subagent: false,
+                subagent_mcp_socket: None,
+                clear_context_request: None,
+                context_restore: None,
+                goal_recovery: Default::default(),
+                command: "python3".into(),
+                args: vec![script.to_string_lossy().into_owned()],
+                environment: BTreeMap::new(),
+                cwd: temp.path().to_path_buf(),
+                additional_directories: Vec::new(),
+                extra_mcp_servers: Vec::new(),
+                project_memory: None,
+                resume_session: Some("native".into()),
+                native_session_may_have_history: true,
+                accepted_config: Default::default(),
+                initial_model: None,
+                harness,
+                execution_policy: ExecutionPolicy::ConfiguredApprovals,
+                acp_activity: Default::default(),
+                step_clock: Default::default(),
+                tools_in_flight: Default::default(),
+                turn_context: Default::default(),
+                verdict: Some(crate::acp::VerdictSource::Direct {
+                    key: String::new(),
+                    endpoint: String::new(),
+                }),
+                stall_policy: None,
+            },
+            request_rx,
+            event_tx,
+        ));
+        let mut updates = Vec::new();
+        let mut started = false;
+        let mut replay_committed = false;
+        let mut before_load_response = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(10), event_rx.recv())
+                .await
+                .expect("adapter must not stall on a full output pipe")
+                .expect("runtime remains connected");
+            match event {
+                RuntimeEvent::SessionUpdate { update } => {
+                    if !replay_committed {
+                        before_load_response.push(update.clone());
+                    }
+                    updates.push(update);
                 }
-                updates.push(update);
+                RuntimeEvent::NativeAgent {
+                    event: mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+                } => replay_committed = true,
+                RuntimeEvent::SessionStarted { resumed, .. } => {
+                    assert!(resumed);
+                    started = true;
+                }
+                RuntimeEvent::SessionConfigured { .. } if started => {
+                    request_tx
+                        .send(CommandRequest::Prompt {
+                            request_id: "new-turn".into(),
+                            prompt: vec![ContentBlock::Text(TextContent::new("continue"))],
+                        })
+                        .await
+                        .unwrap();
+                    started = false;
+                }
+                RuntimeEvent::PromptFinished { request_id, .. } if request_id == "new-turn" => {
+                    break;
+                }
+                RuntimeEvent::Stopped => panic!(
+                    "{harness:?}: runtime stopped while loading the session: {:#?}",
+                    runtime.await
+                ),
+                _ => {}
             }
-            RuntimeEvent::NativeAgent {
-                event: mj_core::native_agent::NativeAgentEvent::ReplayCommit,
-            } => replay_committed = true,
-            RuntimeEvent::SessionStarted { resumed, .. } => {
-                assert!(resumed);
-                started = true;
-            }
-            RuntimeEvent::SessionConfigured { .. } if started => {
-                request_tx
-                    .send(CommandRequest::Prompt {
-                        request_id: "new-turn".into(),
-                        prompt: vec![ContentBlock::Text(TextContent::new("continue"))],
-                    })
-                    .await
-                    .unwrap();
-                started = false;
-            }
-            RuntimeEvent::PromptFinished { request_id, .. } if request_id == "new-turn" => break,
-            RuntimeEvent::Stopped => panic!("runtime stopped while loading the session"),
-            _ => {}
         }
+        drop(request_tx);
+        tokio::time::timeout(Duration::from_secs(10), runtime)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(replay_committed);
+        assert!(
+            before_load_response
+                .iter()
+                .all(|u| u.pointer("/_meta/jetbrains/air/sessionFailure").is_none()),
+            "{harness:?}: historical failures must not become current transcript notices"
+        );
+        let live_failures: Vec<_> = updates
+            .iter()
+            .filter_map(|u| u.pointer("/_meta/jetbrains/air/sessionFailure"))
+            .collect();
+        assert_eq!(
+            live_failures.len(),
+            1,
+            "{harness:?}: live failures still pass"
+        );
+        assert_eq!(live_failures[0]["id"], "quota-error");
+        assert!(
+            before_load_response
+                .iter()
+                .any(|u| u["availableCommands"][0]["name"] == "goal")
+        );
+        assert!(
+            before_load_response
+                .iter()
+                .any(|u| u["_meta"]["jetbrains"]["air"]["goal"]["tokensUsed"] == 42)
+        );
+        assert!(
+            before_load_response
+                .iter()
+                .any(|u| u["configOptions"][0]["currentValue"] == "astra")
+        );
+        assert!(
+            before_load_response
+                .iter()
+                .any(|u| u["currentModeId"] == "agent")
+        );
+        assert!(
+            before_load_response
+                .iter()
+                .any(|u| u["title"] == "Current title")
+        );
+        assert!(!updates.iter().any(|u| u["toolCallId"] == "old-tool"));
+        assert!(
+            !updates
+                .iter()
+                .any(|u| matches!(u["sessionUpdate"].as_str(), Some("plan" | "usage_update")))
+        );
+        assert!(
+            updates
+                .iter()
+                .any(|u| u["toolCallId"] == "new-tool" && u["status"] == "completed")
+        );
+        let text: String = updates
+            .iter()
+            .filter_map(|u| u["content"]["text"].as_str())
+            .collect();
+        assert_eq!(text, "live output ".repeat(12000));
     }
-    drop(request_tx);
-    tokio::time::timeout(Duration::from_secs(10), runtime)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(replay_committed);
-    assert!(
-        before_load_response
-            .iter()
-            .any(|u| u["availableCommands"][0]["name"] == "goal")
-    );
-    assert!(
-        before_load_response
-            .iter()
-            .any(|u| u["_meta"]["goal"]["tokensUsed"] == 42)
-    );
-    assert!(
-        before_load_response
-            .iter()
-            .any(|u| u["configOptions"][0]["currentValue"] == "astra")
-    );
-    assert!(
-        before_load_response
-            .iter()
-            .any(|u| u["currentModeId"] == "agent")
-    );
-    assert!(
-        before_load_response
-            .iter()
-            .any(|u| u["title"] == "Current title")
-    );
-    assert!(!updates.iter().any(|u| u["toolCallId"] == "old-tool"));
-    assert!(
-        !updates
-            .iter()
-            .any(|u| matches!(u["sessionUpdate"].as_str(), Some("plan" | "usage_update")))
-    );
-    assert!(
-        updates
-            .iter()
-            .any(|u| u["toolCallId"] == "new-tool" && u["status"] == "completed")
-    );
-    let text: String = updates
-        .iter()
-        .filter_map(|u| u["content"]["text"].as_str())
-        .collect();
-    assert_eq!(text, "live output ".repeat(12000));
 }
 
 /// Every launch request states the servers Mjolnir owns. A bridge that opens
@@ -188,6 +217,7 @@ for line in sys.stdin:
 #[test]
 fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
     let mut spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -282,8 +312,8 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
 }
 
 #[test]
-fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
-    use agent_client_protocol::schema::v1::{PermissionOption, ToolCallUpdateFields};
+fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
+    use agent_client_protocol::v1::schema::{PermissionOption, ToolCallUpdateFields};
     use mj_core::worker_launch::ReviewMcpServer;
     // A DSH permission request, titled and offering options as dsh-acp 0.2.0
     // does, and the option the worker selects for it without asking.
@@ -312,7 +342,8 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
         ] {
             for role in [
                 SubagentMcpRole::Parent,
-                SubagentMcpRole::Parent,
+                SubagentMcpRole::MessageOnly,
+                SubagentMcpRole::FetchOnly,
                 SubagentMcpRole::Child,
             ] {
                 let mut spec = reload_fallback_spec(harness);
@@ -399,7 +430,8 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
                         );
                         let allowed = request.pointer("/_meta/claudeCode/options/allowedTools");
                         if guardian {
-                            let mut expected = vec!["mcp__mj-memory__*".to_owned()];
+                            let mut expected =
+                                vec!["Bash(gh:*)".to_owned(), "mcp__mj-memory__*".to_owned()];
                             expected.extend(
                                 role.tool_names()
                                     .iter()
@@ -407,6 +439,7 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
                             );
                             if role == SubagentMcpRole::Parent {
                                 expected.push("mcp__mj-agents__request_review".into());
+                                expected.push("mcp__mj-agents__override_review".into());
                             }
                             assert_eq!(allowed, Some(&serde_json::json!(expected)), "{request}");
                         } else {
@@ -457,18 +490,69 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
                 let without_memory =
                     serde_json::to_value(new_session_request(&spec, false)).unwrap();
                 assert!(without_memory["mcpServers"].as_array().unwrap().is_empty());
-                assert!(
-                    without_memory
-                        .pointer("/_meta/claudeCode/options/allowedTools")
-                        .is_none()
+                let expected = (harness == HarnessKind::Claude && guardian)
+                    .then(|| serde_json::json!(["Bash(gh:*)"]));
+                assert_eq!(
+                    without_memory.pointer("/_meta/claudeCode/options/allowedTools"),
+                    expected.as_ref(),
+                    "{without_memory}"
                 );
                 spec.project_memory = None;
                 let absent = serde_json::to_value(new_session_request(&spec, true)).unwrap();
                 assert!(absent["mcpServers"].as_array().unwrap().is_empty());
+                assert_eq!(
+                    absent.pointer("/_meta/claudeCode/options/allowedTools"),
+                    expected.as_ref(),
+                    "{absent}"
+                );
+            }
+        }
+    }
+
+    for policy in [
+        ExecutionPolicy::ConfiguredApprovals,
+        ExecutionPolicy::Unconstrained,
+    ] {
+        let mut spec = reload_fallback_spec(HarnessKind::Claude);
+        spec.execution_policy = policy;
+        spec.project_memory = None;
+        spec.subagent_mcp_socket = None;
+        spec.extra_mcp_servers.clear();
+        for (method, request) in [
+            (
+                "session/new",
+                serde_json::to_value(new_session_request(&spec, true)).unwrap(),
+            ),
+            (
+                "session/load",
+                serde_json::to_value(load_session_request(&spec, SessionId::from("native")))
+                    .unwrap(),
+            ),
+            (
+                "session/resume",
+                serde_json::to_value(resume_session_request(&spec, SessionId::from("native")))
+                    .unwrap(),
+            ),
+        ] {
+            // The protocol's optional field is serialized only when nonempty;
+            // no MCP servers is represented by either omission or an empty list.
+            assert!(
+                request
+                    .get("mcpServers")
+                    .is_none_or(|servers| servers.as_array().is_some_and(Vec::is_empty)),
+                "{method} unexpectedly registered MCP servers: {request}"
+            );
+            let allowed = request.pointer("/_meta/claudeCode/options/allowedTools");
+            if policy == ExecutionPolicy::ConfiguredApprovals {
+                assert_eq!(
+                    allowed,
+                    Some(&serde_json::json!(["Bash(gh:*)"])),
+                    "{method}: {request}"
+                );
+            } else {
                 assert!(
-                    absent
-                        .pointer("/_meta/claudeCode/options/allowedTools")
-                        .is_none()
+                    allowed.is_none(),
+                    "YOLO must not receive native allow rules for {method}: {request}"
                 );
             }
         }
@@ -710,6 +794,7 @@ fn only_codex_receives_hidden_context_as_a_resource() {
     }
 }
 
+// Hard-won: c823ba502: metadata-only live terminal output was discarded before reaching the TUI.
 #[test]
 fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
     let live_tool_calls = Mutex::new(BTreeSet::new());
@@ -737,7 +822,7 @@ fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
         "session-1"
     ));
 
-    let created = SessionUpdate::ToolCall(agent_client_protocol::schema::v1::ToolCall::new(
+    let created = SessionUpdate::ToolCall(agent_client_protocol::v1::schema::ToolCall::new(
         "live-tool",
         "read",
     ));
@@ -755,12 +840,40 @@ fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
         &live_tool_calls,
         "session-1"
     ));
+
+    for key in [
+        "terminal_output",
+        "terminal_output_delta",
+        "terminal_exit",
+        "private",
+    ] {
+        let update = SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new("live-tool", ToolCallUpdateFields::default()).meta(
+                serde_json::Map::from_iter([(
+                    key.into(),
+                    serde_json::json!({
+                        "terminal_id": "exec-1", "data": "command failed", "exit_code": 1
+                    }),
+                )]),
+            ),
+        );
+        assert_eq!(
+            session_update_is_relay_visible(&update, &live_tool_calls, "session-1"),
+            key != "private"
+        );
+        assert!(!session_update_is_relay_visible(
+            &metadata_only,
+            &live_tool_calls,
+            "session-1"
+        ));
+    }
 }
 
 /// Suppression follows the stored policy, including None without an MCP socket.
 #[test]
 fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
     let mut spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -850,6 +963,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
 #[test]
 fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
     let mut spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -957,6 +1071,7 @@ fn worker_socket(role: SubagentMcpRole) -> SubagentMcpSocket {
 #[test]
 fn a_child_socket_serves_handback_and_hides_native_tools() {
     let mut spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::None,
@@ -1016,112 +1131,89 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
     );
 }
 
+// Hard-won: a02d1c6: child task updates must not become warning rows in the parent transcript.
 #[tokio::test]
-async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_step() {
+async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter() {
+    use mj_core::acp::AirTaskUpdate;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    for (resume_session, advertised_resume) in [
-        (None, false),
-        (None, true),
-        (Some("native"), false),
-        (Some("native"), true),
-    ] {
-        let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    for harness in [HarnessKind::Codex, HarnessKind::Claude] {
         let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
         let bridge = tokio::spawn(async move {
             let (read, mut write) = tokio::io::split(bridge_stream);
             let mut lines = BufReader::new(read).lines();
-            while let Some(line) = lines.next_line().await.expect("read fake adapter input") {
-                let request: serde_json::Value =
-                    serde_json::from_str(&line).expect("fake adapter input is JSON-RPC");
-                let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let Some(method) = request["method"].as_str() else {
                     continue;
                 };
-                let _ = observed_tx.send(request.clone());
-                let id = request
-                    .get("id")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                let response = match method {
-                    "initialize" => {
-                        let mut result = serde_json::json!({"protocolVersion": 1});
-                        if advertised_resume {
-                            result["agentCapabilities"] = serde_json::json!({
-                                "sessionCapabilities": {"resume": {}}
-                            });
+                let mut updates = Vec::new();
+                let result = match method {
+                    "initialize" => serde_json::json!({"protocolVersion":1}),
+                    "session/new" => {
+                        updates.push(("scripted", serde_json::json!({"sessionUpdate":"subagent_spawned", "subagentSessionId":"child", "name":"review", "task":"review source", "capabilities":{}})));
+                        for owner in ["scripted", "child"] {
+                            let id = if owner == "child" && harness == HarnessKind::Codex {
+                                "child:task"
+                            } else {
+                                "task"
+                            };
+                            let mut spawn = serde_json::json!({"sessionUpdate":"async_task_spawned", "asyncTaskId":id, "name":"sleep 600", "taskType":"shell", "showInTranscript":false, "canStop":true});
+                            if harness == HarnessKind::Claude {
+                                spawn["description"] = serde_json::json!("Background sleeper");
+                            }
+                            updates.push((owner, spawn));
+                            updates.push((owner, serde_json::json!({"sessionUpdate":"async_task_progress", "asyncTaskId":id, "description":format!("{owner} sleeper")})));
+                            updates.push((owner, serde_json::json!({"sessionUpdate":"async_task_state_update", "asyncTaskId":id, "state":"paused"})));
                         }
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": result,
-                        })
+                        updates.push(("scripted", serde_json::json!({"sessionUpdate":"async_task_spawned", "asyncTaskId":"turn", "name":"autonomous turn", "taskType":"turn", "canStop":true})));
+                        updates.push(("scripted", serde_json::json!({"sessionUpdate":"async_task_state_update", "asyncTaskId":"turn", "state":"completed"})));
+                        serde_json::json!({"sessionId":"scripted", "modes":{"currentModeId":"default", "availableModes":[{"id":"default", "name":"Default"},{"id":"auto", "name":"Auto"},{"id":"agent", "name":"Agent"}]}})
                     }
-                    "session/new" | "session/load" | "session/resume" => serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {"sessionId": "scripted", "modes": {
-                            "currentModeId": "default",
-                            "availableModes": [
-                                {"id": "default", "name": "Default"},
-                                {"id": "auto", "name": "Auto"}
-                            ]
-                        }},
-                    }),
-                    "session/set_mode" => {
-                        serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}})
+                    "session/set_mode" => serde_json::json!({}),
+                    "_session/async_task/stop" => {
+                        let owner = request["params"]["sessionId"].as_str().unwrap();
+                        let task = request["params"]["asyncTaskId"].as_str().unwrap();
+                        assert!(matches!(owner, "scripted" | "child"));
+                        assert_eq!(
+                            task,
+                            if owner == "child" && harness == HarnessKind::Codex {
+                                "child:task"
+                            } else {
+                                "task"
+                            }
+                        );
+                        let update = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":owner, "update":{"sessionUpdate":"async_task_state_update", "asyncTaskId":task, "state":"stopped"}}});
+                        write
+                            .write_all(format!("{update}\n").as_bytes())
+                            .await
+                            .unwrap();
+                        serde_json::json!({"stopped":true})
                     }
                     _ => continue,
                 };
-                if matches!(method, "session/new" | "session/load" | "session/resume") {
-                    for message in [
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "method": "_claude/sdkMessage",
-                            "params": {
-                                "sessionId": "scripted",
-                                "message": {
-                                    "type": "system",
-                                    "subtype": "task_started",
-                                    "task_id": "foreground",
-                                },
-                            },
-                        }),
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "method": "_claude/sdkMessage",
-                            "params": {
-                                "sessionId": "scripted",
-                                "message": {
-                                    "type": "system",
-                                    "subtype": CLAUDE_BACKGROUND_TASKS_CHANGED_SUBTYPE,
-                                    "tasks": [{
-                                        "task_id": "server",
-                                        "task_type": "shell",
-                                        "description": "npm run dev",
-                                    }],
-                                },
-                            },
-                        }),
-                    ] {
-                        write
-                            .write_all(format!("{message}\n").as_bytes())
-                            .await
-                            .expect("write fake adapter extension notification");
-                    }
+                for (owner, update) in updates {
+                    let notification = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":owner,"update":update}});
+                    write
+                        .write_all(format!("{notification}\n").as_bytes())
+                        .await
+                        .unwrap();
                 }
+                let response =
+                    serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":result});
                 write
                     .write_all(format!("{response}\n").as_bytes())
                     .await
-                    .expect("write fake adapter response");
+                    .unwrap();
             }
         });
         let (client_read, client_write) = tokio::io::split(client_stream);
         let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
-        let (request_tx, mut request_rx) = mpsc::channel(1);
+        let (request_tx, mut request_rx) = mpsc::channel(4);
         let (event_tx, mut event_rx) = mpsc::channel(32);
-        let step_clock = crate::acp::StepClock::default();
+        let step_clock = StepClock::default();
         let observed_step_clock = step_clock.clone();
         let spec = LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
@@ -1144,11 +1236,11 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
             additional_directories: Vec::new(),
             extra_mcp_servers: Vec::new(),
             project_memory: None,
-            resume_session: resume_session.map(str::to_owned),
+            resume_session: None,
             native_session_may_have_history: false,
             accepted_config: Default::default(),
             initial_model: None,
-            harness: HarnessKind::Claude,
+            harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             acp_activity: AcpActivityClock::default(),
             step_clock,
@@ -1164,64 +1256,110 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
             )
             .await
         });
-
-        let event = wait_for_runtime_event(&mut event_rx, |event| {
-            matches!(event, RuntimeEvent::ClaudeBackgroundTasksChanged { .. })
-        })
-        .await;
-        let RuntimeEvent::ClaudeBackgroundTasksChanged { tasks } = event else {
-            unreachable!("wait_for_runtime_event matched the Claude level event");
-        };
-        assert_eq!(
-            tasks,
-            vec![ClaudeBackgroundTask {
-                task_id: "server".into(),
-                description: "npm run dev".into(),
-            }]
-        );
-        assert_eq!(
-            observed_step_clock.started_at_ms(),
-            None,
-            "a provider background level must not advance the step clock"
-        );
-
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = crate::relay::DurableRelay::open(root.path(), "air-test", "test").unwrap();
+        relay.set_background_work_policy(crate::relay::BackgroundWorkPolicy::AirTasks);
+        relay.set_harness_turn_policy(if harness == HarnessKind::Claude {
+            crate::relay::HarnessTurnPolicy::ClaudeAdapter
+        } else {
+            crate::relay::HarnessTurnPolicy::CodexAdapter
+        });
+        let mut paused = 0;
+        while paused < 2 {
+            let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match event {
+                RuntimeEvent::AirTaskChanged { session_id, update } => {
+                    if matches!(&update, AirTaskUpdate::Spawned { .. }) {
+                        let AirTaskUpdate::Spawned { description, .. } = &update else {
+                            unreachable!()
+                        };
+                        assert_eq!(
+                            description,
+                            if harness == HarnessKind::Claude {
+                                "Background sleeper"
+                            } else {
+                                "sleep 600"
+                            }
+                        );
+                    }
+                    if matches!(
+                        &update,
+                        AirTaskUpdate::Changed {
+                            description: None,
+                            ..
+                        }
+                    ) {
+                        paused += 1;
+                    }
+                    relay.air_task_changed(session_id, update).unwrap();
+                }
+                RuntimeEvent::Warning { message } => {
+                    assert!(!message.contains("async_task"), "{message}")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(observed_step_clock.started_at_ms(), None);
+        let commands = relay.operational_state().background_commands;
+        assert_eq!(commands.len(), 2);
+        for command in commands {
+            assert!(command.can_stop);
+            assert!(command.command.ends_with(" sleeper"));
+            let target = relay.background_task_stop_target(&command.id).unwrap();
+            let (resolved, resolution) = oneshot::channel();
+            request_tx
+                .send(CommandRequest::StopBackgroundTask { target, resolved })
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), resolution)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            loop {
+                let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                match event {
+                    RuntimeEvent::AirTaskChanged { session_id, update } => {
+                        let finished = matches!(update, AirTaskUpdate::Finished { .. });
+                        relay.air_task_changed(session_id, update).unwrap();
+                        if finished
+                            && relay
+                                .operational_state()
+                                .background_commands
+                                .iter()
+                                .all(|entry| entry.id != command.id)
+                        {
+                            break;
+                        }
+                    }
+                    RuntimeEvent::Warning { message } => {
+                        assert!(!message.contains("async_task"), "{message}")
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(relay.operational_state().background_commands.is_empty());
+        assert!(relay.activity_facts().task_settled_at_ms.is_none());
         drop(request_tx);
         tokio::time::timeout(Duration::from_secs(5), driver)
             .await
-            .expect("closing the command channel ends the runtime")
-            .expect("the runtime task does not panic")
-            .expect("the fake adapter session ends cleanly");
-        let mut session_requests = Vec::new();
-        while let Ok(request) = observed_rx.try_recv() {
-            if matches!(
-                request["method"].as_str(),
-                Some("session/new" | "session/load" | "session/resume")
-            ) {
-                session_requests.push(request);
-            }
-        }
-        assert_eq!(session_requests.len(), 1, "open exactly one native session");
-        assert_eq!(
-            session_requests[0]["method"],
-            if resume_session.is_none() {
-                "session/new"
-            } else if advertised_resume {
-                "session/resume"
-            } else {
-                "session/load"
-            },
-            "session setup must select the advertised lifecycle method"
-        );
-        if resume_session.is_some() {
-            assert_eq!(session_requests[0]["params"]["sessionId"], "native");
-        }
+            .unwrap()
+            .unwrap()
+            .unwrap();
         bridge.abort();
     }
 }
 
 #[test]
 fn unconstrained_permission_prefers_a_one_time_allow_and_never_cancels() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         PermissionOption, ToolCallUpdate, ToolCallUpdateFields,
     };
 
@@ -1567,6 +1705,7 @@ async fn answer_to_ext_request(
     // Drain events so a full channel can never be mistaken for silence.
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -1812,6 +1951,7 @@ async fn answer_architecture_form(
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -2072,7 +2212,7 @@ fn grok_plan_review_answers_are_user_selected() {
 
 #[test]
 fn supported_permission_plan_reviews_are_detected_and_mapped_to_native_options() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         PermissionOption, ToolCallUpdate, ToolCallUpdateFields,
     };
 
@@ -2329,6 +2469,7 @@ async fn policy_is_enforced_before_session_is_reported(
     let (request_tx, mut request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -2527,6 +2668,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
     let (request_tx, mut request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -2793,6 +2935,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -3199,6 +3342,7 @@ async fn silent_after_prompt_bridge_with_late_reply(
 
 pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -> LaunchSpec {
     LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -3522,9 +3666,8 @@ where
     F: FnMut(&RuntimeEvent) -> bool,
 {
     loop {
-        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        let event = crate::test_support::wait_for("runtime event", events.recv())
             .await
-            .expect("runtime event arrives")
             .expect("runtime event channel stays open");
         if matches(&event) {
             return event;
@@ -3686,6 +3829,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -3896,6 +4040,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -4038,6 +4183,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -4134,6 +4280,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
 async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
     fn scripted_spec(resume_session: Option<String>) -> LaunchSpec {
         LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -4472,6 +4619,7 @@ mod terminals {
             }
         });
         let spec = LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -4912,6 +5060,7 @@ for line in sys.stdin:
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let runtime = tokio::spawn(run(
         LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5093,6 +5242,7 @@ for line in sys.stdin:
     let (request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5185,6 +5335,7 @@ for line in sys.stdin:
     );
 }
 
+// Hard-won: bd326e2bb: Bridge startup and recovery can exceed five seconds under parallel I/O load.
 #[cfg(unix)]
 #[tokio::test]
 async fn dead_bridge_after_session_start_reloads_the_native_session() {
@@ -5257,6 +5408,7 @@ while True:
     let (request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5301,7 +5453,7 @@ while True:
     let mut saw_reload = false;
     let mut capability_updates = 0;
     loop {
-        let event = tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv())
+        let event = tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())
             .await
             .expect("ACP runtime keeps reporting")
             .expect("event channel stays open");
@@ -5344,18 +5496,18 @@ while True:
     assert_eq!(started, vec![false, true], "the second open is a resume");
 
     drop(request_tx);
-    tokio::time::timeout(std::time::Duration::from_secs(5), runtime)
+    tokio::time::timeout(crate::test_support::IO_TIMEOUT, runtime)
         .await
         .expect("closing the command channel must end the runtime")
         .expect("runtime task does not panic")
         .expect("a recovered bridge must not fail the worker");
 }
 
+// Hard-won: 410851f2d: Bridge startup is not bounded by the five-second fixture wait.
 #[cfg(unix)]
 #[tokio::test]
 async fn an_acknowledged_cancel_keeps_the_running_bridge() {
     let temp = tempfile::tempdir().unwrap();
-    let prompt_seen = temp.path().join("prompt-seen");
     let initializes = temp.path().join("initializes");
     let script = temp.path().join("cancelled_acp.py");
     std::fs::write(
@@ -5363,7 +5515,6 @@ async fn an_acknowledged_cancel_keeps_the_running_bridge() {
         format!(
             r#"
 import json, sys
-prompt_seen = {prompt_seen:?}
 initializes = {initializes:?}
 
 def read():
@@ -5390,7 +5541,9 @@ while True:
     elif method == "session/prompt":
         prompts += 1
         if prompts == 1:
-            open(prompt_seen, "w").close()
+            write({{"jsonrpc": "2.0", "method": "session/update", "params": {{
+                "sessionId": "scripted", "update": {{"sessionUpdate": "agent_message_chunk",
+                "content": {{"type": "text", "text": "prompt-ready"}}}}}}}})
             cancellation = read()
             assert cancellation.get("method") == "session/cancel", cancellation
             write({{"jsonrpc": "2.0", "id": ident, "result": {{"stopReason": "cancelled"}}}})
@@ -5406,6 +5559,7 @@ while True:
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5443,7 +5597,7 @@ while True:
     let wait_for_finished_prompt =
         async |event_rx: &mut mpsc::Receiver<RuntimeEvent>, finished: &mut Vec<String>| {
             loop {
-                let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                let event = tokio::time::timeout(crate::test_support::IO_TIMEOUT, event_rx.recv())
                     .await
                     .expect("the ACP runtime keeps reporting")
                     .expect("the event channel stays open");
@@ -5471,13 +5625,11 @@ while True:
         })
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !prompt_seen.exists() {
-            tokio::task::yield_now().await;
-        }
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::SessionUpdate { update }
+            if update["content"]["text"] == "prompt-ready")
     })
-    .await
-    .expect("the prompt reaches the bridge");
+    .await;
     request_tx
         .send(CommandRequest::Cancel {
             request_id: "cancel-1".into(),
@@ -5504,7 +5656,7 @@ while True:
     );
 
     drop(request_tx);
-    tokio::time::timeout(Duration::from_secs(5), runtime)
+    tokio::time::timeout(crate::test_support::IO_TIMEOUT, runtime)
         .await
         .expect("closing the command channel ends the runtime")
         .expect("runtime task does not panic")
@@ -5517,6 +5669,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
     let (_request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5600,6 +5753,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
         let (_request_tx, request_rx) = mpsc::channel(1);
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let spec = LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5645,7 +5799,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
 
 #[test]
 fn echoed_user_images_do_not_reenter_the_relay_journal() {
-    use agent_client_protocol::schema::v1::{ContentChunk, ImageContent};
+    use agent_client_protocol::v1::schema::{ContentChunk, ImageContent};
     let update = SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Image(
         ImageContent::new("x".repeat(700 * 1024), "image/png"),
     )));
@@ -5839,6 +5993,7 @@ async fn session_reload_rejecting_bridge(
 
 fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
     LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5924,6 +6079,7 @@ async fn codex_still_fails_when_the_recorded_session_cannot_be_reloaded() {
 fn resume_failures_report_a_missing_native_session_per_harness() {
     fn spec(harness: HarnessKind) -> LaunchSpec {
         LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -5962,9 +6118,12 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
     )
     .context("resume ACP session native");
     // The ACP standard resource error as claude-agent-acp answers it.
-    let missing_transcript =
-        anyhow::anyhow!("Resource not found: native: {{\n  \"uri\": \"native\"\n}}")
-            .context("resume ACP session native");
+    let missing_transcript = Err::<(), _>(
+        agent_client_protocol::Error::new(-32002, "Resource not found")
+            .data(serde_json::json!({"sessionId": "native"})),
+    )
+    .context("resume ACP session native")
+    .unwrap_err();
     assert!(harness_reports_missing_native_session(
         &spec(HarnessKind::Codex),
         &missing_thread
@@ -5999,15 +6158,18 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
 }
 
 /// A fake ACP bridge that refuses every reload of `missing-thread` with
-/// `reload_error`, the text the harness under test really answers, and opens a
-/// fresh session for `session/new`.
+/// `reload_error`, the JSON-RPC error the harness under test really answers,
+/// and opens a fresh session for `session/new`.
 #[cfg(unix)]
-fn missing_native_session_script(directory: &Path, reload_error: &str) -> std::path::PathBuf {
+fn missing_native_session_script(
+    directory: &Path,
+    reload_error: &serde_json::Value,
+) -> std::path::PathBuf {
     let script = directory.join("missing_native_session.py");
     let source = r#"
 import json, sys
 
-RELOAD_ERROR = __RELOAD_ERROR__
+RELOAD_ERROR = json.loads(__RELOAD_ERROR__)
 
 for line in sys.stdin:
     request = json.loads(line)
@@ -6017,7 +6179,7 @@ for line in sys.stdin:
         result = {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}}
     elif method in ("session/load", "session/resume"):
         print(json.dumps({"jsonrpc": "2.0", "id": ident,
-                          "error": {"code": -32603, "message": RELOAD_ERROR}}),
+                          "error": RELOAD_ERROR}),
               flush=True)
         continue
     elif method == "session/new":
@@ -6033,13 +6195,13 @@ for line in sys.stdin:
     if ident is not None:
         print(json.dumps({"jsonrpc": "2.0", "id": ident, "result": result}), flush=True)
 "#;
-    // A JSON string literal is also a Python string literal, so the error text
+    // A JSON string literal is also a Python string literal, so the error
     // reaches the script exactly as the harness would send it.
     std::fs::write(
         &script,
         source.replace(
             "__RELOAD_ERROR__",
-            &serde_json::to_string(reload_error).unwrap(),
+            &serde_json::to_string(&reload_error.to_string()).unwrap(),
         ),
     )
     .unwrap();
@@ -6048,13 +6210,24 @@ for line in sys.stdin:
 
 /// Codex's wrapped refusal for a thread whose rollout was never written.
 #[cfg(unix)]
-const MISSING_CODEX_THREAD_ERROR: &str =
-    r#"Internal error: {"details": "no rollout found for thread id missing-thread"}"#;
+fn missing_codex_thread_error() -> serde_json::Value {
+    serde_json::json!({
+        "code": -32603,
+        "message": "Internal error",
+        "data": {"details": "no rollout found for thread id missing-thread"}
+    })
+}
 
-/// Claude Code's ACP resource error for a session with no transcript on disk.
+/// claude-agent-acp's ACP resource error for a session with no transcript on
+/// disk, as 0.99 sends it.
 #[cfg(unix)]
-const MISSING_CLAUDE_SESSION_ERROR: &str =
-    "Resource not found: missing-thread: {\n  \"uri\": \"missing-thread\"\n}";
+fn missing_claude_session_error() -> serde_json::Value {
+    serde_json::json!({
+        "code": -32002,
+        "message": "Resource not found",
+        "data": {"sessionId": "missing-thread"}
+    })
+}
 
 #[cfg(unix)]
 fn missing_native_session_spec(
@@ -6064,6 +6237,7 @@ fn missing_native_session_spec(
     native_session_may_have_history: bool,
 ) -> LaunchSpec {
     LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -6101,9 +6275,12 @@ fn missing_native_session_spec(
 /// Mjolnir's state showing the native session was never used, and prove the
 /// queued work finishes on a replacement session in the same Mjolnir session.
 #[cfg(unix)]
-async fn assert_unused_native_session_is_replaced(harness: HarnessKind, reload_error: &str) {
+async fn assert_unused_native_session_is_replaced(
+    harness: HarnessKind,
+    reload_error: serde_json::Value,
+) {
     let temp = tempfile::tempdir().unwrap();
-    let script = missing_native_session_script(temp.path(), reload_error);
+    let script = missing_native_session_script(temp.path(), &reload_error);
     // An installed worker upgrades a snapshot whose original opening is
     // already behind its saved frontier, before ACP attempts native resume.
     let root = temp.path().join("legacy-relay");
@@ -6192,13 +6369,14 @@ async fn assert_unused_native_session_is_replaced(harness: HarnessKind, reload_e
 #[cfg(unix)]
 #[tokio::test]
 async fn an_unused_codex_thread_is_replaced_in_the_same_session_after_upgrade() {
-    assert_unused_native_session_is_replaced(HarnessKind::Codex, MISSING_CODEX_THREAD_ERROR).await;
+    assert_unused_native_session_is_replaced(HarnessKind::Codex, missing_codex_thread_error())
+        .await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn an_unused_claude_session_is_replaced_in_the_same_session_after_upgrade() {
-    assert_unused_native_session_is_replaced(HarnessKind::Claude, MISSING_CLAUDE_SESSION_ERROR)
+    assert_unused_native_session_is_replaced(HarnessKind::Claude, missing_claude_session_error())
         .await;
 }
 
@@ -6206,7 +6384,7 @@ async fn an_unused_claude_session_is_replaced_in_the_same_session_after_upgrade(
 #[tokio::test]
 async fn a_used_codex_thread_codex_cannot_find_fails_instead_of_starting_over() {
     let temp = tempfile::tempdir().unwrap();
-    let script = missing_native_session_script(temp.path(), MISSING_CODEX_THREAD_ERROR);
+    let script = missing_native_session_script(temp.path(), &missing_codex_thread_error());
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let runtime = tokio::spawn(run(
@@ -6382,8 +6560,15 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
                 let method = request["method"].as_str().unwrap_or("");
                 let result = match method {
                     "initialize" => {
-                        assert!(request["params"]["clientCapabilities"]["_meta"]["jetbrains"]["air"]["capabilities"]
-                            .as_array().unwrap().iter().any(|v| v == "nativeSubagentSessions"));
+                        let mut expected =
+                            vec!["asyncTasks", "nativeSubagentSessions", "sessionFailure"];
+                        if harness == HarnessKind::Claude {
+                            expected.push("backgroundSubagents");
+                        }
+                        assert_eq!(
+                            request["params"]["clientCapabilities"]["_meta"]["jetbrains"]["air"]["capabilities"],
+                            serde_json::json!(expected)
+                        );
                         serde_json::json!({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}},
                             "_meta":{"jetbrains":{"air":{"version":1,"capabilities":["nativeSubagentSessions"]}}}})
                     }
@@ -6438,6 +6623,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
         let (event_tx, mut event_rx) = mpsc::channel(32);
         let step_clock = crate::acp::StepClock::default();
         let spec = LaunchSpec {
+            operator_away: Default::default(),
             imported_logins: None,
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
@@ -6482,11 +6668,18 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             .await
         });
         let mut children = Vec::new();
+        let mut missing_background_capability = false;
         tokio::time::timeout(Duration::from_secs(10), async {
             while let Some(event) = event_rx.recv().await {
                 match event {
                     RuntimeEvent::NativeAgent { event } => {
                         children.push(event);
+                    }
+                    RuntimeEvent::Warning { message }
+                        if message.contains("backgroundSubagents") =>
+                    {
+                        assert!(message.contains("0.95.0") && message.contains("upgrade"));
+                        missing_background_capability = true;
                     }
                     RuntimeEvent::SessionConfigured { .. } => break,
                     RuntimeEvent::SessionUpdate { update } => {
@@ -6498,6 +6691,10 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
         })
         .await
         .expect("child history load finishes");
+        assert_eq!(
+            missing_background_capability,
+            harness == HarnessKind::Claude
+        );
         assert_eq!(children.len(), 5);
         assert!(matches!(children[0], NativeAgentEvent::ReplayBegin));
         let spawn_index = if missing {
@@ -6525,6 +6722,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
     }
 }
 
+// Hard-won: 29a80b2d2: Correct bridge startup exceeded the fixture event deadline under load.
 #[tokio::test]
 async fn clear_replaces_the_native_session_without_forwarding_a_prompt() {
     exercise_context_clear(false, HarnessKind::Codex).await;
@@ -6602,7 +6800,7 @@ for line in sys.stdin:
     .await;
     drop(request_tx);
     let drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-    tokio::time::timeout(Duration::from_secs(20), runtime)
+    tokio::time::timeout(crate::test_support::IO_TIMEOUT, runtime)
         .await
         .unwrap()
         .unwrap()
@@ -6610,6 +6808,7 @@ for line in sys.stdin:
     drain.await.unwrap();
 }
 
+// Hard-won: 29a80b2d2: Correct bridge replacement exceeded the fixture event deadline under load.
 #[tokio::test]
 async fn failed_clear_reloads_the_previous_native_session() {
     exercise_context_clear(true, HarnessKind::Codex).await;
@@ -6696,7 +6895,7 @@ for line in sys.stdin:
     drop(request_tx);
     // Drain the bounded event channel while shutdown completes.
     let drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-    tokio::time::timeout(Duration::from_secs(20), runtime)
+    tokio::time::timeout(crate::test_support::IO_TIMEOUT, runtime)
         .await
         .unwrap()
         .unwrap()
@@ -6880,6 +7079,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
     let (commands, mut requests) = mpsc::channel(16);
     let (event_tx, mut events) = mpsc::channel(256);
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -7010,20 +7210,17 @@ fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
     // I2-15: after Escape, Kimi left its permission request pending and the
     // form stayed open on an idle session.
     let pending = PendingElicitations::default();
-    let (permission, mut permission_rx) = oneshot::channel();
-    let (question, mut question_rx) = oneshot::channel();
-    {
-        let mut map = pending.lock().unwrap();
-        let permission_id = format!("{TOOL_PERMISSION_ID_PREFIX}1");
-        map.insert(
-            permission_id.clone(),
-            PendingElicitation::open(&permission_id, permission),
-        );
-        map.insert(
-            "elicitation-1".to_owned(),
-            PendingElicitation::open("elicitation-1", question),
-        );
-    }
+    let permission_id = format!("{TOOL_PERMISSION_ID_PREFIX}1");
+    let mut permission_rx = pending.register(
+        pending_test_question(&permission_id),
+        String::new(),
+        AwayRequest::Tool("permission".into()),
+    );
+    let mut question_rx = pending.register(
+        pending_test_question("elicitation-1"),
+        String::new(),
+        AwayRequest::Question,
+    );
     withdraw_tool_permissions(&pending);
     assert!(
         matches!(
@@ -7036,17 +7233,30 @@ fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
         question_rx.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
     ));
-    assert_eq!(pending.lock().unwrap().len(), 1);
+    assert!(!pending.is_empty());
+    assert!(pending.remove("elicitation-1").is_some());
+    assert!(pending.is_empty());
+}
+
+fn pending_test_question(id: &str) -> ElicitationRequest {
+    ElicitationRequest {
+        id: id.to_owned(),
+        message: String::new(),
+        title: None,
+        description: None,
+        fields: Vec::new(),
+        tool_permission: None,
+    }
 }
 
 #[tokio::test]
 async fn accepted_elicitation_replies_survive_concurrent_withdrawal() {
     for accepted in [true, false] {
         let pending = PendingElicitations::default();
-        let (answer, received) = oneshot::channel();
-        pending.lock().unwrap().insert(
-            "question-1".into(),
-            PendingElicitation::open("question-1", answer),
+        let received = pending.register(
+            pending_test_question("question-1"),
+            String::new(),
+            AwayRequest::Question,
         );
         if accepted {
             resolve_pending_elicitation(
@@ -7062,10 +7272,138 @@ async fn accepted_elicitation_replies_survive_concurrent_withdrawal() {
             await_elicitation_response(&pending, "question-1", received, std::future::ready(()))
                 .await;
         assert_eq!(response.is_some(), accepted);
-        assert!(pending.lock().unwrap().is_empty());
+        assert!(pending.is_empty());
         assert!(
             resolve_pending_elicitation(&pending, "question-1", ElicitationResponse::Cancel)
                 .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn pending_afk_arbitration_preserves_registration_order_and_bridge_scope() {
+    let owner = OperatorAway::default();
+    let old = owner.pending_for_bridge();
+    let current = owner.pending_for_bridge();
+    // Lexical id order differs from the order in which the worker accepted them.
+    let first = old.register(
+        pending_test_question("question-2"),
+        String::new(),
+        AwayRequest::Question,
+    );
+    let mut repeated = current.register(
+        pending_test_question("question-10"),
+        String::new(),
+        AwayRequest::Question,
+    );
+    let human = current.register(
+        pending_test_question("human"),
+        "native-child".into(),
+        AwayRequest::Question,
+    );
+    resolve_pending_elicitation(&current, "human", ElicitationResponse::Decline).unwrap();
+    owner.set(mj_core::state::OperatorPresence {
+        away: true,
+        revision: 1,
+    });
+    assert!(matches!(
+        await_elicitation_response(&old, "question-2", first, std::future::ready(())).await,
+        Some(PendingAnswer::OperatorAway)
+    ));
+    assert!(matches!(
+        await_elicitation_response(&current, "human", human, std::future::ready(())).await,
+        Some(PendingAnswer::Human(ElicitationResponse::Decline))
+    ));
+    assert!(matches!(
+        repeated.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    // Same ids in different bridges cannot make an old bridge withdraw new work.
+    let mut reused = current.register(
+        pending_test_question("question-2"),
+        String::new(),
+        AwayRequest::Question,
+    );
+    old.close();
+    assert!(matches!(
+        reused.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    let mut late = old.register(
+        pending_test_question("late"),
+        "another-child".into(),
+        AwayRequest::Question,
+    );
+    assert!(matches!(
+        late.try_recv(),
+        Err(oneshot::error::TryRecvError::Closed)
+    ));
+    // A missed off revision still starts a new period, and registration order wins.
+    owner.set(mj_core::state::OperatorPresence {
+        away: true,
+        revision: 3,
+    });
+    assert!(matches!(
+        await_elicitation_response(&current, "question-10", repeated, std::future::ready(())).await,
+        Some(PendingAnswer::OperatorAway)
+    ));
+    assert!(matches!(
+        reused.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    current.close();
+    assert!(matches!(
+        reused.try_recv(),
+        Err(oneshot::error::TryRecvError::Closed)
+    ));
+    let next = owner.pending_for_bridge();
+    let mut restarted = next.register(
+        pending_test_question("question-2"),
+        String::new(),
+        AwayRequest::Question,
+    );
+    assert!(
+        matches!(
+            restarted.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "bridge cleanup retains the period's refusal memory"
+    );
+}
+
+#[tokio::test]
+async fn permission_cancel_and_afk_claim_the_pending_entry_once() {
+    for cancel_first in [true, false] {
+        let owner = OperatorAway::default();
+        let pending = owner.pending_for_bridge();
+        let id = format!("{TOOL_PERMISSION_ID_PREFIX}1");
+        let received = pending.register(
+            pending_test_question(&id),
+            String::new(),
+            AwayRequest::Tool("command".into()),
+        );
+        let cancelled = cancel_first.then(|| {
+            pending
+                .take_turn_cancel(&id, &ElicitationResponse::Cancel)
+                .unwrap()
+        });
+        owner.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
+        assert!(
+            pending
+                .take_turn_cancel(&id, &ElicitationResponse::Cancel)
+                .is_none()
+        );
+        assert!(resolve_pending_elicitation(&pending, &id, ElicitationResponse::Decline).is_err());
+        // The cancellation owner retains the sender until session/cancel is sent.
+        drop(cancelled);
+        let answer =
+            await_elicitation_response(&pending, &id, received, std::future::ready(())).await;
+        assert_eq!(
+            matches!(answer, Some(PendingAnswer::OperatorAway)),
+            !cancel_first
         );
     }
 }
@@ -7150,6 +7488,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let opened = Arc::new(Mutex::new(None));
     let spec = LaunchSpec {
+        operator_away: Default::default(),
         imported_logins: None,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -7363,11 +7702,11 @@ async fn a_form_the_harness_withdraws_still_resolves() {
     bridge.abort();
 }
 
-/// A codex-acp that, once asked for typed failures, ends the first prompt the
+/// An adapter that, once asked for typed failures, ends the first prompt the
 /// way it ended issue 1217's: `end_turn`, no agent text, and the provider's
 /// error as a `sessionFailure` record on the response. Reports whether the
 /// worker's `initialize` asked for the records.
-async fn typed_failure_bridge(stream: tokio::io::DuplexStream) -> bool {
+async fn typed_failure_bridge(stream: tokio::io::DuplexStream, failure: serde_json::Value) -> bool {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (read, mut write) = tokio::io::split(stream);
@@ -7395,16 +7734,12 @@ async fn typed_failure_bridge(stream: tokio::io::DuplexStream) -> bool {
                 "sessionId": "typed-failure",
                 "modes": {
                     "currentModeId": "agent",
-                    "availableModes": [{"id": "agent", "name": "Agent"}],
+                    "availableModes": [{"id": "agent", "name": "Agent"}, {"id": "auto", "name": "Auto"}],
                 },
             }),
             "session/prompt" => serde_json::json!({
                 "stopReason": "end_turn",
-                "_meta": {"quota": {}, "jetbrains": {"air": {"version": 1, "sessionFailure": {
-                    "id": "turn-1:error", "revision": 1, "category": "service",
-                    "severity": "error", "actions": ["retry"],
-                    "title": "{\"type\":\"error\",\"error\":{\"message\":\"model 'gpt-6-luna' is not enabled in rustponsesapi\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null},\"status\":400}",
-                }}}},
+                "_meta": {"jetbrains": {"air": {"version": 1, "sessionFailure": failure}}},
             }),
             _ if !id.is_null() => serde_json::json!({}),
             _ => continue,
@@ -7424,70 +7759,128 @@ async fn typed_failure_bridge(stream: tokio::io::DuplexStream) -> bool {
 // Hard-won: 03e1b5a: Codex model failures counted as completed turns and asked child agents for reports they had not written.
 #[tokio::test]
 async fn a_typed_bridge_failure_fails_the_turn_with_the_providers_reason() {
-    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let bridge = tokio::spawn(typed_failure_bridge(bridge_stream));
-    let (client_read, client_write) = tokio::io::split(client_stream);
-    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
-    let (request_tx, mut request_rx) = mpsc::channel(4);
-    let (event_tx, mut event_rx) = mpsc::channel(64);
-    let mut spec = reload_fallback_spec(HarnessKind::Codex);
-    spec.resume_session = None;
-    let driver = tokio::spawn(async move {
-        drive(
-            transport,
-            spec,
-            &mut request_rx,
-            event_tx,
-            Arc::new(Mutex::new(None)),
-            false,
-        )
-        .await
-    });
-
-    request_tx
-        .send(CommandRequest::Prompt {
-            request_id: "task".into(),
-            prompt: vec![ContentBlock::Text(TextContent::new("Do the task."))],
-        })
-        .await
-        .unwrap();
-    let mut warnings = Vec::new();
-    let (stop_reason, diagnostic) = loop {
-        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+    for (harness, failure_kind, actions, expected_stop) in [
+        (
+            HarnessKind::Codex,
+            None,
+            vec!["retry"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            None,
+            vec!["retry"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            Some("quota_exhausted"),
+            vec![],
+            mj_core::diagnostic::QUOTA_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            Some("rate_limited"),
+            vec!["retry"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            Some("budget_exhausted"),
+            vec!["new_session"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+        (
+            HarnessKind::Claude,
+            Some("context_exhausted"),
+            vec!["new_session"],
+            PROMPT_ERROR_STOP_REASON,
+        ),
+    ] {
+        let title = if failure_kind.is_some() {
+            "This usage limit was reached"
+        } else {
+            r#"{"type":"error","error":{"message":"model 'gpt-6-luna' is not enabled in rustponsesapi"},"status":400}"#
+        };
+        let failure = serde_json::json!({"id":"turn-1:error", "revision":1,
+        "category":if failure_kind.is_some() {"limit"} else {"service"},
+        "severity":"error", "actions":actions, "title":title});
+        let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+        let bridge = tokio::spawn(typed_failure_bridge(bridge_stream, failure));
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let mut spec = reload_fallback_spec(harness);
+        spec.resume_session = None;
+        let driver = tokio::spawn(async move {
+            drive(
+                transport,
+                spec,
+                &mut request_rx,
+                event_tx,
+                Arc::new(Mutex::new(None)),
+                false,
+            )
             .await
-            .expect("the runtime keeps reporting")
-            .expect("the runtime keeps its event channel");
-        match event {
-            RuntimeEvent::Warning { message } if message.starts_with("prompt") => {
-                warnings.push(message)
-            }
-            RuntimeEvent::PromptFinished {
-                stop_reason,
-                diagnostic,
-                ..
-            } => break (stop_reason, diagnostic),
-            _ => {}
-        }
-    };
-    assert_eq!(stop_reason, PROMPT_ERROR_STOP_REASON);
-    let diagnostic = diagnostic.expect("a failed turn carries its diagnostic");
-    assert_eq!(
-        diagnostic.message,
-        "model 'gpt-6-luna' is not enabled in rustponsesapi"
-    );
-    assert_eq!(diagnostic.http_status, Some(400));
-    assert_eq!(
-        warnings,
-        vec!["prompt failed: model 'gpt-6-luna' is not enabled in rustponsesapi".to_owned()],
-        "one line, not the empty-response warning"
-    );
+        });
 
-    drop(request_tx);
-    let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
-    assert!(
-        bridge.await.unwrap(),
-        "a Codex worker asks the bridge for typed failures"
-    );
+        request_tx
+            .send(CommandRequest::Prompt {
+                request_id: "task".into(),
+                prompt: vec![ContentBlock::Text(TextContent::new("Do the task."))],
+            })
+            .await
+            .unwrap();
+        let mut warnings = Vec::new();
+        let (stop_reason, diagnostic) = loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("the runtime keeps reporting");
+            let Some(event) = event else {
+                panic!(
+                    "{harness:?} {failure_kind:?}: driver ended before failure: {:?}",
+                    driver.await
+                );
+            };
+            match event {
+                RuntimeEvent::Warning { message } if message.starts_with("prompt") => {
+                    warnings.push(message)
+                }
+                RuntimeEvent::PromptFinished {
+                    stop_reason,
+                    diagnostic,
+                    ..
+                } => break (stop_reason, diagnostic),
+                _ => {}
+            }
+        };
+        assert_eq!(stop_reason, expected_stop);
+        let diagnostic = diagnostic.expect("a failed turn carries its diagnostic");
+        let expected_message = if failure_kind.is_some() {
+            title
+        } else {
+            "model 'gpt-6-luna' is not enabled in rustponsesapi"
+        };
+        assert_eq!(diagnostic.message, expected_message);
+        assert_eq!(
+            diagnostic.http_status,
+            failure_kind.is_none().then_some(400)
+        );
+        let label = if expected_stop == mj_core::diagnostic::QUOTA_STOP_REASON {
+            "prompt failed (usage limit reached)"
+        } else {
+            "prompt failed"
+        };
+        assert_eq!(warnings, vec![format!("{label}: {expected_message}")]);
+
+        drop(request_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
+        assert!(
+            bridge.await.unwrap(),
+            "both adapters are asked for typed failures"
+        );
+    }
 }
 
 /// A fake OpenCode that opens one session and holds each prompt until

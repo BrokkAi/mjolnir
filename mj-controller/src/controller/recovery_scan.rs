@@ -667,7 +667,7 @@ fn scan_target_workers(
             executor,
         )?,
         TargetTemplate::SshPodman { ssh, .. } => {
-            let remote = targets::join_remote_command(&[
+            let remote = vec![
                 "podman".into(),
                 "ps".into(),
                 "--all".into(),
@@ -675,16 +675,16 @@ fn scan_target_workers(
                 format!("label={}=true", targets::MANAGED_LABEL),
                 "--format".into(),
                 "json".into(),
-            ]);
+            ];
             let output = execute_scan(
                 executor,
-                ssh_spec(ssh, [remote]),
+                ssh_spec(ssh, remote),
                 "scan remote Podman workers",
             )?;
             candidates_from_container_json(target_id, template, &output.stdout)?
         }
         TargetTemplate::SshDocker { ssh, .. } => {
-            let remote = targets::join_remote_command(&[
+            let remote = vec![
                 "docker".into(),
                 "ps".into(),
                 "--all".into(),
@@ -692,25 +692,25 @@ fn scan_target_workers(
                 format!("label={}=true", targets::MANAGED_LABEL),
                 "--format".into(),
                 "json".into(),
-            ]);
+            ];
             let output = execute_scan(
                 executor,
-                ssh_spec(ssh, [remote]),
+                ssh_spec(ssh, remote),
                 "scan remote Docker workers",
             )?;
             candidates_from_container_json(target_id, template, &output.stdout)?
         }
         TargetTemplate::SshAppleContainer { ssh, .. } => {
-            let remote = targets::join_remote_command(&[
+            let remote = vec![
                 "container".into(),
                 "list".into(),
                 "--all".into(),
                 "--format".into(),
                 "json".into(),
-            ]);
+            ];
             let output = execute_scan(
                 executor,
-                ssh_spec(ssh, [remote]),
+                ssh_spec(ssh, remote),
                 "scan remote Apple container workers",
             )?;
             candidates_from_container_json(target_id, template, &output.stdout)?
@@ -750,7 +750,7 @@ fn scan_target_workers(
                 executor,
                 ssh_spec(
                     ssh,
-                    [targets::join_remote_command(&[
+                    vec![
                         "find".into(),
                         ".local/share/hel/workers".into(),
                         "-mindepth".into(),
@@ -760,7 +760,7 @@ fn scan_target_workers(
                         "-name".into(),
                         "ownership.json".into(),
                         "-print".into(),
-                    ])],
+                    ],
                 ),
                 "scan bare SSH worker markers",
             )?;
@@ -1092,12 +1092,8 @@ fn execute_scan(
     Ok(output)
 }
 
-fn ssh_spec(ssh: &SshConnection, remote: impl IntoIterator<Item = String>) -> CommandSpec {
-    let backend = SshTarget::from(ssh);
-    let mut args = backend.ssh_args.clone();
-    args.push(backend.destination.clone());
-    args.extend(remote);
-    CommandSpec::new("ssh", args).ssh_session(&backend)
+fn ssh_spec(ssh: &SshConnection, remote: Vec<String>) -> CommandSpec {
+    targets::ssh_command_owned(&SshTarget::from(ssh), remote)
 }
 
 fn read_recovery_ownership(

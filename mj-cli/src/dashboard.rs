@@ -10,13 +10,14 @@
 //! wait, the drains, and the action handling in [`actions`] be separate
 //! functions over the same state.
 
-pub(crate) mod absent_engines;
 pub(crate) mod actions;
 mod attachment;
+mod auto_afk;
 mod composer_drafts;
-mod help_search;
 pub(crate) mod io;
 mod read_receipts;
+mod startup_prompts;
+mod summary_reads;
 mod usage_report;
 mod workspace_settings;
 
@@ -32,7 +33,7 @@ use crossterm::event::{
 use mj_controller::database::DetachedSessionDraft;
 use mj_core::config::Config;
 use mj_core::state::{MaterializedSession, SessionRecord, SessionResourceAllocation};
-use mj_core::subagent::SubagentRecord;
+use mj_core::subagent::SubagentMetadata;
 
 use mj_chat::chat::ChatElicitationDraft;
 use mj_chat::selection::{
@@ -69,9 +70,8 @@ use crate::import::{
 };
 use crate::pollers::{
     CapacityPollUpdate, DashboardLifecycleUpdate, Feed, RuntimeStateUpdate, WorkerDiagnosisTracker,
-    apply_worker_poll_update, complete_manual_quota_refresh, projected_queued_prompts,
-    session_target_is_pollable, spawn_dashboard_capacity_poller,
-    spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
+    apply_worker_poll_update, complete_manual_quota_refresh, session_target_is_pollable,
+    spawn_dashboard_capacity_poller, spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
 };
 use crate::session_presentation::{apply_lifecycle_display, apply_worker_activity, lifecycle_kind};
 use crate::{TerminalGuard, short_id};
@@ -326,6 +326,7 @@ pub(crate) struct DashboardContext {
     /// What the two-second keep-alive last saw. It never starts a daemon, so
     /// a daemon that goes away stays away until the user asks for it back.
     daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
+    auto_afk: auto_afk::AutoAfkReporter,
 
     /// What the daemon says about quota. The daemon is the only prober; this
     /// process never asks a provider.
@@ -340,9 +341,6 @@ pub(crate) struct DashboardContext {
     /// The daemon's finished-cycle count in the latest snapshot.
     pub(crate) quota_cycles: u64,
     pub(crate) target_test_cancel: Option<Arc<AtomicBool>>,
-    /// Local container targets whose engine is not installed, answered
-    /// without a check until their configuration or the engine changes.
-    pub(crate) absent_engines: absent_engines::AbsentEngines,
     /// The active global review choice discovery. New profile/model
     /// selections cancel the old request before starting another one.
     pub(crate) path_input_job: Option<(String, Arc<AtomicBool>)>,
@@ -356,6 +354,7 @@ pub(crate) struct DashboardContext {
 
     worker: Feed<SessionManagerUpdates>,
     runtime_state: Feed<watch::Receiver<RuntimeStateUpdate>>,
+    runtime_subagent_parents: watch::Sender<BTreeSet<String>>,
     runtime_health: Feed<watch::Receiver<mj_controller::pollers::RuntimeFeedHealth>>,
     /// Reviews the daemon is running. The chat renders one of these rather
     /// than driving a review of its own.
@@ -370,8 +369,7 @@ pub(crate) struct DashboardContext {
     runtime_review_views: BTreeMap<String, mj_controller::review_host::RuntimeReviewView>,
     runtime_config: Feed<watch::Receiver<Config>>,
     pending_runtime_updates: Vec<io::PendingRuntimeUpdate>,
-    remote_lifecycle_sessions: BTreeSet<String>,
-    remote_lifecycle_operations: BTreeMap<String, String>,
+    remote_lifecycle_operations: BTreeMap<String, drains::RemoteLifecycleObservation>,
     /// A workspace the user just created, opened once the feed carries it.
     pending_workspace_selection: Option<String>,
     pub(crate) worker_commands_tx: SessionManagerControl,
@@ -405,6 +403,7 @@ pub(crate) struct DashboardContext {
     /// request itself runs on a blocking worker; this flag keeps repeated
     /// Ctrl-V key repeats from creating an unbounded queue of reads.
     pub(crate) clipboard_read_in_flight: bool,
+    startup_prompts: startup_prompts::StartupPrompts,
     /// Pane-scoped text selection, driven by the mouse events this loop
     /// intercepts before the views see them.
     selection: SelectionState,
@@ -416,16 +415,16 @@ pub(crate) struct DashboardContext {
     /// The newest conversation search the Sessions filter asked for, read by
     /// its debounced task the same way.
     sessions_text_request: Arc<std::sync::atomic::AtomicU64>,
-    help_search: help_search::HelpSearch,
     usage_report: usage_report::UsageReportLoader,
 
     pub(crate) dashboard_io_tx: UnboundedSender<DashboardIoUpdate>,
     dashboard_io: Feed<UnboundedReceiver<DashboardIoUpdate>>,
     pub(crate) web_request_generation: u64,
     pub(crate) web_request_cancel: Option<tokio_util::sync::DropGuard>,
+    summary_reads: summary_reads::SummaryReads,
     materialized_projection_permits: Arc<tokio::sync::Semaphore>,
     materialized_projections_in_flight: BTreeSet<String>,
-    pending_materialized_projections: BTreeMap<String, (MaterializedSession, u64)>,
+    pending_materialized_projections: BTreeMap<String, (MaterializedProjection, u64)>,
     project_sources_in_flight: BTreeSet<String>,
     read_receipts: read_receipts::ReadReceipts,
 
@@ -444,51 +443,48 @@ type AwsResourceOptions = (
 );
 type AwsResourceOptionsSender = UnboundedSender<AwsResourceOptions>;
 
+/// One worker publication, kept together while background projections coalesce.
+pub(crate) struct MaterializedProjection {
+    materialized: MaterializedSession,
+    assessment: Option<Box<mj_core::assessment::TurnAssessment>>,
+}
+
+impl From<MaterializedSession> for MaterializedProjection {
+    fn from(materialized: MaterializedSession) -> Self {
+        Self {
+            materialized,
+            assessment: None,
+        }
+    }
+}
+
+impl From<mj_core::state::ManagedSessionSnapshot> for MaterializedProjection {
+    fn from(snapshot: mj_core::state::ManagedSessionSnapshot) -> Self {
+        Self {
+            materialized: snapshot.materialized,
+            assessment: snapshot.operational.assessment,
+        }
+    }
+}
+
 fn enqueue_materialized_projection(
     in_flight: &mut BTreeSet<String>,
-    pending: &mut BTreeMap<String, (MaterializedSession, u64)>,
-    materialized: MaterializedSession,
+    pending: &mut BTreeMap<String, (MaterializedProjection, u64)>,
+    projection: MaterializedProjection,
     viewed_through_event_ordinal: u64,
-) -> Option<(MaterializedSession, u64)> {
-    let session_id = materialized.session_id.clone();
+) -> Option<(MaterializedProjection, u64)> {
+    let session_id = projection.materialized.session_id.clone();
     if !in_flight.insert(session_id.clone()) {
         let replace = pending.get(&session_id).is_none_or(|(queued, _)| {
-            materialized.applied_event_ordinal >= queued.applied_event_ordinal
+            projection.materialized.applied_event_ordinal
+                >= queued.materialized.applied_event_ordinal
         });
         if replace {
-            pending.insert(session_id, (materialized, viewed_through_event_ordinal));
+            pending.insert(session_id, (projection, viewed_through_event_ordinal));
         }
         return None;
     }
-    Some((materialized, viewed_through_event_ordinal))
-}
-
-pub(super) fn retain_workspace_sessions(
-    controller: &mut Controller,
-    _workspace_id: &str,
-    client_id: &str,
-) -> Result<()> {
-    let active: Vec<_> = controller
-        .state
-        .sessions
-        .values()
-        .filter(|session| session.state.is_active())
-        .map(|session| session.id.clone())
-        .collect();
-    for id in active {
-        let session = controller
-            .state
-            .sessions
-            .get_mut(&id)
-            .expect("active session exists");
-        let frontier = mj_controller::database::client_read_frontier(
-            client_id,
-            &session.workspace_id,
-            &session.id,
-        )?;
-        session.viewed_through_event_ordinal = frontier;
-    }
-    Ok(())
+    Some((projection, viewed_through_event_ordinal))
 }
 
 /// The top level of the Git worktree `mj` was started in, or `None` outside
@@ -532,6 +528,10 @@ pub(crate) async fn run_dashboard_for_workspace(
         context.restore_upgrade(resume).await;
     }
     if automatic_setup {
+        // First-run setup decides whether this is a new installation from
+        // whether the configuration is empty, so nothing else may add to it
+        // first.
+        context.dashboard.hold_availability_check();
         io::spawn_first_run_setup(
             context.dashboard_io_tx.clone(),
             context.critical_operations.clone(),
@@ -616,6 +616,8 @@ pub(crate) async fn run_dashboard_for_workspace(
     let mut pacer = FramePacer::new(FRAME_INTERVAL);
     pacer.mark_urgent();
     loop {
+        context.update_subagent_scope();
+        context.reconcile_stored_session_summaries();
         if !context.shutdown_requested {
             context.refresh_controller_derived_state();
             context.start_sessions_text_search();
@@ -673,10 +675,13 @@ pub(crate) async fn run_dashboard_for_workspace(
                 input = true;
                 pacer.mark_urgent();
                 let Some(event) = event else { break };
+                let mut event = event?;
+                if auto_afk::is_operator_input(&event) {
+                    context.auto_afk.input();
+                }
                 if context.shutdown_requested {
                     continue;
                 }
-                let mut event = event?;
                 // Nothing behind the splash has been seen, so nothing there
                 // should act on input yet.
                 if context.splash.is_some() {
@@ -777,6 +782,9 @@ pub(crate) async fn run_dashboard_for_workspace(
                         break;
                     };
                     event = next?;
+                    if auto_afk::is_operator_input(&event) {
+                        context.auto_afk.input();
+                    }
                 }
             }
             // A drag held past a scrollable surface's edge keeps scrolling it
@@ -856,6 +864,10 @@ pub(crate) async fn run_dashboard_for_workspace(
                         }
                     }
                 }
+            }
+            Some(error) = context.auto_afk.errors.recv() => {
+                context.dashboard.set_failure_notice(error);
+                pacer.mark();
             }
             _ = context.critical_operations_changed.changed(),
                 if context.shutdown_requested => {
@@ -964,12 +976,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             if let Some(refresh) = context.dashboard.take_mount_history_refresh() {
                 actions::apply_dashboard_action(&mut context, refresh).await?;
             }
-            if let Some(check) = context.dashboard.take_target_availability_check() {
-                actions::apply_dashboard_action(&mut context, check).await?;
-            }
-            // A machine no runtime runs on, found at startup or brought by a
-            // save or another client's edit, is probed for its runtimes.
-            if let Some(check) = context.dashboard.take_machine_runtime_check() {
+            // What is there is checked at startup and whenever a picker
+            // opens, one check at a time.
+            if let Some(check) = context.dashboard.take_availability_check() {
                 actions::apply_dashboard_action(&mut context, check).await?;
             }
             // Settings shows whether each saved profile has a login. Reading
@@ -998,9 +1007,6 @@ pub(crate) async fn run_dashboard_for_workspace(
             context.refresh_go_context();
             context.refresh_git_status();
             context
-                .help_search
-                .sync(&context.dashboard, &context.dashboard_io_tx);
-            context
                 .usage_report
                 .sync(&context.dashboard, &context.dashboard_io_tx);
         }
@@ -1016,6 +1022,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             break;
         }
     }
+    context.auto_afk.shutdown().await;
     context.cancel_background_work();
     let quit_detached = context.quit_detached;
     // Hand the terminal back before saying anything on it; the warm chat and
@@ -1096,7 +1103,7 @@ mod upgrade;
 pub(crate) use upgrade::UpgradeResume;
 mod drafts;
 mod drains;
-pub(crate) use drains::{refresh_open_chats, refresh_subagent_counts};
+pub(crate) use drains::refresh_subagent_counts;
 mod frame_pacer;
 use frame_pacer::{FRAME_INTERVAL, FramePacer, paced};
 mod session_state;
@@ -1196,6 +1203,16 @@ impl DashboardContext {
         self.record_detach(session_id, ordinal);
     }
 
+    /// Keep pending input jobs alive when navigation drops a worker-facing view.
+    pub(crate) fn park_chat_composer(&mut self, session_id: &str) {
+        if !self.dashboard.has_standby_composer(session_id)
+            && let Some(chat) = self.chats.get_mut(session_id)
+            && let Some(composer) = chat.take_live_composer()
+        {
+            self.dashboard.adopt_standby_composer(session_id, composer);
+        }
+    }
+
     /// Drops the warm chats no pane shows any more, saving each one first.
     pub(crate) fn retire_chats_outside_the_layout(&mut self) {
         let shown = self.dashboard.pane_session_ids();
@@ -1206,6 +1223,7 @@ impl DashboardContext {
             .cloned()
             .collect::<Vec<_>>()
         {
+            self.park_chat_composer(&session_id);
             self.save_question_draft(&session_id);
             self.record_chat_detach(&session_id);
             self.chats.remove(&session_id);
@@ -1311,6 +1329,7 @@ impl DashboardContext {
         self.opening_chat_sessions.remove(&pane);
         self.attachments.remove(&pane);
         if let Some(session_id) = self.dashboard.close_pane(pane) {
+            self.park_chat_composer(&session_id);
             self.record_chat_detach(&session_id);
             self.chats.remove(&session_id);
             self.selection.clear();
@@ -1448,6 +1467,22 @@ impl DashboardContext {
     fn begin_shutdown(&mut self, detached: bool) {
         if self.shutdown_requested {
             return;
+        }
+        self.collect_prepared_startup_prompts();
+        self.startup_prompts
+            .cancel_unadmitted(&mut self.dashboard, &mut self.chats);
+        self.startup_prompts
+            .retain_unconfirmed(&mut self.dashboard, &mut self.chats);
+        for session_id in self.dashboard.standby_session_ids() {
+            if !self.chats.contains_key(&session_id) {
+                let viewed = self
+                    .controller
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .map_or(0, |session| session.viewed_through_event_ordinal);
+                self.record_detach(&session_id, viewed);
+            }
         }
         // A warm chat may be hidden while another session opens. Every
         // shutdown path must save every one of them, including global quit
@@ -1594,6 +1629,7 @@ impl DashboardContext {
             workspace_id,
             client_id,
             controller,
+            bootstrap,
             workspaces,
             layouts,
             conversation_layouts,
@@ -1639,11 +1675,15 @@ impl DashboardContext {
             dashboard.apply_queued_prompts(&session_id, queued);
         }
 
-        let remote_worker = spawn_remote_dashboard_worker_poller(workspace_id.clone())?;
+        let remote_worker = spawn_remote_dashboard_worker_poller(workspace_id.clone(), bootstrap)?;
         let worker_updates_rx = remote_worker.updates;
         let worker_commands_tx = remote_worker.control;
         let worker_shutdown = remote_worker.shutdown;
-        let runtime_state_rx = remote_worker.state;
+        let runtime_subagent_parents = remote_worker.subagent_parents;
+        let mut runtime_state_rx = remote_worker.state;
+        // Apply bootstrap lifecycle and resource views even when the first
+        // delta contains no changes and therefore causes no watch wakeup.
+        runtime_state_rx.mark_changed();
         dashboard.set_move_snapshot(runtime_state_rx.borrow().moves.clone());
         dashboard.set_recent_launch(runtime_state_rx.borrow().recent_launch.clone());
         dashboard.set_container_capacities(runtime_state_rx.borrow().container_capacities.clone());
@@ -1697,6 +1737,8 @@ impl DashboardContext {
             conversation_layouts.clone(),
             notices.clone(),
         );
+        let auto_afk_enabled = controller.config.advanced.auto_afk_minutes > 0;
+        let auto_afk_away = controller.state.operator_presence.away;
 
         let mut context = Self {
             terminal,
@@ -1734,17 +1776,18 @@ impl DashboardContext {
             critical_operations,
             critical_operations_changed,
             daemon_presence,
+            auto_afk: auto_afk::AutoAfkReporter::new(auto_afk_enabled, auto_afk_away),
             quota: Feed::new(quota_rx),
             manual_quota_refresh_cycles: None,
             quota_cycles: 0,
             target_test_cancel: None,
-            absent_engines: absent_engines::AbsentEngines::default(),
             path_input_job: None,
             completion_job: None,
             review_discovery_cancel: None,
             session_preflight_cancel: None,
             worker: Feed::new(worker_updates_rx),
             runtime_state: Feed::new(runtime_state_rx),
+            runtime_subagent_parents,
             runtime_health: Feed::new(remote_worker.health),
             runtime_reviews: Feed::new(runtime_reviews_rx),
             runtime_notices: Feed::new(runtime_notices_rx),
@@ -1754,7 +1797,6 @@ impl DashboardContext {
             review_capabilities: capabilities_rx.clone(),
             profile_capabilities: Feed::new(capabilities_rx),
             pending_runtime_updates: Vec::new(),
-            remote_lifecycle_sessions: BTreeSet::new(),
             remote_lifecycle_operations: BTreeMap::new(),
             pending_workspace_selection: None,
             worker_commands_tx,
@@ -1771,7 +1813,6 @@ impl DashboardContext {
             resolving_aws_resource_options: BTreeSet::new(),
             wiki_search_task: None,
             sessions_text_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            help_search: help_search::HelpSearch::default(),
             usage_report: usage_report::UsageReportLoader::default(),
             import_updates_tx,
             import_profiles: Feed::new(import_updates_rx),
@@ -1783,12 +1824,14 @@ impl DashboardContext {
             next_import_task_id: 0,
             active_import: None,
             clipboard_read_in_flight: false,
+            startup_prompts: startup_prompts::StartupPrompts::default(),
             selection: SelectionState::new(),
             selection_text: None,
             dashboard_io_tx,
             dashboard_io: Feed::new(dashboard_io_rx),
             web_request_generation: 0,
             web_request_cancel: None,
+            summary_reads: summary_reads::SummaryReads::default(),
             materialized_projection_permits: Arc::new(tokio::sync::Semaphore::new(2)),
             materialized_projections_in_flight: BTreeSet::new(),
             pending_materialized_projections: BTreeMap::new(),
@@ -1812,6 +1855,7 @@ pub(crate) struct LoadedDashboard {
     workspace_id: String,
     client_id: String,
     controller: Controller,
+    bootstrap: mj_client::runtime_feed::RuntimeReplica,
     workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
     layouts: BTreeMap<String, PaneSizes>,
     conversation_layouts: BTreeMap<String, ConversationLayout>,
@@ -1821,55 +1865,44 @@ pub(crate) struct LoadedDashboard {
 }
 
 impl LoadedDashboard {
-    pub(crate) fn load(
+    /// Builds the dashboard's starting state from what the daemon read from
+    /// the store and its atomic runtime publication.
+    pub(crate) fn from_daemon(
         workspace_id: &str,
         client_id: &str,
         workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
-    ) -> Result<Self> {
-        let mut controller = Controller::load()?;
-        retain_workspace_sessions(&mut controller, workspace_id, client_id)?;
-        let launch_recency = mj_client::runtime_feed::launch_recency(&controller.state.sessions);
-        // Start from what the runtime feed will send, which is live sessions
-        // only; the resume dialog asks for the stopped ones. No lifecycle
-        // operation is known yet, so only a durable move keeps a stopped
-        // session live here.
-        let moving = mj_controller::database::load_move_operations()?
-            .into_iter()
-            .filter(|operation| operation.is_active())
-            .map(|operation| operation.selection.session_id)
-            .collect();
-        let live = mj_core::state::live_session_ids(
-            &controller.state.sessions,
-            &controller.state.subagents,
-            &moving,
-        );
-        controller.state.sessions.retain(|id, _| live.contains(id));
-        controller.state.subagents.retain(|id, _| live.contains(id));
-        let layouts = workspaces
-            .iter()
-            .map(|workspace| {
-                mj_controller::database::load_workspace_pane_sizes(&workspace.id)
-                    .map(|sizes| (workspace.id.clone(), sizes))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        let conversation_layouts = workspaces
-            .iter()
-            .map(|workspace| {
-                mj_controller::database::load_workspace_layout(&workspace.id)
-                    .map(|layout| (workspace.id.clone(), layout))
-            })
-            .collect::<Result<BTreeMap<String, ConversationLayout>>>()?;
-        let queued_prompts = projected_queued_prompts(&controller)?;
-        Ok(Self {
+        startup: mj_client::daemon::DashboardStartup,
+    ) -> Self {
+        let mj_client::daemon::DashboardStartup {
+            runtime,
+            metadata,
+            pane_sizes,
+            conversation_layouts,
+            queued_prompts,
+        } = startup;
+        let bootstrap = runtime.into_replica();
+        let config = bootstrap.projection.metadata.installed_config();
+        let state = mj_core::state::State {
+            sessions: bootstrap.projection.records.clone(),
+            subagents: bootstrap.projection.subagents.clone(),
+            operator_presence: bootstrap.projection.metadata.operator_presence,
+            last_subagent_policies: bootstrap.projection.metadata.last_subagent_policies.clone(),
+            mount_history: metadata.mount_history,
+            container_sizes: metadata.container_sizes,
+            ..Default::default()
+        };
+        let launch_recency = (*bootstrap.projection.metadata.launch_recency).clone();
+        Self {
             workspace_id: workspace_id.to_owned(),
             client_id: client_id.to_owned(),
-            controller,
+            controller: Controller { config, state },
+            bootstrap,
             workspaces,
-            layouts,
+            layouts: pane_sizes,
             conversation_layouts,
             queued_prompts,
             launch_recency,
-        })
+        }
     }
 
     /// The color the dashboard's first frame paints behind everything.

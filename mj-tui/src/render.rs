@@ -25,7 +25,7 @@ use mj_core::state::{SessionRecord, SessionState, SessionTransitionKind, State};
 use mj_chat::chat::render_agent_message_head;
 use mj_chat::components::{render_scrollbar, scrollbar_geometry};
 use mj_chat::theme;
-use mj_client::quota::{API_LABEL, ProfileQuota, QuotaWindow};
+use mj_client::quota::{NOT_REPORTED_LABEL, ProfileQuota, QuotaWindow};
 use mj_client::review::RuntimeReviewView;
 use mj_core::targets::DeploymentCapacityKind;
 
@@ -69,6 +69,11 @@ fn take_selection_recenter(dashboard: &DashboardState, focus: Focus) -> bool {
 pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut DashboardState) {
     dashboard.prepare_dialog_state();
     let mut surfaces = std::mem::take(&mut dashboard.frame_surfaces);
+    if let Some(dialog) = dashboard.away_dialog() {
+        crate::operator_away::render(frame, area, dashboard, dialog, &mut surfaces);
+        dashboard.frame_surfaces = surfaces;
+        return;
+    }
     match &dashboard.mode {
         Mode::New(wizard) => render_new_wizard(frame, area, dashboard, wizard, &mut surfaces),
         Mode::Resume(wizard) => render_resume_wizard(frame, area, dashboard, wizard, &mut surfaces),
@@ -106,9 +111,6 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
             render_import_bundle_confirmation(frame, area, confirmation, &mut surfaces)
         }
         Mode::Confirm(dialog) => render_confirmation(frame, area, dialog, &mut surfaces),
-        Mode::Help(overlay) => {
-            crate::help::render_help(frame, area, dashboard, overlay, &mut surfaces)
-        }
         Mode::Palette(palette) => {
             crate::palette::render_palette(frame, area, dashboard, palette, &mut surfaces)
         }

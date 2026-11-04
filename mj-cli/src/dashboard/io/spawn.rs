@@ -188,17 +188,18 @@ pub(crate) fn spawn_workspace_pane_sizes_load(
     workspace_ids: Vec<String>,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) -> JoinHandle<()> {
-    spawn_io(
+    spawn_background_async(
         "load workspace pane sizes",
         updates,
-        move || {
-            workspace_ids
+        SAVE_ACK_TIMEOUT,
+        async move {
+            Ok(daemon::connect_or_start()
+                .await?
+                .workspace_layouts(workspace_ids)
+                .await?
+                .pane_sizes
                 .into_iter()
-                .map(|workspace_id| {
-                    let sizes = mj_controller::database::load_workspace_pane_sizes(&workspace_id)?;
-                    Ok((workspace_id, sizes))
-                })
-                .collect()
+                .collect())
         },
         |result| DashboardIoUpdate::WorkspacePaneSizes { result },
     )
@@ -210,17 +211,18 @@ pub(crate) fn spawn_workspace_layouts_load(
     workspace_ids: Vec<String>,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) -> JoinHandle<()> {
-    spawn_io(
+    spawn_background_async(
         "load workspace layouts",
         updates,
-        move || {
-            workspace_ids
+        SAVE_ACK_TIMEOUT,
+        async move {
+            Ok(daemon::connect_or_start()
+                .await?
+                .workspace_layouts(workspace_ids)
+                .await?
+                .conversation_layouts
                 .into_iter()
-                .map(|workspace_id| {
-                    let layout = mj_controller::database::load_workspace_layout(&workspace_id)?;
-                    Ok((workspace_id, layout))
-                })
-                .collect()
+                .collect())
         },
         |result| DashboardIoUpdate::WorkspaceLayouts { result },
     )
@@ -403,6 +405,12 @@ pub(crate) fn spawn_review_settings_discovery(
             request,
             worker_cancelled,
             progress_tx,
+            |selection| async move {
+                daemon::connect_existing()
+                    .await?
+                    .warm_profile_capabilities(selection)
+                    .await
+            },
         );
         tokio::pin!(discovery);
         let result = loop {
@@ -492,18 +500,9 @@ pub(crate) fn spawn_first_run_setup(
                     );
                 },
             )?;
+            // An existing installation picks up agents installed since its
+            // last launch through the startup availability check.
             let Some(summary) = result else {
-                // An existing installation still picks up agents installed
-                // since its last launch.
-                let added = setup::add_detected_profiles(&config_path, &executor, &|| {
-                    executor.is_cancelled()
-                })
-                .map_err(|error| format!("{error:#}"));
-                report(
-                    "detecting agent profiles",
-                    &progress,
-                    DashboardIoUpdate::StartupProfilesDetected(added),
-                );
                 return Ok(None);
             };
             report(
@@ -534,6 +533,7 @@ fn machine_runtime_probe(probe: mj_controller::setup::MachineProbe) -> mj_tui::M
             rejected: probe
                 .rejected()
                 .map(|runtime| RejectedRuntime {
+                    kind: runtime.kind.name().to_owned(),
                     label: runtime.kind.label().to_owned(),
                     detail: runtime.detail.clone(),
                     remediation: runtime.remediation.clone(),
@@ -555,34 +555,62 @@ fn machine_runtime_probe(probe: mj_controller::setup::MachineProbe) -> mj_tui::M
     }
 }
 
-/// Probe machines that no runtime runs on and write the runtimes they can
-/// run, off the event loop. Each machine is its own host, so they are probed
-/// at once, and quitting cancels the probes.
-pub(crate) fn spawn_machine_runtime_check(
+/// Check what is there and add what is new, off the event loop: this
+/// computer's agents and engines, and every machine at once, each with one
+/// SSH call. Quitting cancels the check.
+pub(crate) fn spawn_availability_check(
     generation: u64,
-    machines: Vec<(String, mj_core::config::Machine)>,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
     spawn_cancellable_io(
         tracker,
-        "detecting machine runtimes",
+        "checking what is available",
         updates,
         move |cancelled| {
-            use mj_controller::setup;
+            use mj_controller::setup::{self, DEFAULT_IMAGE};
+            // Only quitting stops the check. A host that runs out the
+            // deadline fails its own probe; every other answer still lands.
+            let quit = cancelled.clone();
             let executor =
                 CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(60));
-            let probes = setup::probe_machines(&machines, &executor);
-            let added =
-                setup::add_machine_runtimes(&mj_core::config::config_path(), &probes, &|| {
-                    executor.is_cancelled()
+            let report =
+                setup::check_availability(&mj_core::config::config_path(), &executor, &|| {
+                    quit.load(std::sync::atomic::Ordering::Acquire)
                 })?;
-            Ok(mj_tui::MachineRuntimesChecked {
-                probes: probes.into_iter().map(machine_runtime_probe).collect(),
-                added,
+            let path = std::env::var_os("PATH");
+            let local = report
+                .local
+                .into_iter()
+                .map(|runtime| {
+                    let (_, template) = setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
+                    let installed = mj_controller::targets::local_engine_command(&template)
+                        .is_some_and(|engine| {
+                            mj_controller::targets::program_on_path(engine, path.as_deref())
+                        });
+                    let missing = (!runtime.usable()).then(|| match runtime.remediation {
+                        Some(fix) => format!("{} {fix}", runtime.detail.trim()),
+                        None => runtime.detail,
+                    });
+                    (
+                        runtime.kind.name().to_owned(),
+                        mj_tui::LocalEngine { missing, installed },
+                    )
+                })
+                .collect();
+            Ok(mj_tui::AvailabilityChecked {
+                profiles: report.profiles,
+                local,
+                machines: report
+                    .machines
+                    .into_iter()
+                    .map(machine_runtime_probe)
+                    .collect(),
+                added_profiles: report.added_profiles,
+                added_runtimes: report.added_runtimes,
             })
         },
-        move |result| DashboardIoUpdate::MachineRuntimesChecked { generation, result },
+        move |result| DashboardIoUpdate::AvailabilityChecked { generation, result },
     )
 }
 
@@ -649,6 +677,7 @@ pub(crate) fn spawn_setup_discovery(
                             config.targets.insert(id.to_owned(), target);
                         } else {
                             rejected_runtimes.push(RejectedRuntime {
+                                kind: runtime.kind.name().to_owned(),
                                 label: runtime.kind.label().to_owned(),
                                 detail: runtime.detail,
                                 remediation: runtime.remediation,
@@ -673,6 +702,9 @@ pub(crate) fn spawn_setup_discovery(
     )
 }
 
+#[cfg(test)]
+pub(crate) use mj_client::settings::save::save_at as save_setup_at;
+
 pub(crate) fn spawn_setup_save(
     generation: u64,
     original: String,
@@ -681,13 +713,18 @@ pub(crate) fn spawn_setup_save(
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
-    spawn_critical_io(
+    spawn_critical_async(
         tracker,
         "saving setup",
         updates,
-        move || {
-            let state = mj_controller::database::load_state()?;
-            save_setup_at(&mj_core::config::config_path(), &original, &updated, &state)
+        SAVE_ACK_TIMEOUT,
+        async move {
+            // The daemon checks the edit against the stored sessions it would
+            // disturb; only it opens the store.
+            daemon::connect_or_start()
+                .await?
+                .save_setup(original, updated)
+                .await
         },
         move |result| DashboardIoUpdate::SetupSaved {
             generation,
@@ -695,99 +732,6 @@ pub(crate) fn spawn_setup_save(
             login_profile,
         },
     )
-}
-
-pub(crate) fn save_setup_at(
-    path: &std::path::Path,
-    original: &str,
-    updated: &str,
-    state: &State,
-) -> Result<Config> {
-    let original: serde_json::Value = serde_json::from_str(original)?;
-    let updated_config: Config = serde_json::from_str(updated)?;
-    updated_config.validate()?;
-    let updated = serde_json::to_value(&updated_config)?;
-    // A profile this edit adds or changes must be usable, so Setup reports a
-    // missing key while it is open. Any other profile's readiness is not this
-    // save's business: refusing over it would block every unrelated setting.
-    for (id, profile) in updated_config.enabled_profiles() {
-        if original["profiles"][id] != updated["profiles"][id] {
-            profile.ensure_ready(id)?;
-        }
-    }
-    Config::update_to(path, |config| {
-        // The editor includes implicit local defaults. Treat those same defaults
-        // as the merge base when they have not been written to disk yet.
-        let defaults = Config::default().with_local_targets();
-        // Compare in the stored shape the editor works in, where a runtime
-        // names its machine, rather than in the fused in-memory shape.
-        let stored_defaults = serde_json::to_value(&defaults)?;
-        let mut implicit = Vec::new();
-        for (id, target) in defaults.targets {
-            if !config.targets.contains_key(&id)
-                && original["targets"][&id] == stored_defaults["targets"][&id]
-            {
-                implicit.push((id.clone(), target.clone()));
-                config.targets.insert(id, target);
-            }
-        }
-        let current = serde_json::to_value(&*config)?;
-        let merged = merge_setup_edit(Some(&original), Some(&updated), Some(&current), "Setup")?
-            .context("setup cannot remove the configuration")?;
-        let mut next: Config = serde_json::from_value(merged)?;
-        state.validate_setup_update(config, &next)?;
-        // The defaults were only the merge base. A built-in target the edit
-        // left as it was stays out of the file, as `Config::update` does, so
-        // an unrelated save does not turn it into one the user configured.
-        for (id, target) in implicit {
-            if next.targets.get(&id) == Some(&target) {
-                next.targets.remove(&id);
-            }
-        }
-        *config = next;
-        Ok(())
-    })
-    .map(|(config, ())| config)
-}
-
-/// Apply only fields the dialog changed; refuse conflicting concurrent edits.
-pub(crate) fn merge_setup_edit(
-    original: Option<&serde_json::Value>,
-    updated: Option<&serde_json::Value>,
-    current: Option<&serde_json::Value>,
-    path: &str,
-) -> Result<Option<serde_json::Value>> {
-    use serde_json::Value;
-    if original == updated || updated == current {
-        return Ok(current.cloned());
-    }
-    if original == current {
-        return Ok(updated.cloned());
-    }
-    if updated.is_some_and(Value::is_object)
-        && original.is_none_or(Value::is_object)
-        && current.is_some_and(Value::is_object)
-    {
-        let keys = original
-            .into_iter()
-            .chain(updated)
-            .chain(current)
-            .flat_map(|value| value.as_object().unwrap().keys())
-            .collect::<BTreeSet<_>>();
-        let mut merged = serde_json::Map::new();
-        for key in keys {
-            if let Some(value) = merge_setup_edit(
-                original.and_then(|v| v.get(key)),
-                updated.and_then(|v| v.get(key)),
-                current.and_then(|v| v.get(key)),
-                &format!("{path} / {key}"),
-            )? {
-                merged.insert(key.clone(), value);
-            }
-        }
-        return Ok(Some(Value::Object(merged)));
-    }
-    bail!("{path} changed in another client. Reopen Setup to edit the latest value.")
 }
 
 pub(crate) fn spawn_spinner_style_save(
@@ -860,13 +804,12 @@ pub(crate) struct LifecycleOperationRequest {
 
 /// Runs one session lifecycle operation on a blocking task.
 ///
-/// Every one of them reloads the controller so it acts on durable state, then
-/// answers on the lifecycle channel whatever happens. The daemon owns
-/// lifecycle/recovery serialization.
+/// Every one of them asks the daemon, which owns lifecycle/recovery
+/// serialization, and answers on the lifecycle channel whatever happens.
 pub(crate) fn spawn_lifecycle_operation(
     request: LifecycleOperationRequest,
     tracker: CriticalOperationTracker,
-    work: impl FnOnce(&mut Controller, Arc<AtomicBool>) -> Result<LifecycleSuccess> + Send + 'static,
+    work: impl FnOnce(Arc<AtomicBool>) -> Result<LifecycleSuccess> + Send + 'static,
 ) {
     let LifecycleOperationRequest {
         session_id,
@@ -883,11 +826,7 @@ pub(crate) fn spawn_lifecycle_operation(
         cancelled.clone(),
     );
     tokio::task::spawn_blocking(move || {
-        let result = (|| -> Result<LifecycleSuccess> {
-            let mut controller = Controller::load()?;
-            work(&mut controller, cancelled.clone())
-        })()
-        .map_err(|error| format!("{error:#}"));
+        let result = work(cancelled.clone()).map_err(|error| format!("{error:#}"));
         report(
             "session lifecycle operation",
             &updates,
@@ -902,19 +841,20 @@ pub(crate) fn spawn_lifecycle_operation(
 }
 
 pub(crate) fn spawn_materialized_session_projection(
-    materialized: MaterializedSession,
+    projection: crate::dashboard::MaterializedProjection,
     viewed_through_event_ordinal: u64,
     previous: mj_tui::MaterializedProjectionCache,
     updates: UnboundedSender<DashboardIoUpdate>,
     permits: Arc<tokio::sync::Semaphore>,
 ) {
-    let session_id = materialized.session_id.clone();
+    let session_id = projection.materialized.session_id.clone();
     tokio::spawn(async move {
         let result = match permits.acquire_owned().await {
             Ok(permit) => {
                 let result = tokio::task::spawn_blocking(move || {
-                    PreparedMaterializedSessionDetail::from_materialized(
-                        materialized,
+                    PreparedMaterializedSessionDetail::from_assessed_materialized(
+                        projection.materialized,
+                        projection.assessment.as_deref(),
                         viewed_through_event_ordinal,
                         previous,
                     )
@@ -942,15 +882,15 @@ pub(crate) fn spawn_stopped_subagent_transcript(
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
     let reported_session_id = session_id.clone();
-    spawn_io(
+    spawn_background_async(
         "load a stopped sub-agent's transcript",
         updates,
-        move || {
-            Ok(mj_controller::database::load_materialized_projection_tail(
-                &session_id,
-                mj_chat::chat::TAIL_SEED_ITEMS,
-            )?
-            .map(|(session, _)| session))
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .stored_projection_tail(session_id, mj_chat::chat::TAIL_SEED_ITEMS)
+                .await
         },
         move |result| DashboardIoUpdate::StoppedSubagentTranscript {
             session_id: reported_session_id,
@@ -962,50 +902,60 @@ pub(crate) fn spawn_stopped_subagent_transcript(
 pub(crate) fn spawn_stored_session_summary(
     session_id: String,
     viewed_through_event_ordinal: u64,
+    generation: u64,
+    permits: Arc<tokio::sync::Semaphore>,
     updates: UnboundedSender<DashboardIoUpdate>,
-) {
+) -> JoinHandle<()> {
     let reported_session_id = session_id.clone();
-    spawn_io(
-        "load stored session summary",
-        updates,
-        move || {
-            let summary = mj_controller::database::load_materialized_session_summary(&session_id)?
-                .with_context(|| format!("session {session_id} has no stored projection"))?;
-            Ok(PreparedMaterializedSessionSummary::from_materialized(
-                summary,
-                viewed_through_event_ordinal,
-            ))
-        },
-        move |result| DashboardIoUpdate::StoredSessionSummary {
-            session_id: reported_session_id,
-            result,
-        },
-    );
+    tokio::spawn(async move {
+        let _permit = permits
+            .acquire_owned()
+            .await
+            .expect("summary read permits remain open");
+        let task = spawn_background_async(
+            "load stored session summary",
+            updates,
+            SAVE_ACK_TIMEOUT,
+            async move {
+                let summary = daemon::connect_or_start()
+                    .await?
+                    .stored_session_summary(session_id.clone())
+                    .await?
+                    .with_context(|| format!("session {session_id} has no stored projection"))?;
+                // Only CPU preparation needs a blocking thread. Acquiring one
+                // while awaiting the connection can starve its metadata read.
+                tokio::task::spawn_blocking(move || {
+                    PreparedMaterializedSessionSummary::from_materialized(
+                        summary,
+                        viewed_through_event_ordinal,
+                    )
+                })
+                .await
+                .context("prepare stored session summary task failed")
+            },
+            move |result| DashboardIoUpdate::StoredSessionSummary {
+                session_id: reported_session_id,
+                generation,
+                result,
+            },
+        );
+        if let Err(error) = tokio_util::task::AbortOnDropHandle::new(task).await {
+            tracing::error!(%error, "stored summary supervisor failed");
+        }
+    })
 }
 
 pub(crate) fn spawn_lifecycle_reload(
     reload: LifecycleReload,
-    workspace_id: String,
-    client_id: String,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
-    spawn_io(
+    spawn_background_async(
         "reload lifecycle state",
         updates,
-        move || {
-            let mut controller = Controller::load()?;
-            crate::dashboard::retain_workspace_sessions(
-                &mut controller,
-                &workspace_id,
-                &client_id,
-            )?;
-            Ok(controller)
-        },
+        SAVE_ACK_TIMEOUT,
+        crate::dashboard::io::stored_session_metadata(),
         move |result| {
-            DashboardIoUpdate::LifecycleReloaded(Box::new(LifecycleReloaded {
-                reload,
-                result: result.map(DashboardMetadata::from),
-            }))
+            DashboardIoUpdate::LifecycleReloaded(Box::new(LifecycleReloaded { reload, result }))
         },
     );
 }
@@ -1060,68 +1010,11 @@ pub(crate) fn spawn_dashboard_change_workspace(
     );
 }
 
-pub(crate) fn spawn_startup_prompt(
-    session_id: String,
-    text: String,
-    inherited_draft: Option<String>,
-    updates: UnboundedSender<DashboardIoUpdate>,
-    tracker: CriticalOperationTracker,
-) {
-    let queued_session_id = session_id.clone();
-    let queued_text = text.clone();
-    spawn_critical_async(
-        tracker,
-        format!("queueing a prompt for session {}", short_id(&session_id)),
-        updates,
-        SAVE_ACK_TIMEOUT,
-        async move {
-            daemon::connect_or_start()
-                .await?
-                .queue_startup_prompt(queued_session_id, queued_text, inherited_draft)
-                .await
-        },
-        move |result| DashboardIoUpdate::StartupPromptQueued {
-            session_id,
-            text,
-            result,
-        },
-    );
-}
-
-pub(crate) fn spawn_withdraw_startup_prompt(
-    session_id: String,
-    text: String,
-    updates: UnboundedSender<DashboardIoUpdate>,
-    tracker: CriticalOperationTracker,
-) {
-    let withdrawn_session_id = session_id.clone();
-    let withdrawn_text = text.clone();
-    spawn_critical_async(
-        tracker,
-        format!("withdrawing a prompt for session {}", short_id(&session_id)),
-        updates,
-        SAVE_ACK_TIMEOUT,
-        async move {
-            daemon::connect_or_start()
-                .await?
-                .withdraw_startup_prompt(withdrawn_session_id, withdrawn_text)
-                .await
-        },
-        move |result| DashboardIoUpdate::StartupPromptWithdrawn {
-            session_id,
-            text,
-            result,
-        },
-    );
-}
-
 pub(crate) struct ConfigRenameRequest {
     pub(crate) what: String,
     pub(crate) old_id: String,
     pub(crate) new_id: String,
     pub(crate) profile: bool,
-    pub(crate) workspace_id: String,
-    pub(crate) client_id: String,
 }
 
 pub(crate) fn spawn_config_rename(
@@ -1134,8 +1027,6 @@ pub(crate) fn spawn_config_rename(
         old_id,
         new_id,
         profile,
-        workspace_id,
-        client_id,
     } = request;
     spawn_critical_async(
         tracker,
@@ -1149,22 +1040,12 @@ pub(crate) fn spawn_config_rename(
             } else {
                 daemon.rename_target(old_id, new_id).await?;
             }
-            tokio::task::spawn_blocking(move || {
-                let mut controller = Controller::load()?;
-                crate::dashboard::retain_workspace_sessions(
-                    &mut controller,
-                    &workspace_id,
-                    &client_id,
-                )?;
-                Ok::<_, anyhow::Error>(controller)
-            })
-            .await
-            .context("configuration reload task panicked")?
+            daemon
+                .stored_session_metadata()
+                .await
+                .map(DashboardMetadata::from)
         },
-        move |result| DashboardIoUpdate::ConfigRename {
-            what,
-            result: result.map(DashboardMetadata::from),
-        },
+        move |result| DashboardIoUpdate::ConfigRename { what, result },
     );
 }
 
@@ -1188,8 +1069,6 @@ pub(crate) struct ContainerSettingsRequest {
     pub(crate) memory: Option<String>,
     pub(crate) additional_mounts: Vec<mj_controller::targets::AdditionalMount>,
     pub(crate) mount_history: Vec<std::path::PathBuf>,
-    pub(crate) workspace_id: String,
-    pub(crate) client_id: String,
 }
 
 pub(crate) fn spawn_dashboard_container_settings(
@@ -1198,47 +1077,35 @@ pub(crate) fn spawn_dashboard_container_settings(
     tracker: CriticalOperationTracker,
 ) {
     let session_id = request.session_id.clone();
-    spawn_critical_io(
+    spawn_critical_async(
         tracker,
         format!("saving container settings for {}", short_id(&session_id)),
         updates,
-        move || {
+        SAVE_ACK_TIMEOUT,
+        async move {
             let ContainerSettingsRequest {
                 session_id,
                 cpus,
                 memory,
                 additional_mounts,
                 mount_history,
-                workspace_id,
-                client_id,
             } = request;
-            mj_core::runtime::block_on(async {
-                daemon::connect_or_start()
-                    .await?
-                    .set_session_container_settings(
-                        session_id,
-                        cpus,
-                        memory,
-                        additional_mounts,
-                        mount_history,
-                    )
-                    .await
-            })??;
+            daemon::connect_or_start()
+                .await?
+                .set_session_container_settings(
+                    session_id,
+                    cpus,
+                    memory,
+                    additional_mounts,
+                    mount_history,
+                )
+                .await?;
             // Return a fresh durable snapshot so the dashboard can update its
             // state without synchronously reloading the database while it is
             // applying the worker result.
-            let mut controller = Controller::load()?;
-            crate::dashboard::retain_workspace_sessions(
-                &mut controller,
-                &workspace_id,
-                &client_id,
-            )?;
-            Ok(controller)
+            crate::dashboard::io::stored_session_metadata().await
         },
-        move |result| DashboardIoUpdate::ContainerSettings {
-            session_id,
-            result: result.map(DashboardMetadata::from),
-        },
+        move |result| DashboardIoUpdate::ContainerSettings { session_id, result },
     );
 }
 
@@ -1304,12 +1171,15 @@ pub(crate) fn spawn_read_receipt_persist(
     );
 }
 
-pub(crate) fn spawn_clipboard_read(updates: UnboundedSender<DashboardIoUpdate>) -> JoinHandle<()> {
+pub(crate) fn spawn_clipboard_read(
+    target: mj_tui::DashboardPasteTarget,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) -> JoinHandle<()> {
     spawn_io(
         "read clipboard",
         updates,
         mj_chat::clipboard::read_text,
-        DashboardIoUpdate::ClipboardText,
+        move |result| DashboardIoUpdate::ClipboardText { target, result },
     )
 }
 
@@ -1356,11 +1226,17 @@ pub(crate) fn spawn_remove_bundle(
     tracker: CriticalOperationTracker,
 ) {
     let removed = bundle_id.clone();
-    spawn_critical_io(
+    spawn_critical_async(
         tracker,
         "removing project",
         updates,
-        move || mj_controller::controller::remove_bundle(&bundle_id).map(|_| ()),
+        Duration::from_secs(60),
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .remove_project(bundle_id)
+                .await
+        },
         move |result| DashboardIoUpdate::RemovedBundle {
             bundle_id: removed,
             result,
@@ -1535,7 +1411,9 @@ pub(crate) fn spawn_dashboard_create_session(
                 )
                 .context("save fast-start setup; session has not been started")?;
             }
-            let controller = Controller::load()?;
+            // The new-session preflight reads configuration and runs git; it
+            // never needs the store, which only the daemon opens.
+            let controller = mj_controller::controller::config_only_controller(Config::load()?);
             let executor = CancellableProcessExecutor::new(cancelled.clone())
                 .with_deadline(Duration::from_secs(30));
             if project_directory.is_none() {

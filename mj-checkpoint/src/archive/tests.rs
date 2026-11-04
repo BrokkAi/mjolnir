@@ -571,6 +571,82 @@ fn git_bundles_are_stored_and_other_payloads_use_zstandard() {
     );
 }
 
+#[test]
+fn verified_payload_reader_refuses_descriptor_over_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("bounded.hel.zip");
+    let verified = write_archive_atomic(&path, &input()).unwrap();
+    let descriptor = verified
+        .manifest
+        .payloads
+        .iter()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap();
+
+    let error =
+        read_verified_checkpoint_payload(&path, descriptor, descriptor.size - 1).unwrap_err();
+    assert!(format!("{error:#}").contains("exceeds read limit"));
+}
+
+#[test]
+fn verified_payload_reader_rejects_tampered_non_sharded_digest() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("digest.hel.zip");
+    let verified = write_archive_atomic(&path, &input()).unwrap();
+    let mut descriptor = verified
+        .manifest
+        .payloads
+        .iter()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap()
+        .clone();
+    assert!(descriptor.parts.is_empty());
+    descriptor.sha256 = "0".repeat(64);
+
+    let error = read_verified_checkpoint_payload(&path, &descriptor, descriptor.size).unwrap_err();
+    assert!(format!("{error:#}").contains("SHA-256 mismatch"));
+}
+
+#[test]
+fn verified_payload_reader_reassembles_sharded_payload() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sharded-reader.hel.zip");
+    let (archive_input, native, _) = sharded_input();
+    write_archive_installed_with_part_size(&path, &archive_input, TEST_PART_BYTES).unwrap();
+    let manifest = read_checkpoint_manifest(&path).unwrap();
+    let descriptor = manifest
+        .payloads
+        .iter()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap();
+    assert!(!descriptor.parts.is_empty());
+
+    assert_eq!(
+        read_verified_checkpoint_payload(&path, descriptor, native.len() as u64).unwrap(),
+        native
+    );
+}
+
+#[test]
+fn verified_payload_reader_refuses_incomplete_shard_coverage() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sharded-coverage.hel.zip");
+    let (archive_input, _, _) = sharded_input();
+    write_archive_installed_with_part_size(&path, &archive_input, TEST_PART_BYTES).unwrap();
+    let manifest = read_checkpoint_manifest(&path).unwrap();
+    let mut descriptor = manifest
+        .payloads
+        .iter()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap()
+        .clone();
+    assert!(!descriptor.parts.is_empty());
+    descriptor.parts.pop();
+
+    let error = read_verified_checkpoint_payload(&path, &descriptor, descriptor.size).unwrap_err();
+    assert!(format!("{error:#}").contains("payload parts do not cover declared size"));
+}
+
 /// Replaces a tar payload in an already prepared archive, resharding it so
 /// the manifest and the payload body stay consistent.
 fn replace_tar_payload(
@@ -605,7 +681,7 @@ fn streaming_verification_parses_a_sharded_untracked_tar_for_safety() {
     let (archive_input, _, _) = sharded_input();
     let (mut manifest, mut payloads) =
         prepare_archive_with_part_size(&archive_input, TEST_PART_BYTES).unwrap();
-    let malicious = tar_with_file(".env", &b"secret\n".repeat(2_000), 0o600);
+    let malicious = tar_with_file(".git/config", &b"unsafe\n".repeat(2_000), 0o600);
     assert!(malicious.len() > TEST_PART_BYTES);
     replace_tar_payload(
         &mut manifest,
@@ -621,7 +697,7 @@ fn streaming_verification_parses_a_sharded_untracked_tar_for_safety() {
     drop(file);
 
     let error = format!("{:#}", verify_archive_streaming(&path).unwrap_err());
-    assert!(error.contains("credential/config path"), "{error}");
+    assert!(error.contains("inside a Git directory"), "{error}");
 }
 
 /// A restore writes the operation state tar into the Git directory, so the
@@ -1000,7 +1076,7 @@ fn streaming_verification_parses_untracked_tar_for_safety() {
     let path = directory.path().join("unsafe-untracked.hel.zip");
     let archive_input = input();
     let (mut manifest, mut payloads) = prepare_archive(&archive_input).unwrap();
-    let malicious = tar_with_file(".env", b"secret", 0o600);
+    let malicious = tar_with_file(".git/config", b"unsafe", 0o600);
     let descriptor = manifest
         .payloads
         .iter_mut()
@@ -1025,7 +1101,7 @@ fn streaming_verification_parses_untracked_tar_for_safety() {
     drop(file);
 
     let error = verify_archive_streaming(&path).unwrap_err();
-    assert!(format!("{error:#}").contains("credential/config path"));
+    assert!(format!("{error:#}").contains("inside a Git directory"));
 }
 
 #[test]
@@ -1316,16 +1392,12 @@ fn queued_entries_written_before_config_changes_load_as_prompts() {
 }
 
 #[test]
-fn traversal_and_credentials_are_rejected_before_destination_changes() {
+fn traversal_is_rejected_before_destination_changes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("session.hel.zip");
     fs::write(&path, b"existing archive").unwrap();
     let mut unsafe_input = input();
     unsafe_input.native_artifacts[0].relative_path = PathBuf::from("../auth.json");
-    assert!(write_archive_atomic(&path, &unsafe_input).is_err());
-    assert_eq!(fs::read(&path).unwrap(), b"existing archive");
-
-    unsafe_input.native_artifacts[0].relative_path = PathBuf::from("auth.json");
     assert!(write_archive_atomic(&path, &unsafe_input).is_err());
     assert_eq!(fs::read(&path).unwrap(), b"existing archive");
 }
@@ -1357,7 +1429,8 @@ fn untracked_tar_preserves_executable_mode_and_safe_symlink() {
     let paths = b"scripts/tool\0scripts/current\0".to_vec();
     #[cfg(not(unix))]
     let paths = b"scripts/tool\0".to_vec();
-    let tar = build_untracked_tar(source.path(), &paths, &|_| Ok(())).unwrap();
+    let tar =
+        build_untracked_tar(source.path(), &paths, UntrackedFiles::Include, &|_| Ok(())).unwrap();
     validate_untracked_tar(&tar).unwrap();
 
     let destination = tempfile::tempdir().unwrap();
@@ -1391,7 +1464,7 @@ fn untracked_tar_progress_can_cancel_before_opening_the_next_file() {
     let paths = b"first.txt\0missing.txt\0";
     let seen = std::sync::Mutex::new(Vec::new());
 
-    let error = build_untracked_tar(source.path(), paths, &|progress| {
+    let error = build_untracked_tar(source.path(), paths, UntrackedFiles::Include, &|progress| {
         let GitSnapshotProgress::UntrackedFile { current, total, .. } = progress;
         seen.lock().unwrap().push((current, total));
         ensure!(current < 2, "cancelled by test");
@@ -1404,59 +1477,7 @@ fn untracked_tar_progress_can_cancel_before_opening_the_next_file() {
 }
 
 #[test]
-fn malicious_untracked_tar_is_rejected() {
-    assert!(validate_archive_relative_path(Path::new("../escape")).is_err());
-    for path in [
-        ".env",
-        ".credentials.json",
-        "auth.toml",
-        "vendor_credentials.json",
-        "vendor-credentials.json",
-        "nested/.credentials.json",
-    ] {
-        let tar = tar_with_file(path, b"secret", 0o600);
-        assert!(
-            validate_untracked_tar(&tar).is_err(),
-            "untracked tar accepted '{path}'"
-        );
-    }
-}
-
-/// The untracked payload is built from paths Git reports, so credential
-/// files a repository never tracked must be dropped as the tar is built,
-/// not merely rejected later.
-// Hard-won: 37432b73: Claude's canonical .credentials.json was being captured in recovery archives.
-#[test]
-fn untracked_tar_omits_credential_files_from_the_worktree() {
-    let source = tempfile::tempdir().unwrap();
-    fs::create_dir_all(source.path().join("nested")).unwrap();
-    for name in [
-        ".credentials.json",
-        "auth.toml",
-        "vendor_credentials.json",
-        "vendor-credentials.json",
-        "nested/.credentials.json",
-        "note.txt",
-    ] {
-        fs::write(source.path().join(name), b"payload").unwrap();
-    }
-    let paths = b".credentials.json\0auth.toml\0vendor_credentials.json\0\
-vendor-credentials.json\0nested/.credentials.json\0note.txt\0";
-
-    let tar = build_untracked_tar(source.path(), paths, &|_| Ok(())).unwrap();
-    validate_untracked_tar(&tar).unwrap();
-
-    let mut archive = tar::Archive::new(Cursor::new(&tar));
-    let entries: Vec<_> = archive
-        .entries()
-        .unwrap()
-        .map(|entry| entry.unwrap().path().unwrap().into_owned())
-        .collect();
-    assert_eq!(entries, vec![PathBuf::from("note.txt")]);
-}
-
-#[test]
-fn git_collection_is_abstracted_redacts_origin_and_skips_credentials() {
+fn git_collection_is_abstracted_and_redacts_origin() {
     let repository = tempfile::tempdir().unwrap();
     fs::write(repository.path().join("note.txt"), b"keep").unwrap();
     fs::write(repository.path().join(".env"), b"SECRET=nope").unwrap();
@@ -1482,7 +1503,10 @@ fn git_collection_is_abstracted_redacts_origin_and_skips_credentials() {
         .unwrap()
         .map(|entry| entry.unwrap().path().unwrap().into_owned())
         .collect();
-    assert_eq!(paths, vec![PathBuf::from("note.txt")]);
+    assert_eq!(
+        paths,
+        vec![PathBuf::from("note.txt"), PathBuf::from(".env")]
+    );
 }
 
 #[test]
@@ -2254,12 +2278,67 @@ fn restore_without_a_bundle_reports_an_unreachable_commit_actionably() {
     );
 }
 
+// Hard-won: #1384: a registered nested worktree failed with an unidentified untracked file type.
+#[test]
+fn nested_worktree_checkpoint_names_the_directory_and_explicit_scratch_exclusion() {
+    let source = tempfile::tempdir().unwrap();
+    initialize_repository(source.path());
+    commit_file(source.path(), "tracked.txt", b"base\n", "base");
+    let base = git_line(source.path(), &["rev-parse", "HEAD"]);
+    let nested = ".mj/csharp-parity/bin-src";
+    git(
+        source.path(),
+        &["worktree", "add", "--detach", nested, "HEAD"],
+    );
+    fs::write(
+        source.path().join(nested).join("valuable.txt"),
+        b"nested work\n",
+    )
+    .unwrap();
+    let spec = GitCollectionSpec {
+        id: "repo".into(),
+        relative_destination: "repo".into(),
+        history: GitHistoryMode::DeltaFrom(base),
+        origin_override: None,
+    };
+    let error = collect_git_snapshot(&SystemGit, source.path(), &spec).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("nested Git repository directory"),
+        "{message}"
+    );
+    assert!(
+        message.contains(&source.path().join(nested).display().to_string()),
+        "{message}"
+    );
+    assert!(message.contains(".git/info/exclude"), "{message}");
+    assert!(
+        message.contains("preserve its work separately"),
+        "{message}"
+    );
+    fs::write(
+        source.path().join(".git/info/exclude"),
+        format!("/{nested}/\n"),
+    )
+    .unwrap();
+    let snapshot = collect_git_snapshot(&SystemGit, source.path(), &spec).unwrap();
+    let mut untracked = tar::Archive::new(Cursor::new(snapshot.untracked_tar));
+    assert!(untracked.entries().unwrap().next().is_none());
+    assert_eq!(
+        fs::read(source.path().join(nested).join("valuable.txt")).unwrap(),
+        b"nested work\n"
+    );
+}
+
+// Hard-won: b63fedbf31: checkpoint filename filtering silently discarded untracked files.
 #[test]
 fn system_git_round_trip_restores_commits_index_worktree_and_untracked() {
     let source = tempfile::tempdir().unwrap();
     git(source.path(), &["init", "-q", "-b", "main"]);
     git(source.path(), &["config", "user.name", "Hel Test"]);
     git(source.path(), &["config", "user.email", "hel@example.test"]);
+    // Exercise every fixture file regardless of the host's global ignore list.
+    git(source.path(), &["config", "core.excludesFile", ""]);
     git(
         source.path(),
         &[
@@ -2283,6 +2362,11 @@ fn system_git_round_trip_restores_commits_index_worktree_and_untracked() {
     git(source.path(), &["add", "staged.txt"]);
     fs::write(source.path().join("dirty.txt"), b"dirty\n").unwrap();
     fs::write(source.path().join("new.txt"), b"untracked\n").unwrap();
+    let configuration_files = ["config.json", ".env", "auth.toml", "credentials/notes.txt"];
+    fs::create_dir_all(source.path().join("credentials")).unwrap();
+    for relative in configuration_files {
+        fs::write(source.path().join(relative), relative.as_bytes()).unwrap();
+    }
 
     let snapshot = collect_git_snapshot(
         &SystemGit,
@@ -2325,6 +2409,13 @@ fn system_git_round_trip_restores_commits_index_worktree_and_untracked() {
     assert!(status.contains("A  staged.txt"));
     assert!(status.contains(" M dirty.txt"));
     assert!(status.contains("?? new.txt"));
+    for relative in configuration_files {
+        assert_eq!(
+            fs::read(destination.join(relative)).unwrap(),
+            relative.as_bytes(),
+            "untracked file {relative} was not preserved"
+        );
+    }
 }
 
 #[test]
@@ -2841,10 +2932,10 @@ fn review_capture_preserves_tracked_ignored_files_and_staged_deletions() {
     );
     let index_before_ignored_capture = fs::read(repository.path().join(".git/index")).unwrap();
     let baseline_tree =
-        capture_worktree_tree(&crate::test_support::Git225, repository.path()).unwrap();
+        capture_worktree_tree(&crate::test_support::Git231, repository.path()).unwrap();
     fs::write(repository.path().join("new-ignored"), b"ignored\n").unwrap();
     let ignored_only_tree =
-        capture_worktree_tree(&crate::test_support::Git225, repository.path()).unwrap();
+        capture_worktree_tree(&crate::test_support::Git231, repository.path()).unwrap();
     assert_eq!(
         baseline_tree, ignored_only_tree,
         "a new ignored file does not change the captured review tree"
@@ -2862,7 +2953,7 @@ fn review_capture_preserves_tracked_ignored_files_and_staged_deletions() {
     fs::write(repository.path().join("forced"), b"forced\n").unwrap();
     git(repository.path(), &["add", "-f", "forced"]);
     let index = fs::read(repository.path().join(".git/index")).unwrap();
-    let tree = capture_worktree_tree(&crate::test_support::Git225, repository.path()).unwrap();
+    let tree = capture_worktree_tree(&crate::test_support::Git231, repository.path()).unwrap();
     assert_eq!(
         git(repository.path(), &["show", &format!("{tree}:unchanged")]),
         b"base\n"

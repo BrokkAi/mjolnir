@@ -8,7 +8,7 @@ use mj_core::config::Config;
 use mj_core::elicitation::ElicitationRequest;
 use mj_core::state::{
     MaterializedExecutionState, MaterializedSession, MaterializedSessionSummary, MoveOperation,
-    SessionRecord, State, TranscriptBody, TranscriptItem, normalize_session_title,
+    SessionRecord, State, TranscriptBody, TranscriptItem,
 };
 
 use mj_chat::chat::{Notices, TranscriptSnapshot};
@@ -49,6 +49,8 @@ pub(crate) struct SessionDetail {
     pub(crate) materialized_applied_event_ordinal: Option<u64>,
     pub(crate) current_turn_started_at: Option<u64>,
     pub(crate) awaiting_input: bool,
+    pub(crate) dismissible_question: Option<mj_core::assessment::InferredQuestion>,
+    pub(crate) question_dismissal: Option<QuestionDismissal>,
     pub(crate) last_activity_at_ms: Option<u64>,
     pub(crate) last_agent_message: Option<Arc<str>>,
     pub(crate) last_user_message: Option<Arc<str>>,
@@ -81,6 +83,15 @@ pub(crate) struct SessionDetail {
     pub(crate) projection: MaterializedProjectionCache,
     /// The Sessions row's rendering of the message it shows.
     pub(crate) output_preview: crate::render::OutputPreviewCache,
+}
+
+#[derive(Debug)]
+pub(crate) enum QuestionDismissal {
+    Submitting(mj_core::assessment::InferredQuestion),
+    Accepted {
+        question: mj_core::assessment::InferredQuestion,
+        ordinal: u64,
+    },
 }
 
 impl SessionDetail {
@@ -234,9 +245,9 @@ pub(crate) fn latest_agent_activity(
 pub struct PreparedMaterializedSessionDetail {
     pub(crate) session_id: String,
     pub(crate) applied_event_ordinal: u64,
-    pub(crate) session_title: Option<String>,
     pub(crate) current_turn_started_at: Option<u64>,
     pub(crate) awaiting_input: bool,
+    pub(crate) dismissible_question: Option<mj_core::assessment::InferredQuestion>,
     pub(crate) last_activity_at_ms: Option<u64>,
     pub(crate) last_agent_message: Option<Arc<str>>,
     pub(crate) last_user_message: Option<Arc<str>>,
@@ -257,7 +268,6 @@ pub struct PreparedMaterializedSessionDetail {
 pub struct PreparedMaterializedSessionSummary {
     session_id: String,
     applied_event_ordinal: u64,
-    session_title: Option<String>,
     current_turn_started_at: Option<u64>,
     last_activity_at_ms: Option<u64>,
     last_agent_message: Option<Arc<str>>,
@@ -295,10 +305,6 @@ impl PreparedMaterializedSessionSummary {
         Self {
             session_id: summary.session_id,
             applied_event_ordinal: summary.applied_event_ordinal,
-            session_title: summary
-                .session_title
-                .as_deref()
-                .and_then(normalize_session_title),
             current_turn_started_at,
             last_activity_at_ms: summary
                 .last_activity_at_ms
@@ -322,6 +328,17 @@ impl PreparedMaterializedSessionDetail {
     /// derived for the transcript items that did not change.
     pub fn from_materialized(
         session: MaterializedSession,
+        viewed_through_event_ordinal: u64,
+        previous: MaterializedProjectionCache,
+    ) -> Self {
+        Self::from_assessed_materialized(session, None, viewed_through_event_ordinal, previous)
+    }
+
+    /// Keep the worker's verdict paired with the projection it describes, so
+    /// delayed background projections cannot attach it to a different turn.
+    pub fn from_assessed_materialized(
+        session: MaterializedSession,
+        assessment: Option<&mj_core::assessment::TurnAssessment>,
         viewed_through_event_ordinal: u64,
         previous: MaterializedProjectionCache,
     ) -> Self {
@@ -437,22 +454,27 @@ impl PreparedMaterializedSessionDetail {
         let awaiting_input = session.active_turn.is_none()
             && session.queued_prompts.is_empty()
             && session.last_turn_outcome.as_ref().is_some_and(|outcome| {
-                matches!(&outcome.outcome,
-                    mj_core::state::TurnOutcomeKind::Completed { stop_reason }
-                    if mj_core::state::classify_prompt_completion(stop_reason)
-                        == mj_core::state::PromptCompletion::InputRequired)
+                outcome.requires_input(assessment)
                     && !session.transcript.iter().any(|item| {
                         matches!(item.body, TranscriptBody::User { .. })
                             && item.position > outcome.completed_ordinal
                     })
             });
+        let dismissible_question = awaiting_input
+            .then(|| {
+                assessment
+                    .filter(|a| {
+                        session
+                            .last_turn_outcome
+                            .as_ref()
+                            .is_some_and(|o| a.applies_to(o))
+                    })
+                    .and_then(|a| a.inferred_question())
+            })
+            .flatten();
         let pending_elicitations = session.pending_elicitations.clone();
         let session_id = session.session_id.clone();
         let applied_event_ordinal = session.applied_event_ordinal;
-        let session_title = session
-            .session_title
-            .as_deref()
-            .and_then(normalize_session_title);
         let last_activity_at_ms = session
             .last_activity_at_ms()
             .and_then(|value| u64::try_from(value).ok());
@@ -466,9 +488,9 @@ impl PreparedMaterializedSessionDetail {
         Self {
             session_id,
             applied_event_ordinal,
-            session_title,
             current_turn_started_at,
             awaiting_input,
+            dismissible_question,
             last_activity_at_ms,
             last_agent_message: last_agent_message
                 .as_ref()
@@ -678,6 +700,12 @@ impl DashboardState {
             self.say_suspended_session_was_unpinned(&name);
         }
         for (id, record) in changed {
+            if record
+                .as_ref()
+                .is_none_or(|record| !record.state.has_live_worker())
+            {
+                self.clear_session_unreachable(&id);
+            }
             self.release_finished_conversation(&id);
             if let Some(record) = record {
                 self.session_details
@@ -931,6 +959,25 @@ impl DashboardState {
     /// Whether the daemon still owns an active Move intent for this session.
     /// Surfaces use this to keep the transition row while intermediate durable
     /// records (Stopped/Provisioning/Running) catch up.
+    pub fn move_prompt_origins(&self) -> Vec<(String, String, Option<bool>)> {
+        self.move_operations
+            .values()
+            .map(|operation| {
+                let terminal = match operation.phase {
+                    mj_core::state::MovePhase::Completed => Some(true),
+                    mj_core::state::MovePhase::Failed | mj_core::state::MovePhase::Cancelled => {
+                        Some(false)
+                    }
+                    _ => None,
+                };
+                (
+                    operation.selection.session_id.clone(),
+                    operation.operation_id.clone(),
+                    terminal,
+                )
+            })
+            .collect()
+    }
     pub fn move_operation_active(&self, session_id: &str) -> bool {
         self.move_operations
             .get(session_id)
@@ -1157,46 +1204,37 @@ impl DashboardState {
         {
             return false;
         }
+        detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
+        detail.current_turn_started_at = prepared.current_turn_started_at;
+        detail.awaiting_input = prepared.awaiting_input;
+        detail.dismissible_question = prepared.dismissible_question;
+        if matches!(&detail.question_dismissal,
+            Some(QuestionDismissal::Accepted { ordinal, .. }) if prepared.applied_event_ordinal >= *ordinal)
         {
-            detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
-            detail.current_turn_started_at = prepared.current_turn_started_at;
-            detail.awaiting_input = prepared.awaiting_input;
-            detail.last_activity_at_ms = prepared.last_activity_at_ms;
-            detail.last_agent_message = prepared.last_agent_message;
-            detail.last_user_message = prepared.last_user_message;
-            detail.last_agent_message_follows_last_user =
-                prepared.last_agent_message_follows_last_user;
-            detail.latest_agent_activity_after_last_user =
-                prepared.latest_agent_activity_after_last_user;
-            detail.agent_message_latest_content_ordinals =
-                prepared.agent_message_latest_content_ordinals;
-            detail.unread_agent_messages = prepared.unread_agent_messages;
-            detail.interruption_event_ordinals = prepared.interruption_event_ordinals;
-            detail.unread_interruptions = prepared.unread_interruptions;
-            // The replaced transcript owns every converted entry and rendered
-            // line of the previous projection, so it is freed off the loop.
-            crate::retire::retire((
-                detail.transcript.replace(prepared.transcript),
-                std::mem::replace(&mut detail.projection, prepared.projection),
-            ));
-            detail.transcript_hydration = TranscriptHydration::Ready;
-            detail.queued_prompts = prepared.queued_prompts;
-            detail.pending_elicitations = prepared.pending_elicitations;
-            detail.pending_elicitations_applied_event_ordinal =
-                Some(prepared.applied_event_ordinal);
-            detail.update_unread(through);
+            detail.question_dismissal = None;
         }
-        let mut title_changed = false;
-        if let Some(title) = prepared.session_title.as_ref()
-            && let Some(record) = self.state.sessions.get_mut(&prepared.session_id)
-            && record.acp_session_title.as_deref() != Some(title.as_str())
-        {
-            record.acp_session_title = Some(title.clone());
-            title_changed = true;
-        }
-        if title_changed {
-            self.rebuild_resume_rows();
-        }
+        detail.last_activity_at_ms = prepared.last_activity_at_ms;
+        detail.last_agent_message = prepared.last_agent_message;
+        detail.last_user_message = prepared.last_user_message;
+        detail.last_agent_message_follows_last_user = prepared.last_agent_message_follows_last_user;
+        detail.latest_agent_activity_after_last_user =
+            prepared.latest_agent_activity_after_last_user;
+        detail.agent_message_latest_content_ordinals =
+            prepared.agent_message_latest_content_ordinals;
+        detail.unread_agent_messages = prepared.unread_agent_messages;
+        detail.interruption_event_ordinals = prepared.interruption_event_ordinals;
+        detail.unread_interruptions = prepared.unread_interruptions;
+        // The replaced transcript owns every converted entry and rendered
+        // line of the previous projection, so it is freed off the loop.
+        crate::retire::retire((
+            detail.transcript.replace(prepared.transcript),
+            std::mem::replace(&mut detail.projection, prepared.projection),
+        ));
+        detail.transcript_hydration = TranscriptHydration::Ready;
+        detail.queued_prompts = prepared.queued_prompts;
+        detail.pending_elicitations = prepared.pending_elicitations;
+        detail.pending_elicitations_applied_event_ordinal = Some(prepared.applied_event_ordinal);
+        detail.update_unread(through);
         true
     }
 
@@ -1222,34 +1260,77 @@ impl DashboardState {
         {
             return false;
         }
-        {
-            detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
-            detail.current_turn_started_at = prepared.current_turn_started_at;
-            detail.last_activity_at_ms = prepared.last_activity_at_ms;
-            detail.last_agent_message = prepared.last_agent_message;
-            detail.last_user_message = prepared.last_user_message;
-            detail.last_agent_message_follows_last_user =
-                prepared.last_agent_message_follows_last_user;
-            detail.latest_agent_activity_after_last_user = None;
-            detail.agent_message_latest_content_ordinals =
-                prepared.agent_message_latest_content_ordinals;
-            detail.unread_agent_messages = prepared.unread_agent_messages;
-            detail.interruption_event_ordinals = prepared.interruption_event_ordinals;
-            detail.unread_interruptions = prepared.unread_interruptions;
-            detail.update_unread(through);
-        }
-        let mut title_changed = false;
-        if let Some(title) = prepared.session_title.as_ref()
-            && let Some(record) = self.state.sessions.get_mut(&prepared.session_id)
-            && record.acp_session_title.as_deref() != Some(title.as_str())
-        {
-            record.acp_session_title = Some(title.clone());
-            title_changed = true;
-        }
-        if title_changed {
-            self.rebuild_resume_rows();
-        }
+        detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
+        detail.current_turn_started_at = prepared.current_turn_started_at;
+        detail.last_activity_at_ms = prepared.last_activity_at_ms;
+        detail.last_agent_message = prepared.last_agent_message;
+        detail.last_user_message = prepared.last_user_message;
+        detail.last_agent_message_follows_last_user = prepared.last_agent_message_follows_last_user;
+        detail.latest_agent_activity_after_last_user = None;
+        detail.agent_message_latest_content_ordinals =
+            prepared.agent_message_latest_content_ordinals;
+        detail.unread_agent_messages = prepared.unread_agent_messages;
+        detail.interruption_event_ordinals = prepared.interruption_event_ordinals;
+        detail.unread_interruptions = prepared.unread_interruptions;
+        detail.update_unread(through);
         true
+    }
+
+    pub(crate) fn question_dismissal_pending(&self, session_id: &str) -> bool {
+        self.session_details
+            .get(session_id)
+            .is_some_and(|detail| detail.question_dismissal.is_some())
+    }
+
+    pub(crate) fn begin_dismiss_question(&mut self) -> crate::DashboardAction {
+        let Some(session_id) = self.command_session_id().map(str::to_owned) else {
+            return crate::DashboardAction::None;
+        };
+        let Some(detail) = self.session_details.get_mut(&session_id) else {
+            return crate::DashboardAction::None;
+        };
+        let Some(question) = detail.dismissible_question.clone() else {
+            return crate::DashboardAction::None;
+        };
+        detail.question_dismissal = Some(QuestionDismissal::Submitting(question.clone()));
+        crate::DashboardAction::DismissQuestion {
+            session_id,
+            question,
+        }
+    }
+
+    pub fn question_dismissal_finished(
+        &mut self,
+        session_id: &str,
+        question: mj_core::assessment::InferredQuestion,
+        result: Result<u64, String>,
+    ) {
+        let Some(detail) = self.session_details.get_mut(session_id) else {
+            return;
+        };
+        let current = match &detail.question_dismissal {
+            Some(QuestionDismissal::Submitting(current))
+            | Some(QuestionDismissal::Accepted {
+                question: current, ..
+            }) => current == &question,
+            None => false,
+        };
+        if !current {
+            return;
+        }
+        match result {
+            Ok(ordinal) => {
+                detail.question_dismissal = detail
+                    .materialized_applied_event_ordinal
+                    .is_none_or(|applied| applied < ordinal)
+                    .then_some(QuestionDismissal::Accepted { question, ordinal });
+                self.set_notice("Question dismissed.");
+            }
+            Err(error) => {
+                detail.question_dismissal = None;
+                self.set_notice(format!("Could not dismiss question: {error}"));
+            }
+        }
     }
 
     pub fn set_current_step_start(&mut self, session_id: &str, timestamp_ms: Option<i64>) {

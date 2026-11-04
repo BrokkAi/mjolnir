@@ -41,6 +41,48 @@ impl RelayVersionRange {
     }
 }
 
+/// Connection-only memory tree. Plain trees retain the pre-44 wire shape.
+/// Compression and expansion must run on a blocking thread; expansion has no
+/// size cap because both endpoints are trusted mj processes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ProjectMemoryWireTree {
+    Plain(ProjectMemorySnapshot),
+    Gzip { gzip: String },
+}
+
+impl ProjectMemoryWireTree {
+    pub fn encode(tree: ProjectMemorySnapshot, protocol: u32) -> Result<Self> {
+        if protocol < super::RELAY_COMPRESSED_PROJECT_MEMORY_PROTOCOL {
+            return Ok(Self::Plain(tree));
+        }
+        use base64::Engine;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        serde_json::to_writer(&mut encoder, &tree.files)
+            .context("compress project memory files")?;
+        let bytes = encoder.finish().context("finish project memory gzip")?;
+        Ok(Self::Gzip {
+            gzip: base64::engine::general_purpose::STANDARD.encode(bytes),
+        })
+    }
+
+    pub fn decode(self) -> Result<ProjectMemorySnapshot> {
+        match self {
+            Self::Plain(tree) => Ok(tree),
+            Self::Gzip { gzip } => {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(gzip)
+                    .context("decode project memory base64")?;
+                let decoder = flate2::read::GzDecoder::new(bytes.as_slice());
+                let files =
+                    serde_json::from_reader(decoder).context("decompress project memory files")?;
+                Ok(ProjectMemorySnapshot { files })
+            }
+        }
+    }
+}
+
 /// A request on the new controller-to-relay boundary. ACP payloads remain ACP
 /// payloads; only durability and queue-control operations are Hel-specific.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,13 +145,13 @@ pub enum RelayRequest {
     /// Install a controller-reconciled tree into both the replica and its
     /// baseline for the next three-way synchronization.
     InstallProjectMemorySnapshot {
-        snapshot: ProjectMemorySnapshot,
+        snapshot: ProjectMemoryWireTree,
     },
     /// Replace the complete session replica and baseline only if the replica
     /// still matches the tree the controller read.
     ReplaceProjectMemoryTree {
         expected_replica: TreeVersion,
-        tree: ProjectMemorySnapshot,
+        tree: ProjectMemoryWireTree,
     },
     /// Connection-only CPU measurement; never journaled.
     CpuUsage,
@@ -145,6 +187,18 @@ pub enum RelayRequest {
     },
     /// Remove the worker's synchronized GitHub CLI token.
     RemoveGithubToken,
+    /// AWS credentials stay on the control connection, outside the journal.
+    AwsCredentialsState,
+    InstallAwsCredentials {
+        data: String,
+    },
+    /// The host's slopcop login, like the GitHub token, stays on the control
+    /// connection, outside the journal.
+    SlopcopLoginState,
+    InstallSlopcopLogin {
+        data: String,
+    },
+    RemoveSlopcopLogin,
     /// Resolve one in-flight form. Only its rendered, masked reply is journaled.
     RespondElicitation {
         elicitation_id: String,
@@ -161,6 +215,11 @@ pub enum RelayRequest {
     /// Acknowledge the previous page and fetch bounded changes on this connection.
     PollSubagentQueue {
         acknowledged: Option<u64>,
+    },
+    /// Connection-only operator-away control; never journaled as a command.
+    SetOperatorAway {
+        away: bool,
+        revision: u64,
     },
     /// Open or close worker-owned admission for requests that change child
     /// state. Closing is serialized with the private MCP queue's enqueue lock.
@@ -212,6 +271,8 @@ pub enum ReviewerRequest {
     /// whole repository as this turn's work. Capture never touches the
     /// repository's index or working tree.
     CaptureDelta {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repositories: Option<Vec<std::path::PathBuf>>,
         #[serde(default)]
         scope: CaptureScope,
         baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
@@ -325,11 +386,17 @@ impl RelayRequest {
             Self::GithubTokenState => "github_token_state",
             Self::InstallGithubToken { .. } => "install_github_token",
             Self::RemoveGithubToken => "remove_github_token",
+            Self::AwsCredentialsState => "aws_credentials_state",
+            Self::InstallAwsCredentials { .. } => "install_aws_credentials",
+            Self::SlopcopLoginState => "slopcop_login_state",
+            Self::InstallSlopcopLogin { .. } => "install_slopcop_login",
+            Self::RemoveSlopcopLogin => "remove_slopcop_login",
             Self::RespondElicitation { .. } => "respond_elicitation",
             Self::StopBackgroundTask { .. } => "stop_background_task",
             Self::SubagentRequests => "subagent_requests",
             Self::PollSubagentQueue { .. } => "poll_subagent_queue",
             Self::SetSubagentAdmission { .. } => "set_subagent_admission",
+            Self::SetOperatorAway { .. } => "set_operator_away",
             Self::HistoryQuery { .. } => "history_query",
             Self::HistoryRequests => "history_requests",
             Self::CompleteHistoryRequest { .. } => "complete_history_request",
@@ -345,6 +412,12 @@ impl RelayRequest {
     /// protocol 31.
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::AwsCredentialsState | Self::InstallAwsCredentials { .. } => {
+                super::RELAY_AWS_CREDENTIALS_PROTOCOL
+            }
+            Self::SlopcopLoginState
+            | Self::InstallSlopcopLogin { .. }
+            | Self::RemoveSlopcopLogin => super::RELAY_SLOPCOP_LOGIN_PROTOCOL,
             Self::CpuUsage => super::RELAY_CPU_USAGE_PROTOCOL,
             Self::DrainMailbox { .. } | Self::AckMailbox { .. } => 33,
             Self::ReserveIdle { .. } => 21,
@@ -358,11 +431,20 @@ impl RelayRequest {
             Self::SubagentRequests | Self::CompleteSubagentRequest { .. } => 12,
             Self::PollSubagentQueue { .. } => super::RELAY_SUBAGENT_FEED_PROTOCOL,
             Self::SetSubagentAdmission { .. } => 32,
+            Self::SetOperatorAway { .. } => super::RELAY_OPERATOR_AWAY_PROTOCOL,
             Self::RespondElicitation { .. } => 2,
             Self::InstallPromptContext { .. } => 3,
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
             Self::ReplaceProjectMemoryTree { .. } => super::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL,
             Self::Submit { command, .. } => command.minimum_protocol(),
+            Self::Reviewer {
+                request:
+                    ReviewerRequest::CaptureDelta {
+                        repositories: Some(_),
+                        ..
+                    },
+                ..
+            } => super::RELAY_WORKTREE_REVIEW_PROTOCOL,
             Self::Reviewer {
                 request:
                     ReviewerRequest::RecordReviewed { .. }
@@ -540,8 +622,8 @@ pub enum RelayResponsePayload {
     },
     PromptContextInstalled,
     ProjectMemorySnapshot {
-        baseline: ProjectMemorySnapshot,
-        replica: ProjectMemorySnapshot,
+        baseline: ProjectMemoryWireTree,
+        replica: ProjectMemoryWireTree,
     },
     ProjectMemorySnapshotInstalled,
     ProjectMemoryTreeReplaced {
@@ -748,5 +830,41 @@ pub fn read_bounded_line(
         if newline.is_some() {
             return Ok((consumed_total, true));
         }
+    }
+}
+
+#[cfg(test)]
+mod project_memory_wire_tests {
+    use super::*;
+
+    #[test]
+    fn memory_wire_preserves_legacy_bytes_and_rejects_corrupt_compression() {
+        let legacy = r#"{"files":{"/MEMORY.md":"notes\n"}}"#;
+        let plain: ProjectMemoryWireTree = serde_json::from_str(legacy).unwrap();
+        assert_eq!(serde_json::to_string(&plain).unwrap(), legacy);
+        let tree = plain.decode().unwrap();
+        let compressed = ProjectMemoryWireTree::encode(tree.clone(), 44).unwrap();
+        let encoded = serde_json::to_vec(&compressed).unwrap();
+        let decoded: ProjectMemoryWireTree = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.decode().unwrap(), tree);
+        assert!(
+            ProjectMemoryWireTree::Gzip {
+                gzip: "invalid base64".into()
+            }
+            .decode()
+            .is_err()
+        );
+        assert!(
+            ProjectMemoryWireTree::Gzip {
+                gzip: "e30=".into()
+            }
+            .decode()
+            .is_err()
+        );
+        let ProjectMemoryWireTree::Gzip { mut gzip } = compressed else {
+            panic!("expected gzip")
+        };
+        gzip.truncate(gzip.len() / 2);
+        assert!(ProjectMemoryWireTree::Gzip { gzip }.decode().is_err());
     }
 }

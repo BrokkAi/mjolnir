@@ -122,7 +122,7 @@ impl Controller {
                         install_staged_worker_binary(&owner, &staging, executor, &backend, session_id)?;
                         replace_installed_worker_launch_config(executor, &backend, session_id, &launch)?;
                         owner.begin_restart(target, mj_core::worker_build::WORKER_BUILD_ID.into())?;
-                        start_worker_durably(&owner, target, executor, &backend, &root)?;
+                        start_worker_durably(&owner, target, executor, &backend, &root, &self.config.github)?;
                     }
                     executor.begin_resumable_work()?;
                     let mut connection = super::readiness::connect_started_worker_with_timeout(&reconnect, session_id, executor, &backend, &root, Duration::from_secs(300)).await?;
@@ -169,11 +169,14 @@ impl Controller {
             .targets
             .get(&record.target_template_id)
             .context("legacy target configuration missing")?;
-        let target = backend::backend_target(
+        let mut target = backend::backend_target(
             configured,
             record.resource_allocation.as_ref(),
             backend::ContainerOverrides::for_session(&record),
         )?;
+        for notice in super::provisioning::enforce_cgroup_capable_limits(&mut target, executor) {
+            executor.notify_notice(&notice);
+        }
         let canonical = match record.target.as_ref() {
             Some(locator) => locator.clone(),
             None => backend::locator_after_provision_named(

@@ -86,6 +86,10 @@ pub enum WebViewerAccess {
         viewer_code: String,
         qr_login_url: Option<String>,
         fallback_reason: Option<String>,
+        /// Address a client on the daemon's host can use to reach this listener.
+        /// Published only after bind, with wildcard IPs replaced by loopback.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_address: Option<SocketAddr>,
         /// Lowercase hex SHA-256 of the DER certificate the viewer serves when
         /// that certificate is one the operator configured (often self-signed).
         /// Local clients trust exactly this certificate instead of a CA chain.

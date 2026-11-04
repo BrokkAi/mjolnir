@@ -69,6 +69,7 @@ fn podman_controller(state: SessionState) -> Controller {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     config.targets.insert(
@@ -394,6 +395,9 @@ fn probeless_request(id: &str) -> QuotaRefreshRequest {
     QuotaRefreshRequest {
         profile_id: id.into(),
         harness: mj_core::config::HarnessKind::Codex,
+        auth_scheme: mj_core::config::AuthScheme::ApiKey {
+            env_key: "PROVIDER_API_KEY".into(),
+        },
         source_home: PathBuf::from("/nonexistent-quota-home"),
         environment: Default::default(),
         cwd: PathBuf::from("."),
@@ -402,6 +406,7 @@ fn probeless_request(id: &str) -> QuotaRefreshRequest {
             host: "example.invalid".into(),
             api_key: "key".into(),
         }),
+        runtime: crate::quota::QuotaRuntimeConfig::host(),
     }
 }
 
@@ -413,6 +418,8 @@ fn stored_report(id: &str, age_seconds: u64) -> crate::quota::ProfileQuota {
         windows: vec![crate::quota::QuotaWindow {
             label: "Week".into(),
             remaining_percent: Some(42),
+            duration_seconds: None,
+            model_scope: None,
             used: None,
             limit: None,
             resets: None,
@@ -1073,10 +1080,11 @@ fn a_new_credential_signal_waits_out_the_cooldown_without_being_lost() {
 }
 
 /// Every harness's session on this machine is reconciled the way its session in
-/// a container is: against the same canonical profile home, with only the
-/// GitHub token left out. A local session an earlier release started from the
+/// a container is: against the same canonical profile home and GitHub source.
+/// A local session an earlier release started from the
 /// profile home itself is left out while its staged home is a link to that
 /// home, because a push would go through the link into the person's own home.
+// Hard-won: #1432: removing a PAT override left its old copy in local workers.
 #[test]
 #[cfg_attr(windows, ignore = "#1300: fails on a Windows controller")]
 fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
@@ -1096,6 +1104,7 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
             },
         );
         controller.config.targets.insert(
@@ -1137,7 +1146,14 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
             on_this_machine[0].skips_login_file_sync,
             in_container[0].skips_login_file_sync
         );
-        assert!(!on_this_machine[0].sync_github_token, "{kind:?}");
+        assert!(on_this_machine[0].sync_github_token, "{kind:?}");
+        controller.config.github.session_token_path = Some(directory.path().join("agent-pat"));
+        let with_pat = credential_sync_targets(&controller);
+        assert!(with_pat[0].sync_github_token, "{kind:?}");
+        assert_ne!(
+            with_pat, on_this_machine,
+            "config reload must publish the new source"
+        );
         assert_eq!(
             on_this_machine[0].skills_scope,
             mj_core::skills::SkillsScope::Localhost
@@ -1183,6 +1199,7 @@ fn credential_sync_skips_a_local_login_file_linked_to_the_profile() {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
+                muse_auto_review: None,
             },
         );
         controller.config.targets.insert(
@@ -1245,6 +1262,7 @@ fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_conta
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
+            muse_auto_review: None,
         },
     );
     controller.config.targets.insert(
@@ -1327,7 +1345,7 @@ fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_conta
 }
 
 #[test]
-fn github_tokens_sync_to_every_remote_target_but_raw_localhost() {
+fn github_tokens_sync_to_every_session_target() {
     use mj_core::state::TargetLocator;
 
     let remotes = [
@@ -1364,11 +1382,9 @@ fn github_tokens_sync_to_every_remote_target_but_raw_localhost() {
     for target in &remotes {
         assert!(target_syncs_github_token(Some(target)), "{target:?}");
     }
-    assert!(!target_syncs_github_token(Some(
-        &TargetLocator::LocalBare {
-            worker_root: "/tmp/worker".into(),
-        }
-    )));
+    assert!(target_syncs_github_token(Some(&TargetLocator::LocalBare {
+        worker_root: "/tmp/worker".into(),
+    })));
     assert!(!target_syncs_github_token(None));
 }
 

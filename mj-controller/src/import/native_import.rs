@@ -344,7 +344,11 @@ pub(super) fn collect_local_repositories(
                     history,
                     origin_override,
                 },
-                control.is_none_or(|control| control.include_untracked),
+                if control.is_none_or(|control| control.include_untracked) {
+                    mj_checkpoint::archive::UntrackedFiles::Include
+                } else {
+                    mj_checkpoint::archive::UntrackedFiles::Exclude
+                },
                 &|progress| {
                     let Some(control) = control else {
                         return Ok(());

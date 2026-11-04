@@ -1,6 +1,8 @@
 //! Provider-reported consumption. Context occupancy is deliberately excluded.
 use serde::{Deserialize, Serialize};
 
+pub mod model_catalog;
+pub mod pricing;
 mod report;
 pub use report::*;
 
@@ -31,7 +33,7 @@ pub struct TokenUsage {
 impl TokenUsage {
     pub fn from_acp(
         harness: crate::config::HarnessKind,
-        usage: agent_client_protocol::schema::v1::Usage,
+        usage: agent_client_protocol::v1::schema::Usage,
     ) -> Self {
         use crate::config::HarnessKind;
         // Explicit adapter metadata takes precedence over legacy defaults. In
@@ -69,7 +71,7 @@ impl TokenUsage {
 mod tests {
     use super::*;
     use crate::config::HarnessKind;
-    use agent_client_protocol::schema::v1::Usage;
+    use agent_client_protocol::v1::schema::Usage;
 
     #[test]
     fn codex_scope_distinguishes_complete_partial_and_legacy_reports() {

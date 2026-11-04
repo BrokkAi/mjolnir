@@ -4,16 +4,19 @@
 //! deliberately does not know about orchestration, turn reviews, or subagents;
 //! [`surface`] projects protocol capabilities for the chat control surface.
 
-mod claude_tasks;
+mod air_tasks;
 mod drive;
 mod launch;
 mod native_agents;
 mod opencode_logins;
+mod operator_away;
 mod permissions;
+pub use operator_away::OperatorAway;
+use operator_away::*;
 mod session;
 mod session_config;
 pub(crate) mod verdict_client;
-use claude_tasks::*;
+use air_tasks::*;
 use drive::*;
 use launch::*;
 pub use launch::{ContextReset, LaunchSpec, ReviewerMcpServer, SubagentMcpSocket};
@@ -25,6 +28,7 @@ pub use verdict_client::VerdictSource;
 
 use mj_core::acp::dialect::grok;
 pub use mj_core::acp::*;
+mod claude_usage;
 mod goal;
 mod grok_usage;
 #[cfg(test)]
@@ -49,8 +53,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::TextContent;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::TextContent;
+use agent_client_protocol::v1::schema::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, ContentBlock,
     CreateTerminalRequest, CreateTerminalResponse, ElicitationCapabilities,
     ElicitationFormCapabilities, EmbeddedResource, EmbeddedResourceResource, Implementation,
@@ -64,7 +69,7 @@ use agent_client_protocol::schema::v1::{
     TerminalId, TerminalOutputRequest, TerminalOutputResponse, ToolCallUpdateFields,
     WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo, UntypedMessage};
+use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, UntypedMessage};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
@@ -115,7 +120,7 @@ pub fn worker_exit_reason(error: &anyhow::Error) -> String {
 /// decides the form the harness's bridge receives.
 #[cfg(any(unix, test))]
 pub(crate) fn hidden_context_block(text: String) -> ContentBlock {
-    use agent_client_protocol::schema::v1::TextResourceContents;
+    use agent_client_protocol::v1::schema::TextResourceContents;
 
     ContentBlock::Resource(EmbeddedResource::new(
         EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
@@ -158,10 +163,8 @@ pub(crate) fn prompt_for_harness(
         .collect()
 }
 
-/// Private ACP metadata is provider-local and has no Hel projection. In
-/// particular, Codex can replay terminal-output metadata for old tool calls on
-/// every `session/load`; journaling those invisible deltas grows the relay and
-/// makes every later recovery replay them again.
+/// Keep terminal output for live calls, while rejecting delayed history from
+/// `session/load` and private metadata that has no transcript projection.
 fn session_update_is_relay_visible(
     update: &SessionUpdate,
     live_tool_calls: &Mutex<BTreeSet<String>>,
@@ -179,7 +182,12 @@ fn session_update_is_relay_visible(
             true
         }
         SessionUpdate::ToolCallUpdate(update)
-            if update.fields == ToolCallUpdateFields::default() =>
+            if update.fields == ToolCallUpdateFields::default()
+                && !update.meta.as_ref().is_some_and(|meta| {
+                    ["terminal_output", "terminal_output_delta", "terminal_exit"]
+                        .iter()
+                        .any(|key| meta.contains_key(*key))
+                }) =>
         {
             false
         }
@@ -198,6 +206,49 @@ fn session_update_is_relay_visible(
             created_live
         }
         _ => true,
+    }
+}
+
+fn suppress_codex_sandbox_warning(
+    harness: HarnessKind,
+    policy: ExecutionPolicy,
+    update: &mut SessionUpdate,
+) {
+    if harness != HarnessKind::Codex || !policy.is_unconstrained() {
+        return;
+    }
+    let SessionUpdate::SessionInfoUpdate(info) = update else {
+        return;
+    };
+    let Some(failure) = mj_core::diagnostic::SessionFailure::from_meta(info.meta.as_ref()) else {
+        return;
+    };
+    if failure.severity != "warning"
+        || failure.details.is_some()
+        || failure.title
+            != "Codex could not find bubblewrap on PATH. \
+            Install bubblewrap with your OS package manager. See the sandbox prerequisites: \
+            https://developers.openai.com/codex/concepts/sandboxing#prerequisites. \
+            Codex will use the bundled bubblewrap in the meantime."
+    {
+        return;
+    }
+    // Codex checks sandbox prerequisites before opening a full-access thread.
+    remove_session_failure(update);
+    tracing::debug!("suppressed Codex bubblewrap prerequisite warning in YOLO mode");
+}
+
+/// Keep any title, goal, or other state carried alongside a suppressed notice.
+fn remove_session_failure(update: &mut SessionUpdate) {
+    if let SessionUpdate::SessionInfoUpdate(info) = update
+        && let Some(air) = info
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.get_mut("jetbrains"))
+            .and_then(|jetbrains| jetbrains.get_mut("air"))
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        air.remove("sessionFailure");
     }
 }
 
@@ -259,21 +310,6 @@ pub enum CommandRequest {
     },
     Close {
         request_id: String,
-    },
-    /// Claude Code reported the result of the cycle that answered this
-    /// prompt. The relay coordinator sends this when it records that result,
-    /// and the prompt loop ends the prompt with the given outcome unless its
-    /// own state says the result is not the end: a cancel is in flight, an
-    /// approved plan is being handed to a continuation prompt, or the result
-    /// arrived before the current `session/prompt` was sent. The loop keeps
-    /// the adapter's reply alive and discards it when it comes.
-    ReleasePrompt {
-        request_id: String,
-        /// The result's position among the results this ACP connection
-        /// received.
-        received: u64,
-        stop_reason: String,
-        usage: Option<mj_core::usage::TokenUsage>,
     },
 }
 
@@ -734,7 +770,7 @@ async fn emit_close_outcome<T>(
 ) -> Result<()> {
     match outcome {
         Ok(_) => emit_runtime_event(events, RuntimeEvent::CloseApplied { request_id }).await,
-        Err(error) if error.code == agent_client_protocol::ErrorCode::MethodNotFound => {
+        Err(error) if error.code == agent_client_protocol::ErrorCode::METHOD_NOT_FOUND => {
             emit_runtime_event(
                 events,
                 RuntimeEvent::Warning {

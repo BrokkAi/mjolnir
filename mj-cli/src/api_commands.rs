@@ -172,6 +172,9 @@ pub(crate) struct NewArgs {
     /// `[review]` is off.
     #[arg(long)]
     review_effort: Option<String>,
+    /// Independent reviewers per review. 1–3 is reasonable; more has diminishing returns.
+    #[arg(long)]
+    review_count: Option<std::num::NonZeroUsize>,
     /// Deprecated compatibility option; the value is ignored.
     #[arg(long, hide = true, value_parser = ["quick", "extended"])]
     review_tier: Option<String>,
@@ -1118,6 +1121,7 @@ fn new_session_review(args: &NewArgs) -> Option<mj_core::config::SessionReview> 
         args.review_model.as_deref(),
         args.review_effort.as_deref(),
         args.review_tier.as_deref(),
+        args.review_count,
     )
 }
 
@@ -1127,22 +1131,26 @@ pub(crate) fn session_review(
     model: Option<&str>,
     effort: Option<&str>,
     tier: Option<&str>,
+    count: Option<std::num::NonZeroUsize>,
 ) -> Option<mj_core::config::SessionReview> {
     use mj_core::config::SessionReview;
-    // A model, an effort or the deprecated tier without a trigger has always
-    // meant "review every turn"; the tier's value itself is ignored.
-    let trigger = trigger
-        .or_else(|| (model.is_some() || effort.is_some() || tier.is_some()).then_some("turn"))?;
+    // Review overrides without a trigger select turn review; the deprecated
+    // tier's value itself is ignored.
+    let trigger = trigger.or_else(|| {
+        (model.is_some() || effort.is_some() || tier.is_some() || count.is_some()).then_some("turn")
+    })?;
     let model = model.map(str::to_owned);
     let effort = effort.map(str::to_owned);
     Some(match trigger {
         "off" => SessionReview::Off,
         "push" => SessionReview::Push {
+            count,
             model,
             effort,
             tier: None,
         },
         "turn" => SessionReview::Turn {
+            count,
             model,
             effort,
             tier: None,
@@ -1200,6 +1208,9 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     };
     let client = ApiClient::connect().await?;
     let response = client.start(&request).await.map_err(name_launch_flags)?;
+    if let Some(notice) = &response.notice {
+        eprintln!("{notice}");
+    }
     if args.json {
         return print_json(&response);
     }
@@ -1749,17 +1760,11 @@ pub(crate) async fn fetch(args: FetchArgs) -> Result<()> {
             .context("write the fetched path")?;
         return stdout.flush().context("write the fetched path");
     }
-    let local = fetched_location(&std::env::temp_dir(), &args.session, &fetched)?;
-    mj_core::config::atomic_write(&local, &fetched.bytes)?;
+    let saved = fetched.save(&std::env::temp_dir(), &args.session)?;
     if args.json {
-        return print_json(&serde_json::json!({
-            "path": local,
-            "kind": fetched.kind,
-            "source": fetched.path,
-            "bytes": fetched.bytes.len(),
-        }));
+        return print_json(&saved);
     }
-    println!("{}", local.display());
+    println!("{}", saved.path.display());
     Ok(())
 }
 
@@ -1795,42 +1800,6 @@ fn listing_lines(listing: &mj_checkpoint::archive::SessionListing) -> Vec<String
             )
         })
         .collect()
-}
-
-/// Where a fetched path lands on this machine:
-/// `<temp>/mjolnir/<session>/<the path on the target>`, with `.zip` after a
-/// directory's name. Keeping the target's whole path means two sub-agents'
-/// `report.md` files, or a fetch from two sessions, never overwrite each other.
-fn fetched_location(
-    temp: &std::path::Path,
-    session: &str,
-    fetched: &mj_checkpoint::archive::FetchedPath,
-) -> Result<PathBuf> {
-    let mut components = std::path::Path::new(session).components();
-    ensure!(
-        matches!(
-            (components.next(), components.next()),
-            (Some(std::path::Component::Normal(_)), None)
-        ),
-        "session id {session:?} cannot name a directory"
-    );
-    let mut local = temp.join("mjolnir").join(session);
-    let mut named = false;
-    // Only plain names are kept, so the result cannot leave the session's
-    // directory whatever the target answered.
-    for component in std::path::Path::new(&fetched.path).components() {
-        if let std::path::Component::Normal(part) = component {
-            local.push(part);
-            named = true;
-        }
-    }
-    ensure!(named, "the target answered no path for the fetch");
-    if fetched.kind == mj_checkpoint::archive::FetchedKind::Directory {
-        let mut name = local.file_name().unwrap_or_default().to_os_string();
-        name.push(".zip");
-        local.set_file_name(name);
-    }
-    Ok(local)
 }
 
 pub(crate) async fn sessions(
@@ -2015,17 +1984,17 @@ pub(crate) async fn resume(args: ResumeArgs) -> Result<()> {
         .clone()
         .context("name the session to resume with --session <id>")?;
     let client = ApiClient::connect().await?;
-    let response = client
-        .resume(
-            &session,
-            &ResumeSessionRequest {
-                profile_id: args.profile.clone(),
-                target_id: args.target.clone(),
-                workspace_id: args.workspace_id.clone(),
-                queue: args.queue.map(Into::into),
-            },
-        )
-        .await?;
+    let response = resume_with_warnings(
+        &client,
+        &session,
+        &ResumeSessionRequest {
+            profile_id: args.profile.clone(),
+            target_id: args.target.clone(),
+            workspace_id: args.workspace_id.clone(),
+            queue: args.queue.map(Into::into),
+        },
+    )
+    .await?;
     if args.json {
         return print_json(&response);
     }
@@ -2035,6 +2004,17 @@ pub(crate) async fn resume(args: ResumeArgs) -> Result<()> {
     );
     println!("watch it with `mj wait --session {}`", response.session_id);
     Ok(())
+}
+
+async fn resume_with_warnings(
+    client: &ApiClient,
+    session_id: &str,
+    request: &ResumeSessionRequest,
+) -> Result<mj_controller::server::api::ResumeSessionResponse> {
+    let mut warnings = crate::LaunchWarnings::new().await;
+    let response = client.resume(session_id, request).await?;
+    warnings.report(session_id).await;
+    Ok(response)
 }
 
 /// Continue the session a SessionWiki id names, whoever ran it.
@@ -2057,17 +2037,17 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
         info.status == WikiSessionStatus::Mine,
     )? {
         WikiContinuation::Resume { session_id } => {
-            let response = client
-                .resume(
-                    &session_id,
-                    &ResumeSessionRequest {
-                        profile_id: args.profile.clone(),
-                        target_id: args.target.clone(),
-                        workspace_id: args.workspace_id.clone(),
-                        queue: args.queue.map(Into::into),
-                    },
-                )
-                .await?;
+            let response = resume_with_warnings(
+                &client,
+                &session_id,
+                &ResumeSessionRequest {
+                    profile_id: args.profile.clone(),
+                    target_id: args.target.clone(),
+                    workspace_id: args.workspace_id.clone(),
+                    queue: args.queue.map(Into::into),
+                },
+            )
+            .await?;
             report_wiki_continuation(&args, "resume", &wiki_id, &response.session_id, || {
                 format!("resumed {}", response.session_id)
             })
@@ -2091,6 +2071,7 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
                         "the indexed session {wiki_id} records no target; name one with --target"
                     )
                 })?;
+            let mut warnings = crate::LaunchWarnings::new().await;
             let response = client
                 .wiki_restore(
                     &wiki_id,
@@ -2104,6 +2085,7 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
                     },
                 )
                 .await?;
+            warnings.report(&response.session_id).await;
             report_wiki_continuation(&args, "restore", &wiki_id, &response.session_id, || {
                 format!("restored {wiki_id} into {}", response.session_id)
             })
@@ -2137,17 +2119,17 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
                 .context("import task panicked")??
             };
             let session_id = imported.context("the import was cancelled")?;
-            let response = client
-                .resume(
-                    &session_id,
-                    &ResumeSessionRequest {
-                        profile_id: args.profile.clone(),
-                        target_id: args.target.clone(),
-                        workspace_id: args.workspace_id.clone(),
-                        queue: args.queue.map(Into::into),
-                    },
-                )
-                .await?;
+            let response = resume_with_warnings(
+                &client,
+                &session_id,
+                &ResumeSessionRequest {
+                    profile_id: args.profile.clone(),
+                    target_id: args.target.clone(),
+                    workspace_id: args.workspace_id.clone(),
+                    queue: args.queue.map(Into::into),
+                },
+            )
+            .await?;
             report_wiki_continuation(&args, "import", &wiki_id, &response.session_id, || {
                 format!(
                     "imported {} session {native_session_id} as {} and resumed it",
@@ -2562,55 +2544,6 @@ mod tests {
             listing_lines(&list(&probes.join("probe.log"))).join("\n"),
         );
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "fetch-ls", &output);
-    }
-
-    #[test]
-    fn a_fetched_path_lands_under_its_session_and_cannot_leave_it() {
-        use mj_checkpoint::archive::{FetchedKind, FetchedPath};
-        let temp = PathBuf::from("/scratch");
-        let fetched = |kind, path: &str| FetchedPath {
-            kind,
-            path: path.to_owned(),
-            bytes: Vec::new(),
-        };
-        // Two children's reports share a name; the target path keeps them apart.
-        assert_eq!(
-            fetched_location(
-                &temp,
-                "d8443f17",
-                &fetched(
-                    FetchedKind::File,
-                    "/workspace/d8443f17/.mj-agents/c1/report.md"
-                ),
-            )
-            .unwrap(),
-            PathBuf::from("/scratch/mjolnir/d8443f17/workspace/d8443f17/.mj-agents/c1/report.md")
-        );
-        assert_eq!(
-            fetched_location(
-                &temp,
-                "d8443f17",
-                &fetched(FetchedKind::Directory, "/tmp/rust-veto-cf")
-            )
-            .unwrap(),
-            PathBuf::from("/scratch/mjolnir/d8443f17/tmp/rust-veto-cf.zip")
-        );
-        // Whatever the target answers, the file stays in the session's directory.
-        assert_eq!(
-            fetched_location(
-                &temp,
-                "s",
-                &fetched(FetchedKind::File, "/a/../../etc/passwd")
-            )
-            .unwrap(),
-            PathBuf::from("/scratch/mjolnir/s/a/etc/passwd")
-        );
-        for session in ["../s", "a/b", "/s", ".."] {
-            assert!(
-                fetched_location(&temp, session, &fetched(FetchedKind::File, "/x")).is_err(),
-                "{session:?} must not name a directory"
-            );
-        }
     }
 
     #[test]
@@ -3053,7 +2986,7 @@ mod tests {
         };
         assert_eq!(parse(&[]).unwrap(), None);
         assert_eq!(
-            parse(&["--review", "off"]).unwrap(),
+            parse(&["--review", "off", "--review-count", "3"]).unwrap(),
             Some(SessionReview::Off)
         );
         assert_eq!(
@@ -3066,8 +2999,9 @@ mod tests {
         );
         assert!(parse(&["--review", "on"]).is_err());
         assert_eq!(
-            parse(&["--review-model", "gpt-6-astra"]).unwrap(),
+            parse(&["--review-model", "gpt-6-astra", "--review-count", "3"]).unwrap(),
             Some(SessionReview::Turn {
+                count: std::num::NonZeroUsize::new(3),
                 model: Some("gpt-6-astra".into()),
                 effort: None,
                 tier: None,
@@ -3076,6 +3010,7 @@ mod tests {
         assert_eq!(
             parse(&["--review-effort", "high"]).unwrap(),
             Some(SessionReview::Turn {
+                count: None,
                 model: None,
                 effort: Some("high".into()),
                 tier: None,
@@ -3084,6 +3019,7 @@ mod tests {
         assert_eq!(
             parse(&["--review-tier", "extended", "--review-model", "gpt-6-luna"]).unwrap(),
             Some(SessionReview::Turn {
+                count: None,
                 model: Some("gpt-6-luna".into()),
                 effort: None,
                 tier: None,
@@ -3108,6 +3044,11 @@ mod tests {
             "the deprecated flag still accepts only quick and extended"
         );
         assert!(parse(&["--no-review"]).is_err());
+        let counted = parse(&["--review-count", "4"]).unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(counted).unwrap(),
+            serde_json::json!({"mode":"turn","count":4})
+        );
     }
 
     #[test]

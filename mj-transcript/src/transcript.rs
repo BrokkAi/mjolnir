@@ -1,6 +1,6 @@
 //! Transcript projection and presentation implementation.
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     SessionUpdate, ToolCall, ToolCallContent, ToolCallLocation, ToolCallUpdateFields, ToolKind,
 };
 use mj_core::acp::RuntimeEvent;
@@ -64,7 +64,7 @@ pub fn compact_tool_call_for_retention(body: &mut TranscriptBody) -> bool {
 }
 
 fn drop_diff_body(item: &mut serde_json::Value) -> bool {
-    use agent_client_protocol::schema::v1::ToolCallContent;
+    use agent_client_protocol::v1::schema::ToolCallContent;
 
     // Round-trip through `ToolCallContent`, not `Diff`: the variant tag lives
     // on the enum, and writing back a bare `Diff` would strip it and make the
@@ -1299,7 +1299,24 @@ pub fn tool_content_details(
     content: &[ToolCallContent],
     terminal_outputs: &[TerminalOutputRecord],
     raw_output: Option<&serde_json::Value>,
+    status: ToolStatus,
 ) -> Vec<String> {
+    let terminal_finished = |record: &TerminalOutputRecord| {
+        !matches!(status, ToolStatus::Pending | ToolStatus::Running)
+            || record.exit_code.is_some()
+            || record.signal.is_some()
+    };
+    let terminal_detail = |record: &TerminalOutputRecord| {
+        if !terminal_finished(record) {
+            if record.truncated {
+                format!("{}\noutput truncated", record.output)
+            } else {
+                record.output.clone()
+            }
+        } else {
+            terminal_output_detail(record)
+        }
+    };
     let mut details = Vec::new();
     let mut referenced: Vec<&str> = Vec::new();
     for item in content {
@@ -1316,7 +1333,7 @@ pub fn tool_content_details(
                     terminal_outputs
                         .iter()
                         .find(|record| record.terminal_id.as_str() == terminal_id)
-                        .map(terminal_output_detail)
+                        .map(terminal_detail)
                         .or_else(|| raw_output.and_then(raw_output_terminal_detail))
                         .unwrap_or_else(|| format!("terminal {}", terminal.terminal_id)),
                 )
@@ -1339,12 +1356,30 @@ pub fn tool_content_details(
             // Kimi sends the captured stdout as ordinary tool content and in
             // its raw result. Keep the exit summary without printing those
             // same bytes a second time in Raw mode.
-            details.push(terminal_exit_summary(record));
+            if terminal_finished(record) {
+                details.push(terminal_exit_summary(record));
+            }
         } else {
-            details.push(sanitize_terminal_text(&terminal_output_detail(record)));
+            details.push(sanitize_terminal_text(&terminal_detail(record)));
         }
     }
     details
+}
+
+/// Read a textual diagnostic from an ACP provider-specific `rawOutput.error`.
+/// Other raw output is deliberately not exposed here: successful result
+/// payloads can contain arbitrary data and belong to the tool-specific view.
+pub fn tool_error_detail(raw_output: Option<&Value>) -> Option<String> {
+    let error = raw_output?.get("error")?;
+    if error.is_null() {
+        return None;
+    }
+    let text = match error {
+        Value::String(text) => text.clone(),
+        _ => serde_json::to_string_pretty(error)
+            .expect("tool diagnostics are serializable JSON values"),
+    };
+    (!text.is_empty()).then(|| sanitize_terminal_text(&text))
 }
 
 /// The output codex reports for a terminal it ran itself. Codex names its own
@@ -1380,7 +1415,7 @@ fn terminal_exit_summary(record: &TerminalOutputRecord) -> String {
     let mut summary = match (record.exit_code, &record.signal) {
         (_, Some(signal)) => format!("killed by {signal}"),
         (Some(code), None) => format!("exited {code}"),
-        (None, None) => "released before exit".to_owned(),
+        (None, None) => "exit status unavailable".to_owned(),
     };
     if record.truncated {
         summary.push_str(" · output truncated");
@@ -1497,7 +1532,13 @@ pub fn apply_session_update_to_entries(
             entry.tool_summary = Some(presentation.summary.clone());
             entry.tool_presentation = Some(presentation);
             entry.tool_input = call.raw_input;
-            entry.tool_content = tool_content_details(&call.content, &[], call.raw_output.as_ref());
+            entry.tool_error = tool_error_detail(call.raw_output.as_ref());
+            entry.tool_content = tool_content_details(
+                &call.content,
+                &[],
+                call.raw_output.as_ref(),
+                tool_status(&call.status),
+            );
             entry.tool_diffstats = tool_diff_paths(&call.content);
             entry.tool_locations = tool_location_details(&call.locations);
             entries.push(entry);
@@ -1515,6 +1556,9 @@ pub fn apply_session_update_to_entries(
             if let Some(input) = &raw_input {
                 entry.tool_input = Some(input.clone());
             }
+            if let Some(raw_output) = &raw_output {
+                entry.tool_error = tool_error_detail(Some(raw_output));
+            }
             if let Some(title) = update.fields.title {
                 entry.text = sanitize_terminal_text(&title);
             }
@@ -1523,8 +1567,12 @@ pub fn apply_session_update_to_entries(
                 mark_tool_end(entry, recorded_at_ms);
             }
             if let Some(content) = update.fields.content {
-                entry.tool_content =
-                    tool_content_details(&content, &[], update.fields.raw_output.as_ref());
+                entry.tool_content = tool_content_details(
+                    &content,
+                    &[],
+                    raw_output.as_ref(),
+                    entry.tool_status.unwrap_or(ToolStatus::Pending),
+                );
                 entry.tool_diffstats = tool_diff_paths(&content);
             }
             if let Some(locations) = update.fields.locations {
@@ -1624,6 +1672,11 @@ pub fn apply_runtime_event_to_entries(
             None
         }
         RuntimeEvent::SessionStarted { resumed: true, .. } => None,
+        RuntimeEvent::ElicitationResolved { action, .. }
+            if action == mj_core::elicitation::OPERATOR_AWAY_ACTION =>
+        {
+            None
+        }
         RuntimeEvent::ElicitationResolved {
             reply: Some(reply), ..
         } => {
@@ -1680,7 +1733,7 @@ pub fn transcript_item_text(item: &TranscriptItem) -> String {
             sanitize_terminal_text(&terminal_output_detail(record))
         }
         TranscriptBody::Plan { plan } => {
-            let Ok(plan) = agent_client_protocol::schema::v1::Plan::deserialize(plan) else {
+            let Ok(plan) = agent_client_protocol::v1::schema::Plan::deserialize(plan) else {
                 return String::new();
             };
             plan.entries
@@ -1736,7 +1789,7 @@ pub fn materialized_tool_diffstats(item: &TranscriptItem) -> Option<Vec<String>>
     (!diffstats.is_empty()).then_some(diffstats)
 }
 
-fn format_diffstat(diff: &agent_client_protocol::schema::v1::Diff) -> String {
+fn format_diffstat(diff: &agent_client_protocol::v1::schema::Diff) -> String {
     // A diff recorded since `diff` landed already carries its counts, so
     // this is a lookup. An older record still holds both file copies and is
     // diffed here on demand.
@@ -1752,7 +1805,7 @@ fn format_diffstat(diff: &agent_client_protocol::schema::v1::Diff) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus, ToolCallUpdate};
+    use agent_client_protocol::v1::schema::{ToolCall, ToolCallStatus, ToolCallUpdate};
     use serde_json::json;
 
     #[test]
@@ -2262,7 +2315,7 @@ mod tests {
         use std::fmt::Write as _;
 
         let mut output = String::new();
-        let diff = agent_client_protocol::schema::v1::Diff::new("/workspace/new.txt", "one\ntwo\n");
+        let diff = agent_client_protocol::v1::schema::Diff::new("/workspace/new.txt", "one\ntwo\n");
         writeln!(output, "=== new file diff detail (transcript row) ===").unwrap();
         writeln!(output, "{}", format_diffstat(&diff)).unwrap();
 
