@@ -1451,7 +1451,7 @@ fn active_child_session_ids_skips_children_that_already_stopped() {
         runtime_test_subagent(&stopped_child.id, &parent.id),
     ]
     .into_iter()
-    .map(|subagent| (subagent.child_session_id.clone(), subagent))
+    .map(|subagent| (subagent.child_session_id.clone(), subagent.into()))
     .collect();
 
     let children = active_child_session_ids(&state, &parent.id);
@@ -6267,17 +6267,25 @@ async fn dashboard_startup_larger_than_a_frame_arrives_whole() {
     let mut session = runtime_test_session("large-draft", "workspace", SessionState::Running);
     session.draft_input = "draft 🙂\n".repeat(MAX_FRAME_BYTES / 8);
     let startup = DashboardStartup {
-        state: mj_core::state::State {
-            sessions: [(session.id.clone(), session)].into_iter().collect(),
-            ..Default::default()
+        runtime: mj_client::runtime_feed::RuntimeBootstrap {
+            cursor: mj_client::runtime_feed::RuntimeCursor {
+                incarnation: "startup".into(),
+                sequence: 1,
+                subagent_parents: Default::default(),
+            },
+            projection: mj_client::runtime_feed::RuntimeProjection {
+                records: [(session.id.clone(), session)].into_iter().collect(),
+                ..Default::default()
+            },
         },
+        metadata: Default::default(),
         pane_sizes: Default::default(),
         conversation_layouts: Default::default(),
         queued_prompts: Default::default(),
-        launch_recency: Default::default(),
     };
     let expected = serde_json::to_value(&startup).unwrap();
-    assert!(serde_json::to_vec(&startup).unwrap().len() > MAX_FRAME_BYTES);
+    let payload_bytes = serde_json::to_vec(&startup).unwrap().len();
+    assert!(payload_bytes > MAX_FRAME_BYTES);
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -6290,7 +6298,7 @@ async fn dashboard_startup_larger_than_a_frame_arrives_whole() {
             match &reply {
                 DaemonReply::DashboardStartup(_) => assert!(matches!(
                     request.action,
-                    DaemonAction::DashboardStartup { client_id } if client_id == "large-dashboard"
+                    DaemonAction::DashboardStartup { client_id, workspace_id } if client_id == "large-dashboard" && workspace_id == "workspace"
                 )),
                 _ => assert!(matches!(request.action, DaemonAction::Ping)),
             }
@@ -6306,11 +6314,20 @@ async fn dashboard_startup_larger_than_a_frame_arrives_whole() {
             .unwrap();
         }
     });
-    let mut client = mj_client::daemon::DaemonClient::connect(test_metadata(address))
+    let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let proxy_address = proxy.local_addr().unwrap();
+    let copied = tokio::spawn(async move {
+        let (mut incoming, _) = proxy.accept().await.unwrap();
+        let mut outgoing = TcpStream::connect(address).await.unwrap();
+        tokio::io::copy_bidirectional(&mut incoming, &mut outgoing)
+            .await
+            .unwrap()
+    });
+    let mut client = mj_client::daemon::DaemonClient::connect(test_metadata(proxy_address))
         .await
         .unwrap();
     let received = client
-        .dashboard_startup("large-dashboard".into())
+        .dashboard_startup("large-dashboard".into(), "workspace".into())
         .await
         .expect("load the complete dashboard startup state");
     assert_eq!(serde_json::to_value(received).unwrap(), expected);
@@ -6318,7 +6335,13 @@ async fn dashboard_startup_larger_than_a_frame_arrives_whole() {
         client.request(DaemonAction::Ping).await.unwrap(),
         DaemonReply::Pong
     ));
+    drop(client);
     server.await.unwrap();
+    let (_, response_bytes) = copied.await.unwrap();
+    assert!(
+        response_bytes < (payload_bytes * 3 / 2) as u64,
+        "base64 chunks must stay near 4/3 of JSON size: {response_bytes} wire bytes for {payload_bytes} JSON bytes"
+    );
 }
 
 #[tokio::test]
@@ -8389,6 +8412,7 @@ async fn runtime_publication_crosses_frame_limit_atomically_and_keeps_connection
                         cursor: RuntimeCursor {
                             incarnation: "test".into(),
                             sequence: 1,
+                            subagent_parents: Default::default(),
                         },
                         projection: Box::new(projection),
                     },
@@ -9252,9 +9276,10 @@ async fn resume_candidates_are_inactive_top_level_sessions_with_every_adopted_na
     for record in [live, stopped, lost, child] {
         state.sessions.insert(record.id.clone(), record);
     }
-    state
-        .subagents
-        .insert("child".into(), runtime_test_subagent("child", "live"));
+    state.subagents.insert(
+        "child".into(),
+        runtime_test_subagent("child", "live").into(),
+    );
     let candidates = test_runtime_state_holding(state).resume_candidates();
     let ids = candidates
         .candidates
@@ -9299,9 +9324,10 @@ async fn go_startup_session_falls_back_when_the_remembered_session_is_archived()
             .collect(),
         ..mj_core::state::State::default()
     };
-    state
-        .subagents
-        .insert(child.id.clone(), runtime_test_subagent(&child.id, "parent"));
+    state.subagents.insert(
+        child.id.clone(),
+        runtime_test_subagent(&child.id, "parent").into(),
+    );
     let runtime = test_runtime_state_holding(state);
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();

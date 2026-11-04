@@ -511,9 +511,8 @@ pub(crate) fn dashboard_with_one_subagent() -> (DashboardState, String) {
     let parent = running_session();
     let mut child = running_session();
     child.id = "child-session".into();
-    let relation = mj_core::subagent::SubagentRecord {
+    let relation = mj_core::subagent::SubagentMetadata {
         kind: mj_core::subagent::SubagentKind::Worker,
-        reviewer_launch: None,
         child_session_id: child.id.clone(),
         parent_session_id: parent.id.clone(),
         task_name: "Inspect parser".into(),
@@ -521,7 +520,6 @@ pub(crate) fn dashboard_with_one_subagent() -> (DashboardState, String) {
         model: None,
         effort: None,
         working_directory: Default::default(),
-        initial_prompt: "Inspect the parser".into(),
         request_key: "request-1".into(),
         created_at: child.created_at.clone(),
         noticed_turn: None,

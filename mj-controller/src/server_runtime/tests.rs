@@ -880,7 +880,8 @@ fn golden_phone_session_snapshot() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-        },
+        }
+        .into(),
     );
     let workspace = |id: &str| mj_core::workspace::WorkspaceRecord {
         id: id.into(),
@@ -1634,7 +1635,8 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: true,
-        },
+        }
+        .into(),
     );
     controller.state.sessions.insert(parent.id.clone(), parent);
     controller.state.sessions.insert(child.id.clone(), child);

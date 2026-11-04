@@ -4,58 +4,58 @@
 
 use super::*;
 
-/// Assembles what the dashboard shows before its runtime feed connects:
-/// live sessions (and durably moving ones) with this client's read frontiers,
-/// the workspaces' layouts, queued prompts and launch recency.
-pub(super) fn dashboard_startup(client_id: &str) -> Result<DashboardStartup> {
-    let mut controller = Controller::load()?;
-    let launch_recency = mj_client::runtime_feed::launch_recency(&controller.state.sessions);
-    // Start from what the runtime feed will send, which is live sessions
-    // only; the resume dialog asks for the stopped ones. No lifecycle
-    // operation is known yet, so only a durable move keeps a stopped session
-    // live here.
-    let moving = crate::database::load_move_operations()?
-        .into_iter()
-        .filter(|operation| operation.is_active())
-        .map(|operation| operation.selection.session_id)
-        .collect();
-    let live = mj_core::state::live_session_ids(
-        &controller.state.sessions,
-        &controller.state.subagents,
-        &moving,
-    );
-    controller.state.sessions.retain(|id, _| live.contains(id));
-    controller.state.subagents.retain(|id, _| live.contains(id));
-    apply_client_read_frontiers(&mut controller.state, client_id)?;
+/// Store-only startup data; the runtime history owns the session snapshot.
+pub(super) struct DashboardStored {
+    pub metadata: StoredSessionMetadata,
+    pub layouts: WorkspaceLayouts,
+    pub queued_prompts: BTreeMap<String, Vec<mj_core::relay::QueuedPrompt>>,
+    pub subagent_parents: BTreeSet<String>,
+}
+
+pub(super) fn dashboard_stored(workspace_id: &str) -> Result<DashboardStored> {
+    let controller = Controller::load()?;
     let workspace_ids = crate::database::list_workspaces()?
         .into_iter()
         .map(|workspace| workspace.id)
         .collect();
     let layouts = workspace_layouts(workspace_ids)?;
+    // A pinned historical conversation needs its family in the first frame.
+    let subagent_parents = layouts
+        .conversation_layouts
+        .get(workspace_id)
+        .into_iter()
+        .flat_map(|layout| layout.sessions.values())
+        .filter_map(|id| controller.state.subagents.get(id))
+        .map(|child| child.parent_session_id.clone())
+        .collect();
     let queued_prompts = crate::pollers::projected_queued_prompts(&controller)?;
-    Ok(DashboardStartup {
-        state: controller.state,
-        pane_sizes: layouts.pane_sizes,
-        conversation_layouts: layouts.conversation_layouts,
+    Ok(DashboardStored {
+        metadata: StoredSessionMetadata {
+            mount_history: controller.state.mount_history,
+            container_sizes: controller.state.container_sizes,
+        },
+        layouts,
         queued_prompts,
-        launch_recency,
+        subagent_parents,
     })
 }
 
-/// Each active session's stored read frontier for `client_id`.
-fn apply_client_read_frontiers(state: &mut mj_core::state::State, client_id: &str) -> Result<()> {
-    let active: Vec<_> = state
-        .sessions
+/// Only the rows in this client's bootstrap need read frontiers.
+pub(super) fn client_read_frontiers(
+    mut records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    client_id: &str,
+) -> Result<mj_core::snapshot_map::SnapshotMap<String, SessionRecord>> {
+    let active = records
         .values()
         .filter(|session| session.state.is_active())
         .map(|session| session.id.clone())
-        .collect();
+        .collect::<Vec<_>>();
     for id in active {
-        let session = state.sessions.get_mut(&id).expect("active session exists");
+        let session = records.get_mut(&id).expect("active session exists");
         session.viewed_through_event_ordinal =
             crate::database::client_read_frontier(client_id, &session.workspace_id, &session.id)?;
     }
-    Ok(())
+    Ok(records)
 }
 
 pub(super) fn workspace_layouts(workspace_ids: Vec<String>) -> Result<WorkspaceLayouts> {

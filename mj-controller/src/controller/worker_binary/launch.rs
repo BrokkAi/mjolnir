@@ -562,9 +562,13 @@ impl Controller {
             },
             &target,
         )?;
-        launch.reviewer_launch = subagent
-            .as_ref()
-            .and_then(|child| child.reviewer_launch.clone());
+        launch.reviewer_launch = if subagent.is_some() {
+            crate::database::load_subagent(session_id)?
+                .context("sub-agent launch record is missing")?
+                .reviewer_launch
+        } else {
+            None
+        };
         if let Some(reviewer) = &launch.reviewer_launch {
             launch.bridge_command = reviewer.bridge_command.clone();
             launch.bridge_args = reviewer.bridge_args.clone();

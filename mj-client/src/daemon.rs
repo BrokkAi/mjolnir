@@ -1,4 +1,5 @@
 //! Authenticated local daemon protocol and client transport.
+mod chunk_bytes;
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
 use agent_client_protocol::v1::schema::ContentBlock;
@@ -257,15 +258,13 @@ pub struct WikiRestoreRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DashboardStartup {
-    /// Live sessions and sub-agents, plus durably moving ones, with each
-    /// session's read frontier for this client applied.
-    pub state: State,
+    /// The snapshot and cursor from which the runtime feed continues.
+    pub runtime: crate::runtime_feed::RuntimeBootstrap,
+    pub metadata: StoredSessionMetadata,
     pub pane_sizes: std::collections::BTreeMap<String, mj_core::workspace::PaneSizes>,
     pub conversation_layouts:
         std::collections::BTreeMap<String, mj_core::workspace::ConversationLayout>,
     pub queued_prompts: std::collections::BTreeMap<String, Vec<mj_core::relay::QueuedPrompt>>,
-    /// Computed before stopped sessions are set aside.
-    pub launch_recency: Vec<crate::runtime_feed::LaunchRecency>,
 }
 
 /// Stored per-workspace layouts, keyed by workspace id.
@@ -649,6 +648,7 @@ pub enum DaemonAction {
     /// Everything the terminal dashboard reads from the store at startup.
     DashboardStartup {
         client_id: String,
+        workspace_id: String,
     },
     /// Stored pane sizes and conversation layouts of these workspaces.
     WorkspaceLayouts {
@@ -692,6 +692,7 @@ pub enum DaemonAction {
     RuntimeChanges {
         cursor: Option<crate::runtime_feed::RuntimeCursor>,
         wait: bool,
+        subagent_parents: std::collections::BTreeSet<String>,
     },
     /// One live session's transcript tail as it was at `cursor`, so the
     /// deltas after that cursor apply to it exactly.
@@ -941,6 +942,7 @@ pub enum DaemonReply {
     /// Transport fragments of one chunked reply (see
     /// [`DaemonReply::is_chunked`]); never exposed to consumers.
     ReplyChunk {
+        #[serde(with = "chunk_bytes")]
         bytes: Vec<u8>,
         finished: bool,
     },
@@ -2075,9 +2077,16 @@ impl DaemonClient {
         }
     }
 
-    pub async fn dashboard_startup(&mut self, client_id: String) -> Result<DashboardStartup> {
+    pub async fn dashboard_startup(
+        &mut self,
+        client_id: String,
+        workspace_id: String,
+    ) -> Result<DashboardStartup> {
         match self
-            .request(DaemonAction::DashboardStartup { client_id })
+            .request(DaemonAction::DashboardStartup {
+                client_id,
+                workspace_id,
+            })
             .await?
         {
             DaemonReply::DashboardStartup(startup) => Ok(*startup),
@@ -2196,8 +2205,22 @@ impl DaemonClient {
         cursor: Option<crate::runtime_feed::RuntimeCursor>,
         wait: bool,
     ) -> Result<crate::runtime_feed::RuntimeFrame> {
+        self.runtime_changes_for_subagent_parents(cursor, wait, Default::default())
+            .await
+    }
+
+    pub async fn runtime_changes_for_subagent_parents(
+        &mut self,
+        cursor: Option<crate::runtime_feed::RuntimeCursor>,
+        wait: bool,
+        subagent_parents: std::collections::BTreeSet<String>,
+    ) -> Result<crate::runtime_feed::RuntimeFrame> {
         match self
-            .request(DaemonAction::RuntimeChanges { cursor, wait })
+            .request(DaemonAction::RuntimeChanges {
+                cursor,
+                wait,
+                subagent_parents,
+            })
             .await?
         {
             DaemonReply::RuntimeChanges(frame) => Ok(*frame),
@@ -2725,7 +2748,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // and client attachments are renewable leases rather than client process IDs.
 // Nodes connect with NodeConnect and then speak the node protocol.
 // Dashboard startup uses chunked replies, which older clients reject for this reply type.
-pub const PROTOCOL_VERSION: u32 = 73;
+// Shared state publishes child metadata; launch intent remains in the daemon store.
+// Startup seeds runtime cursors with family scope; reply chunks use base64 bytes.
+pub const PROTOCOL_VERSION: u32 = 74;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

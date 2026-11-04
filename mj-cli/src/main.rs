@@ -1893,12 +1893,11 @@ async fn start_dashboard(
             .into_iter()
             .map(|listing| listing.workspace)
             .collect();
-        let startup = daemon.dashboard_startup(client_id.clone()).await?;
-        let config = tokio::task::spawn_blocking(mj_core::config::Config::load)
-            .await
-            .context("load configuration task failed")??;
+        let startup = daemon
+            .dashboard_startup(client_id.clone(), selected.clone())
+            .await?;
         Some(dashboard::LoadedDashboard::from_daemon(
-            &selected, &client_id, workspaces, startup, config,
+            &selected, &client_id, workspaces, startup,
         ))
     } else {
         None

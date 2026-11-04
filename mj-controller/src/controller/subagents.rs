@@ -541,7 +541,7 @@ impl Controller {
         self.state.sessions.insert(child_id, session);
         self.state
             .subagents
-            .insert(relation.child_session_id.clone(), relation.clone());
+            .insert(relation.child_session_id.clone(), (&relation).into());
         Ok(relation)
     }
 
@@ -734,10 +734,12 @@ pub fn stopped_subagent(
         .map_or(relation.task_name.as_str(), SessionRecord::listed_title)
         .to_owned();
     let report_dir = crate::database::load_subagent_report(child_session_id)?.report_dir;
+    let launch = crate::database::load_subagent(child_session_id)?
+        .context("sub-agent launch record is missing")?;
     Ok(mj_core::subagent::StoppedSubagent {
         child_session_id: child_session_id.to_owned(),
         title,
-        task: mj_core::subagent::task_summary(&relation.initial_prompt, report_dir.as_deref()),
+        task: mj_core::subagent::task_summary(&launch.initial_prompt, report_dir.as_deref()),
         handed_back: subagent_has_handed_back(child_session_id)?,
     })
 }

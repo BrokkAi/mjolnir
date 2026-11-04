@@ -784,6 +784,82 @@ pub struct SubagentRecord {
     pub handback_tool: bool,
 }
 
+/// Relationship and lifecycle metadata published to control surfaces.
+/// Complete prompts and reviewer launch configuration remain in the store's
+/// `SubagentRecord`; a metadata snapshot cannot create a new child launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentMetadata {
+    #[serde(default)]
+    pub kind: SubagentKind,
+    pub child_session_id: String,
+    pub parent_session_id: String,
+    pub task_name: String,
+    pub profile_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    pub working_directory: PathBuf,
+    pub request_key: String,
+    pub created_at: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "delivered_turn"
+    )]
+    pub noticed_turn: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_finish: Option<SubagentFinishIdentity>,
+    #[serde(default)]
+    pub handback_tool: bool,
+}
+
+impl From<&SubagentRecord> for SubagentMetadata {
+    fn from(record: &SubagentRecord) -> Self {
+        Self {
+            kind: record.kind,
+            child_session_id: record.child_session_id.clone(),
+            parent_session_id: record.parent_session_id.clone(),
+            task_name: record.task_name.clone(),
+            profile_id: record.profile_id.clone(),
+            model: record.model.clone(),
+            effort: record.effort.clone(),
+            working_directory: record.working_directory.clone(),
+            request_key: record.request_key.clone(),
+            created_at: record.created_at.clone(),
+            noticed_turn: record.noticed_turn,
+            reported_finish: record.reported_finish.clone(),
+            handback_tool: record.handback_tool,
+        }
+    }
+}
+
+impl From<SubagentRecord> for SubagentMetadata {
+    fn from(record: SubagentRecord) -> Self {
+        Self::from(&record)
+    }
+}
+
+impl SubagentMetadata {
+    /// Apply metadata edits without replacing the durable launch intent.
+    pub fn apply_to(&self, record: &mut SubagentRecord) {
+        record.kind = self.kind;
+        record.child_session_id = self.child_session_id.clone();
+        record.parent_session_id = self.parent_session_id.clone();
+        record.task_name = self.task_name.clone();
+        record.profile_id = self.profile_id.clone();
+        record.model = self.model.clone();
+        record.effort = self.effort.clone();
+        record.working_directory = self.working_directory.clone();
+        record.request_key = self.request_key.clone();
+        record.created_at = self.created_at.clone();
+        record.noticed_turn = self.noticed_turn;
+        record.reported_finish = self.reported_finish.clone();
+        record.handback_tool = self.handback_tool;
+    }
+}
+
 /// Lifecycle group used by the tool and both user interfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

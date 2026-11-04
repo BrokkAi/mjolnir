@@ -369,6 +369,12 @@ impl DashboardContext {
         let Some(update) = latest else {
             return;
         };
+        if update.subagent_parents != *self.runtime_subagent_parents.borrow() {
+            return;
+        }
+        if self.dashboard.notice().as_deref() == Some("Loading sub-agents…") {
+            self.dashboard.clear_notice();
+        }
         self.auto_afk.configure(
             self.controller.config.advanced.auto_afk_minutes > 0,
             update.operator_presence.away,
@@ -556,7 +562,7 @@ impl DashboardContext {
     pub(crate) fn apply_runtime_records(
         &mut self,
         records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
-        subagents: mj_core::snapshot_map::SnapshotMap<String, SubagentRecord>,
+        subagents: mj_core::snapshot_map::SnapshotMap<String, SubagentMetadata>,
         last_subagent_policies: std::collections::BTreeMap<
             String,
             mj_core::subagent::SubagentPolicy,

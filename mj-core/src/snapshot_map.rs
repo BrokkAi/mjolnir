@@ -200,6 +200,17 @@ impl<K: Ord + Clone, V: Clone> SnapshotMap<K, V> {
             self.0.remove(&key);
         }
     }
+
+    /// Select a smaller view while sharing the retained records' contents.
+    pub fn filtered(&self, mut keep: impl FnMut(&K, &V) -> bool) -> Self {
+        Self(
+            self.0
+                .iter()
+                .filter(|(key, value)| keep(key, value.as_ref()))
+                .map(|(key, value)| (key.clone(), Arc::clone(value)))
+                .collect(),
+        )
+    }
 }
 
 pub struct SnapshotEntry<'a, K: Ord + Clone, V: Clone> {

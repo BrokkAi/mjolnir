@@ -100,6 +100,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     StoredSessionSummary {
         session_id: String,
+        generation: u64,
         result: std::result::Result<PreparedMaterializedSessionSummary, String>,
     },
     /// The stored tail of a stopped sub-agent's conversation, which is read
@@ -830,7 +831,10 @@ impl DashboardContext {
                 self.dashboard
                     .set_stopped_subagent_transcript(&session_id, result);
             }
-            DashboardIoUpdate::StoredSessionSummary { session_id, result } => {
+            DashboardIoUpdate::StoredSessionSummary { session_id, generation, result } => {
+                if !self.summary_reads.finish(&session_id, generation) {
+                    return;
+                }
                 match result {
                     Ok(summary) => {
                         self.dashboard
@@ -2424,8 +2428,15 @@ mod tests {
             .unwrap();
         let completed = runtime.block_on(async {
             let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
+            let permits = Arc::new(tokio::sync::Semaphore::new(4));
             for id in 0..64 {
-                spawn_stored_session_summary(id.to_string(), 0, updates.clone());
+                spawn_stored_session_summary(
+                    id.to_string(),
+                    0,
+                    id,
+                    Arc::clone(&permits),
+                    updates.clone(),
+                );
             }
             tokio::time::timeout(Duration::from_secs(5), async {
                 for _ in 0..64 {

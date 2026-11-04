@@ -902,35 +902,47 @@ pub(crate) fn spawn_stopped_subagent_transcript(
 pub(crate) fn spawn_stored_session_summary(
     session_id: String,
     viewed_through_event_ordinal: u64,
+    generation: u64,
+    permits: Arc<tokio::sync::Semaphore>,
     updates: UnboundedSender<DashboardIoUpdate>,
-) {
+) -> JoinHandle<()> {
     let reported_session_id = session_id.clone();
-    spawn_background_async(
-        "load stored session summary",
-        updates,
-        SAVE_ACK_TIMEOUT,
-        async move {
-            let summary = daemon::connect_or_start()
-                .await?
-                .stored_session_summary(session_id.clone())
-                .await?
-                .with_context(|| format!("session {session_id} has no stored projection"))?;
-            // Only CPU preparation needs a blocking thread. Acquiring one
-            // while awaiting the connection can starve its metadata read.
-            tokio::task::spawn_blocking(move || {
-                PreparedMaterializedSessionSummary::from_materialized(
-                    summary,
-                    viewed_through_event_ordinal,
-                )
-            })
+    tokio::spawn(async move {
+        let _permit = permits
+            .acquire_owned()
             .await
-            .context("prepare stored session summary task failed")
-        },
-        move |result| DashboardIoUpdate::StoredSessionSummary {
-            session_id: reported_session_id,
-            result,
-        },
-    );
+            .expect("summary read permits remain open");
+        let task = spawn_background_async(
+            "load stored session summary",
+            updates,
+            SAVE_ACK_TIMEOUT,
+            async move {
+                let summary = daemon::connect_or_start()
+                    .await?
+                    .stored_session_summary(session_id.clone())
+                    .await?
+                    .with_context(|| format!("session {session_id} has no stored projection"))?;
+                // Only CPU preparation needs a blocking thread. Acquiring one
+                // while awaiting the connection can starve its metadata read.
+                tokio::task::spawn_blocking(move || {
+                    PreparedMaterializedSessionSummary::from_materialized(
+                        summary,
+                        viewed_through_event_ordinal,
+                    )
+                })
+                .await
+                .context("prepare stored session summary task failed")
+            },
+            move |result| DashboardIoUpdate::StoredSessionSummary {
+                session_id: reported_session_id,
+                generation,
+                result,
+            },
+        );
+        if let Err(error) = tokio_util::task::AbortOnDropHandle::new(task).await {
+            tracing::error!(%error, "stored summary supervisor failed");
+        }
+    })
 }
 
 pub(crate) fn spawn_lifecycle_reload(

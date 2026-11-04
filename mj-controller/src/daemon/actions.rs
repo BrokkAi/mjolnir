@@ -411,9 +411,40 @@ pub(super) async fn handle_action(
             let snapshot = blocking(move || workspace_snapshot(&workspace_id)).await?;
             Ok(DaemonReply::Snapshot(snapshot))
         }
-        DaemonAction::DashboardStartup { client_id } => {
-            let startup = blocking(move || dashboard_reads::dashboard_startup(&client_id)).await?;
-            Ok(DaemonReply::DashboardStartup(Box::new(startup)))
+        DaemonAction::DashboardStartup {
+            client_id,
+            workspace_id,
+        } => {
+            let stored = blocking(move || dashboard_reads::dashboard_stored(&workspace_id)).await?;
+            let frame = state
+                .runtime_changes_for_subagent_parents(None, false, stored.subagent_parents)
+                .await?;
+            let mj_client::runtime_feed::RuntimeFrame::Snapshot {
+                cursor,
+                mut projection,
+            } = frame
+            else {
+                bail!("dashboard bootstrap did not produce a runtime snapshot");
+            };
+            let records = std::mem::take(&mut projection.records);
+            projection.records =
+                blocking(move || dashboard_reads::client_read_frontiers(records, &client_id))
+                    .await?;
+            let queued_prompts = stored
+                .queued_prompts
+                .into_iter()
+                .filter(|(id, _)| projection.records.contains_key(id))
+                .collect();
+            Ok(DaemonReply::DashboardStartup(Box::new(DashboardStartup {
+                runtime: mj_client::runtime_feed::RuntimeBootstrap {
+                    cursor,
+                    projection: *projection,
+                },
+                metadata: stored.metadata,
+                pane_sizes: stored.layouts.pane_sizes,
+                conversation_layouts: stored.layouts.conversation_layouts,
+                queued_prompts,
+            })))
         }
         DaemonAction::WorkspaceLayouts { workspace_ids } => Ok(DaemonReply::WorkspaceLayouts(
             blocking(move || dashboard_reads::workspace_layouts(workspace_ids)).await?,
@@ -488,8 +519,14 @@ pub(super) async fn handle_action(
             .await?;
             Ok(DaemonReply::SavedSetup(Box::new(saved)))
         }
-        DaemonAction::RuntimeChanges { cursor, wait } => Ok(DaemonReply::RuntimeChanges(Box::new(
-            state.runtime_changes(cursor, wait).await?,
+        DaemonAction::RuntimeChanges {
+            cursor,
+            wait,
+            subagent_parents,
+        } => Ok(DaemonReply::RuntimeChanges(Box::new(
+            state
+                .runtime_changes_for_subagent_parents(cursor, wait, subagent_parents)
+                .await?,
         ))),
         DaemonAction::SessionTail { session_id, cursor } => Ok(DaemonReply::SessionTail(Box::new(
             state.session_tail(&session_id, &cursor),

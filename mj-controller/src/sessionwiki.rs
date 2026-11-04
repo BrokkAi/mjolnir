@@ -2130,7 +2130,7 @@ pub fn archived_session(id: &str) -> Result<Option<ArchivedSession>> {
 /// Pure over controller state, so the rule can be tested without a daemon.
 pub fn sessions_ready_to_archive(
     sessions: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
-    subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentRecord>,
+    subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentMetadata>,
     now: DateTime<Utc>,
     older_than_days: u32,
 ) -> Vec<String> {
@@ -2209,7 +2209,7 @@ pub(crate) fn sessions_ready_to_archive_from_state(
 /// visit.
 fn ancestor_depth(
     session_id: &str,
-    subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentRecord>,
+    subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentMetadata>,
 ) -> usize {
     let mut depth = 0;
     let mut current = session_id;
@@ -2293,7 +2293,7 @@ fn archive_space_over_state(
 fn archive_space_over(
     sessions_root: &Path,
     sessions: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
-    subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentRecord>,
+    subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentMetadata>,
     now: DateTime<Utc>,
     older_than_days: Option<u32>,
 ) -> ArchiveSpacePreview {
@@ -3728,7 +3728,7 @@ mod tests {
                 .collect(),
             &children
                 .into_iter()
-                .map(|child| (child.child_session_id.clone(), child))
+                .map(|child| (child.child_session_id.clone(), child.into()))
                 .collect(),
             now,
             3,
@@ -4046,7 +4046,8 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-            },
+            }
+            .into(),
         );
         let ownership = top_level::Snapshot::from_state(&state);
         let ids_for_paths: Vec<String> = paths

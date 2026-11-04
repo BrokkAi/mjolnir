@@ -17,6 +17,7 @@ mod composer_drafts;
 pub(crate) mod io;
 mod read_receipts;
 mod startup_prompts;
+mod summary_reads;
 mod usage_report;
 mod workspace_settings;
 
@@ -32,7 +33,7 @@ use crossterm::event::{
 use mj_controller::database::DetachedSessionDraft;
 use mj_core::config::Config;
 use mj_core::state::{MaterializedSession, SessionRecord, SessionResourceAllocation};
-use mj_core::subagent::SubagentRecord;
+use mj_core::subagent::SubagentMetadata;
 
 use mj_chat::chat::ChatElicitationDraft;
 use mj_chat::selection::{
@@ -353,6 +354,7 @@ pub(crate) struct DashboardContext {
 
     worker: Feed<SessionManagerUpdates>,
     runtime_state: Feed<watch::Receiver<RuntimeStateUpdate>>,
+    runtime_subagent_parents: watch::Sender<BTreeSet<String>>,
     runtime_health: Feed<watch::Receiver<mj_controller::pollers::RuntimeFeedHealth>>,
     /// Reviews the daemon is running. The chat renders one of these rather
     /// than driving a review of its own.
@@ -419,6 +421,7 @@ pub(crate) struct DashboardContext {
     dashboard_io: Feed<UnboundedReceiver<DashboardIoUpdate>>,
     pub(crate) web_request_generation: u64,
     pub(crate) web_request_cancel: Option<tokio_util::sync::DropGuard>,
+    summary_reads: summary_reads::SummaryReads,
     materialized_projection_permits: Arc<tokio::sync::Semaphore>,
     materialized_projections_in_flight: BTreeSet<String>,
     pending_materialized_projections: BTreeMap<String, (MaterializedProjection, u64)>,
@@ -613,6 +616,8 @@ pub(crate) async fn run_dashboard_for_workspace(
     let mut pacer = FramePacer::new(FRAME_INTERVAL);
     pacer.mark_urgent();
     loop {
+        context.update_subagent_scope();
+        context.reconcile_stored_session_summaries();
         if !context.shutdown_requested {
             context.refresh_controller_derived_state();
             context.start_sessions_text_search();
@@ -1619,6 +1624,7 @@ impl DashboardContext {
             workspace_id,
             client_id,
             controller,
+            bootstrap,
             workspaces,
             layouts,
             conversation_layouts,
@@ -1661,11 +1667,15 @@ impl DashboardContext {
             dashboard.apply_queued_prompts(&session_id, queued);
         }
 
-        let remote_worker = spawn_remote_dashboard_worker_poller(workspace_id.clone())?;
+        let remote_worker = spawn_remote_dashboard_worker_poller(workspace_id.clone(), bootstrap)?;
         let worker_updates_rx = remote_worker.updates;
         let worker_commands_tx = remote_worker.control;
         let worker_shutdown = remote_worker.shutdown;
-        let runtime_state_rx = remote_worker.state;
+        let runtime_subagent_parents = remote_worker.subagent_parents;
+        let mut runtime_state_rx = remote_worker.state;
+        // Apply bootstrap lifecycle and resource views even when the first
+        // delta contains no changes and therefore causes no watch wakeup.
+        runtime_state_rx.mark_changed();
         dashboard.set_move_snapshot(runtime_state_rx.borrow().moves.clone());
         dashboard.set_recent_launch(runtime_state_rx.borrow().recent_launch.clone());
         dashboard.set_container_capacities(runtime_state_rx.borrow().container_capacities.clone());
@@ -1769,6 +1779,7 @@ impl DashboardContext {
             session_preflight_cancel: None,
             worker: Feed::new(worker_updates_rx),
             runtime_state: Feed::new(runtime_state_rx),
+            runtime_subagent_parents,
             runtime_health: Feed::new(remote_worker.health),
             runtime_reviews: Feed::new(runtime_reviews_rx),
             runtime_notices: Feed::new(runtime_notices_rx),
@@ -1812,6 +1823,7 @@ impl DashboardContext {
             dashboard_io: Feed::new(dashboard_io_rx),
             web_request_generation: 0,
             web_request_cancel: None,
+            summary_reads: summary_reads::SummaryReads::default(),
             materialized_projection_permits: Arc::new(tokio::sync::Semaphore::new(2)),
             materialized_projections_in_flight: BTreeSet::new(),
             pending_materialized_projections: BTreeMap::new(),
@@ -1835,6 +1847,7 @@ pub(crate) struct LoadedDashboard {
     workspace_id: String,
     client_id: String,
     controller: Controller,
+    bootstrap: mj_client::runtime_feed::RuntimeReplica,
     workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
     layouts: BTreeMap<String, PaneSizes>,
     conversation_layouts: BTreeMap<String, ConversationLayout>,
@@ -1845,25 +1858,37 @@ pub(crate) struct LoadedDashboard {
 
 impl LoadedDashboard {
     /// Builds the dashboard's starting state from what the daemon read from
-    /// the store and this client's own configuration.
+    /// the store and its atomic runtime publication.
     pub(crate) fn from_daemon(
         workspace_id: &str,
         client_id: &str,
         workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
         startup: mj_client::daemon::DashboardStartup,
-        config: mj_core::config::Config,
     ) -> Self {
         let mj_client::daemon::DashboardStartup {
-            state,
+            runtime,
+            metadata,
             pane_sizes,
             conversation_layouts,
             queued_prompts,
-            launch_recency,
         } = startup;
+        let bootstrap = runtime.into_replica();
+        let config = bootstrap.projection.metadata.installed_config();
+        let state = mj_core::state::State {
+            sessions: bootstrap.projection.records.clone(),
+            subagents: bootstrap.projection.subagents.clone(),
+            operator_presence: bootstrap.projection.metadata.operator_presence,
+            last_subagent_policies: bootstrap.projection.metadata.last_subagent_policies.clone(),
+            mount_history: metadata.mount_history,
+            container_sizes: metadata.container_sizes,
+            ..Default::default()
+        };
+        let launch_recency = (*bootstrap.projection.metadata.launch_recency).clone();
         Self {
             workspace_id: workspace_id.to_owned(),
             client_id: client_id.to_owned(),
             controller: Controller { config, state },
+            bootstrap,
             workspaces,
             layouts: pane_sizes,
             conversation_layouts,
