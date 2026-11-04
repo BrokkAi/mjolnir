@@ -418,19 +418,22 @@ fn merged_review_tree(
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let stdout = String::from_utf8(output.stdout)?;
-    let mut fields = stdout.split('\0').filter(|field| !field.is_empty());
-    let tree = fields
-        .next()
-        .context("git merge-tree printed no tree id")?
+    // Paths are raw bytes: a file name need not be UTF-8.
+    let mut fields = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    let tree = std::str::from_utf8(fields.next().context("git merge-tree printed no tree id")?)?
         .to_owned();
-    let conflicted: BTreeSet<String> = fields.map(str::to_owned).collect();
+    let conflicted = fields
+        .map(mj_core::path_input::from_git_bytes)
+        .collect::<Result<BTreeSet<_>>>()?;
     if conflicted.is_empty() {
         return Ok(tree);
     }
     let merged = tree_entries(runner, root, &tree, &conflicted)?;
     let resolved = tree_entries(runner, root, head, &conflicted)?;
-    let hidden: Vec<String> = conflicted
+    let hidden: Vec<PathBuf> = conflicted
         .into_iter()
         .filter(|path| merged.get(path) == resolved.get(path))
         .collect();
@@ -445,18 +448,37 @@ fn tree_entries(
     runner: &dyn GitCommandRunner,
     root: &Path,
     tree_ish: &str,
-    paths: &BTreeSet<String>,
-) -> Result<BTreeMap<String, String>> {
-    let mut arguments = vec!["--literal-pathspecs", "ls-tree", "-r", "-z", tree_ish, "--"];
-    arguments.extend(paths.iter().map(String::as_str));
-    let output = String::from_utf8(checked_git(runner, root, &arguments)?)?;
-    Ok(output
-        .split('\0')
-        .filter_map(|record| {
-            let (entry, path) = record.split_once('\t')?;
-            Some((path.to_owned(), entry.to_owned()))
-        })
-        .collect())
+    paths: &BTreeSet<PathBuf>,
+) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+    let mut arguments: Vec<std::ffi::OsString> =
+        ["--literal-pathspecs", "ls-tree", "-r", "-z", tree_ish, "--"]
+            .map(Into::into)
+            .to_vec();
+    arguments.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
+    let output = runner.run(
+        root,
+        &GitCommand {
+            arguments,
+            stdin: Vec::new(),
+            env: Vec::new(),
+        },
+    )?;
+    anyhow::ensure!(
+        output.status == 0,
+        "git ls-tree failed with status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut entries = BTreeMap::new();
+    for record in output.stdout.split(|byte| *byte == 0) {
+        if let Some(tab) = record.iter().position(|byte| *byte == b'\t') {
+            entries.insert(
+                mj_core::path_input::from_git_bytes(&record[tab + 1..])?,
+                record[..tab].to_vec(),
+            );
+        }
+    }
+    Ok(entries)
 }
 
 fn default_branch(runner: &dyn GitCommandRunner, root: &Path) -> Result<Option<String>> {
@@ -2903,6 +2925,75 @@ pub(super) mod push_tests {
         assert_eq!(captured.base.commit(), Some(reviewed.as_str()));
         let files: Vec<_> = captured.delta.files.iter().map(|file| &file.path).collect();
         assert_eq!(files, ["image.bin", "kept.txt"], "{}", captured.delta.patch);
+    }
+
+    #[test]
+    fn push_capture_shows_conflicted_paths_that_are_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::OsStr::from_bytes(b"image-\xff.bin");
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        std::fs::write(root.join(name), b"\0base").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "shared file"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        std::fs::write(root.join(name), b"\0branch").unwrap();
+        git(&root, &["commit", "-qam", "reviewed branch change"]);
+        let reviewed = git(&root, &["rev-parse", "HEAD"]);
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &reviewed).unwrap();
+        git(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join(name), b"\0upstream").unwrap();
+        git(&root, &["commit", "-qam", "upstream conflicting change"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        git(&root, &["checkout", "-q", "feature"]);
+        assert_ne!(
+            SystemGit
+                .run(
+                    &root,
+                    &GitCommand {
+                        arguments: ["merge", "main"].map(Into::into).to_vec(),
+                        stdin: Vec::new(),
+                        env: Vec::new(),
+                    }
+                )
+                .unwrap()
+                .status,
+            0
+        );
+        std::fs::write(root.join(name), b"\0branch").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "resolve merge"]);
+
+        let captured = capture(&root, &start);
+        assert_eq!(captured.base.commit(), Some(reviewed.as_str()));
+        assert_eq!(captured.delta.files.len(), 1, "{}", captured.delta.patch);
+    }
+
+    #[test]
+    fn push_capture_shows_submodule_changes_that_diff_settings_ignore() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["config", "diff.ignoreSubmodules", "all"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        git(
+            &root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{start},vendored"),
+            ],
+        );
+        git(&root, &["commit", "-qm", "point at a submodule commit"]);
+
+        let captured = capture(&root, &start);
+        let files: Vec<_> = captured.delta.files.iter().map(|file| &file.path).collect();
+        assert_eq!(files, ["vendored"], "{}", captured.delta.patch);
+        assert!(captured.delta.patch.contains("Subproject commit"));
     }
 
     #[test]

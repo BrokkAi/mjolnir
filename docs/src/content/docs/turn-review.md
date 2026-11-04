@@ -79,7 +79,7 @@ By default, two separate reviewer sessions inspect the same captured change in p
 The initial prompt includes the user's messages and a per-file diffstat, not the full diff. For each repository it gives the reviewer the root, the baseline tree, the captured tree, and the command:
 
 ```text
-git -C <root> diff --no-ext-diff <baseline_tree> <capture_tree>
+git -C <root> diff --no-ext-diff --ignore-submodules=none <baseline_tree> <capture_tree>
 ```
 
 The reviewer runs that command itself with its harness's shell or read tools. The tree IDs keep the review scoped to the captured changes, even if files change later. Repository contents and tool output are treated as untrusted data, not instructions.

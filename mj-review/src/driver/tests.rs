@@ -98,7 +98,11 @@ fn running() -> (TurnReviewDriver, String) {
     let requests = driver.delta_captured(changed_delta());
     let command_id = prompted(&requests, "reviewer-1");
     let prompt = prompt_text(&requests, "reviewer-1");
-    assert!(prompt.contains("git -C /w/app diff --no-ext-diff base-tree new-tree"));
+    assert!(
+        prompt.contains(
+            "git -C /w/app diff --no-ext-diff --ignore-submodules=none base-tree new-tree"
+        )
+    );
     assert!(
         !prompt.contains("+retry"),
         "the prompt does not embed the diff"

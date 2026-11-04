@@ -1878,7 +1878,7 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     assert!(
         children[0]
             .2
-            .contains("git -C /workspace/app diff --no-ext-diff base new")
+            .contains("git -C /workspace/app diff --no-ext-diff --ignore-submodules=none base new")
     );
     assert!(children[0].2.contains("1 file changed, 1 insertion(+)"));
     assert!(!children[0].2.contains("+one"));

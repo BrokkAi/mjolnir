@@ -110,7 +110,7 @@ pub fn review_prompt(job: &ReviewJob) -> String {
                 })
                 .unwrap_or_default();
             format!(
-                "Repository root: {root}\nRun this exact command: `git -C {} diff --no-ext-diff {} {}`{merged}{unattributed}",
+                "Repository root: {root}\nRun this exact command: `git -C {} diff --no-ext-diff --ignore-submodules=none {} {}`{merged}{unattributed}",
                 shell_quote(&root),
                 repository.baseline_tree,
                 repository.capture_tree
@@ -193,7 +193,7 @@ mod tests {
         let prompt = review_prompt(&job());
         assert!(prompt.starts_with(CODEX_REVIEW_RUBRIC));
         assert!(prompt.contains("You are acting as a reviewer for a proposed code change"));
-        assert!(prompt.contains("git -C /workspace/app diff --no-ext-diff baseline123 capture456"));
+        assert!(prompt.contains("git -C /workspace/app diff --no-ext-diff --ignore-submodules=none baseline123 capture456"));
         assert!(prompt.contains("Repository: /workspace/app -- 1 file changed"));
         assert!(prompt.contains("Keep the public API stable"));
         assert!(prompt.contains("Fix the retry behavior"));
@@ -205,7 +205,7 @@ mod tests {
         merged.repositories[0].merged_in = vec!["upstream1".into(), "upstream2".into()];
         let prompt = review_prompt(&merged);
         assert!(prompt.contains(
-            "diff --no-ext-diff baseline123 capture456`\nThe base already includes the changes of other history merged, pulled or switched to (upstream1, upstream2)"
+            "diff --no-ext-diff --ignore-submodules=none baseline123 capture456`\nThe base already includes the changes of other history merged, pulled or switched to (upstream1, upstream2)"
         ));
 
         let mut unattributed = job();
