@@ -31,8 +31,9 @@ The status says the daemon is in a container. `docker inspect` shows no host net
 - [x] (2026-11-04) `mj setup` and `mj login` in container placement run inside the daemon container with the volume's `HOME`, data and config roots. The nested process carries `MJ_IN_CONTAINER` so it cannot try to launch another container.
 - [x] (2026-11-04) The dashboard's automatic first-run setup is a daemon action (`RunFirstRunSetup`, protocol 77). It discovers and writes configuration in the daemon's own environment, so container placement writes the volume and host placement keeps using the host configuration.
 - [ ] Give local session workers and their harness homes a container-native layout under the volume; verify a real turn in container placement.
+- [x] (2026-11-04) Add `containers/k8s/daemon.yaml`: one StatefulSet replica, a PersistentVolumeClaim at `/var/lib/mjolnir`, a Service, and a token Secret.
 - [ ] Add Docker/Podman end-to-end validation and a guard that the container has no host namespaces and no implicit mounts.
-- [ ] Update human documentation and the Kubernetes manifest.
+- [ ] Validate the Kubernetes manifest on a cluster and add remote-daemon client discovery (the manifest currently assumes the client already knows the Service address and token).
 
 ## Surprises & Discoveries
 
