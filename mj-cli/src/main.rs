@@ -1023,9 +1023,24 @@ async fn run_command(
                 .await
                 .map(|()| DashboardExit::Normal)
         }
-        Some(Command::Doctor(args)) => doctor(args).map(|()| DashboardExit::Normal),
-        Some(Command::Setup(args)) => setup(args).map(|()| DashboardExit::Normal),
+        Some(Command::Doctor(args)) => {
+            if daemon::container::exec_in_container(&container_forwarded_args()).await? {
+                return Ok(DashboardExit::Normal);
+            }
+            doctor(args).map(|()| DashboardExit::Normal)
+        }
+        Some(Command::Setup(args)) => {
+            if args.command.is_none()
+                && daemon::container::exec_in_container(&["setup".to_owned()]).await?
+            {
+                return Ok(DashboardExit::Normal);
+            }
+            setup(args).map(|()| DashboardExit::Normal)
+        }
         Some(Command::Import(args)) => {
+            if daemon::container::exec_in_container(&container_forwarded_args()).await? {
+                return Ok(DashboardExit::Normal);
+            }
             let workspace_id =
                 resolve_store_workspace(args.workspace().or(requested_workspace).as_deref())
                     .await?;
@@ -1096,7 +1111,27 @@ async fn run_command(
             println!("{}", serde_json::to_string_pretty(&sources)?);
             Ok(DashboardExit::Normal)
         }
-        Some(Command::Login(args)) => login(args).await.map(|()| DashboardExit::Normal),
+        Some(Command::Login(args)) => {
+            let mut forwarded = vec!["login".to_owned()];
+            if let Some(profile) = &args.profile {
+                forwarded.push("--profile".to_owned());
+                forwarded.push(profile.clone());
+            }
+            if args.setup_token {
+                forwarded.push("--setup-token".to_owned());
+            }
+            if let Some(method) = &args.method {
+                forwarded.push("--method".to_owned());
+                forwarded.push(method.clone());
+            }
+            if args.cli {
+                forwarded.push("--cli".to_owned());
+            }
+            if daemon::container::exec_in_container(&forwarded).await? {
+                return Ok(DashboardExit::Normal);
+            }
+            login(args).await.map(|()| DashboardExit::Normal)
+        }
         Some(Command::New(args)) => {
             let workspace = args.workspace.or(requested_workspace);
             api_commands::new_session(args, workspace)
@@ -2173,9 +2208,14 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             };
             let status = daemon.status().await?;
             let identity = daemon.identity().await?;
+            let location = match &identity.placement {
+                daemon::DaemonPlacement::Host => status.pid.to_string(),
+                daemon::DaemonPlacement::Container { name, .. } => {
+                    format!("in container {name}")
+                }
+            };
             println!(
-                "Mjolnir daemon {} (version {}) started {}; {} attached client{}; web viewer {}",
-                status.pid,
+                "Mjolnir daemon {location} (version {}) started {}; {} attached client{}; web viewer {}",
                 mj_client::build_identity::BuildIdentity::parse(&status.build_version)
                     .map_or_else(|_| status.build_version.clone(), |build| build.describe()),
                 status.started_at,
@@ -2187,9 +2227,6 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 },
                 status.phone_status
             );
-            if let daemon::DaemonPlacement::Container { name, .. } = &identity.placement {
-                println!("The daemon runs in container {name}.");
-            }
             // Two builds can report the same version, so the version line
             // cannot answer "is my rebuilt code running?". The build identity
             // the daemon reports can, and it is the question a development
@@ -2229,8 +2266,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             if stop.suspend_sessions {
                 let stopped = suspend_all_sessions(stop.acknowledge_unpublished_work).await?;
                 let mut daemon = daemon::connect_management().await?;
-                daemon.stop().await?;
-                daemon::wait_for_stopped_daemon().await?;
+                daemon::stop_and_wait(&mut daemon).await?;
                 node::withdraw_endpoint();
                 match stopped {
                     0 => println!("Mjolnir daemon stopped; no sessions were active."),
@@ -2247,8 +2283,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 }
                 Err(error) => return Err(error.context("Mjolnir daemon is not answering")),
             };
-            daemon.stop().await?;
-            daemon::wait_for_stopped_daemon().await?;
+            daemon::stop_and_wait(&mut daemon).await?;
             node::withdraw_endpoint();
             println!(
                 "Mjolnir daemon stopped; detached workers remain active. \
@@ -2272,6 +2307,26 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The command line to replay inside a daemon container. The container is one
+/// instance already, so the host's `--instance` selector is removed; every
+/// other argument keeps its meaning.
+fn container_forwarded_args() -> Vec<String> {
+    let mut args = std::env::args().skip(1);
+    let mut forwarded = Vec::new();
+    while let Some(argument) = args.next() {
+        if argument == "-i" || argument == "--instance" {
+            let _ = args.next();
+            continue;
+        }
+        if argument.starts_with("--instance=") || (argument.starts_with("-i") && argument.len() > 2)
+        {
+            continue;
+        }
+        forwarded.push(argument);
+    }
+    forwarded
 }
 
 /// Run the harness's own interactive login against a profile's canonical home.

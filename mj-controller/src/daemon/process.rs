@@ -27,11 +27,13 @@ pub async fn run_daemon_process() -> Result<()> {
     // no daemon state behind.
     let owner_pid = owner_pid_to_watch()?;
     let cancellation = crate::termination::Coordinator::install().token();
-    // Everything this process runs on the user's computer goes to its node.
-    // Daemons that tests run inside their own process keep running commands
-    // locally, because they never reach this line.
-    crate::node_registry::install_command_host(cancellation.clone())?;
-    crate::node_registry::install_host_fs(cancellation.clone())?;
+    // A container-native daemon runs every command beside itself, inside its
+    // own container. A host daemon routes host work to the node. Tests that
+    // run a daemon in-process never reach this line.
+    if mj_core::config::env_override("DAEMON_CONTAINER").is_none() {
+        crate::node_registry::install_command_host(cancellation.clone())?;
+        crate::node_registry::install_host_fs(cancellation.clone())?;
+    }
     let opening = Instant::now();
     let guard = ControllerStoreGuard::acquire()?;
     let database_writer = guard.start_database_writer()?;
@@ -436,7 +438,11 @@ pub(super) async fn run_daemon_runtime(
         let recovery_state = state.clone();
         let recovery_shutdown = cancellation.clone();
         let updates = interrupted_close_tx.clone();
-        let upgrade_work = startup_work.clone();
+        // A child's durable close is resumed by every daemon. Its worker
+        // connection may be unavailable for minutes and must not hold startup
+        // admission after the daemon begins serving.
+        let upgrade_work =
+            (!controller.state.subagents.contains_key(&session_id)).then(|| startup_work.clone());
         let interrupted_close_task = tokio::spawn(async move {
             let _upgrade_work = upgrade_work;
             let result = tokio::select! {

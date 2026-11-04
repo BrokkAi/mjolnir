@@ -291,7 +291,7 @@ pub(crate) enum DashboardIoUpdate {
         error: String,
     },
     FirstRunStarted,
-    FirstRunConfigured(mj_controller::setup::SetupReport),
+    FirstRunConfigured(mj_client::daemon::FirstRunSetupReport),
     FirstRunChecked(std::result::Result<Option<Vec<String>>, String>),
     SetupSaved {
         generation: u64,

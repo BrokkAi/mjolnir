@@ -2280,7 +2280,8 @@ fn repository_source_identity(repository: &ProjectRepository) -> Option<ProjectS
         })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectSourceIdentity {
     pub key: String,
     pub short: String,

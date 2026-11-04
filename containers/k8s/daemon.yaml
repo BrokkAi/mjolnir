@@ -1,0 +1,95 @@
+# A single-replica Mjolnir daemon with its data in a PersistentVolumeClaim.
+#
+# Replace the image tag with the release you run, and put the daemon token in
+# the Secret before applying. The daemon listens on the pod's port 8787; the
+# Service publishes it inside the cluster. Clients need the Service address
+# and the same token in their local daemon metadata; automatic discovery for
+# remote daemons is a separate feature.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mjolnir-daemon
+type: Opaque
+stringData:
+  token: replace-with-a-long-random-token
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mjolnir-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mjolnir
+spec:
+  selector:
+    app: mjolnir-daemon
+  ports:
+    - name: daemon
+      port: 8787
+      targetPort: 8787
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mjolnir-daemon
+spec:
+  serviceName: mjolnir
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mjolnir-daemon
+  template:
+    metadata:
+      labels:
+        app: mjolnir-daemon
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: daemon
+          image: ghcr.io/brokkai/mjolnir/agent-dev:latest
+          command: ["/opt/mjolnir/mj"]
+          args: ["daemon-run"]
+          env:
+            - name: HOME
+              value: /var/lib/mjolnir/home
+            - name: MJ_DATA_DIR
+              value: /var/lib/mjolnir/data
+            - name: MJ_CONFIG_DIR
+              value: /var/lib/mjolnir/config
+            - name: MJ_DAEMON_LISTEN
+              value: 0.0.0.0:8787
+            - name: MJ_DAEMON_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mjolnir-daemon
+                  key: token
+            - name: MJ_DAEMON_CONTAINER
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: daemon
+              containerPort: 8787
+          readinessProbe:
+            tcpSocket:
+              port: 8787
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mjolnir
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mjolnir-data

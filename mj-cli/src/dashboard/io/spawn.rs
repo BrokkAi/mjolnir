@@ -481,28 +481,28 @@ pub(crate) fn spawn_first_run_setup(
         tracker,
         "first-run setup",
         updates,
-        move |cancelled| {
-            use mj_controller::{doctor, setup};
-            let executor = CancellableProcessExecutor::new(cancelled.clone())
-                .with_deadline(Duration::from_secs(30));
-            let config_path = mj_core::config::config_path();
-            let result = setup::run_setup(
-                &config_path,
-                &mj_core::config::data_dir(),
-                false,
-                &executor,
-                &|| executor.is_cancelled(),
-                || {
-                    report(
-                        "first-run setup",
-                        &progress,
-                        DashboardIoUpdate::FirstRunStarted,
-                    );
-                },
-            )?;
+        move |_cancelled| {
+            report(
+                "first-run setup",
+                &progress,
+                DashboardIoUpdate::FirstRunStarted,
+            );
+            // The daemon owns its configuration and its environment. In
+            // container placement this discovery runs inside the container,
+            // not against the client's host home.
+            let (summary, errors) = mj_core::runtime::block_on(async {
+                let mut daemon = crate::daemon::connect_or_start().await?;
+                let summary = daemon.run_first_run_setup().await?;
+                let errors = if summary.is_some() {
+                    daemon.run_doctor().await?
+                } else {
+                    Vec::new()
+                };
+                Ok::<_, anyhow::Error>((summary, errors))
+            })??;
             // An existing installation picks up agents installed since its
             // last launch through the startup availability check.
-            let Some(summary) = result else {
+            let Some(summary) = summary else {
                 return Ok(None);
             };
             report(
@@ -510,15 +510,7 @@ pub(crate) fn spawn_first_run_setup(
                 &progress,
                 DashboardIoUpdate::FirstRunConfigured(summary),
             );
-            let checks =
-                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
-            let result = doctor::run_with_config_path(
-                &config_path,
-                &checks,
-                doctor::current_apple_platform(&checks),
-                doctor::DoctorOptions { smoke: false },
-            );
-            Ok(Some(setup::actionable_errors(&result)))
+            Ok(Some(errors))
         },
         DashboardIoUpdate::FirstRunChecked,
     )
@@ -758,31 +750,22 @@ pub(crate) fn spawn_spinner_style_save(
 /// independent, so callers can launch these concurrently and redraw as the
 /// answers arrive.
 pub(crate) fn spawn_project_source_resolution(
-    controller: &Controller,
     session_id: String,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
-    let config = controller.config.clone();
-    let session = controller.state.sessions.get(&session_id).cloned();
-    let source_controller = Controller {
-        config,
-        state: State {
-            sessions: session
-                .map(|session| [(session_id.clone(), session)].into_iter().collect())
-                .unwrap_or_default(),
-            ..State::default()
-        },
-    };
     let reported_session_id = session_id.clone();
     spawn_cancellable_io(
         tracker,
         format!("resolving project for {}", short_id(&session_id)),
         updates,
-        move |cancelled| {
-            let executor =
-                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(8));
-            source_controller.resolve_session_project_source(&session_id, &executor)
+        move |_cancelled| {
+            mj_core::runtime::block_on(async {
+                daemon::connect_or_start()
+                    .await?
+                    .session_project_source(session_id)
+                    .await
+            })?
         },
         move |result| DashboardIoUpdate::ProjectSource {
             session_id: reported_session_id,
@@ -1368,7 +1351,6 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
 /// launch is the daemon's.
 pub(crate) fn spawn_dashboard_create_session(
     action: DashboardAction,
-    config: Config,
     go_save: Option<(std::path::PathBuf, mj_core::go::GoRecipe, bool)>,
     updates: UnboundedSender<DashboardIoUpdate>,
     lifecycle_updates: UnboundedSender<DashboardLifecycleUpdate>,
@@ -1404,25 +1386,22 @@ pub(crate) fn spawn_dashboard_create_session(
                 )
                 .context("save fast-start setup; session has not been started")?;
             }
-            // The new-session preflight reads configuration and runs git; it
-            // never needs the store, which only the daemon opens. The config
-            // is the daemon's published one, not a file this client reads.
-            let controller = mj_controller::controller::config_only_controller(config);
-            let executor = CancellableProcessExecutor::new(cancelled.clone())
-                .with_deadline(Duration::from_secs(30));
+            // The new-session preflight reads configuration and runs git in
+            // the environment that owns the project paths. A client in another
+            // placement cannot do that itself.
             if project_directory.is_none() {
-                let result = controller.preflight_new_session(
-                    &bundle_id,
-                    &target_template_id,
-                    None,
-                    &executor,
-                )?;
-                if !result.remote_repairs.is_empty() {
+                let repairs = mj_core::runtime::block_on(async {
+                    daemon::connect_or_start()
+                        .await?
+                        .new_session_remote_repairs(bundle_id.clone(), target_template_id.clone())
+                        .await
+                })??;
+                if !repairs.is_empty() {
                     updates
                         .send(DashboardIoUpdate::CreateSession(Box::new(
                             DashboardCreateSessionUpdate::RemoteRepair {
                                 bundle_id: bundle_id.clone(),
-                                repairs: result.remote_repairs,
+                                repairs,
                                 retry: Box::new(action.clone()),
                             },
                         )))
