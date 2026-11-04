@@ -18,6 +18,15 @@ use tokio::process::Command;
 pub(crate) type ProxyWriter = Box<dyn AsyncWrite + Unpin + Send>;
 pub(crate) type ProxyReader = Box<dyn AsyncRead + Unpin + Send>;
 
+/// Whether a failed local launch means the program was not there.
+pub(crate) fn is_missing_program(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 /// How far the relay may fall behind a node proxy's output before the node is
 /// asked to wait. The node's own stream window bounds it as well.
 const NODE_PROXY_BUFFER: usize = 256 * 1024;
@@ -145,9 +154,19 @@ pub(crate) async fn spawn_proxy(spec: &CommandSpec) -> Result<ProxyStdio> {
     if let Some(host) = mj_core::targets::command_host(spec) {
         return spawn_on_node(host.as_ref(), spec).await;
     }
-    let mut child = Command::new(&spec.program)
+    let mut command = Command::new(&spec.program);
+    if spec.clear_env {
+        command.env_clear();
+    }
+    command.envs(&spec.env);
+    for name in &spec.env_remove {
+        command.env_remove(name);
+    }
+    if let Some(cwd) = &spec.cwd {
+        command.current_dir(cwd);
+    }
+    let mut child = command
         .args(&spec.args)
-        .envs(&spec.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // Never inherit: the controller owns a TUI alternate screen, so a

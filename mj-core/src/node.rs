@@ -440,6 +440,9 @@ fn spawn(command: &crate::targets::CommandSpec) -> Result<tokio::process::Child>
         process.env_clear();
     }
     process.envs(&command.env);
+    for name in &command.env_remove {
+        process.env_remove(name);
+    }
     if let Some(cwd) = &command.cwd {
         process.current_dir(cwd);
     }

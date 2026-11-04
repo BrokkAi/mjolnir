@@ -129,6 +129,10 @@ pub struct CommandSpec {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Ambient variables to remove before the child starts. Used for a probe
+    /// that must not see the daemon's inherited credentials.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_remove: Vec<String>,
     /// Replace ambient process variables with the explicitly supplied environment.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_env: bool,
@@ -204,6 +208,7 @@ impl CommandSpec {
             arg0: None,
             args: args.into_iter().map(Into::into).collect(),
             env: BTreeMap::new(),
+            env_remove: Vec::new(),
             clear_env: false,
             sensitive_output: false,
             cwd: None,
@@ -1216,10 +1221,14 @@ fn configured_command(command: &CommandSpec) -> Command {
     if command.clear_env {
         process.env_clear();
     }
+    process.envs(&command.env);
+    for name in &command.env_remove {
+        process.env_remove(name);
+    }
     if let Some(cwd) = &command.cwd {
         process.current_dir(cwd);
     }
-    process.args(&command.args).envs(&command.env);
+    process.args(&command.args);
     process
 }
 

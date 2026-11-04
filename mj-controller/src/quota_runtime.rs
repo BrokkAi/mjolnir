@@ -409,20 +409,6 @@ impl ContainerCheck {
     ) -> ContainerLaunch {
         self.runtime.launch(&self.home, program, args, env)
     }
-
-    /// A `tokio` command for `launch`, with stdio piped for a JSON-RPC
-    /// exchange and the engine client killed when the command is dropped.
-    /// The container itself goes with [`ContainerLaunch::container`].
-    pub(crate) fn piped_command(launch: &ContainerLaunch) -> tokio::process::Command {
-        let mut command = tokio::process::Command::new(&launch.program);
-        command
-            .args(&launch.args)
-            .envs(&launch.env)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        command
-    }
 }
 
 /// Add the image quota checks run in to the daemon's background downloads,
