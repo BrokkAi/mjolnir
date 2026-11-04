@@ -26,6 +26,7 @@ fn utility(
     backend: &targets::TargetLocator,
     id: &str,
     command: &WorkspaceCommand,
+    in_daemon: bool,
 ) -> Result<serde_json::Value> {
     use super::super::worker_binary::{IMAGE_WORKER, WorkerInstall};
     let executable = match WorkerInstall::for_target(backend, executor)? {
@@ -60,6 +61,13 @@ fn utility(
         vec![executable, "worker".into(), "move-workspace".into()],
         "prepare or verify Move workspace",
     )?;
+    // Verification reads the controller's staging directory; only the daemon
+    // can reach its own data.
+    let command_spec = if in_daemon {
+        command_spec.in_daemon()
+    } else {
+        command_spec
+    };
     let output = executor.execute_with_stdin(
         &command_spec,
         &mut std::io::Cursor::new(serde_json::to_vec(command)?),
@@ -564,6 +572,7 @@ impl Controller {
             &WorkspaceCommand::Inspect {
                 repositories: repositories(&layout),
             },
+            false,
         )?)?;
         let source_requirement = if targets::is_container(&layout.backend) {
             CONTAINER_RSYNC_REQUIREMENT
@@ -631,7 +640,10 @@ impl Controller {
         let program = local_args.remove(0);
         storage_probe(
             executor,
-            CommandSpec::new(program, local_args).purpose("check controller Move staging space"),
+            CommandSpec::new(program, local_args)
+                .purpose("check controller Move staging space")
+                // The controller's staging directory is the daemon's own data.
+                .in_daemon(),
             "Controller",
             "controller",
             1,
@@ -770,10 +782,18 @@ impl Controller {
                 } => workspace_prefix.clone(),
                 _ => mj_core::config::data_dir(),
             };
+            let command = at_host(destination_ssh.as_ref(), storage_arguments(&path))
+                .purpose("check destination Move staging and workspace space");
+            // A local destination's staging directory is the daemon's data; a
+            // remote one is reached through the node's SSH session.
+            let command = if destination_ssh.is_none() {
+                command.in_daemon()
+            } else {
+                command
+            };
             storage_probe(
                 executor,
-                at_host(destination_ssh.as_ref(), storage_arguments(&path))
-                    .purpose("check destination Move staging and workspace space"),
+                command,
                 "Destination",
                 "destination",
                 2,
@@ -880,6 +900,7 @@ impl Controller {
                     selection: operation.selection.workspace.clone(),
                     destination: transfer.source_stage.clone(),
                 },
+                false,
             )?;
             operation.workspace_transfer.as_mut().unwrap().phase = WorkspaceTransferPhase::Captured;
             crate::database::save_move_operation(operation)?;
@@ -909,6 +930,7 @@ impl Controller {
                 &WorkspaceCommand::Verify {
                     source: transfer.controller_stage.clone(),
                 },
+                true,
             )?;
             operation.workspace_transfer.as_mut().unwrap().phase =
                 WorkspaceTransferPhase::Downloaded;
@@ -1023,6 +1045,7 @@ impl Controller {
                 source: stage,
                 repositories,
             },
+            false,
         )?;
         operation.workspace_transfer.as_mut().unwrap().phase = WorkspaceTransferPhase::Restored;
         crate::database::save_move_operation(&operation)?;

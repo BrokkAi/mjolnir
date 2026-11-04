@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
@@ -11,7 +10,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 
 use crate::targets::{
@@ -134,7 +132,7 @@ mod errors;
 pub use errors::*;
 mod connect;
 mod exchange;
-mod proxy;
+use crate::streamed_child as proxy;
 mod relay;
 mod reviewer;
 mod transport;

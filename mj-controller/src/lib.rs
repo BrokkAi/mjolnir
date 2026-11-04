@@ -33,6 +33,7 @@ pub mod server;
 pub mod session_manager;
 pub mod sessionwiki;
 pub mod setup;
+mod streamed_child;
 pub mod tailscale;
 pub mod utility_llm;
 pub mod worker_client;
