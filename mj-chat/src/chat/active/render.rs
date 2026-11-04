@@ -241,7 +241,15 @@ pub(crate) fn render_chat_footer(
     let composer_keys = if !prompt_focused {
         format!("Tab pane{sep}PgUp/PgDn transcript")
     } else if chat.turn_review_active() && chat.elicitation.is_none() {
-        format!("Down review controls{sep}Enter act{sep}Esc cancel")
+        if chat
+            .turn_review()
+            .and_then(crate::chat::turn_review::TurnReview::verdict_text)
+            .is_some()
+        {
+            format!("v verdict{sep}Down controls{sep}Enter act{sep}Esc cancel")
+        } else {
+            format!("Down review controls{sep}Enter act{sep}Esc cancel")
+        }
     } else if chat.voice_active {
         format!("Listening… click the microphone to stop{sep}PgUp/PgDn transcript")
     } else if !chat.queued_prompts.is_empty() {

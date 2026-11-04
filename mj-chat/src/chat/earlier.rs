@@ -6,6 +6,8 @@ use ratatui::widgets::{Paragraph, Wrap};
 /// A bounded page, separate from the live feed and the person's draft.
 #[derive(Default)]
 pub(super) struct EarlierMessages {
+    /// Static text uses the same reader without requesting history pages.
+    pub title: Option<&'static str>,
     pub generation: u64,
     pub before: Option<TranscriptCursor>,
     pub requested: bool,
@@ -22,6 +24,20 @@ impl ChatState {
         self.earlier = Some(EarlierMessages {
             generation: self.earlier_generation,
             requested: true,
+            ..Default::default()
+        });
+    }
+
+    pub(super) fn open_text_reader(&mut self, title: &'static str, text: &str) {
+        self.earlier_generation += 1;
+        self.earlier = Some(EarlierMessages {
+            title: Some(title),
+            generation: self.earlier_generation,
+            loaded: true,
+            lines: sanitize_terminal_text(text)
+                .lines()
+                .map(|line| Line::raw(line.to_owned()))
+                .collect(),
             ..Default::default()
         });
     }
@@ -48,7 +64,9 @@ impl ChatState {
 }
 
 pub(super) fn render_earlier(frame: &mut Frame, area: Rect, reader: &mut EarlierMessages) {
-    let status = if reader.loading {
+    let status = if reader.title.is_some() {
+        "Up/Down/PgUp/PgDn: scroll | Esc: return"
+    } else if reader.loading {
         "Loading earlier messages..."
     } else if let Some(error) = reader.error.as_deref() {
         error
@@ -58,7 +76,7 @@ pub(super) fn render_earlier(frame: &mut Frame, area: Rect, reader: &mut Earlier
         "Beginning of conversation | Up/Down/PgUp/PgDn: scroll | Esc: live"
     };
     let block = theme::panel(true)
-        .title(" Earlier messages ")
+        .title(format!(" {} ", reader.title.unwrap_or("Earlier messages")))
         .title_bottom(status);
     let inner = block.inner(area);
     let paragraph = Paragraph::new(reader.lines.clone()).wrap(Wrap { trim: false });

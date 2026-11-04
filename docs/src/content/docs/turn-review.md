@@ -135,7 +135,7 @@ mj review status --session <id>
 
 ## Read and resolve a verdict
 
-The parent conversation stays visible at full width throughout review, including when findings arrive. The **Reviewers** button on the prompt’s bottom border opens the reviewer sessions using the same virtual workspace as Subagents. Use its close control, or Escape from the Sessions list, to return to the parent. Review status, a findings summary, and resolution actions appear in the prompt area. Reviewer conversations use the ordinary session view. The web viewer shows the same reviewer role and status.
+The parent conversation stays visible at full width throughout review, including when findings arrive. The **Reviewers** button on the prompt’s bottom border opens the reviewer sessions using the same virtual workspace as Subagents. Use its close control, or Escape from the Sessions list, to return to the parent. Review status, a findings summary, and resolution actions appear in the prompt area. Reviewer conversations use the ordinary session view. **Read verdict** (or `v`) opens the complete findings or failure reason in the existing text reader; scroll with Page Up/Down and press Escape to return without resolving the review. The web viewer shows the same reviewer role and status.
 
 Resolution depends on the verdict:
 

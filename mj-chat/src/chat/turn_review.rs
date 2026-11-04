@@ -13,16 +13,23 @@ use ratatui::widgets::{Paragraph, Wrap};
 /// Which of the review's actions the keyboard is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReviewAction {
+    ReadVerdict,
     Forward,
     Dismiss,
     Cancel,
 }
 
 impl ReviewAction {
-    const ORDER: [Self; 3] = [Self::Forward, Self::Dismiss, Self::Cancel];
+    const ORDER: [Self; 4] = [
+        Self::ReadVerdict,
+        Self::Forward,
+        Self::Dismiss,
+        Self::Cancel,
+    ];
 
     fn label(self) -> &'static str {
         match self {
+            Self::ReadVerdict => "Read verdict",
             Self::Forward => "Forward findings",
             Self::Dismiss => "Dismiss",
             Self::Cancel => "Cancel",
@@ -30,11 +37,12 @@ impl ReviewAction {
     }
 
     /// The resolution this action asks the daemon for.
-    const fn resolution(self) -> Resolution {
+    const fn resolution(self) -> Option<Resolution> {
         match self {
-            Self::Forward => Resolution::Forwarded,
-            Self::Dismiss => Resolution::Dismissed,
-            Self::Cancel => Resolution::Cancelled,
+            Self::ReadVerdict => None,
+            Self::Forward => Some(Resolution::Forwarded),
+            Self::Dismiss => Some(Resolution::Dismissed),
+            Self::Cancel => Some(Resolution::Cancelled),
         }
     }
 
@@ -56,6 +64,7 @@ impl ReviewAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReviewControl {
     Status,
+    ReadVerdict,
     Forward,
     Dismiss,
     Cancel,
@@ -98,22 +107,29 @@ impl TurnReview {
         // A running review must not make an accidental Enter a cancellation;
         // explicit arrow navigation or the Cancel button can still pick it.
         view.verdict.as_ref().and_then(|verdict| {
-            ReviewAction::ORDER
-                .into_iter()
-                .find(|action| verdict.allowed.contains(&action.resolution()))
+            ReviewAction::ORDER.into_iter().find(|action| {
+                action
+                    .resolution()
+                    .is_some_and(|resolution| verdict.allowed.contains(&resolution))
+            })
         })
     }
 
     fn action_allowed_in_view(view: &RuntimeReviewView, action: Option<ReviewAction>) -> bool {
         match action {
             None => view.verdict.is_none(),
+            Some(ReviewAction::ReadVerdict) => view
+                .verdict
+                .as_ref()
+                .is_some_and(|verdict| !verdict.text.trim().is_empty()),
             Some(ReviewAction::Cancel) => {
                 !matches!(&view.phase, TurnReviewPhase::Forwarding { error: None, .. })
             }
-            Some(action) => view
-                .verdict
-                .as_ref()
-                .is_some_and(|verdict| verdict.allowed.contains(&action.resolution())),
+            Some(action) => view.verdict.as_ref().is_some_and(|verdict| {
+                action
+                    .resolution()
+                    .is_some_and(|resolution| verdict.allowed.contains(&resolution))
+            }),
         }
     }
 
@@ -215,7 +231,13 @@ impl super::ChatState {
         if !review.allows(action) {
             return super::ChatAction::None;
         }
-        self.resolve_turn_review(action.resolution())
+        if let Some(resolution) = action.resolution() {
+            self.resolve_turn_review(resolution)
+        } else {
+            let text = review.verdict_text().unwrap_or_default().to_owned();
+            self.open_text_reader("Review verdict", &text);
+            super::ChatAction::None
+        }
     }
 
     fn resolve_turn_review(&mut self, resolution: Resolution) -> super::ChatAction {
@@ -245,6 +267,7 @@ impl super::ChatState {
         if let Some(Interaction::Activate(control)) = result.action {
             if let Some(review) = self.turn_review.as_mut() {
                 review.action = Some(match control {
+                    ReviewControl::ReadVerdict => ReviewAction::ReadVerdict,
                     ReviewControl::Forward => ReviewAction::Forward,
                     ReviewControl::Dismiss => ReviewAction::Dismiss,
                     ReviewControl::Cancel => ReviewAction::Cancel,
@@ -279,6 +302,15 @@ impl super::ChatState {
                     });
                 }
             }
+            KeyCode::Char('v') if modifiers.is_empty() => {
+                if let Some(text) = self
+                    .turn_review()
+                    .and_then(TurnReview::verdict_text)
+                    .map(str::to_owned)
+                {
+                    self.open_text_reader("Review verdict", &text);
+                }
+            }
             KeyCode::Enter => return self.activate_turn_review_action(),
             KeyCode::Tab | KeyCode::BackTab => {
                 return ChatAction::CycleFocus {
@@ -309,20 +341,28 @@ pub(super) fn render_turn_review_actions(
         review.view.phase,
         TurnReviewPhase::Forwarding { error: Some(_), .. }
     );
-    let specs = ReviewAction::ORDER.map(|candidate| {
-        let label = match (failed_delivery, candidate) {
-            (true, ReviewAction::Forward) => "Retry delivery",
-            (true, ReviewAction::Cancel) => "Stop retrying",
-            _ => candidate.label(),
-        };
-        let control = match candidate {
-            ReviewAction::Forward => ReviewControl::Forward,
-            ReviewAction::Dismiss => ReviewControl::Dismiss,
-            ReviewAction::Cancel => ReviewControl::Cancel,
-        };
-        (control, label, review.allows(candidate))
-    });
+    let specs = ReviewAction::ORDER
+        .into_iter()
+        .filter(|candidate| {
+            *candidate != ReviewAction::ReadVerdict || review.verdict_text().is_some()
+        })
+        .map(|candidate| {
+            let label = match (failed_delivery, candidate) {
+                (true, ReviewAction::Forward) => "Retry delivery",
+                (true, ReviewAction::Cancel) => "Stop retrying",
+                _ => candidate.label(),
+            };
+            let control = match candidate {
+                ReviewAction::ReadVerdict => ReviewControl::ReadVerdict,
+                ReviewAction::Forward => ReviewControl::Forward,
+                ReviewAction::Dismiss => ReviewControl::Dismiss,
+                ReviewAction::Cancel => ReviewControl::Cancel,
+            };
+            (control, label, review.allows(candidate))
+        })
+        .collect::<Vec<_>>();
     review.form.focus(match review.action {
+        Some(ReviewAction::ReadVerdict) => ReviewControl::ReadVerdict,
         Some(ReviewAction::Forward) => ReviewControl::Forward,
         Some(ReviewAction::Dismiss) => ReviewControl::Dismiss,
         Some(ReviewAction::Cancel) => ReviewControl::Cancel,
@@ -822,6 +862,51 @@ mod tests {
                 ),
                 format!("action: {action:?}"),
             ],
+        );
+
+        let mut long = fresh_chat();
+        let mut view = findings_view();
+        view.verdict.as_mut().unwrap().text = (0..40)
+            .map(|index| format!("complete verdict line {index:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        long.set_turn_review(Some(view));
+        long.input = "unsent draft".into();
+        let _ = review_golden_buffer(&mut long, 80, 16);
+        long.handle_key(key(KeyCode::Char('v')));
+        // Hard-won: 86b6980ed: multi-line verdicts were clipped in the prompt with no full-text reader.
+        append_review_golden_state(
+            &mut output,
+            "full verdict uses the existing text reader",
+            80,
+            16,
+            &review_golden_buffer(&mut long, 80, 16),
+            &[],
+        );
+        for _ in 0..4 {
+            long.handle_key(key(KeyCode::PageDown));
+        }
+        let bottom = review_golden_buffer(&mut long, 80, 16);
+        assert!(
+            crate::golden::buffer_lines(&bottom)
+                .join("\n")
+                .contains("complete verdict line 39")
+        );
+        append_review_golden_state(
+            &mut output,
+            "full verdict reader reaches the final line",
+            80,
+            16,
+            &bottom,
+            &[],
+        );
+        assert_eq!(long.handle_key(key(KeyCode::Esc)), ChatAction::None);
+        assert!(long.earlier.is_none());
+        assert!(long.turn_review_active());
+        assert_eq!(long.input, "unsent draft");
+        assert_eq!(
+            long.handle_key(key(KeyCode::Enter)),
+            ChatAction::TurnReview(TurnReviewIntent::Resolve(Resolution::Forwarded))
         );
 
         mj_core::golden::assert_platform_golden(

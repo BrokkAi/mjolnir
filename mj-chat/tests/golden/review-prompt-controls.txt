@@ -68,11 +68,11 @@ Down review controls · Enter act │ ctrl+b then q detach · : / ? palette
 │ ● Agent                                                                     ││
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Review findings ─────────────────────────────────────────────────────────────╮
-│  Forward findings     Dismiss     Cancel                                     │
+│  Read verdict     Forward findings     Dismiss     Cancel                    │
 │ [P1] src/lib.rs:1 -- unbounded retry                                         │
 │                                                                              │
 ╰ Reviewers · 1 › ─────────────────────────────────────────────────────────────╯
-Down review controls · Enter act │ ctrl+b then q detach · : / ? palette
+v verdict · Down controls · Enter act │ ctrl+b then q detach · : / ? palette
 
 === findings default action (64x14) ===
 ╭ Conversation · Reviewing ────────────────────────────────────╮
@@ -84,11 +84,11 @@ Down review controls · Enter act │ ctrl+b then q detach · : / ? palette
 │                                                             ▐│
 ╰──────────────────────────────────────────────────────────────╯
 ╭ Review findings ─────────────────────────────────────────────╮
-│  Forward findings     Dismiss     Cancel                     │
+│  Read verdict     Forward findings     Dismiss     Cancel    │
 │ [P1] src/lib.rs:1 -- unbounded retry                         │
 │                                                              │
 ╰ Reviewers · 1 › ─────────────────────────────────────────────╯
-Down review controls │ ctrl+b then q detach · : / ? palette
+v verdict · Down controls │ ctrl+b then q detach · : / ? palette
 selected action: Some(Some(Forward))
 action: TurnReview(Resolve(Forwarded))
 
@@ -102,11 +102,47 @@ action: TurnReview(Resolve(Forwarded))
 │                                                             ▐│
 ╰──────────────────────────────────────────────────────────────╯
 ╭ Review failed ───────────────────────────────────────────────╮
-│  Forward findings     Dismiss     Cancel                     │
+│  Read verdict     Forward findings     Dismiss     Cancel    │
 │ reviewer exited with 1                                       │
 │                                                              │
 ╰ Reviewers · 1 › ─────────────────────────────────────────────╯
-Down review controls │ ctrl+b then q detach · : / ? palette
+v verdict · Down controls │ ctrl+b then q detach · : / ? palette
 selected action: Some(Some(Dismiss))
 allowed actions: Some([(Forward, false), (Dismiss, true), (Cancel, true)])
 action: TurnReview(Resolve(Dismissed))
+
+=== full verdict uses the existing text reader (80x16) ===
+╭ Review verdict ──────────────────────────────────────────────────────────────╮
+│complete verdict line 00                                                      │
+│complete verdict line 01                                                      │
+│complete verdict line 02                                                      │
+│complete verdict line 03                                                      │
+│complete verdict line 04                                                      │
+│complete verdict line 05                                                      │
+│complete verdict line 06                                                      │
+│complete verdict line 07                                                      │
+│complete verdict line 08                                                      │
+│complete verdict line 09                                                      │
+│complete verdict line 10                                                      │
+│complete verdict line 11                                                      │
+│complete verdict line 12                                                      │
+│complete verdict line 13                                                      │
+╰Up/Down/PgUp/PgDn: scroll | Esc: return───────────────────────────────────────╯
+
+=== full verdict reader reaches the final line (80x16) ===
+╭ Review verdict ──────────────────────────────────────────────────────────────╮
+│complete verdict line 26                                                      │
+│complete verdict line 27                                                      │
+│complete verdict line 28                                                      │
+│complete verdict line 29                                                      │
+│complete verdict line 30                                                      │
+│complete verdict line 31                                                      │
+│complete verdict line 32                                                      │
+│complete verdict line 33                                                      │
+│complete verdict line 34                                                      │
+│complete verdict line 35                                                      │
+│complete verdict line 36                                                      │
+│complete verdict line 37                                                      │
+│complete verdict line 38                                                      │
+│complete verdict line 39                                                      │
+╰Up/Down/PgUp/PgDn: scroll | Esc: return───────────────────────────────────────╯
