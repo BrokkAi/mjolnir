@@ -2927,8 +2927,8 @@ pub(super) mod push_tests {
         assert_eq!(files, ["image.bin", "kept.txt"], "{}", captured.delta.patch);
     }
 
-    // Windows file names are always Unicode, so only Unix can make this case.
-    #[cfg(unix)]
+    // Hard-won: 9be41400f: macOS rejects the non-UTF-8 filesystem fixture.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn push_capture_shows_conflicted_paths_that_are_not_utf8() {
         use std::os::unix::ffi::OsStrExt;
