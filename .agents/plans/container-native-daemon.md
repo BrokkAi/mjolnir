@@ -27,7 +27,7 @@ The status says the daemon is in a container. `docker inspect` shows no host net
 - [x] (2026-11-04) A container daemon does not install the host command node or host filesystem. Its commands, workers, harnesses, and files all run inside its own container.
 - [x] (2026-11-04) Stop, restart, and handoff follow the container daemon's endpoint instead of the host store guard. Forced stop uses the container engine.
 - [x] (2026-11-04) The agent-dev image creates `/var/lib/mjolnir/home`, `/var/lib/mjolnir/data`, and `/var/lib/mjolnir/config` owned by its runtime user, so a fresh named volume is writable.
-- [ ] Publish a dedicated daemon image and build script, or document the agent-dev image as the daemon image until then.
+- [x] (2026-11-04) Use the existing agent-dev image as the daemon image. It already carries the daemon, the worker and every harness, which is what an all-in-one container needs; a separate small daemon image would leave local sessions without their runtime.
 - [x] (2026-11-04) `mj setup` and `mj login` in container placement run inside the daemon container with the volume's `HOME`, data and config roots. The nested process carries `MJ_IN_CONTAINER` so it cannot try to launch another container.
 - [ ] Make the dashboard's automatic first-run setup write the volume's configuration rather than the host file.
 - [ ] Give local session workers and their harness homes a container-native layout under the volume; verify a real turn in container placement.
@@ -47,6 +47,7 @@ Host mode still uses those assumptions deliberately. This plan changes only the 
 - Decision: Host directories are opt-in through `[daemon] mounts`, never implicit. Rationale: users may want a project checkout, but the daemon must not require the host home, data directory, or runtime directory. Date/Author: 2026-11-04.
 - Decision: The host launcher writes `daemon.json` with `pid: 0`. Rationale: a container PID is not a host PID. Clients already ask the daemon for `Identity`; `pid` remains only in the frozen `Status` shape. Date/Author: 2026-11-04.
 - Decision: A container daemon runs commands locally inside its container instead of installing a node. Rationale: if everything is containerized, the container is where local work belongs. Date/Author: 2026-11-04.
+- Decision: Use the agent-dev image as the daemon image rather than a small daemon-only image. Rationale: local sessions run their worker and harness in the same container, so that image must contain all three. Date/Author: 2026-11-04.
 
 ## Outcomes & Retrospective
 
