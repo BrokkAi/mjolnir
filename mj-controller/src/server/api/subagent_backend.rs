@@ -370,6 +370,17 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { anyhow::bail!("SessionWiki search is unavailable") })
     }
 
+    /// Publish a dashboard request (`mj ui`) to the attached dashboards.
+    fn request_ui(
+        &self,
+        _body: mj_client::ui_request::UiRequestBody,
+    ) -> std::result::Result<
+        mj_client::ui_request::UiRequestReceipt,
+        mj_client::ui_request::UiRequestRefusal,
+    > {
+        Err(mj_client::ui_request::UiRequestRefusal::NoDashboard)
+    }
+
     /// `None` when the index holds no session with that id.
     fn wiki_brief(
         &self,

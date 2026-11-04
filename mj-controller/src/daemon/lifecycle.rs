@@ -137,6 +137,15 @@ impl RuntimeState {
             }
 
             let durable = durable_session_state(lifecycle_owner.controller(), &session_id);
+            // Every close of a child has the same effect. Startup recovery
+            // has no caller key, while a replay has its durable MCP key; they
+            // must join the same owner under this lock rather than compete.
+            let child_close = kind == LifecycleKind::Suspend
+                && lifecycle_owner
+                    .controller()
+                    .state
+                    .subagents
+                    .contains_key(&session_id);
             let lifecycle = &mut lifecycle_owner.lifecycle;
             // Completion releases ownership under this same lock. Retained
             // results answer identical retries; they cannot block a fresh
@@ -170,7 +179,7 @@ impl RuntimeState {
             }
             if let Some(active) = lifecycle.get(&session_id) {
                 ensure!(
-                    active.request_key == request_key,
+                    child_close || active.request_key == request_key,
                     "another lifecycle request with different selections is already running for session {session_id}"
                 );
                 ensure!(
@@ -194,6 +203,8 @@ impl RuntimeState {
                     crate::upgrade::destroy_activity(&session_id)?
                 } else if kind == LifecycleKind::Unpark {
                     crate::upgrade::activity_unless_draining("subagent unpark admission")?
+                } else if child_close {
+                    crate::upgrade::activity("subagent close admission")?
                 } else {
                     crate::upgrade::activity("session lifecycle")?
                 };
@@ -344,9 +355,11 @@ impl RuntimeState {
                     {
                         result = Ok(DaemonLifecycleResult::Done);
                     }
-                    let handed_off_restart = matches!(
+                    let handed_off_lifecycle = matches!(
                         kind,
-                        LifecycleKind::Restart | LifecycleKind::UpgradeContainer
+                        LifecycleKind::Suspend
+                            | LifecycleKind::Restart
+                            | LifecycleKind::UpgradeContainer
                     ) && state
                         .owner()
                         .lifecycle
@@ -370,7 +383,7 @@ impl RuntimeState {
                     // not get as far as rolling that record back, the stored
                     // error is applied here, because nothing else will.
                     if let Err(failure) = &result
-                        && !handed_off_restart
+                        && !handed_off_lifecycle
                         && matches!(
                             kind,
                             LifecycleKind::Create
@@ -388,7 +401,7 @@ impl RuntimeState {
                     // and exited. A failure puts the record back in the state
                     // it had, so without this the person is never told (#1081).
                     if let Err(failure) = &result
-                        && !handed_off_restart
+                        && !handed_off_lifecycle
                         && matches!(
                             kind,
                             LifecycleKind::Suspend
@@ -434,7 +447,9 @@ impl RuntimeState {
                     }
                     let deferred_cleanup =
                         matches!(result, Ok(DaemonLifecycleResult::DeferredCleanup));
-                    if let Err(error) = &result {
+                    if handed_off_lifecycle {
+                        tracing::info!(session_id = %operation_session_id, ?kind, "lifecycle operation yielded to the replacement daemon");
+                    } else if let Err(error) = &result {
                         tracing::warn!(session_id = %operation_session_id, ?kind, reference = %operation_reference, %error, "lifecycle operation failed");
                     }
                     // Serialize final Move refusal disposition against any late

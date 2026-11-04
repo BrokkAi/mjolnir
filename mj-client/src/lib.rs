@@ -9,6 +9,7 @@ pub mod runtime_feed;
 pub mod session;
 pub mod settings;
 pub mod target;
+pub mod ui_request;
 pub mod web;
 
 pub mod transcript;

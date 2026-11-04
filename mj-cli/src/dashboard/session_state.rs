@@ -492,7 +492,6 @@ impl DashboardContext {
         for session_id in session_ids {
             self.project_sources_in_flight.insert(session_id.clone());
             spawn_project_source_resolution(
-                &self.controller,
                 session_id,
                 self.dashboard_io_tx.clone(),
                 self.critical_operations.clone(),

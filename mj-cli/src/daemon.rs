@@ -69,6 +69,19 @@ impl Drop for StartupNoticeRoute {
     }
 }
 
+/// The splash replaces its status line; stderr notices remain infrequent.
+fn startup_notice_interval() -> Duration {
+    if STARTUP_NOTICES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+    {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(30)
+    }
+}
+
 /// The daemon startup lock held exclusively: the only hold under which a
 /// client may start, stop or replace the daemon.
 #[derive(Debug)]
@@ -143,7 +156,7 @@ async fn acquire_start_lock(path: PathBuf, shared: bool) -> Result<StartLock> {
         }
         if Instant::now() >= notice_at {
             startup_notice(shared_handoff_notice(running_daemon_blockers().await));
-            notice_at = Instant::now() + Duration::from_secs(30);
+            notice_at = Instant::now() + startup_notice_interval();
         }
         tokio::time::sleep(RETRY_DELAY).await;
     }
@@ -1304,6 +1317,7 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
 async fn hand_off_daemon(metadata: &DaemonMetadata) -> Result<()> {
     let asked = Instant::now();
     let mut notice_at = asked + START_NOTICE_DELAY;
+    let mut log_at = notice_at;
     let mut attempts = 0_u32;
     // The latest reason the daemon has not accepted, reported with each notice.
     let mut not_yet = String::new();
@@ -1391,15 +1405,18 @@ async fn hand_off_daemon(metadata: &DaemonMetadata) -> Result<()> {
             Ok(Ok(false)) => not_yet = "the daemon is finishing accepted work".to_owned(),
         }
         if Instant::now() >= notice_at {
-            tracing::info!(
-                pid = metadata.pid,
-                attempts,
-                waited_ms = asked.elapsed().as_millis(),
-                reason = %not_yet,
-                "the daemon has not accepted the handoff yet"
-            );
+            if Instant::now() >= log_at {
+                tracing::info!(
+                    pid = metadata.pid,
+                    attempts,
+                    waited_ms = asked.elapsed().as_millis(),
+                    reason = %not_yet,
+                    "the daemon has not accepted the handoff yet"
+                );
+                log_at = Instant::now() + Duration::from_secs(30);
+            }
             startup_notice(upgrade_wait_notice(upgrade_blockers(metadata).await));
-            notice_at = Instant::now() + Duration::from_secs(30);
+            notice_at = Instant::now() + startup_notice_interval();
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -1786,6 +1803,93 @@ pub(crate) async fn upgraded_daemon_executable() -> Result<Option<UpgradeTarget>
 mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
+
+    // Hard-won: 413864386: the startup splash displayed frozen blocker ages for thirty seconds.
+    #[tokio::test]
+    async fn splash_refreshes_blockers_each_second_for_replacing_and_queued_clients() {
+        const CHILD: &str = "MJ_TEST_LIVE_HANDOFF_NOTICES";
+        const TEST: &str =
+            "daemon::tests::splash_refreshes_blockers_each_second_for_replacing_and_queued_clients";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "isolated-notices".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let server = tokio::spawn(async move {
+            let mut age = 0;
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                let reply = match request.action {
+                    DaemonAction::Identity => DaemonReply::Identity(DaemonIdentity {
+                        instance_id: "isolated-notices".into(),
+                        build_version: env!("CARGO_PKG_VERSION").into(),
+                        placement: DaemonPlacement::Host,
+                    }),
+                    DaemonAction::PrepareUpgrade => DaemonReply::UpgradePending,
+                    DaemonAction::UpgradeBlockers => {
+                        age += 1;
+                        DaemonReply::UpgradeBlockers(vec![format!("session lifecycle ({age}s)")])
+                    }
+                    action => panic!("unexpected management action {action:?}"),
+                };
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: request.protocol_version,
+                        request_id: request.request_id,
+                        result: Ok(reply),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let (_route, mut notices) = StartupNoticeRoute::open();
+        let path = data_dir().join("daemon-start.lock");
+        let held = acquire_start_guard(path.clone()).await.unwrap();
+        for queued in [false, true] {
+            let metadata = metadata.clone();
+            let path = path.clone();
+            let waiting = tokio::spawn(async move {
+                if queued {
+                    let _guard = acquire_shared_start_guard(path).await?;
+                    Ok(())
+                } else {
+                    hand_off_daemon(&metadata).await
+                }
+            });
+            let first = tokio::time::timeout(Duration::from_secs(15), notices.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let second = tokio::time::timeout(Duration::from_secs(3), notices.recv())
+                .await
+                .expect("the splash age must refresh without waiting thirty seconds")
+                .unwrap();
+            assert!(first.contains("session lifecycle ("), "{first}");
+            assert!(second.contains("session lifecycle ("), "{second}");
+            assert_ne!(first, second, "a fresh daemon age must reach the splash");
+            if queued {
+                assert!(second.contains("another client"), "{second}");
+            }
+            waiting.abort();
+            assert!(waiting.await.unwrap_err().is_cancelled());
+        }
+        drop(held);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
 
     async fn viewer_fixture(
         statuses: Vec<mj_client::web::WebViewerAccess>,

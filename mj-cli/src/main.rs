@@ -23,6 +23,7 @@ mod session_presentation;
 mod simple;
 mod splash;
 mod terminal_background;
+mod ui_command;
 
 #[cfg(test)]
 mod test_support;
@@ -197,6 +198,9 @@ enum Command {
     ApiInfo(api_commands::ApiInfoArgs),
     /// Print a valid GitHub App token for an owner or repository.
     GithubToken(api_commands::GithubTokenArgs),
+    /// Change what the person's dashboard shows: pane sizes, which session
+    /// is open, or Settings with changes staged for them to save.
+    Ui(ui_command::UiArgs),
     /// Discover available models and efforts for a profile.
     Models(api_commands::ModelsArgs),
     /// Apply a session configuration setting.
@@ -867,6 +871,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::StopTask(_)) => "stop-task",
         Some(Command::ApiInfo(_)) => "api-info",
         Some(Command::GithubToken(_)) => "github-token",
+        Some(Command::Ui(_)) => "ui",
         Some(Command::Models(_)) => "models",
         Some(Command::SetConfig(_)) => "set-config",
         Some(Command::Close(_)) => "close",
@@ -1205,6 +1210,7 @@ async fn run_command(
         Some(Command::StopTask(args)) => api_commands::stop_task(args)
             .await
             .map(|()| DashboardExit::Normal),
+        Some(Command::Ui(args)) => ui_command::ui(args).await.map(|()| DashboardExit::Normal),
         Some(Command::Models(args)) => api_commands::models(args)
             .await
             .map(|()| DashboardExit::Normal),

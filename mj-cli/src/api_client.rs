@@ -338,6 +338,14 @@ impl ApiClient {
         decode(response).await
     }
 
+    /// Ask the attached dashboards to change what they show (`mj ui`).
+    pub(crate) async fn request_ui(
+        &self,
+        body: &mj_client::ui_request::UiRequestBody,
+    ) -> Result<mj_client::ui_request::UiRequestReceipt> {
+        self.post_json("/ui/requests", body, REQUEST_TIMEOUT).await
+    }
+
     pub(crate) async fn workspaces(&self) -> Result<WorkspaceListResponse> {
         self.get_json("/workspaces").await
     }

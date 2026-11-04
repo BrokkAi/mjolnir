@@ -118,6 +118,8 @@ use options::*;
 pub(crate) use options::{LocalEngineChecks, target_availability};
 mod sessions;
 use sessions::*;
+mod ui;
+use ui::*;
 mod subagents;
 pub(crate) use subagents::*;
 mod turns;

@@ -348,6 +348,21 @@ pub(super) async fn handle_action(
             refresh_runtime_controller(state).await;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::SessionProjectSource { session_id } => {
+            let controller = state.with_controller(|controller| crate::controller::Controller {
+                config: controller.config.clone(),
+                state: controller.state.clone(),
+            });
+            let source = blocking(move || {
+                let executor = crate::targets::CancellableProcessExecutor::new(
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                )
+                .with_deadline(Duration::from_secs(8));
+                controller.resolve_session_project_source(&session_id, &executor)
+            })
+            .await?;
+            Ok(DaemonReply::ProjectSource(source))
+        }
         DaemonAction::SetSessionTitle { session_id, title } => {
             let title =
                 blocking(move || Controller::load()?.rename_session(&session_id, &title)).await?;

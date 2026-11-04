@@ -992,6 +992,8 @@ pub struct DashboardState {
     pub(crate) git_identity_gate: dialogs::GitIdentityGate,
     /// The new-session action a settled Git identity check let through.
     pub(crate) git_identity_followup: Option<DashboardAction>,
+    /// Dashboard requests (`mj ui`) waiting for the open dialog to close.
+    pub(crate) held_ui_requests: std::collections::VecDeque<mj_client::ui_request::UiRequest>,
     pub(crate) command_session_override: Option<String>,
     /// Persisted scroll offsets for the three list panes, so each scrolls only
     /// far enough to keep its selection visible instead of jumping back to the
@@ -1229,6 +1231,7 @@ mod native_agents;
 mod session_cpu_report;
 mod session_usage_report;
 mod stopped_subagents;
+mod ui_requests;
 
 impl DashboardState {
     pub fn finish_spinner_style_save(&mut self) {
@@ -1301,6 +1304,7 @@ impl DashboardState {
             mount_history_refresh_pending: false,
             git_identity_gate: Default::default(),
             git_identity_followup: None,
+            held_ui_requests: std::collections::VecDeque::new(),
 
             command_session_override: None,
             sessions_scroll: Cell::new(0),

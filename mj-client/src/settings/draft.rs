@@ -15,6 +15,21 @@ pub fn storage_path(path: &[String]) -> Vec<String> {
     }
 }
 
+/// The page path of a setting named the way the file stores it. The Interface
+/// page's settings live at the root (`theme`) or under `keys` (`keys.prefix`);
+/// every other setting's stored path is its page path.
+pub fn page_path(path: &[String]) -> Vec<String> {
+    match path {
+        [key] if matches!(key.as_str(), "theme" | "spinner" | "sessions_side") => {
+            vec!["interface".to_owned(), key.clone()]
+        }
+        [section, key] if section == "keys" && key == "prefix" => {
+            vec!["interface".to_owned(), "prefix".to_owned()]
+        }
+        _ => path.to_vec(),
+    }
+}
+
 pub fn pointer(path: &[String]) -> String {
     storage_path(path)
         .iter()

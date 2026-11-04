@@ -16,6 +16,8 @@ pub fn spawn_remote_dashboard_worker_poller(
     let metadata = &bootstrap.projection.metadata;
     let (reviews_tx, reviews_rx) = tokio::sync::watch::channel(metadata.reviews.clone());
     let (notices_tx, notices_rx) = tokio::sync::watch::channel(metadata.notices.clone());
+    let (ui_requests_tx, ui_requests_rx) =
+        tokio::sync::watch::channel(metadata.ui_requests.clone());
     let (quotas_tx, quotas_rx) = tokio::sync::watch::channel(metadata.quotas.clone().into_inner());
     let (capabilities_tx, capabilities_rx) =
         tokio::sync::watch::channel(metadata.profile_capabilities.clone().into_inner());
@@ -84,6 +86,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                             send_if_changed(&reviews_tx, metadata.reviews.clone());
                             send_if_changed(&capabilities_tx, metadata.profile_capabilities.clone().into_inner());
                             send_if_changed(&notices_tx, metadata.notices.clone());
+                            send_if_changed(&ui_requests_tx, metadata.ui_requests.clone());
                             send_if_changed(&quotas_tx, metadata.quotas.clone().into_inner());
                         }
                         Some(RuntimeFeedUpdate::Session { session_id, view }) => {
@@ -117,6 +120,7 @@ pub fn spawn_remote_dashboard_worker_poller(
         subagent_parents,
         reviews: reviews_rx,
         notices: notices_rx,
+        ui_requests: ui_requests_rx,
         quotas: quotas_rx,
         profile_capabilities: capabilities_rx,
         config: config_rx,
