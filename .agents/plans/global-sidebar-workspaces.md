@@ -17,7 +17,9 @@ The Sessions sidebar should retain its chosen width across workspaces and applic
 - [x] (2026-11-04) Final full core, controller, TUI, and CLI suites passed, including CLI integration, PTY upgrade/termination tests, and doctests. Workspace clippy passed with warnings denied; formatting and diff checks passed.
 - [x] (2026-11-04) Committed implementation as `1b13e4a69` and requested review.
 - [x] (2026-11-04) Addressed both review findings; immediate-startup regression and short-terminal golden pass after reproducing both defects.
-- [ ] Validate the review fixes, commit, request review again, and push to origin/master.
+- [x] (2026-11-04) Committed review fixes as `def5f54e8` and merged the concurrent upstream macOS fixture adjustment without conflicts.
+- [x] (2026-11-04) Full core, client, controller, TUI, and CLI suites passed after the fixes and merge, including integration, PTY, and doctest suites. Workspace clippy passed with warnings denied; formatting and diff checks passed.
+- [x] (2026-11-04) Prepared the completed, validated tree for renewed review and publication; the session's review record tracks that gate and the subsequent push.
 
 ## Surprises & Discoveries
 
@@ -51,11 +53,11 @@ Review also found that measuring workspace height against the whole frame did no
 
 ## Outcomes & Retrospective
 
-All requested behaviors are implemented. The initial full validation passed, and both subsequent review findings now have passing focused regressions. The existing workspace-manager golden shows medium/large overflow, wheel and track navigation, selected-workspace visibility, and the tiny chooser. The combined-dashboard golden additionally shows overflow on short stacked and wide terminals. Full validation of the review fixes and the reviewed push remain.
+All requested behaviors and both review corrections are implemented, committed, and validated. The existing workspace-manager golden shows medium/large overflow, wheel and track navigation, selected-workspace visibility, and the tiny chooser. The combined-dashboard golden additionally shows overflow on short stacked and wide terminals. The deterministic startup regression proves a saved choice is published before acknowledgement without relying on the daemon's periodic refresh. Publication follows the session's mandatory review gate.
 
 ## Context and Orientation
 
-`mj-tui/src/dashboard_panes.rs` owns `DashboardState.pane_sizes`, the explicit sizes of Sessions, Targets, and Profiles. `mj-tui/src/dashboard_workspaces.rs` currently replaces them on workspace switches and on background workspace-cache loads. `mj-core/src/config.rs` defines both the runtime configuration and its stored representation. `mj-cli/src/dashboard/workspace_settings.rs` serializes background saves; `mj-cli/src/dashboard.rs` drives and flushes those saves.
+`mj-tui/src/dashboard_panes.rs` owns `DashboardState.pane_sizes`, the explicit sizes of Sessions, Targets, and Profiles. `mj-tui/src/dashboard_workspaces.rs` restores Targets and Profiles on workspace switches and background cache loads while preserving the global Sessions choice. `mj-core/src/config.rs` defines both the runtime configuration and its stored representation. `mj-cli/src/dashboard/workspace_settings.rs` serializes background saves; `mj-cli/src/dashboard.rs` drives and flushes those saves.
 
 `mj-tui/src/combined.rs` measures and allocates the bordered workspace pane above Sessions. `mj-tui/src/workspaces.rs` draws workspace tabs and handles keyboard and pointer navigation. `mj-tui/src/pane_controls.rs` implements menus anchored to a screen rectangle, with existing scrolling and dismissal. Rendered tests use Ratatui's terminal backend and checked-in files under `mj-tui/tests/golden/`.
 
@@ -70,6 +72,8 @@ Finally add a workspace operation to the existing anchored menu for tiny mode. O
 ## Concrete Steps
 
 Work from the repository root. Use `cargo fmt --all` for formatting. Run Cargo tests outside the restricted sandbox, leaving mbx build storage untouched. Run focused tests during implementation, then `cargo test -p brokk-mj-core -p brokk-mj-client -p brokk-mj-controller -p brokk-mj-tui -p brokk-mjolnir` and `cargo clippy --all-targets -- -D warnings` after the final implementation round. Golden updates use `MJ_UPDATE_GOLDEN=1` and require inspection of the resulting diff.
+
+Commit on the current branch, call `request_review`, and push `HEAD:master` to origin once every reviewer is clean. Review and publication status are recorded in the session's review record and Git operation results.
 
 ## Validation and Acceptance
 
@@ -89,6 +93,8 @@ Final validation exited successfully: controller 2,272 tests, core 562 tests plu
 
 Review regressions reproduced both defects before the fix (`/mnt/optane/tmp/mj-sidebar-review-startup-before.log` and `mj-sidebar-review-layout-before.log`). The startup case observed Standard after saving Minimized, without a periodic refresher. Focused checks now pass (`mj-sidebar-review-startup-after.log` and `mj-sidebar-review-layout-after.log`). The layout golden covers 70x22, 80x13, and 160x13 terminals and verifies pane boundaries and scrollbar presence.
 
+Final review-fix validation passed in `/mnt/optane/tmp/mj-sidebar-review-tests-final.log`: client 44 tests, controller 2,273 tests, core 562 tests plus subprocess checks, TUI 570 tests, CLI 236 unit tests, and all integration/PTY/doctest suites. `/mnt/optane/tmp/mj-sidebar-review-clippy.log` records a successful `cargo clippy --all-targets -- -D warnings` run. Formatting and whitespace checks also passed.
+
 ## Interfaces and Dependencies
 
 Use the existing `PaneSize`, `PaneSizes`, `WorkspaceSettingPersistence`, `PaneMenu`, Ratatui, and theme glyph/scrollbar helpers. `DaemonClient::save_sidebar_size` sends the additive `DaemonAction::SaveSidebarSize` operation; the controller coordinates its file transaction and publication under `config_mutation`, with the admission label `sidebar size setting`. Add no crate or external dependency. Keep shared workspace row interpretation in `mj-tui/src/workspaces.rs` and use it from the combined layout.
@@ -102,3 +108,5 @@ Revision 2026-11-04: Recorded successful full validation before committing and r
 Revision 2026-11-04: Recorded both accepted review findings and their ownership/allocation corrections before implementing the fixes.
 
 Revision 2026-11-04: Recorded deterministic before/after evidence and the dedicated daemon operation, which avoids optimistic snapshot updates and session-store reads for sidebar saves.
+
+Revision 2026-11-04: Recorded the completed review corrections, clean upstream merge, and final full validation. Review and publication are tracked by the session gate.
