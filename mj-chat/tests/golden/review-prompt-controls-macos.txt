@@ -68,11 +68,11 @@ Down review controls · Enter act │ ctrl+b then q detach · : / ? palette
 │ ● Agent                                                                     ││
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Review findings ─────────────────────────────────────────────────────────────╮
-│  Read verdict     Forward findings     Dismiss     Cancel                    │
+│  Read details     Forward findings     Dismiss     Cancel                    │
 │ [P1] src/lib.rs:1 -- unbounded retry                                         │
 │                                                                              │
 ╰ Reviewers · 1 › ─────────────────────────────────────────────────────────────╯
-v verdict · Down controls · Enter act │ ctrl+b then q detach · : / ? palette
+v details · Down controls · Enter act │ ctrl+b then q detach · : / ? palette
 
 === findings default action (64x14) ===
 ╭ Conversation · Reviewing ────────────────────────────────────╮
@@ -84,11 +84,11 @@ v verdict · Down controls · Enter act │ ctrl+b then q detach · : / ? palett
 │                                                             ▐│
 ╰──────────────────────────────────────────────────────────────╯
 ╭ Review findings ─────────────────────────────────────────────╮
-│  Read verdict     Forward findings     Dismiss     Cancel    │
+│  Read details     Forward findings     Dismiss     Cancel    │
 │ [P1] src/lib.rs:1 -- unbounded retry                         │
 │                                                              │
 ╰ Reviewers · 1 › ─────────────────────────────────────────────╯
-v verdict · Down controls │ ctrl+b then q detach · : / ? palette
+v details · Down controls │ ctrl+b then q detach · : / ? palette
 selected action: Some(Some(Forward))
 action: TurnReview(Resolve(Forwarded))
 
@@ -102,17 +102,17 @@ action: TurnReview(Resolve(Forwarded))
 │                                                             ▐│
 ╰──────────────────────────────────────────────────────────────╯
 ╭ Review failed ───────────────────────────────────────────────╮
-│  Read verdict     Forward findings     Dismiss     Cancel    │
+│  Read details     Forward findings     Dismiss     Cancel    │
 │ reviewer exited with 1                                       │
 │                                                              │
 ╰ Reviewers · 1 › ─────────────────────────────────────────────╯
-v verdict · Down controls │ ctrl+b then q detach · : / ? palette
+v details · Down controls │ ctrl+b then q detach · : / ? palette
 selected action: Some(Some(Dismiss))
 allowed actions: Some([(Forward, false), (Dismiss, true), (Cancel, true)])
 action: TurnReview(Resolve(Dismissed))
 
 === full verdict uses the existing text reader (80x16) ===
-╭ Review verdict ──────────────────────────────────────────────────────────────╮
+╭ Review details ──────────────────────────────────────────────────────────────╮
 │complete verdict line 00                                                      │
 │complete verdict line 01                                                      │
 │complete verdict line 02                                                      │
@@ -130,7 +130,7 @@ action: TurnReview(Resolve(Dismissed))
 ╰Up/Down/PgUp/PgDn: scroll | Esc: return───────────────────────────────────────╯
 
 === full verdict reader reaches the final line (80x16) ===
-╭ Review verdict ──────────────────────────────────────────────────────────────╮
+╭ Review details ──────────────────────────────────────────────────────────────╮
 │complete verdict line 26                                                      │
 │complete verdict line 27                                                      │
 │complete verdict line 28                                                      │
@@ -146,3 +146,35 @@ action: TurnReview(Resolve(Dismissed))
 │complete verdict line 38                                                      │
 │complete verdict line 39                                                      │
 ╰Up/Down/PgUp/PgDn: scroll | Esc: return───────────────────────────────────────╯
+
+=== delivery error is fully readable (64x14) ===
+╭ Review details ──────────────────────────────────────────────╮
+│connection is unavailable. The remote worker refused this     │
+│request because its control connection is unavailable. The    │
+│remote worker refused this request because its control        │
+│connection is unavailable. The remote worker refused this     │
+│request because its control connection is unavailable. The    │
+│remote worker refused this request because its control        │
+│connection is unavailable. The remote worker refused this     │
+│request because its control connection is unavailable. The    │
+│remote worker refused this request because its control        │
+│connection is unavailable. The remote worker refused this     │
+│request because its control connection is unavailable.        │
+│complete error reason at the end                              │
+╰Up/Down/PgUp/PgDn: scroll | Esc: return───────────────────────╯
+
+=== action refusal is readable without a verdict (64x14) ===
+╭ Review details ──────────────────────────────────────────────╮
+│connection is unavailable. The remote worker refused this     │
+│request because its control connection is unavailable. The    │
+│remote worker refused this request because its control        │
+│connection is unavailable. The remote worker refused this     │
+│request because its control connection is unavailable. The    │
+│remote worker refused this request because its control        │
+│connection is unavailable. The remote worker refused this     │
+│request because its control connection is unavailable. The    │
+│remote worker refused this request because its control        │
+│connection is unavailable. The remote worker refused this     │
+│request because its control connection is unavailable.        │
+│complete error reason at the end                              │
+╰Up/Down/PgUp/PgDn: scroll | Esc: return───────────────────────╯

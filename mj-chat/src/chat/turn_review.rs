@@ -13,7 +13,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 /// Which of the review's actions the keyboard is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReviewAction {
-    ReadVerdict,
+    ReadDetails,
     Forward,
     Dismiss,
     Cancel,
@@ -21,7 +21,7 @@ pub(super) enum ReviewAction {
 
 impl ReviewAction {
     const ORDER: [Self; 4] = [
-        Self::ReadVerdict,
+        Self::ReadDetails,
         Self::Forward,
         Self::Dismiss,
         Self::Cancel,
@@ -29,7 +29,7 @@ impl ReviewAction {
 
     fn label(self) -> &'static str {
         match self {
-            Self::ReadVerdict => "Read verdict",
+            Self::ReadDetails => "Read details",
             Self::Forward => "Forward findings",
             Self::Dismiss => "Dismiss",
             Self::Cancel => "Cancel",
@@ -39,7 +39,7 @@ impl ReviewAction {
     /// The resolution this action asks the daemon for.
     const fn resolution(self) -> Option<Resolution> {
         match self {
-            Self::ReadVerdict => None,
+            Self::ReadDetails => None,
             Self::Forward => Some(Resolution::Forwarded),
             Self::Dismiss => Some(Resolution::Dismissed),
             Self::Cancel => Some(Resolution::Cancelled),
@@ -64,7 +64,7 @@ impl ReviewAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReviewControl {
     Status,
-    ReadVerdict,
+    ReadDetails,
     Forward,
     Dismiss,
     Cancel,
@@ -76,6 +76,29 @@ pub(super) struct TurnReview {
     pub(super) action: Option<ReviewAction>,
     pub(super) failure: Option<String>,
     pub(super) form: Form<ReviewControl>,
+}
+
+fn report_sections<'a>(
+    view: &'a RuntimeReviewView,
+    failure: Option<&'a str>,
+) -> impl Iterator<Item = (Option<&'static str>, &'a str)> {
+    let delivery_error = match &view.phase {
+        TurnReviewPhase::Forwarding { error, .. } => error.as_deref(),
+        _ => None,
+    };
+    [
+        (
+            None,
+            view.verdict.as_ref().map(|verdict| verdict.text.as_str()),
+        ),
+        (Some("Delivery failed"), delivery_error),
+        (Some("Action refused"), failure),
+    ]
+    .into_iter()
+    .filter_map(|(title, text)| {
+        text.filter(|text| !text.trim().is_empty())
+            .map(|text| (title, text))
+    })
 }
 
 impl TurnReview {
@@ -92,7 +115,9 @@ impl TurnReview {
         let changed = self.view != view;
         let verdict_changed = self.view.verdict.as_ref().map(|verdict| verdict.kind)
             != view.verdict.as_ref().map(|verdict| verdict.kind);
-        if verdict_changed || !Self::action_allowed_in_view(&view, self.action) {
+        if verdict_changed
+            || !Self::action_allowed_in_view(&view, self.failure.as_deref(), self.action)
+        {
             self.action = Self::preferred_action(&view);
         }
         self.view = view;
@@ -115,13 +140,14 @@ impl TurnReview {
         })
     }
 
-    fn action_allowed_in_view(view: &RuntimeReviewView, action: Option<ReviewAction>) -> bool {
+    fn action_allowed_in_view(
+        view: &RuntimeReviewView,
+        failure: Option<&str>,
+        action: Option<ReviewAction>,
+    ) -> bool {
         match action {
             None => view.verdict.is_none(),
-            Some(ReviewAction::ReadVerdict) => view
-                .verdict
-                .as_ref()
-                .is_some_and(|verdict| !verdict.text.trim().is_empty()),
+            Some(ReviewAction::ReadDetails) => report_sections(view, failure).next().is_some(),
             Some(ReviewAction::Cancel) => {
                 !matches!(&view.phase, TurnReviewPhase::Forwarding { error: None, .. })
             }
@@ -154,8 +180,23 @@ impl TurnReview {
             .and_then(|verdict| (!verdict.text.trim().is_empty()).then_some(verdict.text.as_str()))
     }
 
+    pub(super) fn has_report(&self) -> bool {
+        report_sections(&self.view, self.failure.as_deref())
+            .next()
+            .is_some()
+    }
+
+    fn report_text(&self) -> Option<String> {
+        let parts = report_sections(&self.view, self.failure.as_deref())
+            .map(|(title, text)| {
+                title.map_or_else(|| text.to_owned(), |title| format!("{title}:\n{text}"))
+            })
+            .collect::<Vec<_>>();
+        (!parts.is_empty()).then(|| parts.join("\n\n"))
+    }
+
     fn allows(&self, action: ReviewAction) -> bool {
-        Self::action_allowed_in_view(&self.view, Some(action))
+        Self::action_allowed_in_view(&self.view, self.failure.as_deref(), Some(action))
     }
 
     pub(super) fn report_failure(&mut self, message: impl Into<String>) -> bool {
@@ -234,8 +275,8 @@ impl super::ChatState {
         if let Some(resolution) = action.resolution() {
             self.resolve_turn_review(resolution)
         } else {
-            let text = review.verdict_text().unwrap_or_default().to_owned();
-            self.open_text_reader("Review verdict", &text);
+            let text = review.report_text().unwrap_or_default();
+            self.open_text_reader("Review details", &text);
             super::ChatAction::None
         }
     }
@@ -267,7 +308,7 @@ impl super::ChatState {
         if let Some(Interaction::Activate(control)) = result.action {
             if let Some(review) = self.turn_review.as_mut() {
                 review.action = Some(match control {
-                    ReviewControl::ReadVerdict => ReviewAction::ReadVerdict,
+                    ReviewControl::ReadDetails => ReviewAction::ReadDetails,
                     ReviewControl::Forward => ReviewAction::Forward,
                     ReviewControl::Dismiss => ReviewAction::Dismiss,
                     ReviewControl::Cancel => ReviewAction::Cancel,
@@ -303,12 +344,8 @@ impl super::ChatState {
                 }
             }
             KeyCode::Char('v') if modifiers.is_empty() => {
-                if let Some(text) = self
-                    .turn_review()
-                    .and_then(TurnReview::verdict_text)
-                    .map(str::to_owned)
-                {
-                    self.open_text_reader("Review verdict", &text);
+                if let Some(text) = self.turn_review().and_then(TurnReview::report_text) {
+                    self.open_text_reader("Review details", &text);
                 }
             }
             KeyCode::Enter => return self.activate_turn_review_action(),
@@ -343,9 +380,7 @@ pub(super) fn render_turn_review_actions(
     );
     let specs = ReviewAction::ORDER
         .into_iter()
-        .filter(|candidate| {
-            *candidate != ReviewAction::ReadVerdict || review.verdict_text().is_some()
-        })
+        .filter(|candidate| *candidate != ReviewAction::ReadDetails || review.has_report())
         .map(|candidate| {
             let label = match (failed_delivery, candidate) {
                 (true, ReviewAction::Forward) => "Retry delivery",
@@ -353,7 +388,7 @@ pub(super) fn render_turn_review_actions(
                 _ => candidate.label(),
             };
             let control = match candidate {
-                ReviewAction::ReadVerdict => ReviewControl::ReadVerdict,
+                ReviewAction::ReadDetails => ReviewControl::ReadDetails,
                 ReviewAction::Forward => ReviewControl::Forward,
                 ReviewAction::Dismiss => ReviewControl::Dismiss,
                 ReviewAction::Cancel => ReviewControl::Cancel,
@@ -362,7 +397,7 @@ pub(super) fn render_turn_review_actions(
         })
         .collect::<Vec<_>>();
     review.form.focus(match review.action {
-        Some(ReviewAction::ReadVerdict) => ReviewControl::ReadVerdict,
+        Some(ReviewAction::ReadDetails) => ReviewControl::ReadDetails,
         Some(ReviewAction::Forward) => ReviewControl::Forward,
         Some(ReviewAction::Dismiss) => ReviewControl::Dismiss,
         Some(ReviewAction::Cancel) => ReviewControl::Cancel,
@@ -908,6 +943,47 @@ mod tests {
             long.handle_key(key(KeyCode::Enter)),
             ChatAction::TurnReview(TurnReviewIntent::Resolve(Resolution::Forwarded))
         );
+
+        let error = format!("{}\ncomplete error reason at the end", "The remote worker refused this request because its control connection is unavailable. ".repeat(18));
+        for (label, view, refusal) in [
+            (
+                "delivery error is fully readable",
+                forwarding_view(Some(&error)),
+                None,
+            ),
+            (
+                "action refusal is readable without a verdict",
+                running_view(),
+                Some(error.clone()),
+            ),
+        ] {
+            let mut chat = fresh_chat();
+            chat.set_turn_review(Some(view));
+            if let Some(refusal) = refusal {
+                chat.turn_review_mut().unwrap().report_failure(refusal);
+            }
+            let _ = review_golden_buffer(&mut chat, 64, 14);
+            assert!(
+                chat.turn_review()
+                    .unwrap()
+                    .allows(ReviewAction::ReadDetails)
+            );
+            chat.handle_key(key(KeyCode::Char('v')));
+            assert!(chat.earlier.is_some());
+            for _ in 0..4 {
+                chat.handle_key(key(KeyCode::PageDown));
+            }
+            let buffer = review_golden_buffer(&mut chat, 64, 14);
+            assert!(
+                crate::golden::buffer_lines(&buffer)
+                    .join("\n")
+                    .contains("complete error reason at the end")
+            );
+            // Hard-won: eeb875f7b: delivery and action errors were only visible in a truncated prompt title.
+            append_review_golden_state(&mut output, label, 64, 14, &buffer, &[]);
+            assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
+            assert!(chat.turn_review_active());
+        }
 
         mj_core::golden::assert_platform_golden(
             env!("CARGO_MANIFEST_DIR"),
