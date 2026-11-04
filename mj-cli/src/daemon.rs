@@ -1831,6 +1831,11 @@ mod tests {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
                 let reply = match request.action {
+                    DaemonAction::Identity => DaemonReply::Identity(DaemonIdentity {
+                        instance_id: "isolated-notices".into(),
+                        build_version: env!("CARGO_PKG_VERSION").into(),
+                        placement: DaemonPlacement::Host,
+                    }),
                     DaemonAction::PrepareUpgrade => DaemonReply::UpgradePending,
                     DaemonAction::UpgradeBlockers => {
                         age += 1;
