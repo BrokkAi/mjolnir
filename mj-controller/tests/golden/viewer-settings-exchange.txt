@@ -283,10 +283,6 @@
                     "label": "opencode"
                   },
                   {
-                    "value": "mimo",
-                    "label": "MiMo Code"
-                  },
-                  {
                     "value": "dsh",
                     "label": "DSH"
                   }

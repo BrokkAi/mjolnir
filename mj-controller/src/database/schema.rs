@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 106;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 107;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1636,7 +1636,9 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
 
     // Breaking: older daemons do not know the `mimo` harness. They skip such
     // sessions when loading state, and a full state save would delete them, so
-    // the compatibility floor rises with the new harness kind.
+    // the compatibility floor rises with the new harness kind. MiMo Code has
+    // since been removed; the constraint keeps admitting `mimo` so rows an
+    // earlier release wrote stay readable, and loading skips them.
     if version < 90 {
         migrate_mimo_harness_kind(connection)?;
     }
@@ -1945,6 +1947,19 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (106, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
              PRAGMA user_version = 106;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: older daemons cannot decode durable SessionReview::Inherit
+    // values in stored JSON. Refuse their reads and writes before one is saved.
+    if version < 107 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 107 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (107, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 107;
              COMMIT;",
         )?;
     }

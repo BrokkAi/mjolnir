@@ -58,7 +58,6 @@ Kimi Code
 Grok Build
 Muse Code
 opencode
-MiMo Code
 DSH
 Account directory
 

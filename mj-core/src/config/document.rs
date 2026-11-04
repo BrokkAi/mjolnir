@@ -6,7 +6,9 @@
 
 use toml_edit::{Document, Item, TableLike};
 
-use super::{LEGACY_DEFAULT_CONTAINER_IMAGE, LEGACY_DEFAULT_IMAGE_LAST_VERSION};
+use super::{
+    LEGACY_DEFAULT_CONTAINER_IMAGE, LEGACY_DEFAULT_IMAGE_LAST_VERSION, is_removed_harness_profile,
+};
 
 /// The first version whose file shape this build writes in place. Earlier
 /// files store fused runtime and host tables that a save has to convert, so
@@ -70,6 +72,20 @@ pub(super) fn edit_in_place(existing: &str, loaded: &str, updated: &str) -> Opti
     // and writes the trigger even when its effective value has not changed.
     if let Some(review) = raw.get("review") {
         loaded.insert("review".into(), review.clone());
+    }
+    // Loading dropped every profile for a removed harness. Compare those
+    // against the file so saving removes them.
+    if let Some(raw_profiles) = raw.get("profiles").and_then(toml::Value::as_table)
+        && let Some(loaded_profiles) = loaded
+            .entry("profiles")
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+    {
+        for (id, profile) in raw_profiles {
+            if is_removed_harness_profile(profile) {
+                loaded_profiles.insert(id.clone(), profile.clone());
+            }
+        }
     }
     let updated_table = updated.parse::<toml::Table>().ok()?;
     let source = updated.parse::<Document>().ok()?;

@@ -2417,6 +2417,7 @@ fn reviewer_workspace_filters_child_kinds_and_returns_through_nested_workspaces(
     state.subagents.get_mut("reviewer-a").unwrap().kind = SubagentKind::Reviewer;
     dashboard.set_state(state);
     dashboard.open_subagent_workspace(parent.clone());
+    dashboard.clear_sessions_filter();
     assert_eq!(
         dashboard
             .ordered_sessions()
@@ -2780,6 +2781,7 @@ fn sessions_pane_shows_every_row_from_the_top_after_the_list_shrank() {
 fn subagents_pane_shows_every_child_from_the_top_with_a_stale_offset() {
     let (mut dashboard, parent) = dashboard_with_subagents(&["worker-a", "worker-b", "worker-c"]);
     dashboard.open_subagent_workspace(parent);
+    dashboard.clear_sessions_filter();
     dashboard.select_active_session("worker-c");
     dashboard.sessions_scroll.set(2);
     let text = crate::test_support::drawn(&mut dashboard, 120, 60).join("\n");
@@ -2800,6 +2802,8 @@ fn sessions_pane_keeps_the_keyboard_selection_centred_and_pins_the_ends() {
     let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
     let (mut dashboard, parent) = dashboard_with_subagents(&refs);
     dashboard.open_subagent_workspace(parent);
+    dashboard.clear_sessions_filter();
+    dashboard.select_active_session("child-00");
     dashboard.focus = Focus::Sessions;
     let lines = crate::test_support::drawn(&mut dashboard, 120, 40);
     let first = row_of_title(&lines, "child-00").expect("first child drawn at the top");
@@ -3336,17 +3340,19 @@ fn golden_dashboard_resource_panels() {
         &mut dashboard,
     );
 
-    let mut mimo_config = config();
-    let mut mimo = mimo_config.profiles["codex-1"].clone();
-    mimo.kind = HarnessKind::Mimo;
-    mimo.home = std::path::PathBuf::from("/profiles/mimo");
-    mimo_config.profiles.insert("mimo-1".into(), mimo);
-    let mut dashboard = DashboardState::new(mimo_config, State::default(), BTreeMap::new());
+    let mut opencode_config = config();
+    let mut opencode = opencode_config.profiles["codex-1"].clone();
+    opencode.kind = HarnessKind::OpenCode;
+    opencode.home = std::path::PathBuf::from("/profiles/opencode");
+    opencode_config
+        .profiles
+        .insert("opencode-1".into(), opencode);
+    let mut dashboard = DashboardState::new(opencode_config, State::default(), BTreeMap::new());
     dashboard.apply_quota(ProfileQuota {
-        harness: HarnessKind::Mimo,
+        harness: HarnessKind::OpenCode,
         extra: Some(NOT_REPORTED_LABEL.into()),
         refreshed_at_epoch_seconds: 0,
-        ..api_quota("mimo-1")
+        ..api_quota("opencode-1")
     });
     append_dashboard_golden(
         &mut output,

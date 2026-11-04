@@ -472,6 +472,14 @@ image = "ubuntu:24.04"
 "#,
     )
     .expect("write Hel test config");
+    // This fixture represents an installed Codex profile. Keep its home
+    // inside the isolated test tree so availability checks see a real home.
+    let profile_home = storage.path().join("codex-profile");
+    fs::create_dir_all(&profile_home).expect("create fixture Codex home");
+    let config_path = config_root.join("hel/config.toml");
+    let mut config = mj_core::config::Config::load_from(&config_path).unwrap();
+    config.profiles.get_mut("codex").unwrap().home = profile_home;
+    config.save_to(&config_path).unwrap();
     if let Some(prefix) = prefix {
         let path = config_root.join("hel/config.toml");
         let mut config = mj_core::config::Config::load_from(&path).unwrap();
@@ -634,11 +642,10 @@ image = "ubuntu:24.04"
     } else {
         let tools = storage.path().join("fixture-tools");
         fs::create_dir_all(&tools).unwrap();
-        // The dashboard needs only these host commands: `uname` for platform
-        // detection, `git` to check a project directory, and `sh`, which the
-        // daemon runs a local launch's harness preflight in.
+        // Startup probes use these host commands, including the storage
+        // capacity script and process scan. Keep PATH isolated from agents.
         let host_path = std::env::var_os("PATH").unwrap_or_default();
-        for name in ["uname", "git", "sh"] {
+        for name in ["uname", "git", "sh", "awk", "dirname", "ps"] {
             let command = std::env::split_paths(&host_path)
                 .map(|directory| directory.join(name))
                 .find(|path| path.is_file())

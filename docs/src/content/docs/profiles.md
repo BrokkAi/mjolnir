@@ -1,6 +1,6 @@
 ---
 title: Profiles and harnesses
-description: Configure Codex (including Amazon Bedrock and custom model providers), Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, MiMo Code, and DSH accounts, credentials, skills, runtimes, and quota reporting.
+description: Configure Codex (including Amazon Bedrock and custom model providers), Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, and DSH accounts, credentials, skills, runtimes, and quota reporting.
 ---
 
 A profile connects Mjolnir to one installed coding-agent harness and one account.
@@ -134,10 +134,11 @@ the model mix and quota charging stay comparable.
 | Grok Build | `grok` | `GROK_HOME` | `~/.grok` | `auth.json` | yes |
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
 | OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | no |
-| MiMo Code | `mimo` | `MIMOCODE_HOME` | `~/.mimocode` (stock XDG config and login when unset) | `data/auth.json`, or `~/.local/share/mimocode/auth.json` for the stock install | no |
 | DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh` | `DEEPSEEK_API_KEY` saved in DSH, or in the environment | no |
 
-There are eight harness kinds. Codex can use its built-in Amazon Bedrock
+There are seven harness kinds. A profile whose `kind` is `mimo`, for the
+removed MiMo Code harness, is ignored with a warning when the configuration
+loads and is removed from the file on the next save. Codex can use its built-in Amazon Bedrock
 providers; see [Codex on Amazon Bedrock](#codex-on-amazon-bedrock). It can also
 authenticate with an API key against a custom provider; see
 [Codex with a custom provider](#codex-with-a-custom-provider).
@@ -154,9 +155,9 @@ no login, such as `DEEPSEEK_API_KEY` for DSH. A detected home becomes the
 explicit `home` path in `config.toml`; subsequent sessions use that configured
 path.
 
-Kimi Code does not expose a guardian approval mode. OpenCode and MiMo Code ask
-before tools according to their permission rules, and DSH asks before every
-write, command, and MCP tool call other than Mjolnir's own, but all three run commands on the host
+Kimi Code does not expose a guardian approval mode. OpenCode asks before tools
+according to its permission rules, and DSH asks before every write, command,
+and MCP tool call other than Mjolnir's own, but both run commands on the host
 without a sandbox, so they have no guardian either. The dashboard's
 new-session and resume wizards warn before using any of them on a raw target. Muse's guardian is muse-acp's auto-review; see
 [Harness limitations](#harness-limitations).
@@ -565,18 +566,6 @@ wins over a key for the same provider, as it does in OpenCode. Export the key
 before running `mj`, and run `mj daemon restart` after exporting a new one;
 `mj doctor` names the keys a profile is using.
 
-For MiMo Code, configure `kind = "mimo"`. A profile at the conventional
-`~/.mimocode` home, which is where the official installer keeps its executable,
-uses the person's stock XDG configuration and login:
-`~/.config/mimocode` and `~/.local/share/mimocode/auth.json`. That keeps an
-existing `mimo auth login` working without a second sign-in. Any other home is
-a `MIMOCODE_HOME` root, for example
-`home = "/home/me/accounts/work/mimo"`, with its own `config/` and `data/`
-trees; discovery uses `$MIMOCODE_HOME` when set. Mjolnir gives each session a
-private root with those `config/` and `data/` trees, including on a bare
-runtime on this machine. Do not override `MIMOCODE_HOME` in the profile
-environment.
-
 For DSH, configure `kind = "dsh"`, for example with
 `home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
 `~/.dsh` home, or `DEEPSEEK_API_KEY` in the environment Mjolnir started with,
@@ -678,7 +667,6 @@ that harness as an ACP agent. It reads the methods the bridge advertises:
 | Grok Build | Runs `grok login` for its `grok.com` method; falls back to the CLI when the bridge cannot run |
 | Muse Code | Runs the ACP `terminal` method `muse-acp login` |
 | OpenCode | Runs the pinned `opencode auth login --standalone` |
-| MiMo Code | Runs the pinned `mimo auth login` |
 | DSH | none; `mj login` refuses the profile, which authenticates with `DEEPSEEK_API_KEY` |
 
 Use `--method <id>` when a bridge advertises several methods. Use `--cli` to
@@ -691,7 +679,7 @@ For harnesses with an ACP login, signing in installs or reuses the pinned
 harness, so the controller does not need a separate installation of that
 harness. Claude agent-acp advertises no login method, so Mjolnir runs
 `auth login` through the Claude CLI in the pinned installation. A profile
-pointed at your own OpenCode, Muse, or MiMo home signs in through that installed
+pointed at your own OpenCode or Muse home signs in through that installed
 harness's CLI instead: Mjolnir never runs the pinned binary against a login
 database it does not own. A profile with its own Mjolnir-managed home gets the
 pinned flow. API-key profiles, and profiles whose harness is configured for an
@@ -756,7 +744,6 @@ from the profile home:
 | Grok Build | `auth.json`, `config.toml`, `AGENTS.md`, `agent_id`, `skills/`, `plugins/` |
 | Muse Code | `auth.json`, `settings.json`, `trust.json`, `AGENTS.md`, `skills/`, `rules/` |
 | OpenCode | `opencode.json`, `opencode.jsonc`, `AGENTS.md`, `skills/`, and the logins from `opencode.db`, as `.data/opencode/mjolnir-credentials.json` |
-| MiMo Code | `config/`, `data/auth.json` |
 | DSH | `AGENTS.md`, `skills/` (staged, but DSH does not read skills) |
 
 Staging follows symbolic links: a linked file or directory is copied with the
@@ -785,8 +772,6 @@ Mjolnir then adds its own files to the staged home:
 - for Muse, the permission profile in its settings;
 - for OpenCode under an unconstrained policy, the `"permission": "allow"`
   setting in `opencode.json`;
-- for MiMo Code under an unconstrained policy,
-  `MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1` in the launch environment;
 - for DSH, the staged `AGENTS.md` in the session's `DSH_ACP_DATA_DIR` (with
   `DSH_ACP_SYSTEM_PROMPT` cleared), and dsh-acp's `permission_mode` on every
   session open: `ask` under configured approvals, `allow` under an
@@ -992,11 +977,6 @@ OpenCode downloads the pinned OpenCode 2 package for the platform from npm
 and verifies it in-process. Linux and macOS, on x86-64 and ARM64, are supported.
 The pinned installation disables OpenCode's self-update so a running session
 never replaces its own binary.
-MiMo Code installs from its pinned native release archive on GitHub, with
-Xiaomi's download mirror as a fallback, and verifies its pinned SHA-256
-checksum; it needs no Node.js runtime. Linux and macOS, on x86-64 and ARM64,
-are supported. Its managed launch disables automatic updates so a running
-session never replaces its own binary.
 DSH is never installed. A launch uses the target's own `dsh-acp` on `PATH` when
 it is 0.5.0 or newer, or fetches the pinned `@brokkai/dsh-acp@0.5.0` package
 through `npx`, using the compatible system runtime or the managed Node
@@ -1033,7 +1013,6 @@ while the pane has focus. **Refresh** runs the same refresh as
 | Grok Build | The harness's ACP billing extension. |
 | Muse Code | Native subscription usage windows and reset times, when reported. The daemon refreshes the Muse login itself, so the reading does not depend on Muse having run. |
 | OpenCode | No published quota endpoint; the profile shows an unavailable reading. |
-| MiMo Code | Xiaomi publishes no quota endpoint for Token Plan API keys, so the profile shows an unavailable reading. Remaining credits appear only in the Xiaomi console at `platform.xiaomimimo.com/console/plan-manage`. |
 | DSH | No quota endpoint; DeepSeek bills by usage, so the profile shows `API`. |
 
 A Codex profile on a provider that publishes no quota endpoint, and a DSH
@@ -1087,7 +1066,7 @@ without them. Muse Spark can also supply utility inference for cross-harness
 handoffs; see
 [Durability and recovery](/durability/).
 
-- Kimi Code, OpenCode, MiMo Code, and DSH have no guardian approval mode.
+- Kimi Code, OpenCode, and DSH have no guardian approval mode.
   Prefer an isolated [container target](/containers/) or EC2 rather than raw
   execution.
 - OpenCode talks to third-party providers through its own gateway, so it
@@ -1095,11 +1074,6 @@ handoffs; see
   reads permission rules from `opencode.json`. Its sessions live in a SQLite
   database, so native import and SessionWiki search do not list them, and it
   never serves Mjolnir's delegation or utility inference.
-- MiMo Code has no quota reading, because Xiaomi exposes Token Plan usage only
-  to a logged-in console session and not to the API key. It accepts one
-  workspace root and keeps native sessions in a SQLite database. Native import and SessionWiki
-  search do not list them yet, and it does not serve Mjolnir's delegation or
-  utility inference.
 - DSH has no sandbox: commands run directly on the host, and only its file
   tools are confined to the workspace roots. Under configured approvals
   Mjolnir selects dsh-acp's `permission_mode` `ask` on every session open, so

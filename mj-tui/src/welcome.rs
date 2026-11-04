@@ -90,6 +90,13 @@ impl DashboardState {
         }
     }
 
+    pub fn welcome_not_needed(&mut self) {
+        self.pending_welcome = None;
+        if matches!(self.mode, Mode::Welcome(_)) {
+            self.cancel_modal();
+        }
+    }
+
     pub(crate) fn handle_welcome_event(
         &mut self,
         event: Event,

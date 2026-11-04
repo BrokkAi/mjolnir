@@ -2173,7 +2173,7 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
 fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     use mj_core::harness_runtime::{
         CLAUDE_CLI_VERSION, DSH_ACP_PACKAGE, DSH_ACP_VERSION, GROK_VERSION, KIMI_VERSION,
-        MIMO_VERSION, MUSE_ACP_PACKAGE, MUSE_ACP_VERSION, OPENCODE_VERSION,
+        MUSE_ACP_PACKAGE, MUSE_ACP_VERSION, OPENCODE_VERSION,
     };
 
     const CONTAINERFILE: &str = include_str!("../../../../containers/Containerfile.agent-dev");
@@ -2216,17 +2216,6 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
         "containers/Containerfile.agent-dev must check the installed adapter is \
              {MUSE_ACP_VERSION}; a stale check fails only when the image is published"
     );
-    // The image installs MiMo Code from the managed runtime's own metadata, so
-    // both run the pinned release with the pinned digest.
-    assert!(
-        CONTAINERFILE.contains("COPY mj-core/assets/mimo/runtime.json")
-            && CONTAINERFILE.contains("install-mimo.py"),
-        "containers/Containerfile.agent-dev must install MiMo Code from mj-core/assets/mimo/runtime.json"
-    );
-    let mimo: serde_json::Value =
-        serde_json::from_str(include_str!("../../../../mj-core/assets/mimo/runtime.json")).unwrap();
-    assert_eq!(mimo["version"], MIMO_VERSION);
-    assert!(CONTAINERFILE.contains("ENV MIMOCODE_DISABLE_AUTOUPDATE=1"));
     assert!(CONTAINERFILE.contains("OPENCODE_DISABLE_AUTOUPDATE=1"));
 
     for package in [
@@ -3454,7 +3443,6 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             | HarnessKind::Grok
             | HarnessKind::Muse
             | HarnessKind::OpenCode
-            | HarnessKind::Mimo
             | HarnessKind::Dsh => &[],
         };
         let home = tempfile::tempdir().unwrap();
@@ -5372,17 +5360,6 @@ fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
             (".data/opencode/log/opencode.log", false),
             (".data/opencode/repos/native", false),
         ],
-        HarnessKind::Mimo => &[
-            ("config/mimocode.json", true),
-            ("config/AGENTS.md", true),
-            ("config/skills/review/SKILL.md", true),
-            ("data/auth.json", true),
-            ("data/mimocode.db", false),
-            ("data/mimocode.db-wal", false),
-            ("data/log/mimocode.log", false),
-            ("state/model.json", false),
-            ("cache/models", false),
-        ],
         // dsh-acp keeps only its sessions, written atomically through a
         // temporary file beside each record.
         HarnessKind::Dsh => &[
@@ -5567,14 +5544,6 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
                 "expires": 1_790_000_000_000_i64 + generation * 1000,
             },
         }]),
-        HarnessKind::Mimo => serde_json::json!({
-            "xiaomi": {
-                "type": "oauth",
-                "refresh": format!("refresh-{generation}"),
-                "access": format!("access-{generation}"),
-                "expires": 1_790_000_000_000_i64 + generation * 1000,
-            }
-        }),
         HarnessKind::Dsh => panic!("DSH keeps no login; its key comes from DEEPSEEK_API_KEY"),
     };
     serde_json::to_vec(&login).unwrap()

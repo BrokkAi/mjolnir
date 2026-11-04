@@ -152,23 +152,21 @@ impl HostState {
         });
     }
 
-    pub(super) fn close_reviewer_child(&self, session_id: &str) {
-        if let Some(group) = self
+    pub(super) fn close_reviewer_child(&mut self, session_id: &str) {
+        let children: Vec<_> = self
             .reviews
             .get(session_id)
             .and_then(|slot| slot.state.active_group.as_ref())
-        {
-            for child in group
-                .registrations
-                .iter()
-                .filter_map(|item| item.child_session_id.clone())
-            {
-                self.close_child(child);
-            }
+            .into_iter()
+            .flat_map(|group| group.registrations.iter())
+            .filter_map(|item| item.child_session_id.clone())
+            .collect();
+        for child in children {
+            self.close_child(child);
         }
     }
 
-    pub(super) fn close_reviewer_role(&self, session_id: &str, role: &str) {
+    pub(super) fn close_reviewer_role(&mut self, session_id: &str, role: &str) {
         if let Some(child) = self
             .reviews
             .get(session_id)
@@ -180,13 +178,50 @@ impl HostState {
         }
     }
 
-    fn close_child(&self, child: String) {
+    pub(super) fn close_child(&mut self, child: String) {
+        if self
+            .child_closure_owners
+            .values()
+            .any(|(id, _)| id == &child)
+        {
+            return;
+        }
+        self.spawn_child_close(child, std::time::Duration::ZERO);
+    }
+
+    fn spawn_child_close(&mut self, child: String, delay: std::time::Duration) {
         let environment = self.environment.clone();
-        tokio::spawn(async move {
-            if let Err(error) = environment.close_child(&child).await {
-                tracing::warn!(child, %error, "could not close reviewer child");
-            }
+        let closing = child.clone();
+        let task = self.child_closures.spawn(async move {
+            tokio::time::sleep(delay).await;
+            environment.close_child(&closing).await
         });
+        self.child_closure_owners.insert(task.id(), (child, delay));
+    }
+
+    pub(super) fn child_closed(
+        &mut self,
+        result: Result<(tokio::task::Id, Result<(), String>), tokio::task::JoinError>,
+    ) {
+        let id = match &result {
+            Ok((id, _)) => *id,
+            Err(error) => error.id(),
+        };
+        let (child, delay) = self
+            .child_closure_owners
+            .remove(&id)
+            .expect("a supervised child close has an owner");
+        let failure = match result {
+            Ok((_, Ok(()))) => return,
+            Ok((_, Err(error))) => error,
+            Err(error) => format!("reviewer cleanup task stopped: {error}"),
+        };
+        let delay = (delay * 2)
+            .max(std::time::Duration::from_secs(1))
+            .min(std::time::Duration::from_secs(30));
+        tracing::warn!(%child, error = %failure, retry_in_seconds = delay.as_secs(),
+            "could not close reviewer child; its borrowed target remains owned and cleanup will retry");
+        self.spawn_child_close(child, delay);
     }
 
     pub(super) fn role_failed(

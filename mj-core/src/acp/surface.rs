@@ -215,12 +215,12 @@ impl AcpSessionSurface {
         }
     }
 
-    /// The mode a harness returns to when Plan mode ends. OpenCode and MiMo
-    /// Code name their normal mode `build` and dsh-acp names it `agent`;
+    /// The mode a harness returns to when Plan mode ends. OpenCode names its
+    /// normal mode `build` and dsh-acp names it `agent`;
     /// every other harness Hel drives with a plan pair names it `default`.
     fn execution_mode_id(&self) -> &'static str {
         match self.harness_kind {
-            Some(HarnessKind::OpenCode | HarnessKind::Mimo) => "build",
+            Some(HarnessKind::OpenCode) => "build",
             Some(HarnessKind::Dsh) => "agent",
             _ => "default",
         }
@@ -252,10 +252,10 @@ impl AcpSessionSurface {
                     value: value.into(),
                 })
                 .ok_or(PlanControlError::Incompatible),
-            // OpenCode, MiMo Code and dsh-acp advertise their modes as a
+            // OpenCode and dsh-acp advertise their modes as a
             // `mode` select whose normal value is not `default`, so Hel's
             // plan toggle maps onto that value instead.
-            Some(HarnessKind::OpenCode | HarnessKind::Mimo | HarnessKind::Dsh) => {
+            Some(HarnessKind::OpenCode | HarnessKind::Dsh) => {
                 let execution = self.execution_mode_id();
                 self.exact_config_has_pair("mode", execution)
                     .then(|| PlanControl::SetConfig {
@@ -491,10 +491,13 @@ mod tests {
     }
 
     /// Leaving Plan selects the normal mode each harness's `mode` select
-    /// offers: MiMo Code's `build` and dsh-acp's `agent`.
+    /// offers: OpenCode's `build` and dsh-acp's `agent`.
     #[test]
     fn plan_exit_selects_each_harness_own_normal_mode() {
-        for (harness, normal) in [(HarnessKind::Mimo, "build"), (HarnessKind::Dsh, "agent")] {
+        for (harness, normal) in [
+            (HarnessKind::OpenCode, "build"),
+            (HarnessKind::Dsh, "agent"),
+        ] {
             let mut surface = AcpSessionSurface::default();
             surface.set_harness_kind(harness);
             surface.set_config_options(&[SessionConfigOption::new(

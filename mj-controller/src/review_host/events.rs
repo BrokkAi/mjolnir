@@ -112,6 +112,7 @@ pub(super) enum HostEvent {
     },
     RestoreGroups {
         groups: Vec<(String, TurnReviewState)>,
+        abandoned_children: Vec<String>,
     },
     StartupRecoveryFailed(String),
     Shutdown {
@@ -228,6 +229,8 @@ pub(super) struct HostState {
     pub(super) events: mpsc::UnboundedSender<HostEvent>,
     pub(super) persistence: Option<mpsc::UnboundedSender<PersistenceRequest>>,
     pub(super) persistence_task: Option<tokio::task::JoinHandle<()>>,
+    pub(super) child_closures: tokio::task::JoinSet<Result<(), String>>,
+    pub(super) child_closure_owners: BTreeMap<tokio::task::Id, (String, std::time::Duration)>,
     pub(super) reviews: BTreeMap<String, ReviewSlot>,
     /// Sessions whose review is being prepared. Preparation is asynchronous,
     /// so without this an automatic trigger and a manual `/review` racing each
@@ -287,9 +290,15 @@ pub(super) async fn host_loop(
     mut state: HostState,
     mut events: mpsc::UnboundedReceiver<HostEvent>,
 ) {
-    while let Some(event) = events.recv().await {
-        if state.handle(event).await {
-            break;
+    loop {
+        tokio::select! {
+            event = events.recv() => {
+                let Some(event) = event else { break };
+                if state.handle(event).await { break; }
+            }
+            closed = state.child_closures.join_next_with_id(), if !state.child_closures.is_empty() => {
+                state.child_closed(closed.expect("a child close was in flight"));
+            }
         }
     }
 }
@@ -387,21 +396,24 @@ pub(super) async fn persistence_loop(
                 let sweep = environment.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let groups = sweep.active_groups()?;
-                    let retained: BTreeSet<_> = groups
-                        .iter()
-                        .filter_map(|(parent, state)| {
-                            state.active_group.as_ref().map(|group| (parent, group))
-                        })
-                        .flat_map(|(parent, group)| {
-                            group.registrations.iter().map(move |item| {
-                                (
+                    let mut retained = BTreeSet::new();
+                    for (parent, state) in &groups {
+                        let group = state
+                            .active_group
+                            .as_ref()
+                            .ok_or_else(|| format!("{parent}: missing active review group"))?;
+                        let driver = TurnReviewDriver::restore(group.driver.clone())?;
+                        let awaited = driver.awaited_commands();
+                        for item in &group.registrations {
+                            if awaited.iter().any(|(role, _)| role == &item.role) {
+                                retained.insert((
                                     parent.clone(),
                                     mj_core::subagent::SubagentKind::Reviewer
                                         .request_key(&item.request_key),
-                                )
-                            })
-                        })
-                        .collect();
+                                ));
+                            }
+                        }
+                    }
                     let children: Vec<String> = sweep
                         .reviewer_children()?
                         .into_iter()
@@ -423,15 +435,10 @@ pub(super) async fn persistence_loop(
                         if !interrupted.is_empty() {
                             let _ = events.send(HostEvent::Interrupted { interrupted });
                         }
-                        let _ = events.send(HostEvent::RestoreGroups { groups });
-                        for child in children {
-                            let environment = environment.clone();
-                            tokio::spawn(async move {
-                                if let Err(error) = environment.close_child(&child).await {
-                                    tracing::warn!(child, %error, "could not close orphaned reviewer child");
-                                }
-                            });
-                        }
+                        let _ = events.send(HostEvent::RestoreGroups {
+                            groups,
+                            abandoned_children: children,
+                        });
                     }
                     Ok(Err(error)) => {
                         tracing::warn!(%error, "could not clear interrupted reviews");

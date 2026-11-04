@@ -163,13 +163,11 @@ pub(crate) struct NewArgs {
     /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_effort: Option<String>,
-    /// Review every turn of this session with this model, even when
-    /// `[review]` is off. Without a `[review]` profile, Auto picks a profile
-    /// that offers the model.
+    /// Override the reviewer model while keeping the configured review trigger.
+    /// Without a `[review]` profile, Auto picks a profile that offers the model.
     #[arg(long)]
     review_model: Option<String>,
-    /// Review every turn of this session at this reasoning effort, even when
-    /// `[review]` is off.
+    /// Override reviewer effort while keeping the configured review trigger.
     #[arg(long)]
     review_effort: Option<String>,
     /// Independent reviewers per review. 1–3 is reasonable; more has diminishing returns.
@@ -1114,7 +1112,7 @@ pub(crate) fn subagent_policy(
     })
 }
 
-/// The session's own turn-review choice, or `None` to follow `[review]`.
+/// The session's review overrides, or `None` to follow all of `[review]`.
 fn new_session_review(args: &NewArgs) -> Option<mj_core::config::SessionReview> {
     session_review(
         args.review.as_deref(),
@@ -1134,13 +1132,19 @@ pub(crate) fn session_review(
     count: Option<std::num::NonZeroUsize>,
 ) -> Option<mj_core::config::SessionReview> {
     use mj_core::config::SessionReview;
-    // Review overrides without a trigger select turn review; the deprecated
-    // tier's value itself is ignored.
-    let trigger = trigger.or_else(|| {
-        (model.is_some() || effort.is_some() || tier.is_some() || count.is_some()).then_some("turn")
-    })?;
     let model = model.map(str::to_owned);
     let effort = effort.map(str::to_owned);
+    let Some(trigger) = trigger else {
+        // Reviewer overrides preserve the configured trigger. The deprecated
+        // tier is accepted but does not change it.
+        return (model.is_some() || effort.is_some() || count.is_some() || tier.is_some())
+            .then_some(SessionReview::Inherit {
+                count,
+                model,
+                effort,
+                tier: None,
+            });
+    };
     Some(match trigger {
         "off" => SessionReview::Off,
         "push" => SessionReview::Push {
@@ -2970,9 +2974,10 @@ mod tests {
         assert_eq!(refused.to_string(), "--no-later-history requires --at");
     }
 
+    // Hard-won: 06cfc1cfe: reviewer-only flags replaced before-push review with end-of-turn.
     #[test]
     fn new_review_flags_choose_the_sessions_own_review() {
-        use mj_core::config::SessionReview;
+        use mj_core::config::{ReviewConfig, ReviewTrigger, SessionReview};
         let parse = |extra: &[&str]| {
             let mut argv = vec!["mj", "new", "--bundle", "product"];
             argv.extend_from_slice(extra);
@@ -2988,16 +2993,16 @@ mod tests {
         );
         assert_eq!(
             parse(&["--review", "push"]).unwrap().unwrap().trigger(),
-            mj_core::config::ReviewTrigger::Push
+            Some(ReviewTrigger::Push)
         );
         assert_eq!(
             parse(&["--review", "turn"]).unwrap().unwrap().trigger(),
-            mj_core::config::ReviewTrigger::Turn
+            Some(ReviewTrigger::Turn)
         );
         assert!(parse(&["--review", "on"]).is_err());
         assert_eq!(
             parse(&["--review-model", "gpt-6-astra", "--review-count", "3"]).unwrap(),
-            Some(SessionReview::Turn {
+            Some(SessionReview::Inherit {
                 count: std::num::NonZeroUsize::new(3),
                 model: Some("gpt-6-astra".into()),
                 effort: None,
@@ -3006,7 +3011,7 @@ mod tests {
         );
         assert_eq!(
             parse(&["--review-effort", "high"]).unwrap(),
-            Some(SessionReview::Turn {
+            Some(SessionReview::Inherit {
                 count: None,
                 model: None,
                 effort: Some("high".into()),
@@ -3015,7 +3020,7 @@ mod tests {
         );
         assert_eq!(
             parse(&["--review-tier", "extended", "--review-model", "gpt-6-luna"]).unwrap(),
-            Some(SessionReview::Turn {
+            Some(SessionReview::Inherit {
                 count: None,
                 model: Some("gpt-6-luna".into()),
                 effort: None,
@@ -3023,12 +3028,41 @@ mod tests {
             })
         );
         assert_eq!(
-            parse(&["--review-tier", "quick"])
-                .unwrap()
-                .unwrap()
-                .trigger(),
-            mj_core::config::ReviewTrigger::Turn
+            parse(&["--review-tier", "quick"]).unwrap(),
+            Some(SessionReview::Inherit {
+                count: None,
+                model: None,
+                effort: None,
+                tier: None,
+            })
         );
+        for trigger in [ReviewTrigger::Off, ReviewTrigger::Turn, ReviewTrigger::Push] {
+            let global = ReviewConfig {
+                trigger,
+                ..Default::default()
+            };
+            for flags in [
+                ["--review-model", "gpt-6-astra"],
+                ["--review-effort", "high"],
+                ["--review-count", "3"],
+                ["--review-tier", "extended"],
+            ] {
+                let inherited = parse(&flags).unwrap().unwrap();
+                assert_eq!(
+                    global.for_session(Some(&inherited)).trigger,
+                    trigger,
+                    "{flags:?} with global {trigger}"
+                );
+            }
+            for (flag, expected) in [
+                ("off", ReviewTrigger::Off),
+                ("turn", ReviewTrigger::Turn),
+                ("push", ReviewTrigger::Push),
+            ] {
+                let explicit = parse(&["--review", flag]).unwrap().unwrap();
+                assert_eq!(global.for_session(Some(&explicit)).trigger, expected);
+            }
+        }
         let help = Cli::try_parse_from(["mj", "new", "--help"])
             .expect_err("help exits parsing")
             .to_string();
@@ -3044,7 +3078,7 @@ mod tests {
         let counted = parse(&["--review-count", "4"]).unwrap().unwrap();
         assert_eq!(
             serde_json::to_value(counted).unwrap(),
-            serde_json::json!({"mode":"turn","count":4})
+            serde_json::json!({"mode":"inherit","count":4})
         );
     }
 

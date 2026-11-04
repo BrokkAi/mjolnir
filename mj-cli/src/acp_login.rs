@@ -6,7 +6,7 @@
 //! names a command the client is expected to run (Muse does this); a method
 //! without a command is either handled by ACP `authenticate` (Codex) or by a
 //! known terminal fallback for bridges that only describe the command in text
-//! (OpenCode and MiMo).
+//! (OpenCode).
 //!
 //! The command runs with inherited standard input and output because it is an
 //! interactive browser or device-code flow. That is why this belongs to the
@@ -49,12 +49,7 @@ pub(crate) struct PinnedCli {
 }
 
 fn uses_ambient_cli(profile: &HarnessProfile) -> bool {
-    let own_nested = profile.kind.nested_home() && profile.kind.is_own_nested_home(&profile.home);
-    let own_data = !profile
-        .kind
-        .data_source(&profile.home)
-        .starts_with(&profile.home);
-    own_nested || own_data
+    profile.kind.nested_home() && profile.kind.is_own_nested_home(&profile.home)
 }
 
 /// Sign in `profile` through the pinned harness's ACP methods.
@@ -67,9 +62,8 @@ pub(crate) async fn login(
         return Ok(Outcome::NoLogin(describe_auth(&scheme)));
     }
     // A person's own installation keeps its config in their own nested home
-    // (OpenCode/Muse), or its data outside a conventional profile home
-    // (MiMo's stock XDG data). Pointing the pinned harness at either could
-    // migrate a database Mjolnir does not own. Use their CLI for that case.
+    // (OpenCode/Muse). Pointing the pinned harness at it could migrate a
+    // database Mjolnir does not own. Use their CLI for that case.
     if uses_ambient_cli(profile) {
         return Ok(Outcome::Unavailable(format!(
             "this profile uses your own {} installation; Mjolnir signs in through that harness's installed CLI",
@@ -415,7 +409,6 @@ impl AuthMethod {
 ///
 /// OpenCode 2.1.2 advertises `opencode-login` with the description "Run
 /// `opencode auth login` in the terminal" and no `terminal-auth` metadata.
-/// MiMo is OpenCode-derived and advertises the same method.
 fn known_terminal_fallback(
     kind: HarnessKind,
     method: &str,
@@ -423,7 +416,6 @@ fn known_terminal_fallback(
 ) -> Option<TerminalCommand> {
     let args: &[&str] = match (kind, method) {
         (HarnessKind::OpenCode, "opencode-login") => &["auth", "login", "--standalone"],
-        (HarnessKind::Mimo, "opencode-login") => &["auth", "login"],
         (HarnessKind::Muse, "muse-login") => &["login"],
         // Grok's ACP bridge names an agent method, but its usable sign-in is
         // the CLI's own login. Running it is safer than leaving `authenticate`

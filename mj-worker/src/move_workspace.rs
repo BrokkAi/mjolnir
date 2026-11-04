@@ -11,9 +11,13 @@ use sha2::{Digest, Sha256};
 const MANIFEST: &str = "move-workspace.json";
 
 fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    git_with_input(root, args, &[])
+}
+
+fn git_with_input(root: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
     let output = mj_core::subprocess::run_with_input(
         Command::new("git").arg("-C").arg(root).args(args),
-        &[],
+        input,
     )?;
     ensure!(
         output.status.success(),
@@ -391,10 +395,9 @@ pub fn verify(source: &Path) -> Result<WorkspaceManifest> {
         };
         ensure!(
             valid_oid(&repository.head)
-                && repository
-                    .refs
-                    .iter()
-                    .all(|(name, hash)| name.starts_with("refs/") && valid_oid(hash)),
+                && repository.refs.iter().all(|(name, hash)| {
+                    name.starts_with("refs/") && !name.contains('\0') && valid_oid(hash)
+                }),
             "invalid Move Git identities"
         );
         let mut seen = std::collections::BTreeSet::new();
@@ -457,25 +460,41 @@ pub fn restore(source: &Path, repositories: &[WorkspaceRepository]) -> Result<()
         git(
             root,
             &[
-                "fetch",
-                "--no-tags",
+                "bundle",
+                "unbundle",
                 bundle.to_str().context("non-UTF8 Move bundle")?,
-                &repository.head,
             ],
         )?;
         git(root, &["checkout", "--detach", "--force", &repository.head])?;
+        let saved_refs: std::collections::BTreeSet<_> = repository
+            .refs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let mut deletions = Vec::new();
         for line in git_text(root, &["for-each-ref", "--format=%(refname)"])?.lines() {
-            if !repository.refs.iter().any(|(name, _)| name == line) {
-                git(root, &["update-ref", "--no-deref", "-d", line])?;
+            if !saved_refs.contains(line) {
+                write!(deletions, "delete {line}\0\0")?;
             }
         }
-        for (name, hash) in &repository.refs {
-            // Fetch the complete bundle before installing saved refs.
-            git(
+        // Delete first: Git cannot replace a ref with its child in one transaction.
+        if !deletions.is_empty() {
+            git_with_input(
                 root,
-                &["fetch", "--no-tags", bundle.to_str().unwrap(), hash],
+                &["update-ref", "--no-deref", "--stdin", "-z"],
+                &deletions,
             )?;
-            git(root, &["update-ref", "--no-deref", name, hash])?;
+        }
+        let mut updates = Vec::new();
+        for (name, hash) in &repository.refs {
+            write!(updates, "update {name}\0{hash}\0\0")?;
+        }
+        if !updates.is_empty() {
+            git_with_input(
+                root,
+                &["update-ref", "--no-deref", "--stdin", "-z"],
+                &updates,
+            )?;
         }
         for (name, target) in &repository.symbolic_refs {
             ensure!(
@@ -709,8 +728,54 @@ mod tests {
     }
 
     // Hard-won: b63fedbf31: Move silently omitted untracked files based on their names.
+    // Hard-won: 0cffddc616: restoring refs fetched the same bundle once for every ref.
     #[test]
     fn disk_backed_move_preserves_git_state_and_selected_large_files() {
+        if std::env::var_os("MJ_MOVE_RESTORE_TRACE_CHILD").is_none() {
+            // Scope Git tracing to a child test process; other tests run concurrently.
+            let directory = tempfile::tempdir().unwrap();
+            let trace = directory.path().join("git-trace.jsonl");
+            let output = mj_core::subprocess::run_with_input(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "move_workspace::tests::disk_backed_move_preserves_git_state_and_selected_large_files",
+                        "--nocapture",
+                    ])
+                    .env("MJ_MOVE_RESTORE_TRACE_CHILD", "1")
+                    .env("GIT_TRACE2_EVENT", &trace),
+                &[],
+            )
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let commands: Vec<Vec<String>> = fs::read_to_string(trace)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|event| event["event"] == "start")
+                .map(|event| serde_json::from_value(event["argv"].clone()).unwrap())
+                .collect();
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|args| args.windows(2).any(|pair| pair == ["bundle", "unbundle"]))
+                    .count(),
+                1,
+                "Move must import the complete bundle exactly once"
+            );
+            assert!(
+                !commands
+                    .iter()
+                    .any(|args| args.iter().any(|arg| arg == "fetch")),
+                "Move must not fetch individual saved refs"
+            );
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         let target = temp.path().join("target");
@@ -762,6 +827,24 @@ mod tests {
         ] {
             git(&source, &["update-ref", &name, &object]).unwrap();
         }
+        git(&source, &["tag", "-a", "move-tag", "-m", "saved tag"]).unwrap();
+        git(&target, &["update-ref", "refs/mj/replaced", "HEAD"]).unwrap();
+        git(&source, &["update-ref", "refs/mj/replaced/child", "HEAD"]).unwrap();
+        git(
+            &target,
+            &[
+                "symbolic-ref",
+                "refs/mj/destination-only",
+                "refs/heads/main",
+            ],
+        )
+        .unwrap();
+        let head = git_text(&source, &["rev-parse", "HEAD"]).unwrap();
+        let scale_refs: String = (0..2048)
+            .map(|index| format!("update refs/remotes/origin/move-scale/{index:04} {head}\n"))
+            .collect();
+        assert!(scale_refs.len() > 64 * 1024);
+        git_with_input(&source, &["update-ref", "--stdin"], scale_refs.as_bytes()).unwrap();
         fs::write(source.join("tracked"), "staged\n").unwrap();
         git(&source, &["add", "tracked"]).unwrap();
         fs::write(source.join("tracked"), "unstaged\n").unwrap();
@@ -790,6 +873,34 @@ mod tests {
         };
         let stage = temp.path().join("stage");
         capture(&repos, &selection, &stage).unwrap();
+        let hooks = target.join(".git/hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        git(
+            &target,
+            &["config", "core.hooksPath", hooks.to_str().unwrap()],
+        )
+        .unwrap();
+        let hook = hooks.join("reference-transaction");
+        fs::write(
+            &hook,
+            r#"#!/bin/sh
+set -eu
+if [ "$1" = prepared ]; then
+    cat > .git/move-ref-input
+    if grep -q ' refs/remotes/origin/move-scale/' .git/move-ref-input; then
+        [ "$(grep -c ' refs/remotes/origin/move-scale/' .git/move-ref-input)" -eq 2048 ] || exit 1
+        cat .git/move-ref-input >> .git/move-ref-batches
+        printf 'batch\n' >> .git/move-ref-batch-count
+    fi
+fi
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         restore(
             &stage,
             &[WorkspaceRepository {
@@ -798,6 +909,16 @@ mod tests {
             }],
         )
         .unwrap();
+        assert!(
+            fs::metadata(target.join(".git/move-ref-batches"))
+                .unwrap()
+                .len()
+                > 64 * 1024
+        );
+        assert_eq!(
+            fs::read_to_string(target.join(".git/move-ref-batch-count")).unwrap(),
+            "batch\n"
+        );
         for args in [
             vec!["rev-parse", "HEAD"],
             vec!["status", "--porcelain=v1", "--untracked-files=no"],

@@ -3,8 +3,8 @@
 **One control plane for all your coding agents.**
 
 Mjolnir (`mj`) runs Claude Code, Codex, Kimi Code, Grok Build, Muse Code,
-OpenCode, MiMo Code, and DSH sessions side by side, on your laptop, in containers,
-over SSH, or on EC2, and
+OpenCode, and DSH sessions side by side, on your laptop, in containers, over
+SSH, or on EC2, and
 keeps them running after you close the terminal. You can move a session to
 another account, another harness, or a compatible target without starting over.
 Bare SSH sessions stay on their original host.
@@ -52,9 +52,9 @@ away.
 - **Shared project memory.** Supported harnesses share synchronized project
   memory across sessions and targets. Muse currently cannot receive the
   injected memory tools; see the [harness limitations](https://mjolnir.brokk.ai/profiles/#harness-limitations).
-- **Adversarial review.** Turn it on and an independent reviewer, on a different
-  provider when one is available, checks each turn's work and reports
-  actionable findings.
+- **Adversarial review.** Choose end-of-turn or before-push review. Independent
+  reviewers, on a different provider when one is available, check the work and
+  report actionable findings.
 - **Multi-repo projects.** Bundle several repositories so they provision,
   checkpoint, move, and restore together.
 - **Agent and editor integration.** Drive sessions through `mj new`, `mj prompt`,

@@ -1037,10 +1037,8 @@ pub(super) fn clear_profile_configuration(
         mj_core::aws_credentials::CONFIG_FILE,
         mj_core::aws_credentials::EMPTY_CREDENTIALS_FILE,
     ]);
-    match harness {
-        HarnessKind::Codex => paths.push(STAGED_CATALOG_FILE),
-        HarnessKind::Mimo => paths.push("config"),
-        _ => {}
+    if harness == HarnessKind::Codex {
+        paths.push(STAGED_CATALOG_FILE);
     }
     paths.sort_unstable();
     paths.dedup();

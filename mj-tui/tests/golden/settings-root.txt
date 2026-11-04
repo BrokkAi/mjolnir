@@ -859,8 +859,8 @@ Terminal Light after save acknowledgement: rendered colors: text fg=Reset bg=Res
   │ Muse account; container use is supported                                                     │
   │   OpenCode                                                                                   │
   │ OpenCode provider login or an API key                                                        │
-  │   MiMo Code                                                                                  │
-  │ MiMo Code account                                                                            │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │

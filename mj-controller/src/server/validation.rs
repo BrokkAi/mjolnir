@@ -437,7 +437,8 @@ fn validate_action_against(
             no_github_events: _,
         } => {
             if let Some(
-                mj_core::config::SessionReview::Turn { model, effort, .. }
+                mj_core::config::SessionReview::Inherit { model, effort, .. }
+                | mj_core::config::SessionReview::Turn { model, effort, .. }
                 | mj_core::config::SessionReview::Push { model, effort, .. },
             ) = review
                 && [model, effort].into_iter().flatten().any(|value| {

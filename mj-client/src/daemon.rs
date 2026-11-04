@@ -196,7 +196,7 @@ pub struct WikiRow {
     #[serde(default)]
     pub profile: Option<String>,
     /// The harness kind the session ran (`codex`, `claude`, `kimi`, `grok`,
-    /// `muse`, `opencode`, or `mimo`), from the index's `mj-harness:` tag. It
+    /// `muse`, `opencode`, or `dsh`), from the index's `mj-harness:` tag. It
     /// stays meaningful after the profile id has been removed from the
     /// configuration.
     #[serde(default)]
@@ -2994,7 +2994,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // The daemon reports its per-start identity, build and placement instead of
 // clients reading its PID and `/proc`, and it serves the configuration that
 // owns the store instead of clients opening `config.toml`.
-pub const PROTOCOL_VERSION: u32 = 81;
+// SessionReview::Inherit adds a value older API clients cannot deserialize.
+pub const PROTOCOL_VERSION: u32 = 82;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

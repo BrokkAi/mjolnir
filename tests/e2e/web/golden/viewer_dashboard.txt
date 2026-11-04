@@ -1647,6 +1647,7 @@ Parent session
 ×
 New session
 Resume a session
+Hide idle
 Grok helper
 ⋯
 Parent project

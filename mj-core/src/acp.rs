@@ -468,7 +468,6 @@ pub fn error_reports_missing_native_session(
         | HarnessKind::Grok
         | HarnessKind::Muse
         | HarnessKind::OpenCode
-        | HarnessKind::Mimo
         | HarnessKind::Dsh => false,
     }
 }

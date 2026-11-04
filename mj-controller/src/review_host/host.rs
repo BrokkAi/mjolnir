@@ -108,6 +108,8 @@ impl TurnReviewHost {
                 events,
                 persistence: Some(persistence),
                 persistence_task: Some(persistence_task),
+                child_closures: tokio::task::JoinSet::new(),
+                child_closure_owners: BTreeMap::new(),
                 reviews: BTreeMap::new(),
                 preparing: BTreeMap::new(),
                 pending_open: BTreeMap::new(),

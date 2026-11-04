@@ -293,9 +293,6 @@ async fn resolve_at_async(
     if harness == HarnessKind::OpenCode {
         launch_environment.insert("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into());
     }
-    if harness == HarnessKind::Mimo {
-        launch_environment.insert("MIMOCODE_DISABLE_AUTOUPDATE".into(), "1".into());
-    }
     // Muse launches its adapter the way the other npm bridges do: the target's
     // own `muse-acp` when present, otherwise npx fetches the pinned package.
     let (command, args) = if harness == HarnessKind::Muse {
@@ -427,7 +424,6 @@ async fn install_into(
         HarnessKind::Grok => install_grok(staging.path(), environment).await?,
         HarnessKind::Muse => install_muse_native(staging.path(), environment).await?,
         HarnessKind::OpenCode => install_opencode(staging.path(), environment).await?,
-        HarnessKind::Mimo => install_mimo(staging.path(), environment).await?,
         HarnessKind::Dsh => {
             unreachable!("DSH has no managed installation; resolve returns before installing")
         }
@@ -666,80 +662,6 @@ async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>
     std::fs::remove_file(&archive)?;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o755))?;
-    Ok(())
-}
-
-/// Install the pinned MiMo Code release from its native archive. The npm
-/// package is only a launcher that downloads this archive on first run and
-/// skips verification when no checksum is published (none is), so the archive
-/// is fetched here against the pinned digest instead. Each archive holds the
-/// executable `mimo` at its root: a gzipped tarball on Linux, a zip on macOS.
-async fn install_mimo(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
-    use crate::harness_runtime::MIMO_VERSION;
-    let metadata: serde_json::Value =
-        serde_json::from_str(include_str!("../assets/mimo/runtime.json"))?;
-    anyhow::ensure!(
-        metadata["version"] == MIMO_VERSION,
-        "MiMo Code download metadata does not match the managed runtime pin"
-    );
-    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    let platform = metadata["platforms"]
-        .get(&key)
-        .with_context(|| format!("MiMo Code does not have a managed runtime for {key}"))?;
-    let field = |name: &str| {
-        platform[name]
-            .as_str()
-            .with_context(|| format!("missing MiMo Code artifact field {name}"))
-    };
-    let file = field("archive")?;
-    let destinations = [
-        format!("https://github.com/XiaomiMiMo/MiMo-Code/releases/download/v{MIMO_VERSION}/{file}"),
-        format!(
-            "https://mimocode.cnbj1.mi-fds.com/mimocode/mimocode/releases/v{MIMO_VERSION}/{file}"
-        ),
-    ];
-    let archive = staging.join(file);
-    download_verified_first_async(&destinations, &archive, field("sha256")?, environment).await?;
-    let bin = staging.join("bin");
-    std::fs::create_dir_all(&bin)?;
-    let entrypoint = bin.join("mimo");
-    let archive_for_extract = archive.clone();
-    let entrypoint_for_extract = entrypoint.clone();
-    tokio::task::spawn_blocking(move || {
-        if archive_for_extract.extension() == Some(OsStr::new("zip")) {
-            extract_zip_file(&archive_for_extract, "mimo", &entrypoint_for_extract)
-        } else {
-            extract_archive_file(
-                &archive_for_extract,
-                Path::new("mimo"),
-                &entrypoint_for_extract,
-            )
-        }
-    })
-    .await
-    .context("MiMo Code extraction task failed")??;
-    std::fs::remove_file(&archive)?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o755))?;
-    Ok(())
-}
-
-fn extract_zip_file(archive: &Path, wanted: &str, destination: &Path) -> Result<()> {
-    let archive_file =
-        File::open(archive).with_context(|| format!("open archive {}", archive.display()))?;
-    let mut zip_archive = zip::ZipArchive::new(archive_file)
-        .with_context(|| format!("read archive {}", archive.display()))?;
-    let mut entry = zip_archive
-        .by_name(wanted)
-        .with_context(|| format!("archive {} did not contain {wanted}", archive.display()))?;
-    anyhow::ensure!(
-        entry.is_file(),
-        "archive entry {wanted} is not a regular file"
-    );
-    let mut output =
-        File::create(destination).with_context(|| format!("create {}", destination.display()))?;
-    std::io::copy(&mut entry, &mut output)
-        .with_context(|| format!("extract {wanted} to {}", destination.display()))?;
     Ok(())
 }
 
@@ -1663,33 +1585,6 @@ mod tests {
         command.arg("--version");
         apply_environment(&mut command, &environment);
         run_checked(&mut command, "verify relocated Kimi executable").unwrap();
-    }
-
-    #[test]
-    #[ignore = "downloads the pinned MiMo Code release into a disposable cache"]
-    fn mimo_real_install_launches_from_final_directory() {
-        let parent =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/mimo-install-validation");
-        std::fs::create_dir_all(&parent).unwrap();
-        let temp = tempfile::tempdir_in(parent).unwrap();
-        let environment = crate::login_environment::discover().unwrap();
-        let managed = resolve_at(
-            temp.path(),
-            HarnessKind::Mimo,
-            ExecutionPolicy::ConfiguredApprovals,
-            &environment,
-        )
-        .unwrap();
-        let mut command = Command::new(&managed.cli_entrypoint);
-        command.arg("--version");
-        apply_environment(&mut command, &environment);
-        command.envs(&managed.environment);
-        let output = crate::subprocess::run_with_input(&mut command, &[]).unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout).trim(),
-            crate::harness_runtime::MIMO_VERSION
-        );
     }
 
     #[test]

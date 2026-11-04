@@ -220,7 +220,7 @@ impl ReviewEnvironment for ControllerEnvironment {
                     .state
                     .sessions
                     .get(&child.child_session_id)
-                    .is_some_and(|session| session.state.is_active())
+                    .is_some_and(|session| session.state.is_active() || session.target.is_some())
             })
             .map(|child| ReviewerChildRelation {
                 parent_session_id: child.parent_session_id.clone(),

@@ -376,6 +376,7 @@ pub(super) async fn run_daemon_runtime(
         cancellation.clone(),
         state.clone(),
     );
+    let compatibility_watch = spawn_store_compatibility_watch(cancellation.clone());
     let image_refresh = spawn_image_refresher(
         {
             let state = state.clone();
@@ -916,6 +917,11 @@ pub(super) async fn run_daemon_runtime(
     );
     epilogue.record(
         &mut outcome,
+        "join store compatibility watch",
+        compatibility_watch.await.map_err(anyhow::Error::new),
+    );
+    epilogue.record(
+        &mut outcome,
         "join container image refresher",
         image_refresh.await.map_err(anyhow::Error::new),
     );
@@ -1164,13 +1170,16 @@ pub(super) fn spawn_manager_target_refresher(
             .expect("daemon owns the writer")
             .clone();
         let mut revisions = state.revisions();
-        let mut compatibility = tokio::time::interval(Duration::from_millis(500));
-        compatibility.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut refresh = tokio::time::interval(Duration::from_millis(500));
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut installed = None;
         let mut credential_installed = None;
         let mut auth = crate::pollers::ProviderAuthCache::default();
         let mut auth_profiles = None;
         let mut staged_sources = None;
+        tokio::select! {
+        _ = cancellation.cancelled() => {},
+        _ = async {
         loop {
             let inputs = {
                 let owner = state.owner();
@@ -1316,13 +1325,12 @@ pub(super) fn spawn_manager_target_refresher(
                 changed = revisions.changed() => {
                     if changed.is_err() { return; }
                 }
-                _ = compatibility.tick() => {
+                _ = refresh.tick() => {
                     let mut inactivity = state.config_mutation.lock().await;
                     let mut cache = auth.clone();
                     let staging = inputs.clone();
                     let preference_owner = state.clone();
                     let refreshed = tokio::task::spawn_blocking(move || {
-                        crate::database::check_read_compatibility()?;
                         let config = Config::load()?;
                         let recent_changed = {
                             // Serialize the cache refresh with create's persisted write so
@@ -1356,11 +1364,6 @@ pub(super) fn spawn_manager_target_refresher(
                             if changed || recent_changed { state.publish_revision(); }
                         }
                         Ok(Err(error)) => {
-                            if error.chain().any(|cause| cause.downcast_ref::<StoreSchemaMismatch>().is_some()) {
-                                tracing::error!(%error, "daemon store schema diverged underneath the daemon; shutting down");
-                                cancellation.cancel();
-                                return;
-                            }
                             tracing::warn!(error = format!("{error:#}"), "could not refresh daemon configuration");
                         }
                         Err(error) => {
@@ -1369,6 +1372,49 @@ pub(super) fn spawn_manager_target_refresher(
                             return;
                         }
                     }
+                }
+            }
+        }
+        } => {}
+        }
+    })
+}
+
+/// Store compatibility is a mandatory guard, independent of optional profile,
+/// target and credential preparation. A mismatch owns daemon cancellation.
+fn spawn_store_compatibility_watch(cancellation: CancellationToken) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => return,
+                _ = interval.tick() => {}
+            }
+            let check = tokio::task::spawn_blocking(crate::database::check_read_compatibility);
+            let result = tokio::select! {
+                _ = cancellation.cancelled() => return,
+                result = check => result,
+            };
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error))
+                    if error
+                        .chain()
+                        .any(|cause| cause.downcast_ref::<StoreSchemaMismatch>().is_some()) =>
+                {
+                    tracing::error!(%error, "daemon store schema diverged underneath the daemon; shutting down");
+                    cancellation.cancel();
+                    return;
+                }
+                Ok(Err(error)) => tracing::warn!(
+                    error = format!("{error:#}"),
+                    "could not check daemon store compatibility"
+                ),
+                Err(error) => {
+                    tracing::error!(%error, "daemon store compatibility reader failed");
+                    cancellation.cancel();
+                    return;
                 }
             }
         }

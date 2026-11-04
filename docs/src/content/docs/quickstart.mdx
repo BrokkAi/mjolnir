@@ -19,7 +19,7 @@ mj
 Two words come up on every screen:
 
 - A **profile** is one coding-agent account: which agent (Claude Code, Codex,
-  Kimi Code, Grok Build, Muse Code, OpenCode, MiMo Code, or DSH) and the home directory that holds its
+  Kimi Code, Grok Build, Muse Code, OpenCode, or DSH) and the home directory that holds its
   sign-in.
 - A **target** is where the session runs: this machine directly (`localhost`),
   a local container, an SSH host, or an EC2 instance.
@@ -229,8 +229,7 @@ By default Mjolnir sends recent prompt and reply text to TypeSafe's Jev classifi
 
 The Import tab of the session dialog (`prefix+g`) and `mj import` adopt a
 session you started directly in Claude Code, Codex, Kimi Code, Grok Build, or
-Muse Code. OpenCode and MiMo Code sessions use SQLite stores that are not
-importable yet, and DSH sessions are not importable yet either. Import leaves
+Muse Code. OpenCode sessions use a SQLite store that is not importable yet, and DSH sessions are not importable yet either. Import leaves
 your repository unchanged. For a bare Git project, the dialog shows any
 uncommitted changes and offers **Create isolated checkout**. Select it to
 resume in a clean managed clone, or clear it to use the original checkout

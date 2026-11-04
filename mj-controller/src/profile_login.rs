@@ -88,7 +88,7 @@ pub fn status(
                     }
                     let expiry =
                         credentials::credential_expiry(profile.kind, &bytes).or_else(|| {
-                            matches!(profile.kind, HarnessKind::Grok | HarnessKind::Mimo)
+                            (profile.kind == HarnessKind::Grok)
                                 .then(|| credentials::credential_freshness(profile.kind, &bytes))
                                 .flatten()
                         });

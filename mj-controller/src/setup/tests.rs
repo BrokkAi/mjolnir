@@ -141,12 +141,10 @@ fn discovers_default_and_overridden_homes_with_authentication_markers() {
     let codex = home.join(".codex");
     let kimi = home.join(".kimi-code");
     let grok = home.join(".grok");
-    let mimo = home.join(".mimocode");
     let claude = directory.path().join("claude-override");
     fs::create_dir_all(&codex).unwrap();
     fs::create_dir_all(kimi.join("credentials")).unwrap();
     fs::create_dir_all(&grok).unwrap();
-    fs::create_dir_all(mimo.join("data")).unwrap();
     fs::create_dir_all(&claude).unwrap();
     fs::write(codex.join("auth.json"), "{}").unwrap();
     fs::write(codex.join("ds.config.toml"), "model = \"deepseek-v5\"\n").unwrap();
@@ -154,7 +152,6 @@ fn discovers_default_and_overridden_homes_with_authentication_markers() {
     fs::write(codex.join("a.b.config.toml"), "").unwrap();
     fs::write(kimi.join("credentials/kimi-code.json"), "{}").unwrap();
     fs::write(grok.join("auth.json"), "{}").unwrap();
-    fs::write(mimo.join("data/auth.json"), "{}").unwrap();
     fs::write(claude.join(".credentials.json"), "{}").unwrap();
 
     let executor = FakeExecutor::succeeds();
@@ -164,7 +161,7 @@ fn discovers_default_and_overridden_homes_with_authentication_markers() {
         &executor,
     );
 
-    assert_eq!(homes.len(), 6);
+    assert_eq!(homes.len(), 5);
     assert!(homes.iter().all(|home| home.authenticated));
     let codex_profiles = homes
         .iter()
@@ -179,19 +176,14 @@ fn discovers_default_and_overridden_homes_with_authentication_markers() {
             .iter()
             .any(|home| home.path == grok && home.kind == HarnessKind::Grok)
     );
-    assert!(
-        homes
-            .iter()
-            .any(|home| home.path == mimo && home.kind == HarnessKind::Mimo)
-    );
 }
 
 #[test]
-fn an_installed_mimo_is_offered_before_its_first_login() {
+fn an_installed_harness_is_offered_before_its_first_login() {
     let directory = tempfile::tempdir().unwrap();
     let executor = FakeExecutor {
         commands: RefCell::new(Vec::new()),
-        statuses: vec![1, 1, 1, 1, 1, 1, 0, 1],
+        statuses: vec![1, 1, 1, 1, 1, 0, 1],
     };
     let mut homes = Vec::new();
 
@@ -206,8 +198,8 @@ fn an_installed_mimo_is_offered_before_its_first_login() {
     assert_eq!(
         homes,
         [DiscoveredHome {
-            kind: HarnessKind::Mimo,
-            path: directory.path().join(".mimocode"),
+            kind: HarnessKind::OpenCode,
+            path: directory.path().join(".config/opencode"),
             conventional: true,
             codex_profile: None,
             authenticated: false,
@@ -218,7 +210,7 @@ fn an_installed_mimo_is_offered_before_its_first_login() {
             .commands
             .borrow()
             .iter()
-            .any(|command| command.program == "mimo")
+            .any(|command| command.program == "opencode")
     );
 }
 
@@ -231,7 +223,7 @@ fn an_installed_dsh_is_offered_before_its_first_login() {
     let directory = tempfile::tempdir().unwrap();
     let executor = FakeExecutor {
         commands: RefCell::new(Vec::new()),
-        statuses: vec![1, 1, 1, 1, 1, 1, 1, 0],
+        statuses: vec![1, 1, 1, 1, 1, 1, 0],
     };
     let mut homes = Vec::new();
 

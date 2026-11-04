@@ -240,6 +240,19 @@ impl From<ReviewConfigInput> for ReviewConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum SessionReview {
+    /// Follow the current `[review]` trigger, with optional session settings.
+    Inherit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<std::num::NonZeroUsize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+        /// Deprecated review tier. Accepted in old session records and API
+        /// requests, ignored, and omitted from newly serialized values.
+        #[serde(default, skip_serializing)]
+        tier: Option<String>,
+    },
     /// Never review this session automatically. A manual `/review` still runs.
     Off,
     /// Review every turn. A field left empty keeps the `[review]` value; a
@@ -273,11 +286,12 @@ pub enum SessionReview {
 }
 
 impl SessionReview {
-    pub fn trigger(&self) -> ReviewTrigger {
+    pub fn trigger(&self) -> Option<ReviewTrigger> {
         match self {
-            Self::Off => ReviewTrigger::Off,
-            Self::Turn { .. } => ReviewTrigger::Turn,
-            Self::Push { .. } => ReviewTrigger::Push,
+            Self::Inherit { .. } => None,
+            Self::Off => Some(ReviewTrigger::Off),
+            Self::Turn { .. } => Some(ReviewTrigger::Turn),
+            Self::Push { .. } => Some(ReviewTrigger::Push),
         }
     }
 }
@@ -299,7 +313,13 @@ impl ReviewConfig {
             None => {}
             Some(SessionReview::Off) => config.trigger = ReviewTrigger::Off,
             Some(
-                choice @ (SessionReview::Turn {
+                choice @ (SessionReview::Inherit {
+                    model,
+                    effort,
+                    count,
+                    ..
+                }
+                | SessionReview::Turn {
                     model,
                     effort,
                     count,
@@ -312,7 +332,9 @@ impl ReviewConfig {
                     ..
                 }),
             ) => {
-                config.trigger = choice.trigger();
+                if let Some(trigger) = choice.trigger() {
+                    config.trigger = trigger;
+                }
                 if model.is_some() {
                     config.model.clone_from(model);
                 }
@@ -1531,7 +1553,7 @@ impl Config {
         if contents.trim().is_empty() {
             return Ok(Self::default());
         }
-        let document: toml::Value = contents
+        let mut document: toml::Value = contents
             .parse()
             .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
         if let Some(found) = newer_version(&document) {
@@ -1552,6 +1574,18 @@ impl Config {
             );
         }
         reject_removed_profile_overrides(&contents)?;
+        let removed = drop_removed_harness_profiles(&mut document);
+        let contents = if removed.is_empty() {
+            contents
+        } else {
+            tracing::warn!(
+                config = %path.display(),
+                profiles = ?removed,
+                "ignoring profiles for a harness Mjolnir no longer supports; the next save removes them"
+            );
+            toml::to_string(&document)
+                .with_context(|| format!("rewrite Mjolnir config {}", path.display()))?
+        };
         // Version 2 adds Podman workspace storage; version 3 restores the
         // spinner preference; version 4 adds stopped-session visibility;
         // version 5 adds the terminal theme preference; version 6 adds

@@ -2941,8 +2941,9 @@ async fn a_session_with_no_projection_row_has_no_transcript() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+// Hard-won: #1448: publication preflight refused child close although it preserves the shared checkout.
 #[tokio::test]
-async fn suspend_refuses_an_unverified_clone_from_the_published_snapshot_until_acknowledged() {
+async fn suspend_requires_publication_ack_only_for_owned_clones() {
     let (app, mut actions, _snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |snapshot| {
             snapshot.sessions[0].publication_state =
@@ -2983,6 +2984,36 @@ async fn suspend_refuses_an_unverified_clone_from_the_published_snapshot_until_a
         .unwrap();
     let response = response.await.unwrap().unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let (app, mut actions, _snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.sessions[0].publication_state =
+                Some(mj_core::state::PublicationState::Unknown);
+            snapshot.sessions[0].is_subagent_session = true;
+        });
+    let response = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/suspend"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    let request = actions.recv().await.unwrap();
+    assert_eq!(
+        request.action,
+        ControllerAction::Suspend {
+            session_id: "session-1".into(),
+            acknowledge_unpublished_work: false,
+        }
+    );
+    request
+        .reply
+        .send(super::super::ActionOutcome::accepted())
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
 }
 
 /// A snapshot whose session-1 has one running sub-agent, child-1, and nothing
@@ -6498,8 +6529,40 @@ async fn session_review_api_rejects_the_legacy_on_mode() {
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let message = String::from_utf8_lossy(&body);
-    for value in ["off", "turn", "push"] {
+    for value in ["inherit", "off", "turn", "push"] {
         assert!(message.contains(value), "{message}");
     }
     assert!(actions.is_empty());
+}
+
+// Hard-won: 06cfc1cfe: reviewer-only flags replaced before-push review with end-of-turn.
+#[tokio::test]
+async fn session_review_api_accepts_inherit_and_forwards_its_settings() {
+    let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = tokio::spawn(app.oneshot(start_request(start_body(
+        r#", "review":{"mode":"inherit","count":3,"model":"gpt-6-astra","effort":"high"}"#,
+    ))));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New { review, .. } = request.action else {
+        panic!("expected new-session action");
+    };
+    assert_eq!(
+        review,
+        Some(mj_core::config::SessionReview::Inherit {
+            count: std::num::NonZeroUsize::new(3),
+            model: Some("gpt-6-astra".into()),
+            effort: Some("high".into()),
+            tier: None,
+        })
+    );
+    request
+        .reply
+        .send(ActionOutcome::Refused(
+            mj_core::refusal::Refusal::precondition("test complete"),
+        ))
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CONFLICT
+    );
 }

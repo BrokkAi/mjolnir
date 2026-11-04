@@ -933,7 +933,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::FilterSessions,
         label: "Search sessions",
-        description: "Type to keep only the sessions whose name, project, profile, or target matches. The letters b, w, i, d, and a keep only blocked, working, idle, or done sessions, or all of them.",
+        description: "Type to keep only the sessions whose name, project, profile, or target matches. The letters b, w, i, d, I, and a keep only blocked, working, idle, done, or not idle sessions, or all of them.",
         scope: Scope::Sessions,
         pane_keys: &[KeyHint::plain(KeyCode::Char('/'), "/")],
         action: None,
@@ -2208,9 +2208,10 @@ mod tests {
             }
         );
 
-        // Esc in the sub-agents' Sessions list goes back to the parent, as
-        // the X on the workspace strip does.
+        // With the filter cleared, Esc goes back to the parent, as the X on
+        // the workspace strip does.
         dashboard.open_subagent_workspace(parent);
+        dashboard.handle_key(key(KeyCode::Char('a')));
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Esc)),
             DashboardAction::ExitSubagentWorkspace

@@ -255,7 +255,14 @@ impl DashboardState {
 
     pub(crate) fn native_agent_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
         let id = match self.focus {
-            Focus::Sessions if self.sessions_filter.is_none() => self.selected_session_id()?,
+            Focus::Sessions
+                if !self
+                    .sessions_filter
+                    .as_ref()
+                    .is_some_and(|filter| filter.editing) =>
+            {
+                self.selected_session_id()?
+            }
             Focus::Prompt => self.current_session_id()?,
             _ => return None,
         }
@@ -282,7 +289,8 @@ impl DashboardState {
             KeyCode::End => pane.scroll = 0,
             KeyCode::Char('p') if key.modifiers.is_empty() => {
                 let parent = pane.agent.parent_view_id();
-                *self.child_workspace = self.child_workspace_for(&parent);
+                let next = self.child_workspace_for(&parent);
+                self.switch_child_scope(next);
                 self.select_active_session(&parent);
                 return Some(DashboardAction::Open { session_id: parent });
             }

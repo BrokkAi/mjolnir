@@ -36,6 +36,7 @@ impl Controller {
                         | SessionState::Disconnected
                         | SessionState::Checkpointing
                         | SessionState::Closing
+                        | SessionState::Error
                 );
             let mut relay = if live {
                 let record = self.state.sessions.get_mut(session_id).unwrap();

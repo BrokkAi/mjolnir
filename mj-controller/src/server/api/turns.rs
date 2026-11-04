@@ -433,7 +433,7 @@ pub(super) async fn suspend(
     Path(session_id): Path<String>,
     request: Option<Json<SuspendRequest>>,
 ) -> Result<(StatusCode, Json<SuspendSessionResponse>), ApiFailure> {
-    let (active_children, publication_state) = {
+    let (active_children, publication_ack_required) = {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
         let active_children = session
@@ -447,11 +447,16 @@ pub(super) async fn suspend(
             })
             .cloned()
             .collect::<Vec<_>>();
-        (active_children, session.publication_state)
+        // Child close retains the parent's checkout and commits. Only an
+        // owning session can release unpublished repository work here.
+        (
+            active_children,
+            !session.is_subagent_session && session.publication_state.is_some(),
+        )
     };
     // The controller re-checks publication after its checkpoint; this is only
     // an early refusal that avoids a needless checkpoint.
-    if publication_state.is_some()
+    if publication_ack_required
         && !request
             .as_ref()
             .is_some_and(|r| r.acknowledge_unpublished_work)

@@ -1337,7 +1337,7 @@ impl DashboardContext {
                 self.dashboard.release_availability_check();
                 match result {
                 Ok(Some(errors)) => self.dashboard.welcome_checked(errors),
-                Ok(None) => {}
+                Ok(None) => self.dashboard.welcome_not_needed(),
                 Err(error) => self.dashboard.welcome_checked(vec![format!(
                     "Setup could not finish: {error}. Run `mj setup` to retry."
                 )]),

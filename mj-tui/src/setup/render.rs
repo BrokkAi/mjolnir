@@ -641,7 +641,6 @@ fn managed_harness_description(kind: mj_core::config::HarnessKind) -> &'static s
         HarnessKind::Grok => "Grok Build subscription",
         HarnessKind::Muse => "Muse account; container use is supported",
         HarnessKind::OpenCode => "OpenCode provider login or an API key",
-        HarnessKind::Mimo => "MiMo Code account",
         HarnessKind::Dsh => "DeepSeek API key",
     }
 }

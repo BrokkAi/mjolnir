@@ -265,8 +265,6 @@ container sessions run the same harness versions as managed bare workers:
   the new tag. The test
   `opencode_provider_environment_was_generated_from_the_pinned_opencode`
   fails until you do.
-- MiMo Code: update `mj-core/assets/mimo/runtime.json`. The image installs
-  MiMo Code from that file.
 
 Pushing the commit to master runs `publish-agent-dev-image.yml`, which
 publishes `ghcr.io/brokkai/mjolnir/agent-dev:latest`. Check that the run

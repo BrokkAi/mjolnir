@@ -1304,6 +1304,48 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     );
 }
 
+// Hard-won: 06cfc1cfe: reviewer-only flags replaced before-push review with end-of-turn.
+#[test]
+fn inherited_session_review_survives_lifecycle_writes_and_keeps_trigger_inheritance() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut record = session("session-1", "project-1");
+    record.review = Some(mj_core::config::SessionReview::Inherit {
+        count: std::num::NonZeroUsize::new(3),
+        model: Some("gpt-6-astra".into()),
+        effort: Some("high".into()),
+        tier: None,
+    });
+    save_session_to(&database, &record).unwrap();
+    record.state = SessionState::Running;
+    save_lifecycle_session_to(&database, &record).unwrap();
+
+    let loaded = load_state_from(&database).unwrap();
+    let review = loaded.sessions["session-1"].review.as_ref().unwrap();
+    assert_eq!(
+        review,
+        &mj_core::config::SessionReview::Inherit {
+            count: std::num::NonZeroUsize::new(3),
+            model: Some("gpt-6-astra".into()),
+            effort: Some("high".into()),
+            tier: None,
+        }
+    );
+    for trigger in [
+        mj_core::config::ReviewTrigger::Off,
+        mj_core::config::ReviewTrigger::Turn,
+        mj_core::config::ReviewTrigger::Push,
+    ] {
+        let global = mj_core::config::ReviewConfig {
+            trigger,
+            ..mj_core::config::ReviewConfig::default()
+        };
+        let effective = global.for_session(Some(review));
+        assert_eq!(effective.trigger, trigger);
+        assert_eq!(effective.count.get(), 3);
+    }
+}
+
 #[test]
 fn a_session_keeps_its_project_memory_and_mailbox_opt_outs_through_lifecycle_writes() {
     let directory = tempfile::tempdir().unwrap();
@@ -1875,6 +1917,69 @@ fn a_session_for_a_removed_harness_is_skipped_without_hiding_the_others() {
             .expect("hidden sessions must not fail")
             .is_empty()
     );
+}
+
+// Hard-won: c2617cceee: removed harness records blocked workspace removal but could never be suspended.
+#[test]
+fn workspace_removal_ignores_removed_harnesses_and_preserves_their_history() {
+    for discard_drafts in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("mj.sqlite3");
+        let workspace = create_workspace_at(&database, "BB26").unwrap();
+        for (id, harness) in [
+            ("supported", "codex"),
+            ("legacy-zcode", "zcode"),
+            ("legacy-deepseek", "deepseek"),
+        ] {
+            let mut record = session(id, "project");
+            record.workspace_id = workspace.id.clone();
+            record.state = SessionState::Running;
+            save_session_to(&database, &record).unwrap();
+            open(&database)
+                .unwrap()
+                .execute(
+                    "UPDATE sessions SET harness_kind=?2 WHERE session_id=?1",
+                    [id, harness],
+                )
+                .unwrap();
+        }
+        let materialized = materialized_session("legacy-zcode");
+        save_materialized_session_to(&database, &materialized).unwrap();
+        assert_eq!(load_state_from(&database).unwrap().sessions.len(), 1);
+        assert_eq!(list_workspaces_from(&database).unwrap()[0].session_count, 1);
+        let remove = |workspace_id: &str| {
+            if discard_drafts {
+                close_workspace_at(&database, workspace_id)
+            } else {
+                delete_workspace_at(&database, workspace_id)
+            }
+        };
+        assert!(remove(&workspace.id).is_err());
+        let mut supported = load_state_from(&database).unwrap().sessions["supported"].clone();
+        supported.state = SessionState::Stopped;
+        save_session_to(&database, &supported).unwrap();
+        assert_eq!(list_workspaces_from(&database).unwrap()[0].session_count, 0);
+        remove(&workspace.id).unwrap();
+        assert!(list_workspaces_from(&database).unwrap().is_empty());
+        let connection = open_reader(&database).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM sessions WHERE session_id IN ('legacy-zcode', 'legacy-deepseek') AND state='running'",
+                    [],
+                    |row| row.get::<_, usize>(0),
+                )
+                .unwrap(),
+            2,
+            "removing the workspace must retain the original legacy records"
+        );
+        assert_eq!(
+            load_materialized_session_from(&database, "legacy-zcode")
+                .unwrap()
+                .unwrap(),
+            materialized
+        );
+    }
 }
 
 #[test]

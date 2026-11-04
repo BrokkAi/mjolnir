@@ -188,13 +188,19 @@ impl HostState {
                     }
                 }
             }
-            HostEvent::RestoreGroups { groups } => {
+            HostEvent::RestoreGroups {
+                groups,
+                abandoned_children,
+            } => {
                 for (session_id, state) in groups {
                     if let Err(error) = self.restore_group(session_id, state) {
                         let _ =
                             Box::pin(self.handle(HostEvent::StartupRecoveryFailed(error))).await;
                         return false;
                     }
+                }
+                for child in abandoned_children {
+                    self.close_child(child);
                 }
                 self.startup_ready = true;
                 for (session_id, handback) in std::mem::take(&mut self.deferred_handbacks) {
