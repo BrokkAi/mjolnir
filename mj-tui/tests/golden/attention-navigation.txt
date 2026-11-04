@@ -860,6 +860,91 @@ workspace tabs: │ Default !1  Other !1               ≡ ││               
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · : / ? palette
 folded heading: │[2] done ✓1 ──────────────────────────││                                                                              │
 
+=== tiny workspace dropdown shows current and inactive attention (120x40) ===
+╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ Default !1  ▾  ≡ ││                                                                                                  │
+╰╭Workspaces─────────────╮                                                                                             │
+╭│ !1 Default (current)  │                                                                                             │
+││ !1 Other              │                                                                                             │
+│╰───────────────────────╯                                                                                             │
+│  ! ACP pretty…◇  ││                                                                                                  │
+│  Question        ││                                                                                                  │
+│                  ││                                                                                                  │
+│[2] done ─────────││                                                                                                  │
+│  ✓ ACP pretty…◇  ││                                         ✦  M J O L N I R                                         │
+│  Idle            ││                                                                                                  │
+│                  ││                            Select a session to open its conversation.                            │
+│[3] quiet ────────││                                                                                                  │
+│  · ACP pretty…◇  ││                                                                                                  │
+│  Idle            ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │╭ No conversation open ────────────────────────────────────────────────────────────────────────────╮
+│                  ││No conversation open.                                                                             │
+│                  ││Press Tab for Sessions, then Enter on the one to open.                                            │
+│                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │╭ Targets ▾ ──────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                  ││  Host / fleet  Targets  CPU  RAM                                                                 │
+│                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                  ││            Harness      Weekly      Resets  5H Resets                                            │
+│                  ││  claude-1  Claude Code  refreshing…                                                              │
+│                  ││  codex-1   Codex        refreshing…                                                              │
+│                  ││  codex-2   Codex        refreshing…                                                              │
+╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · : / ? palette
+
+=== open workspace dropdown updates an inactive failure badge (120x40) ===
+╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ Default !1  ▾  ≡ ││                                                                                                  │
+╰╭Workspaces─────────────╮                                                                                             │
+╭│ !1 Default (current)  │                                                                                             │
+││ ×1 Other              │                                                                                             │
+│╰───────────────────────╯                                                                                             │
+│  ! ACP pretty…◇  ││                                                                                                  │
+│  Question        ││                                                                                                  │
+│                  ││                                                                                                  │
+│[2] done ─────────││                                                                                                  │
+│  ✓ ACP pretty…◇  ││                                         ✦  M J O L N I R                                         │
+│  Idle            ││                                                                                                  │
+│                  ││                            Select a session to open its conversation.                            │
+│[3] quiet ────────││                                                                                                  │
+│  · ACP pretty…◇  ││                                                                                                  │
+│  Idle            ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │╭ No conversation open ────────────────────────────────────────────────────────────────────────────╮
+│                  ││No conversation open.                                                                             │
+│                  ││Press Tab for Sessions, then Enter on the one to open.                                            │
+│                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │╭ Targets ▾ ──────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                  ││  Host / fleet  Targets  CPU  RAM                                                                 │
+│                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                  ││            Harness      Weekly      Resets  5H Resets                                            │
+│                  ││  claude-1  Claude Code  refreshing…                                                              │
+│                  ││  codex-1   Codex        refreshing…                                                              │
+│                  ││  codex-2   Codex        refreshing…                                                              │
+╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · o next (×1) · b panes · q detach · u web · shift+r refresh · : / ? palette
+attention dropdown action: SelectWorkspace { workspace_id: "other" }
+
 === priority order lists attention before idle (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ Default !1  Other !1                     ≡ ││                                                                                            │

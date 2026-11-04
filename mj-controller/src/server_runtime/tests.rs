@@ -1348,6 +1348,7 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
             subagents: Default::default(),
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
+            sidebar_size: Default::default(),
             advanced: Default::default(),
             notify: Default::default(),
             spinner: Default::default(),

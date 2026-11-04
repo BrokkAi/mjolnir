@@ -51,7 +51,7 @@ impl DashboardState {
         if self.away_dialog().is_some() {
             return true;
         }
-        if self.resume_scrollbar_handles_mouse(mouse) {
+        if self.resume_scrollbar_handles_mouse(mouse) || self.workspace_scrollbar.is_dragging() {
             return true;
         }
         if self.pane_menu.is_some()
@@ -78,11 +78,15 @@ impl DashboardState {
     /// they take ownership of a pointer gesture; clearing an armed control is
     /// itself a visible change and therefore requests a repaint.
     pub fn cancel_component_pointer(&mut self) -> bool {
+        let workspace_dragging = self.workspace_scrollbar.is_dragging();
+        if workspace_dragging {
+            self.workspace_scrollbar.clear();
+        }
         let mut changed = {
             let form = self.surface_form.get_mut();
             let changed = form.captures_pointer();
             form.cancel_pointer();
-            changed
+            changed || workspace_dragging
         };
         if let Some(modal) = self.active_modal_mut() {
             changed |= modal.cancel_pointer();

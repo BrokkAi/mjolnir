@@ -1181,6 +1181,11 @@ pub struct DashboardState {
     workspace_tab_areas: Vec<(String, Rect)>,
     pub(crate) subagent_workspace_close_area: Option<Rect>,
     pub(crate) workspace_pane_area: Option<Rect>,
+    workspace_scroll: Cell<usize>,
+    workspace_scroll_selected: Option<(String, usize, u16, u16)>,
+    workspace_scroll_geometry: Option<(usize, usize)>,
+    workspace_scrollbar: mj_chat::components::ScrollbarDrag,
+    workspace_dropdown_area: Option<Rect>,
     /// The hamburger's exact three-cell rectangle from the last frame.
     /// Rebuilt with the tabs so stale geometry cannot activate an invisible
     /// manager control after the pane disappears.
@@ -1249,6 +1254,7 @@ impl DashboardState {
     pub fn new(config: Config, state: State, quotas: BTreeMap<String, ProfileQuota>) -> Self {
         let operator_presence = state.operator_presence;
         let launch_recency = mj_client::runtime_feed::launch_recency(&state.sessions);
+        let sidebar_size = config.sidebar_size;
         let mut dashboard = Self {
             #[cfg(test)]
             reconciliation_visits: Cell::new(0),
@@ -1322,7 +1328,10 @@ impl DashboardState {
             capacity_index: 0,
             quota_index: 0,
             focus: Focus::Sessions,
-            pane_sizes: PaneSizes::default(),
+            pane_sizes: PaneSizes {
+                sessions: sidebar_size,
+                ..PaneSizes::default()
+            },
             navigation: conversation_navigation::ConversationNavigation::default(),
             browse_pane: None,
             pin_ids: BTreeMap::new(),
@@ -1387,6 +1396,11 @@ impl DashboardState {
             workspace_tab_areas: Vec::new(),
             subagent_workspace_close_area: None,
             workspace_pane_area: None,
+            workspace_scroll: Cell::new(0),
+            workspace_scroll_selected: None,
+            workspace_scroll_geometry: None,
+            workspace_scrollbar: Default::default(),
+            workspace_dropdown_area: None,
             workspace_hamburger_area: None,
             workspace_control_focus: WorkspaceControlFocus::Tabs,
             workspace_management_generation: 0,

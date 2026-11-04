@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
     layout::Direction,
     style::{Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::Paragraph,
 };
 
@@ -27,6 +27,7 @@ enum PaneOperation {
     Command(CommandId),
     /// An informational row in the read-only capacity dropdown.
     Information,
+    Workspace(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +81,40 @@ impl DashboardState {
             display_rows: None,
             capacity_target: None,
         });
+    }
+
+    pub(crate) fn begin_workspace_dropdown(&mut self) {
+        let Some(anchor) = self.workspace_dropdown_area else {
+            return;
+        };
+        let ids = self.workspace_ids();
+        let selected = ids
+            .iter()
+            .position(|id| Some(id.as_str()) == self.active_workspace_id())
+            .unwrap_or(0);
+        let entries = ids
+            .into_iter()
+            .map(|id| {
+                let name = self.workspace_display_name(&id);
+                let label = if Some(id.as_str()) == self.active_workspace_id() {
+                    format!("{name} (current)")
+                } else {
+                    name.to_owned()
+                };
+                (label, PaneOperation::Workspace(id))
+            })
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            return;
+        }
+        self.show_pane_menu("Workspaces", entries, false);
+        if let Some(menu) = self.pane_menu.as_mut() {
+            menu.anchor = Some(anchor);
+            menu.form.get_mut().set_selected(0, selected);
+        }
+        self.focus = Focus::Workspaces;
+        self.workspace_control_focus = crate::workspaces::WorkspaceControlFocus::Tabs;
+        self.set_session_action_focus(None);
     }
 
     /// Opens the selected capacity row's filesystem details beneath its
@@ -368,6 +403,13 @@ impl DashboardState {
             PaneOperation::Close(pane) => DashboardAction::ClosePane { pane },
             PaneOperation::Command(id) => self.run_available_command(id),
             PaneOperation::Information => DashboardAction::None,
+            PaneOperation::Workspace(workspace_id) => {
+                if self.workspace_ids().contains(&workspace_id) {
+                    DashboardAction::SelectWorkspace { workspace_id }
+                } else {
+                    DashboardAction::None
+                }
+            }
         }
     }
 }
@@ -551,15 +593,10 @@ pub(crate) fn render_pane_chrome(frame: &mut Frame, dashboard: &DashboardState) 
 /// Where a dropdown sits: under the title it hangs from, as wide as its
 /// longest line needs. It opens upward when there is no room below, as for a
 /// minimized pane, whose one row sits just above the footer.
-fn dropdown_popup(
-    area: Rect,
-    anchor: Rect,
-    title: &str,
-    entries: &[(String, PaneOperation)],
-) -> Rect {
-    let content = entries
+fn dropdown_popup(area: Rect, anchor: Rect, title: &str, items: &[Line<'_>]) -> Rect {
+    let content = items
         .iter()
-        .map(|(label, _)| Line::raw(label.as_str()).width())
+        .map(Line::width)
         // The title sits on the top border between the two corners.
         .chain([Line::raw(title).width() + 2])
         .max()
@@ -568,7 +605,7 @@ fn dropdown_popup(
         .unwrap_or(u16::MAX)
         .max(16)
         .min(area.width);
-    let wanted_height = (entries.len() as u16 + 2).min(area.height);
+    let wanted_height = (items.len() as u16 + 2).min(area.height);
     let below = area.bottom().saturating_sub(anchor.bottom());
     let above = anchor.y.saturating_sub(area.y);
     let open_below = below >= wanted_height || below >= above;
@@ -588,8 +625,25 @@ pub(crate) fn render_pane_menu(frame: &mut Frame, area: Rect, dashboard: &Dashbo
     let Some(menu) = &dashboard.pane_menu else {
         return;
     };
+    let items = menu.display_rows.clone().unwrap_or_else(|| {
+        menu.entries
+            .iter()
+            .map(|(label, operation)| {
+                if let PaneOperation::Workspace(id) = operation
+                    && let Some(badge) = crate::render::sessions::attention_badge(
+                        dashboard.workspace_attention_summary(id),
+                    )
+                {
+                    // Keep attention ahead of names so clipping cannot hide it.
+                    Line::from(vec![badge, Span::raw(format!(" {label}"))])
+                } else {
+                    Line::raw(label.clone())
+                }
+            })
+            .collect()
+    });
     let popup = if let Some(anchor) = menu.anchor {
-        dropdown_popup(area, anchor, &menu.title, &menu.entries)
+        dropdown_popup(area, anchor, &menu.title, &items)
     } else if menu.destinations {
         // Open inside the first destination pane, under its "[1] Pin here"
         // marker, so the chooser sits beside the panes it names; without a
@@ -694,11 +748,6 @@ pub(crate) fn render_pane_menu(frame: &mut Frame, area: Rect, dashboard: &Dashbo
             inner,
         );
     } else {
-        let items: Vec<Line> = menu
-            .entries
-            .iter()
-            .map(|(label, _)| Line::raw(label))
-            .collect();
         ChoiceList::render_with_rows(
             frame,
             inner,
