@@ -2194,9 +2194,14 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             };
             let status = daemon.status().await?;
             let identity = daemon.identity().await?;
+            let location = match &identity.placement {
+                daemon::DaemonPlacement::Host => status.pid.to_string(),
+                daemon::DaemonPlacement::Container { name, .. } => {
+                    format!("in container {name}")
+                }
+            };
             println!(
-                "Mjolnir daemon {} (version {}) started {}; {} attached client{}; web viewer {}",
-                status.pid,
+                "Mjolnir daemon {location} (version {}) started {}; {} attached client{}; web viewer {}",
                 mj_client::build_identity::BuildIdentity::parse(&status.build_version)
                     .map_or_else(|_| status.build_version.clone(), |build| build.describe()),
                 status.started_at,
@@ -2208,9 +2213,6 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 },
                 status.phone_status
             );
-            if let daemon::DaemonPlacement::Container { name, .. } = &identity.placement {
-                println!("The daemon runs in container {name}.");
-            }
             // Two builds can report the same version, so the version line
             // cannot answer "is my rebuilt code running?". The build identity
             // the daemon reports can, and it is the question a development
