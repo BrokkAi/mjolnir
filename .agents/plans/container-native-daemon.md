@@ -32,7 +32,8 @@ The status says the daemon is in a container. `docker inspect` shows no host net
 - [x] (2026-11-04) The dashboard's automatic first-run setup is a daemon action (`RunFirstRunSetup`, protocol 77). It discovers and writes configuration in the daemon's own environment, so container placement writes the volume and host placement keeps using the host configuration. `RunDoctor` (protocol 78) returns the actionable checks from that same environment.
 - [x] (2026-11-04) New-session Git-remote preflight is a daemon action (`NewSessionRemoteRepairs`, protocol 79). The dashboard no longer runs that preflight against the client's filesystem, so a container daemon checks the paths it will actually use.
 - [x] (2026-11-04) Applying the proposed remote-tracking repairs is also a daemon action (`RepairRepositoryRemotes`, protocol 80), so the repair happens in the environment that owns the checkout.
-- [ ] Give local session workers and their harness homes a container-native layout under the volume; verify a real turn in container placement.
+- [ ] Give local session workers and their harness homes a container-native layout under the volume; verify a real turn in container placement. The daemon already uses the volume for worker roots, homes and caches; this item is the live proof.
+- [ ] Route the dashboard's setup discovery and availability check through the daemon. `RunFirstRunSetup`, `mj setup` and `mj login` already run in the daemon environment, but the settings-page discovery still builds its draft from the client's filesystem.
 - [x] (2026-11-04) Add `containers/k8s/daemon.yaml`: one StatefulSet replica, a PersistentVolumeClaim at `/var/lib/mjolnir`, a Service, and a token Secret.
 - [ ] Add Docker/Podman end-to-end validation and a guard that the container has no host namespaces and no implicit mounts.
 - [ ] Validate the Kubernetes manifest on a cluster and add remote-daemon client discovery (the manifest currently assumes the client already knows the Service address and token).
@@ -54,7 +55,7 @@ Host mode still uses those assumptions deliberately. This plan changes only the 
 
 ## Outcomes & Retrospective
 
-The launcher and daemon process now follow the container-native model, but no Docker or Podman engine is installed in the development environment used for this change. The launcher's argument construction is unit-tested for the no-host-namespace and volume-only contract; a real container turn remains to be validated on a machine with an engine.
+The launcher and daemon process now follow the container-native model. Setup, login, first-run setup, doctor, new-session preflight and remote repair all run in the daemon's environment. The launcher's argument construction is unit-tested for the no-host-namespace and volume-only contract. No Docker or Podman engine is installed in the development environment used for this change, so a real container turn, the no-host-namespace guard against a real engine, and the Kubernetes manifest remain to be validated on a machine with an engine or cluster.
 
 ## Context and Orientation
 
