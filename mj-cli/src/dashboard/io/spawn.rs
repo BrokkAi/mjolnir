@@ -750,31 +750,22 @@ pub(crate) fn spawn_spinner_style_save(
 /// independent, so callers can launch these concurrently and redraw as the
 /// answers arrive.
 pub(crate) fn spawn_project_source_resolution(
-    controller: &Controller,
     session_id: String,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
-    let config = controller.config.clone();
-    let session = controller.state.sessions.get(&session_id).cloned();
-    let source_controller = Controller {
-        config,
-        state: State {
-            sessions: session
-                .map(|session| [(session_id.clone(), session)].into_iter().collect())
-                .unwrap_or_default(),
-            ..State::default()
-        },
-    };
     let reported_session_id = session_id.clone();
     spawn_cancellable_io(
         tracker,
         format!("resolving project for {}", short_id(&session_id)),
         updates,
-        move |cancelled| {
-            let executor =
-                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(8));
-            source_controller.resolve_session_project_source(&session_id, &executor)
+        move |_cancelled| {
+            mj_core::runtime::block_on(async {
+                daemon::connect_or_start()
+                    .await?
+                    .session_project_source(session_id)
+                    .await
+            })?
         },
         move |result| DashboardIoUpdate::ProjectSource {
             session_id: reported_session_id,

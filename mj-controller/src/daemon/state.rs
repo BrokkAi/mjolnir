@@ -788,6 +788,10 @@ impl RuntimeState {
         read(&self.owner().controller().config)
     }
 
+    pub fn with_controller<T>(&self, read: impl FnOnce(&Controller) -> T) -> T {
+        read(self.owner().controller())
+    }
+
     /// Create a bundle under the daemon's config-mutation coordinator. The
     /// controller helper also takes the cross-process config lock, so a TUI
     /// transaction cannot race this one while the daemon's other config

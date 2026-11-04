@@ -645,6 +645,11 @@ pub enum DaemonAction {
         bundle_id: String,
         repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
     },
+    /// The project source label for a session, read in the environment that
+    /// owns the checkout.
+    SessionProjectSource {
+        session_id: String,
+    },
     Status,
     WebViewerAccess,
     /// The daemon host's Git commit author, which its sessions inherit.
@@ -1083,6 +1088,7 @@ pub enum DaemonReply {
     FirstRunSetup(Option<FirstRunSetupReport>),
     DoctorErrors(Vec<String>),
     RemoteRepairs(Vec<mj_core::local_git::LocalRemoteRepair>),
+    ProjectSource(mj_core::state::ProjectSourceIdentity),
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
     GitIdentity(GitIdentity),
@@ -1729,6 +1735,19 @@ impl DaemonClient {
         {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected remote-repair reply {reply:?}"),
+        }
+    }
+
+    pub async fn session_project_source(
+        &mut self,
+        session_id: String,
+    ) -> Result<mj_core::state::ProjectSourceIdentity> {
+        match self
+            .request(DaemonAction::SessionProjectSource { session_id })
+            .await?
+        {
+            DaemonReply::ProjectSource(source) => Ok(source),
+            reply => bail!("unexpected project-source reply {reply:?}"),
         }
     }
 
@@ -2975,7 +2994,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // The daemon reports its per-start identity, build and placement instead of
 // clients reading its PID and `/proc`, and it serves the configuration that
 // owns the store instead of clients opening `config.toml`.
-pub const PROTOCOL_VERSION: u32 = 80;
+pub const PROTOCOL_VERSION: u32 = 81;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
