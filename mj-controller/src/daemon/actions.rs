@@ -876,6 +876,8 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::Stop => {
+            // Stopping, not handing off: the node goes with this daemon.
+            crate::node_registry::registry().dismiss_node_on_exit();
             // A destroy in flight was acknowledged as accepted and nothing
             // about it is durable, so the stop waits for it, up to a bound
             // (#1191). The reply does not wait.

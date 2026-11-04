@@ -36,6 +36,7 @@ pub async fn run_daemon_process() -> Result<()> {
     log_startup_phase("open the store", opening);
     let epilogue_started = AtomicBool::new(false);
     let mut outcome = run_daemon_runtime(&epilogue_started, owner_pid).await;
+    crate::node_registry::registry().finish().await;
     if !epilogue_started.load(Ordering::Acquire) {
         // Initialization failed before the runtime-owned epilogue existed.
         // The same process-level bound still applies to closing the writer.
@@ -632,6 +633,7 @@ pub(super) async fn run_daemon_runtime(
                     progress.phase(ServingPhase::IdleCheck);
                     state.prune_dead_clients();
                     if state.attachments().is_empty() {
+                        crate::node_registry::registry().dismiss_node_on_exit();
                         break;
                     }
                 }
@@ -641,6 +643,7 @@ pub(super) async fn run_daemon_runtime(
                         && !process_is_alive(owner)
                     {
                         tracing::info!(owner_pid = owner, "daemon owner process exited; shutting down");
+                        crate::node_registry::registry().dismiss_node_on_exit();
                         break;
                     }
                 }

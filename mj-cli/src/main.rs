@@ -2215,6 +2215,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 let stopped = suspend_all_sessions(stop.acknowledge_unpublished_work).await?;
                 let daemon = daemon::connect_management().await?;
                 daemon.stop_and_wait().await?;
+                node::withdraw_endpoint();
                 match stopped {
                     0 => println!("Mjolnir daemon stopped; no sessions were active."),
                     1 => println!("Mjolnir daemon stopped after stopping its active session."),
@@ -2231,6 +2232,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 Err(error) => return Err(error.context("Mjolnir daemon is not answering")),
             };
             daemon.stop_and_wait().await?;
+            node::withdraw_endpoint();
             println!(
                 "Mjolnir daemon stopped; detached workers remain active. \
                  `{}` suspends them too.",

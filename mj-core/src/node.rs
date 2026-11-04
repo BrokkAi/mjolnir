@@ -9,7 +9,7 @@
 //! daemon.
 //!
 //! One stream is one child process. The request body is a length-prefixed
-//! JSON [`NodeCommand`] followed by the child's stdin; the end of the request
+//! JSON [`crate::targets::NodeRun`] followed by the child's stdin; the end of the request
 //! body closes stdin. The response body is a sequence of frames, each a tag
 //! byte, a big-endian `u32` length and that many bytes: [`FRAME_STDOUT`] and
 //! [`FRAME_STDERR`] carry output, and one final [`FRAME_EXIT`] carries a JSON
@@ -21,7 +21,6 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use bytes::{Buf, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::future::poll_fn;
 use std::process::Stdio;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -33,6 +32,19 @@ pub const EXEC_PATH: &str = "/exec";
 /// locally (SSH admission, process groups, the output drain after the leader
 /// exits), with its output sent once it finishes.
 pub const RUN_PATH: &str = "/run";
+/// The daemon is stopping for good, not handing off: the node has nothing
+/// left to serve and exits. A daemon that is replaced never sends this, so
+/// its node keeps running and serves the next one.
+pub const SHUTDOWN_PATH: &str = "/shutdown";
+
+/// Why [`serve`] returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServeEnd {
+    /// The connection ended; a daemon may come back.
+    Closed,
+    /// The daemon dismissed this node.
+    Dismissed,
+}
 
 /// A frame of the child's standard output.
 pub const FRAME_STDOUT: u8 = 1;
@@ -57,29 +69,6 @@ const READ_CHUNK: usize = 64 * 1024;
 const STREAM_WINDOW: u32 = 256 * 1024;
 const MAX_STREAMS: u32 = 256;
 const CONNECTION_WINDOW: u32 = STREAM_WINDOW * MAX_STREAMS;
-
-/// A command the daemon asks a node to run, as the node's computer sees it.
-/// Paths are text in the node's own conventions; only the node turns them
-/// into `PathBuf`s.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeCommand {
-    pub program: String,
-    /// Replaces `argv[0]` on Unix when the child reads its mode from it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub arg0: Option<String>,
-    pub args: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub clear_env: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    /// The child deliberately leaves processes running after it exits, so
-    /// ending the stream must not kill its process group.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub detaches: bool,
-}
 
 /// How a child ended. `status` is its exit code, or `None` when it was killed
 /// by a signal; `error` says why it never ran.
@@ -187,7 +176,7 @@ async fn next_chunk(body: &mut h2::RecvStream) -> Result<Option<Bytes>> {
 
 /// Serve execs on `io` until the daemon closes the connection. Each stream
 /// runs on its own task, so one slow child never holds up another.
-pub async fn serve<T>(io: T) -> Result<()>
+pub async fn serve<T>(io: T) -> Result<ServeEnd>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -199,14 +188,27 @@ where
         .await
         .context("node HTTP/2 handshake")?;
     while let Some(accepted) = connection.accept().await {
-        let (request, respond) = accepted.context("accept node stream")?;
+        let (request, mut respond) = accepted.context("accept node stream")?;
+        if request.uri().path() == SHUTDOWN_PATH {
+            let response = http::Response::builder()
+                .status(200)
+                .body(())
+                .expect("static response");
+            respond.send_response(response, true)?;
+            // Let the answer leave before the connection is dropped.
+            connection.graceful_shutdown();
+            while let Some(accepted) = connection.accept().await {
+                drop(accepted);
+            }
+            return Ok(ServeEnd::Dismissed);
+        }
         tokio::spawn(async move {
             if let Err(error) = serve_exec(request, respond).await {
                 tracing::warn!(error = %format!("{error:#}"), "node exec failed");
             }
         });
     }
-    Ok(())
+    Ok(ServeEnd::Closed)
 }
 
 async fn serve_exec(
@@ -255,15 +257,35 @@ async fn serve_stream(
     body: h2::RecvStream,
     mut respond: h2::server::SendResponse<Bytes>,
 ) -> Result<()> {
-    let command: NodeCommand =
-        serde_json::from_slice(&description).context("decode node command")?;
+    let run: crate::targets::NodeRun =
+        serde_json::from_slice(&description).context("decode node exec")?;
+    let command = run.into_spec();
+    tracing::debug!(program = %command.program, purpose = %command.purpose, "node streams a command");
     let response = http::Response::builder()
         .status(200)
         .body(())
         .expect("static response");
     let mut send = respond.send_response(response, false)?;
-    match spawn(&command) {
-        Ok(child) => run_child(child, &command, stdin_prefix, body, &mut send).await,
+    // A command over a shared SSH connection leases its session and an
+    // admission slot here, where SSH runs, exactly as a local launch does.
+    let prepared = tokio::task::spawn_blocking(move || -> Result<SshPrepared> {
+        let destination = command.ssh_destination.clone();
+        let (command, lease) = command
+            .open_ssh_session(&crate::targets::ProcessExecutor)?
+            .into_parts();
+        let permit = destination
+            .as_deref()
+            .map(crate::targets::SshAdmission::acquire);
+        Ok(SshPrepared {
+            command,
+            lease,
+            permit,
+        })
+    })
+    .await
+    .context("node SSH preparation task failed")?;
+    match prepared.and_then(|prepared| spawn(&prepared.command).map(|child| (child, prepared))) {
+        Ok((child, prepared)) => run_child(child, prepared, stdin_prefix, body, &mut send).await,
         Err(error) => {
             let exit = NodeExit {
                 status: None,
@@ -399,7 +421,15 @@ impl std::io::Read for ChannelReader {
     }
 }
 
-fn spawn(command: &NodeCommand) -> Result<tokio::process::Child> {
+/// A command ready to spawn, with the SSH session it runs on and the
+/// admission slot it holds until it is past authentication.
+struct SshPrepared {
+    command: crate::targets::CommandSpec,
+    lease: Option<crate::targets::SshSessionLease>,
+    permit: Option<crate::targets::SshPermit>,
+}
+
+fn spawn(command: &crate::targets::CommandSpec) -> Result<tokio::process::Child> {
     let mut process = tokio::process::Command::new(&command.program);
     #[cfg(unix)]
     if let Some(arg0) = &command.arg0 {
@@ -422,7 +452,7 @@ fn spawn(command: &NodeCommand) -> Result<tokio::process::Child> {
         .stderr(Stdio::piped())
         .kill_on_drop(!command.detaches)
         .spawn()
-        .with_context(|| format!("run {}", command.program))
+        .with_context(|| format!("run {} for {}", command.program, command.purpose))
 }
 
 /// Feed stdin, drain stdout and stderr, and report the exit, all at once.
@@ -430,11 +460,18 @@ fn spawn(command: &NodeCommand) -> Result<tokio::process::Child> {
 /// reads it. Pipes are never written before they are drained.
 async fn run_child(
     mut child: tokio::process::Child,
-    command: &NodeCommand,
+    prepared: SshPrepared,
     stdin_prefix: Bytes,
     mut body: h2::RecvStream,
     send: &mut h2::SendStream<Bytes>,
 ) -> Result<()> {
+    let SshPrepared {
+        command,
+        lease,
+        mut permit,
+    } = prepared;
+    let command = &command;
+    let stderr_tail = std::sync::Mutex::new(Vec::<u8>::new());
     let group = (!command.detaches).then(|| crate::subprocess::ProcessGroupGuard::new(child.id()));
     let mut stdin = child.stdin.take().context("node child stdin missing")?;
     let stdout = child.stdout.take().context("node child stdout missing")?;
@@ -492,7 +529,24 @@ async fn run_child(
             })
             .await?;
             match next {
-                Some(framed) => send_all(send, framed).await?,
+                Some(framed) => {
+                    match framed.first() {
+                        // The first output is the far side answering: the
+                        // session is past authentication and no longer
+                        // counts against the server's startup budget.
+                        Some(&FRAME_STDOUT) => drop(permit.take()),
+                        Some(&FRAME_STDERR) => {
+                            let mut tail = stderr_tail
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            tail.extend_from_slice(&framed[5..]);
+                            let excess = tail.len().saturating_sub(4096);
+                            tail.drain(..excess);
+                        }
+                        _ => {}
+                    }
+                    send_all(send, framed).await?
+                }
                 None => return anyhow::Ok(()),
             }
         }
@@ -523,6 +577,18 @@ async fn run_child(
             bail!("the daemon reset the exec while its child ran: {reset:?}");
         }
     };
+    // A session the transport turned away usually means its shared master
+    // died; the next lease must check and reopen it.
+    if let (Some(lease), Some(code)) = (&lease, status.code()) {
+        let tail = stderr_tail
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if crate::targets::ssh_refusal(code, &String::from_utf8_lossy(&tail))
+            == Some(crate::targets::SshRefusal::BeforeAuthentication)
+        {
+            lease.invalidate();
+        }
+    }
     let exit = NodeExit {
         status: status.code(),
         error: None,
@@ -530,8 +596,10 @@ async fn run_child(
     send_all(send, frame(FRAME_EXIT, &serde_json::to_vec(&exit)?)).await?;
     send.send_data(Bytes::new(), true)?;
     // A non-detaching command owns its whole group: the guard kills what the
-    // child left behind, as local execution does.
+    // child left behind, as local execution does. The SSH session is held
+    // until the command is gone.
     drop(group);
+    drop(lease);
     Ok(())
 }
 
@@ -568,9 +636,8 @@ impl NodeClient {
 
     /// Start `command` on the node. Dropping the returned [`NodeExec`] before
     /// it finishes resets the stream, which kills the child.
-    pub async fn exec(&self, command: &NodeCommand) -> Result<NodeExec> {
-        self.open(EXEC_PATH, &serde_json::to_vec(command)?, false)
-            .await
+    pub async fn exec(&self, run: &crate::targets::NodeRun) -> Result<NodeExec> {
+        self.open(EXEC_PATH, &serde_json::to_vec(run)?, false).await
     }
 
     /// Run `run` on the node with the node's own executor. The caller feeds
@@ -581,6 +648,30 @@ impl NodeClient {
         // command that finishes at once never races an open request body.
         self.open(RUN_PATH, &serde_json::to_vec(run)?, !run.streamed_stdin)
             .await
+    }
+
+    /// Tell the node the daemon is stopping for good, and wait for it to
+    /// acknowledge.
+    pub async fn dismiss(&self) -> Result<()> {
+        let mut send_request = self
+            .send_request
+            .clone()
+            .ready()
+            .await
+            .context("node connection is gone")?;
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(format!("http://node{SHUTDOWN_PATH}"))
+            .body(())
+            .expect("static request");
+        let (response, _) = send_request.send_request(request, true)?;
+        let response = response.await.context("node did not acknowledge")?;
+        ensure!(
+            response.status() == 200,
+            "node answered {}",
+            response.status()
+        );
+        Ok(())
     }
 
     async fn open(&self, path: &str, description: &[u8], complete: bool) -> Result<NodeExec> {
@@ -722,6 +813,74 @@ fn finished_by_peer(error: &anyhow::Error) -> bool {
     })
 }
 
+impl NodeExec {
+    /// Separate stdin from output, so one task can feed the child while
+    /// another reads it.
+    pub fn split(self) -> (NodeStdin, NodeOutputStream) {
+        (
+            NodeStdin { stdin: self.stdin },
+            NodeOutputStream {
+                output: self.output,
+                decoder: self.decoder,
+            },
+        )
+    }
+}
+
+/// The stdin half of a split [`NodeExec`].
+pub struct NodeStdin {
+    stdin: Option<h2::SendStream<Bytes>>,
+}
+
+impl NodeStdin {
+    pub async fn write(&mut self, data: Bytes) -> Result<()> {
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Ok(());
+        };
+        match send_all(stdin, data).await {
+            Err(error) if finished_by_peer(&error) => {
+                self.stdin = None;
+                Ok(())
+            }
+            result => result,
+        }
+    }
+
+    pub fn close(&mut self) -> Result<()> {
+        if let Some(mut stdin) = self.stdin.take() {
+            match stdin.send_data(Bytes::new(), true) {
+                Err(error) if error.reason() == Some(h2::Reason::NO_ERROR) => {}
+                result => result?,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The output half of a split [`NodeExec`].
+pub struct NodeOutputStream {
+    output: h2::RecvStream,
+    decoder: FrameDecoder,
+}
+
+impl NodeOutputStream {
+    /// The next frame of output, or the exit. `None` after the exit.
+    pub async fn next(&mut self) -> Result<Option<NodeFrame>> {
+        loop {
+            if let Some(frame) = self.decoder.next_frame()? {
+                return Ok(Some(frame));
+            }
+            match next_chunk(&mut self.output).await? {
+                Some(chunk) => self.decoder.push(&chunk),
+                None => {
+                    ensure!(self.decoder.is_empty(), "node stream ended inside a frame");
+                    return Ok(None);
+                }
+            }
+        }
+    }
+}
+
 /// Everything a finished exec printed.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct NodeOutput {
@@ -769,6 +928,14 @@ impl NodeCommandHost {
 }
 
 impl crate::targets::CommandHost for NodeCommandHost {
+    fn open_stream<'a>(
+        &'a self,
+        command: &crate::targets::CommandSpec,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<NodeExec>> + Send + 'a>> {
+        let run = command.to_node_run(true);
+        Box::pin(async move { self.connected().await?.exec(&run).await })
+    }
+
     fn run(
         &self,
         command: &crate::targets::CommandSpec,
@@ -838,18 +1005,14 @@ mod tests {
 
     async fn connected() -> NodeClient {
         let (daemon_side, node_side) = tokio::io::duplex(64 * 1024);
-        tokio::spawn(async move { serve(node_side).await });
+        tokio::spawn(async move { serve(node_side).await.map(|_| ()) });
         let (client, driver) = NodeClient::handshake(daemon_side).await.unwrap();
         tokio::spawn(driver);
         client
     }
 
-    fn sh(script: &str) -> NodeCommand {
-        NodeCommand {
-            program: "sh".into(),
-            args: vec!["-c".into(), script.into()],
-            ..NodeCommand::default()
-        }
+    fn sh(script: &str) -> crate::targets::NodeRun {
+        crate::targets::CommandSpec::new("sh", ["-c", script]).to_node_run(true)
     }
 
     // A stream protocol over bounded windows: drive far more than 64KB both

@@ -53,6 +53,16 @@ pub(crate) fn write_endpoint(endpoint: &NodeEndpoint) -> Result<()> {
     mj_core::config::atomic_write(&path, &serde_json::to_vec_pretty(endpoint)?)
 }
 
+/// The daemon was stopped on purpose: its node has nothing to serve and
+/// exits as soon as it notices, instead of waiting for a daemon to return.
+pub(crate) fn withdraw_endpoint() {
+    match std::fs::remove_file(endpoint_path()) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(%error, "could not withdraw the node endpoint"),
+    }
+}
+
 fn read_endpoint() -> Result<Option<NodeEndpoint>> {
     match std::fs::read(endpoint_path()) {
         Ok(bytes) => Ok(Some(
@@ -144,9 +154,17 @@ pub(crate) async fn run_node() -> Result<()> {
             );
             return Ok(());
         }
-        if let Some(endpoint) = endpoint {
+        let Some(endpoint) = endpoint else {
+            tracing::info!("the daemon was stopped; the node exits");
+            return Ok(());
+        };
+        {
             match serve_once(&endpoint, &node_id).await {
-                Ok(()) => {
+                Ok(mj_core::node::ServeEnd::Dismissed) => {
+                    tracing::info!("the daemon stopped and dismissed its node");
+                    return Ok(());
+                }
+                Ok(mj_core::node::ServeEnd::Closed) => {
                     tracing::info!("the daemon closed the node connection");
                     retry = FIRST_RETRY;
                     last_served = Instant::now();
@@ -170,7 +188,7 @@ pub(crate) async fn run_node() -> Result<()> {
 }
 
 /// Connect, authenticate, and serve until the connection ends.
-async fn serve_once(endpoint: &NodeEndpoint, node_id: &str) -> Result<()> {
+async fn serve_once(endpoint: &NodeEndpoint, node_id: &str) -> Result<mj_core::node::ServeEnd> {
     let mut stream =
         tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(endpoint.address))
             .await

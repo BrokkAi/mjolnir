@@ -464,6 +464,15 @@ pub trait CommandHost: Send + Sync {
         input: Option<&mut (dyn Read + Send)>,
         is_cancelled: &(dyn Fn() -> bool + Sync),
     ) -> Result<CommandOutput>;
+
+    /// Start `command` as a live stream: stdin, stdout and stderr flow while
+    /// it runs. Long-lived proxies run this way.
+    fn open_stream<'a>(
+        &'a self,
+        command: &CommandSpec,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<crate::node::NodeExec>> + Send + 'a>,
+    >;
 }
 
 static COMMAND_HOST: std::sync::OnceLock<Arc<dyn CommandHost>> = std::sync::OnceLock::new();
@@ -476,8 +485,9 @@ pub fn install_command_host(host: Arc<dyn CommandHost>) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("a command host is already installed"))
 }
 
-/// The host that runs `command`, or `None` to run it in this process.
-fn command_host(command: &CommandSpec) -> Option<&'static Arc<dyn CommandHost>> {
+/// The host that runs `command`, or `None` to run it in this process. Every
+/// caller that starts a process asks this, so none decides on its own.
+pub fn command_host(command: &CommandSpec) -> Option<&'static Arc<dyn CommandHost>> {
     COMMAND_HOST.get().filter(|_| !command.in_daemon)
 }
 

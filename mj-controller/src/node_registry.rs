@@ -16,6 +16,8 @@ use tokio::net::TcpStream;
 pub struct NodeRegistry {
     slot: NodeSlot,
     current: Mutex<Option<Connection>>,
+    /// Set when this daemon stops for good rather than handing off.
+    dismiss_on_exit: std::sync::atomic::AtomicBool,
 }
 
 struct Connection {
@@ -32,6 +34,7 @@ pub fn registry() -> &'static Arc<NodeRegistry> {
         Arc::new(NodeRegistry {
             slot: tokio::sync::watch::channel(None).0,
             current: Mutex::new(None),
+            dismiss_on_exit: std::sync::atomic::AtomicBool::new(false),
         })
     })
 }
@@ -110,5 +113,45 @@ impl NodeRegistry {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .map(|connection| connection.node_id.clone())
+    }
+
+    /// This daemon is stopping for good (an explicit stop or idle exit, not a
+    /// handoff), so its node should exit with it.
+    pub fn dismiss_node_on_exit(&self) {
+        self.dismiss_on_exit
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// At daemon exit: dismiss the node if this daemon stopped for good, and
+    /// wait briefly for it to go, so no node outlives a stopped daemon.
+    pub async fn finish(&self) {
+        if !self
+            .dismiss_on_exit
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        let Some(client) = self.slot.borrow().clone() else {
+            return;
+        };
+        let bound = std::time::Duration::from_secs(2);
+        match tokio::time::timeout(bound, client.dismiss()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(error = format!("{error:#}"), "could not dismiss the node");
+                return;
+            }
+            Err(_) => {
+                tracing::warn!("the node did not acknowledge its dismissal in time");
+                return;
+            }
+        }
+        let mut slot = self.slot.subscribe();
+        if tokio::time::timeout(bound, slot.wait_for(Option::is_none))
+            .await
+            .is_err()
+        {
+            tracing::warn!("the dismissed node kept its connection open");
+        }
     }
 }
