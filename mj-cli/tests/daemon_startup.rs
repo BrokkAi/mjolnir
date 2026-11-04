@@ -75,7 +75,8 @@ exit 64
 "#,
     );
     let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", tools.display());
-    let mut daemon = common::own_test_daemons(&mut Command::new(env!("CARGO_BIN_EXE_mj")))
+    let mut daemon_command = Command::new(env!("CARGO_BIN_EXE_mj"));
+    common::own_test_daemons(&mut daemon_command)
         .arg("daemon-run")
         .env("MJ_DATA_DIR", &data)
         .env("MJ_CONFIG_DIR", &config)
@@ -87,9 +88,11 @@ exit 64
         .env("MJOLNIR_NO_UPDATE_CHECK", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(std::process::Stdio::null());
+    let mut daemon = daemon_command.spawn().unwrap();
+    // The daemon starts Apple container through its node, the process that
+    // runs its commands on this computer, as the launcher provides one.
+    let _node = common::start_test_node(&daemon_command, &data);
 
     let deadline = Instant::now() + Duration::from_secs(30);
     while !started.exists() {

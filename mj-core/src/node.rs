@@ -596,10 +596,10 @@ async fn run_child(
     send_all(send, frame(FRAME_EXIT, &serde_json::to_vec(&exit)?)).await?;
     send.send_data(Bytes::new(), true)?;
     // A non-detaching command owns its whole group: the guard kills what the
-    // child left behind, as local execution does. The SSH session is held
-    // until the command is gone.
+    // child left behind, as local execution does. The SSH session, a local
+    // here, is held until this returns, after the group is gone. (Without
+    // connection sharing, on Windows, the lease has no destructor at all.)
     drop(group);
-    drop(lease);
     Ok(())
 }
 
