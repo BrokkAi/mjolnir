@@ -101,6 +101,15 @@ pub fn has_changes(deltas: &[RepoDelta]) -> bool {
     })
 }
 
+/// Whether every repository's tree matches its base. A push capture like this
+/// adds nothing unreviewed, so it is recorded clean without a reviewer.
+#[must_use]
+pub fn trees_unchanged(deltas: &[RepoDelta]) -> bool {
+    deltas
+        .iter()
+        .all(|delta| delta.files.is_empty() && delta.patch.trim().is_empty())
+}
+
 /// Every changed file with its added and removed line counts, one section per
 /// repository headed by that repository's totals. Git counts the whole change,
 /// so the table lists every file even where the patch a prompt shows was cut
@@ -217,6 +226,7 @@ mod tests {
             files: Vec::new(),
             merged_in: Vec::new(),
             unattributed: None,
+            push_review_warning: None,
         }
     }
 

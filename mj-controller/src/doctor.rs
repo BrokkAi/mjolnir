@@ -28,6 +28,7 @@ use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
 };
 use mj_core::credentials::login_command;
+use mj_core::local_git::{MINIMUM_GIT_VERSION, parse_git_version};
 
 // Only the image for the Apple container smoke test when the config has no
 // apple-container target. This intentionally stays a small stock image rather
@@ -46,8 +47,6 @@ pub(crate) const APPLE_CONTAINER_INSTALL_URL: &str =
 /// so this only ever fires for a wedged runtime socket, a blackholed network,
 /// or a credential helper waiting on something that will never arrive.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
-
-const MINIMUM_GIT_VERSION: (u64, u64) = (2, 31);
 
 /// The executor `mj doctor` and `mj setup` run their prerequisite probes
 /// through: one deadline per probe, so a wedged runtime cannot hang the run.
@@ -283,7 +282,10 @@ fn git_version_check(
     executor: &impl CommandExecutor,
 ) -> DoctorCheck {
     let title = format!("Git on {location}");
-    let minimum = format!("{}.{}", MINIMUM_GIT_VERSION.0, MINIMUM_GIT_VERSION.1);
+    let minimum = format!(
+        "{}.{}.{}",
+        MINIMUM_GIT_VERSION.0, MINIMUM_GIT_VERSION.1, MINIMUM_GIT_VERSION.2
+    );
     let remediation = format!(
         "Install or upgrade to Git {minimum} or newer on {location}, ensure it is the `git` found on PATH, then rerun `mj doctor`."
     );
@@ -291,15 +293,7 @@ fn git_version_check(
         Ok(output) if output.status == 0 => {
             let version = String::from_utf8_lossy(&output.stdout);
             let version = version.trim();
-            // Apple Git appends a build label; Git for Windows adds dotted
-            // suffixes. Only the numeric major/minor determine this minimum.
-            let parsed = version.strip_prefix("git version ").and_then(|version| {
-                let mut parts = version.split_whitespace().next()?.split('.');
-                Some((
-                    parts.next()?.parse::<u64>().ok()?,
-                    parts.next()?.parse::<u64>().ok()?,
-                ))
-            });
+            let parsed = parse_git_version(version);
             match parsed {
                 Some(found) if found >= MINIMUM_GIT_VERSION => {
                     return DoctorCheck::ready(
@@ -309,7 +303,7 @@ fn git_version_check(
                     );
                 }
                 Some(_) => format!(
-                    "{version} is older than the minimum required version {minimum}; workspace moves and other Git operations require a newer Git."
+                    "{version} is older than {minimum}, the oldest Git version Mjolnir supports. Before-push review cannot review merged work with it."
                 ),
                 None => format!(
                     "Could not determine the Git version from {version:?}; Git {minimum} or newer is required."

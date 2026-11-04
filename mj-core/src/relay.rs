@@ -97,7 +97,9 @@ pub const RELAY_SLOPCOP_LOGIN_PROTOCOL: u32 = 47;
 pub const RELAY_DISMISS_QUESTION_PROTOCOL: u32 = 48;
 /// 49 adds repository-scoped review capture for linked worktrees.
 pub const RELAY_WORKTREE_REVIEW_PROTOCOL: u32 = 49;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_WORKTREE_REVIEW_PROTOCOL;
+/// 50 carries a warning when merged-work review is skipped on old Git.
+pub const RELAY_MERGED_REVIEW_WARNING_PROTOCOL: u32 = 50;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_MERGED_REVIEW_WARNING_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

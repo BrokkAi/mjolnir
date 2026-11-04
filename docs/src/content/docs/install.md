@@ -25,6 +25,10 @@ The Linux controller requires glibc 2.28 or newer; only the portable workers
 are static musl binaries. Alpine and native Windows are not controller release
 targets.
 
+Install Git 2.39.5 or later on the controller. Mjolnir uses Git on the host
+and on SSH targets; `mj doctor` checks the local Git version and configured
+SSH bare targets. Older versions cannot review merged work before push.
+
 If `~/.local/bin` is not already on `PATH`, the installer offers to update the detected shell profile. Open a new shell before running `mj`, or add the directory to `PATH` yourself. The installer's last line tells you to run `mj`; see [First run](#first-run).
 
 Pin a release or choose another destination with environment variables:

@@ -12,7 +12,7 @@ pub struct RepositoryCapture {
     pub root: PathBuf,
     pub baseline_tree: String,
     pub capture_tree: String,
-    /// Commits of other history the turn merged, pulled or switched to, whose
+    /// Commits of other history the reviewed work merged, pulled or switched to, whose
     /// changes the baseline already holds.
     pub merged_in: Vec<String>,
     /// Why the diff may hold changes the turn did not write.
@@ -95,7 +95,7 @@ pub fn review_prompt(job: &ReviewJob) -> String {
                 String::new()
             } else {
                 format!(
-                    "\nThe base already includes the changes of other history this turn merged, pulled or switched to ({}), so the diff shows only the turn's own commits, merge resolutions and edits. Where the turn resolved a merge conflict, the base holds the conflict markers and the diff shows the resolution.",
+                    "\nThe base already includes the changes of other history merged, pulled or switched to ({}), so the diff shows only the reviewed work's own commits, merge resolutions and edits. Where a merge conflict was resolved, the base holds the conflict markers and the diff shows the resolution.",
                     repository.merged_in.join(", ")
                 )
             };
@@ -205,7 +205,7 @@ mod tests {
         merged.repositories[0].merged_in = vec!["upstream1".into(), "upstream2".into()];
         let prompt = review_prompt(&merged);
         assert!(prompt.contains(
-            "diff --no-ext-diff baseline123 capture456`\nThe base already includes the changes of other history this turn merged, pulled or switched to (upstream1, upstream2)"
+            "diff --no-ext-diff baseline123 capture456`\nThe base already includes the changes of other history merged, pulled or switched to (upstream1, upstream2)"
         ));
 
         let mut unattributed = job();

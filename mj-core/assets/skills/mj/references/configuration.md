@@ -1050,6 +1050,9 @@ bare runtime on an EC2 machine launches one instance per session. See
 Review needs a committed Git checkout to capture changes. A local directory
 session without one is created with review off for that session, and `mj new`
 prints a notice saying so; `/review` explains that it cannot capture changes.
+Git 2.39.5 or later is required on the controller and on SSH bare targets.
+`mj doctor` checks both locations. Before-push review cannot review merged
+work when Git is older.
 
 ### Common container fields
 

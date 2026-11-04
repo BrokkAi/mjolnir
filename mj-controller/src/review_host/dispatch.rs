@@ -277,7 +277,13 @@ impl HostState {
                     Ok(deltas) => self
                         .reviews
                         .get_mut(&session_id)
-                        .map(|slot| slot.driver.delta_captured(deltas))
+                        .map(|slot| {
+                            if slot.push.is_some() && mj_review::delta::trees_unchanged(&deltas) {
+                                slot.driver.empty_push_delta_captured(deltas)
+                            } else {
+                                slot.driver.delta_captured(deltas)
+                            }
+                        })
                         .unwrap_or_default(),
                     Err(error) => {
                         self.fail(

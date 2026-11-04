@@ -44,6 +44,10 @@ The human-readable `mj doctor` output is convenient at a terminal; JSON is
 better for exact check IDs, automation, and issue reports. A warning can still
 matter, but only `fixable` means the doctor loop has not converged.
 
+`mj doctor` reports a problem when Git on the controller or a configured SSH bare target
+is older than 2.39.5. Upgrade Git on the named machine. Before-push review
+cannot review merged work with an older version.
+
 ## Configuration is missing, invalid, or from a newer build
 
 If `config.toml` does not exist, run `mj` and open **prefix+s Settings** to add or detect
