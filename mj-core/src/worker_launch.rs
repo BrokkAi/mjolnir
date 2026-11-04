@@ -436,9 +436,6 @@ impl WorkerLaunchConfig {
     /// The `mj-agents` role is derived once from the launch's ownership and
     /// policy so Codex and Claude expose the same tools.
     pub fn subagent_mcp_role(&self) -> Option<crate::subagent::SubagentMcpRole> {
-        if self.review_gate() {
-            return Some(crate::subagent::SubagentMcpRole::Parent);
-        }
         resolve_subagent_mcp_role(
             &self.subagents,
             self.is_managed_subagent(),
@@ -446,7 +443,8 @@ impl WorkerLaunchConfig {
             self.agent_mailboxes_enabled,
             self.environment
                 .get(SESSION_MESSAGE_MCP_ENV)
-                .is_some_and(|value| value == "1"),
+                .is_some_and(|value| value == "1")
+                || self.review_gate(),
         )
     }
 
@@ -606,8 +604,11 @@ mod tests {
         })
     }
 
+    // Hard-won: 32d96d199: push reviews exposed delegation tools with subagents=None.
     #[test]
     fn persisted_review_trigger_controls_primary_mcp_without_leaking_to_children() {
+        use crate::subagent::{SubagentMcpRole, SubagentPolicy};
+
         for harness in [
             HarnessKind::Claude,
             HarnessKind::Codex,
@@ -629,12 +630,25 @@ mod tests {
                 let expected =
                     trigger == crate::config::ReviewTrigger::Push && harness != HarnessKind::Muse;
                 assert_eq!(launch.review_gate(), expected);
-                if expected {
-                    assert_eq!(
-                        launch.subagent_mcp_role(),
-                        Some(crate::subagent::SubagentMcpRole::Parent)
-                    );
+                for policy in [
+                    SubagentPolicy::None,
+                    SubagentPolicy::Native,
+                    SubagentPolicy::Mjolnir {
+                        straightforward: None,
+                        subtle: None,
+                    },
+                ] {
+                    launch.subagents = policy.clone();
+                    let saved = serde_json::to_value(&launch).unwrap();
+                    let read: WorkerLaunchConfig = serde_json::from_value(saved).unwrap();
+                    let expected_role = match policy {
+                        SubagentPolicy::Mjolnir { .. } => Some(SubagentMcpRole::Parent),
+                        _ if expected => Some(SubagentMcpRole::MessageOnly),
+                        _ => None,
+                    };
+                    assert_eq!(read.subagent_mcp_role(), expected_role);
                 }
+                launch.subagents = SubagentPolicy::None;
                 launch
                     .environment
                     .insert(SESSION_MANAGED_SUBAGENT_ENV.into(), "1".into());

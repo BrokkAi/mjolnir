@@ -223,9 +223,11 @@ pub(super) fn session_request_meta(
                     .map(|tool| format!("mcp__{}__{tool}", mj_core::subagent::SUBAGENT_MCP_SERVER)),
             );
         }
-        if spec.subagent_mcp_socket.as_ref().is_some_and(|socket| {
-            socket.review_gate && socket.role == mj_core::subagent::SubagentMcpRole::Parent
-        }) {
+        if spec
+            .subagent_mcp_socket
+            .as_ref()
+            .is_some_and(|socket| socket.review_gate && socket.role.supports_review())
+        {
             allowed.push("mcp__mj-agents__request_review".into());
             allowed.push("mcp__mj-agents__override_review".into());
         }
@@ -287,7 +289,7 @@ fn subagent_acp_mcp(spec: &LaunchSpec) -> Option<McpServer> {
         "--agent-mailboxes-enabled".into(),
         socket.agent_mailboxes_enabled.to_string(),
     ];
-    if socket.review_gate && socket.role == mj_core::subagent::SubagentMcpRole::Parent {
+    if socket.review_gate && socket.role.supports_review() {
         args.push("--review-gate".into());
     }
     if !socket.subtle_subagents {

@@ -906,6 +906,12 @@ pub enum SubagentMcpRole {
 }
 
 impl SubagentMcpRole {
+    /// Push reviews are independent of a top-level session's delegation policy.
+    #[must_use]
+    pub fn supports_review(self) -> bool {
+        matches!(self, Self::Parent | Self::MessageOnly)
+    }
+
     #[must_use]
     pub fn id(self) -> &'static str {
         match self {

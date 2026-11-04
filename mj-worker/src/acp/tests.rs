@@ -349,7 +349,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                 let mut spec = reload_fallback_spec(harness);
                 spec.execution_policy = policy;
                 let mut socket = worker_socket(role);
-                socket.review_gate = role == SubagentMcpRole::Parent;
+                socket.review_gate = true;
                 spec.subagent_mcp_socket = Some(socket);
                 spec.project_memory = Some(ProjectMemoryLaunchConfig {
                     history_socket: Some("/worker/history.sock".into()),
@@ -394,7 +394,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                         let args = delegation["args"].as_array().unwrap();
                         assert_eq!(
                             args.iter().any(|arg| arg == "--review-gate"),
-                            role == SubagentMcpRole::Parent,
+                            matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly),
                             "{request}"
                         );
                     }
@@ -437,7 +437,10 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                                     .iter()
                                     .map(|tool| format!("mcp__mj-agents__{tool}")),
                             );
-                            if role == SubagentMcpRole::Parent {
+                            if matches!(
+                                role,
+                                SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly
+                            ) {
                                 expected.push("mcp__mj-agents__request_review".into());
                                 expected.push("mcp__mj-agents__override_review".into());
                             }

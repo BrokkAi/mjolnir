@@ -422,6 +422,8 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
             "Call mj-agents tools directly. If these tools are not visible, find mj-agents in the tool catalog."
         )
     });
+    static MESSAGE_PUSH_INSTRUCTIONS: LazyLock<String> =
+        LazyLock::new(|| format!("{REVIEW_GATE_INSTRUCTIONS} {MESSAGE_ONLY_INSTRUCTIONS}"));
     let parent_instructions = if options.review_gate {
         if harness == Some(HarnessKind::Codex) {
             CODEX_PUSH_INSTRUCTIONS.as_str()
@@ -447,10 +449,20 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
             parent_instructions,
             tool_definitions_with_options(harness, options),
         ),
-        SubagentMcpRole::MessageOnly => (
-            MESSAGE_ONLY_INSTRUCTIONS,
-            vec![send_message_tool(), fetch_tool()],
-        ),
+        SubagentMcpRole::MessageOnly => {
+            let mut tools = vec![send_message_tool(), fetch_tool()];
+            if options.review_gate {
+                tools.extend(review_tool_definitions());
+            }
+            (
+                if options.review_gate {
+                    MESSAGE_PUSH_INSTRUCTIONS.as_str()
+                } else {
+                    MESSAGE_ONLY_INSTRUCTIONS
+                },
+                tools,
+            )
+        }
         SubagentMcpRole::FetchOnly => (
             "Use fetch to copy files or list paths from a Mjolnir session into your target.",
             vec![fetch_tool()],
@@ -613,7 +625,7 @@ fn call_with_budget_and_options(
     let legacy_alias = params.name == "send_input"
         && matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly);
     let push_review = matches!(params.name.as_str(), "request_review" | "override_review")
-        && role == SubagentMcpRole::Parent
+        && role.supports_review()
         && options.review_gate;
     if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias && !push_review {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
@@ -894,10 +906,24 @@ fn tool_definitions_with_options(
         fetch_tool(),
     ];
     if options.review_gate {
-        tools.push(tool("request_review", "Request review of committed work before pushing. Reviews HEAD of `path`, a worktree of a workspace repository (default: the session working directory). The verdict arrives later as a Mjolnir message.", json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false})));
-        tools.push(tool("override_review", "Override the last complete before-push findings verdict and record the reviewed tree so the push can proceed. Use it only for findings you have judged incorrect or unreasonable; the reason is written into the session transcript. Refused if a review is running, a reviewer failed, or the reviewed tree contents changed.", json!({"type":"object","properties":{"reason":{"type":"string","description":"Why the findings do not need to be addressed."}},"required":["reason"],"additionalProperties":false})));
+        tools.extend(review_tool_definitions());
     }
     tools
+}
+
+fn review_tool_definitions() -> [Value; 2] {
+    [
+        tool(
+            "request_review",
+            "Request review of committed work before pushing. Reviews HEAD of `path`, a worktree of a workspace repository (default: the session working directory). The verdict arrives later as a Mjolnir message.",
+            json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}),
+        ),
+        tool(
+            "override_review",
+            "Override the last complete before-push findings verdict and record the reviewed tree so the push can proceed. Use it only for findings you have judged incorrect or unreasonable; the reason is written into the session transcript. Refused if a review is running, a reviewer failed, or the reviewed tree contents changed.",
+            json!({"type":"object","properties":{"reason":{"type":"string","description":"Why the findings do not need to be addressed."}},"required":["reason"],"additionalProperties":false}),
+        ),
+    ]
 }
 
 #[derive(serde::Deserialize)]
@@ -1107,48 +1133,59 @@ mod tests {
     }
 
     #[cfg(unix)]
+    // Hard-won: 32d96d199: sessions without delegation could not request push reviews under their own role.
     #[test]
-    fn override_review_sends_reason_in_durable_action() {
+    fn review_tools_send_durable_actions_with_or_without_delegation() {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
-        let directory = tempfile::tempdir().unwrap();
-        let socket = directory.path().join("subagents.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let worker = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let request: SubagentToolRequest = serde_json::from_str(&line).unwrap();
-            assert_eq!(
-                request.action,
-                SubagentToolAction::OverrideReview {
-                    reason: "finding is unreasonable".into()
-                }
-            );
-            reader
-                .into_inner()
-                .write_all(b"{\"result\":{\"accepted\":true}}\n")
+        for role in [SubagentMcpRole::Parent, SubagentMcpRole::MessageOnly] {
+            for (params, action) in [
+                (
+                    json!({"name":"request_review","arguments":{"path":"/workspace"}}),
+                    SubagentToolAction::RequestReview {
+                        path: Some("/workspace".into()),
+                    },
+                ),
+                (
+                    json!({"name":"override_review","arguments":{"reason":"finding is unreasonable"}}),
+                    SubagentToolAction::OverrideReview {
+                        reason: "finding is unreasonable".into(),
+                    },
+                ),
+            ] {
+                let directory = tempfile::tempdir().unwrap();
+                let socket = directory.path().join("subagents.sock");
+                let listener = UnixListener::bind(&socket).unwrap();
+                let worker = std::thread::spawn(move || {
+                    let (stream, _) = listener.accept().unwrap();
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let request: SubagentToolRequest = serde_json::from_str(&line).unwrap();
+                    assert_eq!(request.action, action);
+                    reader
+                        .into_inner()
+                        .write_all(b"{\"result\":{\"accepted\":true}}\n")
+                        .unwrap();
+                });
+                let (value, is_error) = call_with_budget_and_options(
+                    &socket,
+                    None,
+                    role,
+                    Some(&params),
+                    &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
+                    |_| Duration::from_secs(5),
+                    ParentTools {
+                        review_gate: true,
+                        ..Default::default()
+                    },
+                )
                 .unwrap();
-        });
-        let (value, is_error) = call_with_budget_and_options(
-            &socket,
-            None,
-            SubagentMcpRole::Parent,
-            Some(
-                &json!({"name":"override_review","arguments":{"reason":"finding is unreasonable"}}),
-            ),
-            &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
-            |_| Duration::from_secs(5),
-            ParentTools {
-                review_gate: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        worker.join().unwrap();
-        assert!(!is_error);
-        assert_eq!(value["accepted"], true);
+                worker.join().unwrap();
+                assert!(!is_error);
+                assert_eq!(value["accepted"], true);
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -1199,12 +1236,14 @@ mod tests {
         assert_eq!(reply["report"], expected);
     }
 
+    // Hard-won: 32d96d199: push reviews granted the full parent tool catalog to sessions without delegation.
     #[test]
-    fn review_gate_is_offered_only_to_flagged_parents() {
+    fn review_gate_is_offered_only_to_flagged_top_level_sessions() {
         for role in [
             SubagentMcpRole::Parent,
             SubagentMcpRole::Child,
             SubagentMcpRole::MessageOnly,
+            SubagentMcpRole::FetchOnly,
         ] {
             for review_gate in [false, true] {
                 let input = format!(
@@ -1231,7 +1270,9 @@ mod tests {
                     .lines()
                     .map(|line| serde_json::from_str(line).unwrap())
                     .collect();
-                let expected = role == SubagentMcpRole::Parent && review_gate;
+                let expected =
+                    matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly)
+                        && review_gate;
                 let tools = replies.iter().find(|r| r["id"] == 2).unwrap()["result"]["tools"]
                     .as_array()
                     .unwrap();
@@ -1248,6 +1289,26 @@ mod tests {
                         .as_str()
                         .unwrap();
                 assert_eq!(instructions.contains(REVIEW_GATE_INSTRUCTIONS), expected);
+                if role == SubagentMcpRole::MessageOnly {
+                    assert!(!instructions.contains(DELEGATION_ROUTING));
+                    for name in ["spawn", "list_agents", "close"] {
+                        assert!(tools.iter().all(|tool| tool["name"] != name));
+                        let error = call_with_budget_and_options(
+                            Path::new("unused.sock"),
+                            None,
+                            role,
+                            Some(&json!({"name":name})),
+                            &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
+                            |_| Duration::from_millis(1),
+                            ParentTools {
+                                review_gate,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap_err();
+                        assert!(error.to_string().contains("unknown sub-agent tool"));
+                    }
+                }
                 if expected {
                     assert!(instructions.chars().count() <= 2048);
                 }

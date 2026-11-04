@@ -114,7 +114,7 @@ pub(super) fn configure_claude_subagent_mcp(
             "--agent-mailboxes-enabled".to_owned(),
             agent_mailboxes_enabled.to_string(),
         ];
-        if review_gate && role == mj_core::subagent::SubagentMcpRole::Parent {
+        if review_gate && role.supports_review() {
             args.push("--review-gate".into());
         }
         if !subtle_subagents {
@@ -161,8 +161,8 @@ pub(super) fn configure_claude_subagent_mcp(
                 )
             })?;
         let mut tools = role.tool_names().to_vec();
-        if review_gate && role == SubagentMcpRole::Parent {
-            tools.push("request_review");
+        if review_gate && role.supports_review() {
+            tools.extend(["request_review", "override_review"]);
         }
         for tool in tools {
             let rule = serde_json::Value::from(format!("mcp__{SUBAGENT_MCP_SERVER}__{tool}"));
@@ -463,7 +463,7 @@ fn configure_codex_mcp_with_mailboxes(
             "--agent-mailboxes-enabled".to_owned(),
             mailboxes_enabled.to_string(),
         ];
-        if review_gate && role == mj_core::subagent::SubagentMcpRole::Parent {
+        if review_gate && role.supports_review() {
             args.push("--review-gate".into());
         }
         if !subtle_subagents {
@@ -2736,8 +2736,9 @@ mod review_gate_tests {
     use super::*;
     use mj_core::subagent::SubagentMcpRole;
 
+    // Hard-won: 32d96d199: review registration required granting the delegation role.
     #[test]
-    fn private_profile_registration_passes_the_gate_only_to_parents() {
+    fn private_profile_registration_passes_the_gate_only_to_top_level_sessions() {
         for role in [
             SubagentMcpRole::Parent,
             SubagentMcpRole::Child,
@@ -2761,7 +2762,8 @@ mod review_gate_tests {
                 let config: serde_json::Value =
                     serde_json::from_slice(&std::fs::read(home.join(".claude.json")).unwrap())
                         .unwrap();
-                let expected = gate && role == SubagentMcpRole::Parent;
+                let expected =
+                    gate && matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly);
                 assert_eq!(
                     config["mcpServers"]["mj-agents"]["args"]
                         .as_array()
@@ -2779,6 +2781,14 @@ mod review_gate_tests {
                         .unwrap()
                         .iter()
                         .any(|value| value == "mcp__mj-agents__request_review"),
+                    expected
+                );
+                assert_eq!(
+                    settings["permissions"]["allow"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|value| value == "mcp__mj-agents__override_review"),
                     expected
                 );
                 configure_codex_mcp_with_mailboxes(
