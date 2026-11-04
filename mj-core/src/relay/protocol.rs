@@ -271,6 +271,8 @@ pub enum ReviewerRequest {
     /// whole repository as this turn's work. Capture never touches the
     /// repository's index or working tree.
     CaptureDelta {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repositories: Option<Vec<std::path::PathBuf>>,
         #[serde(default)]
         scope: CaptureScope,
         baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
@@ -435,6 +437,14 @@ impl RelayRequest {
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
             Self::ReplaceProjectMemoryTree { .. } => super::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL,
             Self::Submit { command, .. } => command.minimum_protocol(),
+            Self::Reviewer {
+                request:
+                    ReviewerRequest::CaptureDelta {
+                        repositories: Some(_),
+                        ..
+                    },
+                ..
+            } => super::RELAY_WORKTREE_REVIEW_PROTOCOL,
             Self::Reviewer {
                 request:
                     ReviewerRequest::RecordReviewed { .. }

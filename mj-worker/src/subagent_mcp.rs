@@ -43,7 +43,7 @@ static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-const REVIEW_GATE_INSTRUCTIONS: &str = "Commit and call `request_review` before `git push` or `gh pr create`. It replies immediately; the verdict arrives later as a Mjolnir message. The pre-push gate requires every reviewer to be clean. Retry incomplete reviews. For complete findings you judge wrong or unreasonable, `override_review` records the exact reviewed trees and audits your reason in the transcript.";
+const REVIEW_GATE_INSTRUCTIONS: &str = "Commit and call `request_review` before `git push` or `gh pr create`. It replies immediately; the verdict arrives later as a Mjolnir message. Pass `path` when pushing from another worktree. The pre-push gate requires every reviewer to be clean. Retry incomplete reviews. For complete findings you judge wrong or unreasonable, `override_review` records the exact reviewed trees and audits your reason in the transcript.";
 
 /// A child's advice when Mjolnir has not confirmed its report. Calling again
 /// is safe: a report that did arrive is refused as already delivered.
@@ -660,7 +660,9 @@ fn call_with_budget_and_options(
                 files: Vec::new(),
             }
         }
-        "request_review" => SubagentToolAction::RequestReview {},
+        "request_review" => SubagentToolAction::RequestReview {
+            path: serde_json::from_value::<RequestReviewArgs>(params.arguments)?.path,
+        },
         "override_review" => {
             let args: OverrideReviewArgs = serde_json::from_value(params.arguments)?;
             let reason = args.reason.trim();
@@ -892,10 +894,16 @@ fn tool_definitions_with_options(
         fetch_tool(),
     ];
     if options.review_gate {
-        tools.push(tool("request_review", "Request review of committed work before pushing. The verdict arrives later as a Mjolnir message.", json!({"type":"object","properties":{},"additionalProperties":false})));
+        tools.push(tool("request_review", "Request review of committed work before pushing. Reviews HEAD of `path`, a worktree of a workspace repository (default: the session working directory). The verdict arrives later as a Mjolnir message.", json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false})));
         tools.push(tool("override_review", "Override the last complete before-push findings verdict and record the reviewed tree so the push can proceed. Use it only for findings you have judged incorrect or unreasonable; the reason is written into the session transcript. Refused if a review is running, a reviewer failed, or the reviewed tree contents changed.", json!({"type":"object","properties":{"reason":{"type":"string","description":"Why the findings do not need to be addressed."}},"required":["reason"],"additionalProperties":false})));
     }
     tools
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestReviewArgs {
+    path: Option<String>,
 }
 
 #[derive(serde::Deserialize)]

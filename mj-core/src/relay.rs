@@ -95,7 +95,9 @@ pub const RELAY_AWS_CREDENTIALS_PROTOCOL: u32 = 46;
 pub const RELAY_SLOPCOP_LOGIN_PROTOCOL: u32 = 47;
 /// 48 adds durable dismissal of an inferred question for an exact completed turn.
 pub const RELAY_DISMISS_QUESTION_PROTOCOL: u32 = 48;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_DISMISS_QUESTION_PROTOCOL;
+/// 49 adds repository-scoped review capture for linked worktrees.
+pub const RELAY_WORKTREE_REVIEW_PROTOCOL: u32 = 49;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_WORKTREE_REVIEW_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

@@ -399,7 +399,10 @@ pub enum SubagentToolAction {
         ls: bool,
     },
     ListProfiles,
-    RequestReview {},
+    RequestReview {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
     OverrideReview {
         reason: String,
     },
@@ -467,7 +470,10 @@ enum SubagentToolActionWire {
         ls: bool,
     },
     ListProfiles,
-    RequestReview {},
+    RequestReview {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
     OverrideReview {
         reason: String,
     },
@@ -525,7 +531,7 @@ impl SubagentToolAction {
         matches!(
             self,
             Self::Spawn { .. }
-                | Self::RequestReview {}
+                | Self::RequestReview { .. }
                 | Self::OverrideReview { .. }
                 | Self::SendInput { .. }
                 | Self::SendMessage { .. }
@@ -577,7 +583,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 ls,
             },
             SubagentToolActionWire::ListProfiles => Self::ListProfiles,
-            SubagentToolActionWire::RequestReview {} => Self::RequestReview {},
+            SubagentToolActionWire::RequestReview { path } => Self::RequestReview { path },
             SubagentToolActionWire::OverrideReview { reason } => Self::OverrideReview { reason },
             SubagentToolActionWire::Spawn {
                 task_name,
@@ -1584,6 +1590,24 @@ pub fn has_handed_back(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn request_review_path_preserves_legacy_encoding() {
+        let old = r#"{"action":"request_review","params":{}}"#;
+        let action: SubagentToolAction = serde_json::from_str(old).unwrap();
+        assert!(matches!(
+            action,
+            SubagentToolAction::RequestReview { path: None }
+        ));
+        assert_eq!(serde_json::to_string(&action).unwrap(), old);
+        let scoped = SubagentToolAction::RequestReview {
+            path: Some("/worktree".into()),
+        };
+        assert_eq!(
+            serde_json::from_str::<SubagentToolAction>(&serde_json::to_string(&scoped).unwrap())
+                .unwrap(),
+            scoped
+        );
+    }
 
     #[test]
     fn only_child_mutations_hold_an_in_place_move_drain() {

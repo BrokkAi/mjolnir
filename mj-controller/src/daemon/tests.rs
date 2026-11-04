@@ -1288,6 +1288,7 @@ async fn in_process_reviewer_forwarding_stops_when_the_caller_goes_away() {
             session_id: "session-1".into(),
             role: None,
             action: crate::session_manager::ReviewerAction::CaptureDelta {
+                repositories: None,
                 scope: Default::default(),
                 baselines: Default::default(),
             },

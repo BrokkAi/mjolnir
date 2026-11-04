@@ -82,7 +82,7 @@ async fn run(
                                 SubagentToolAction::SendInput { .. }
                                     | SubagentToolAction::SendMessage { .. }
                                     | SubagentToolAction::Spawn { .. }
-                                    | SubagentToolAction::RequestReview {}
+                                    | SubagentToolAction::RequestReview { .. }
                                     | SubagentToolAction::OverrideReview { .. }
                                     // A temporary copy is safe to repeat after handoff.
                                     | SubagentToolAction::Fetch { .. }

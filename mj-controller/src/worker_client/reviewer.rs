@@ -8,14 +8,26 @@ impl RelayClient {
         role: Option<&str>,
         baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
         scope: mj_core::relay::CaptureScope,
+        repositories: Option<Vec<std::path::PathBuf>>,
     ) -> Result<Vec<mj_core::relay::RepoDelta>> {
         if scope == mj_core::relay::CaptureScope::PushableCommits
             && self.protocol_version < mj_core::relay::RELAY_PUSH_REVIEW_PROTOCOL
         {
             anyhow::bail!("the session's worker predates push review; restart the session");
         }
-        let request =
-            self.reviewer_request(role, ReviewerRequest::CaptureDelta { baselines, scope })?;
+        if repositories.is_some()
+            && self.protocol_version < mj_core::relay::RELAY_WORKTREE_REVIEW_PROTOCOL
+        {
+            anyhow::bail!("the session's worker predates worktree review; restart the session");
+        }
+        let request = self.reviewer_request(
+            role,
+            ReviewerRequest::CaptureDelta {
+                baselines,
+                scope,
+                repositories,
+            },
+        )?;
         match self
             .call_with_timeout(request, REVIEW_CAPTURE_TIMEOUT)
             .await?

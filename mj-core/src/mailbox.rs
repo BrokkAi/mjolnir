@@ -436,12 +436,17 @@ pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
             ..
         } => {
             let short = |value: &str| value.chars().take(7).collect::<String>();
-            let range = format!(
-                "{}..{} in {}",
-                short(base_commit),
-                short(head_commit),
-                repository.display()
-            );
+            // An empty base means HEAD shares no history with any start point.
+            let range = if base_commit.is_empty() {
+                format!("up to {} in {}", short(head_commit), repository.display())
+            } else {
+                format!(
+                    "{}..{} in {}",
+                    short(base_commit),
+                    short(head_commit),
+                    repository.display()
+                )
+            };
             let text = match verdict {
                 crate::review::verdict::ReviewVerdict::Clean => format!(
                     "Review clean for commits {range}. Tree {} is recorded as reviewed; you may push.",
@@ -778,6 +783,25 @@ mod tests {
             created_at_ms: 1,
             body,
         }
+    }
+
+    #[test]
+    fn a_verdict_without_a_base_names_only_the_head() {
+        let description = describe_mailbox_event(&event(MailboxEventBody::ReviewVerdict {
+            review_id: "orphan-review".into(),
+            repository: "/workspace/solo".into(),
+            base_commit: String::new(),
+            head_commit: "bbbbbbb456".into(),
+            tree: "ccccccc789".into(),
+            verdict: crate::review::verdict::ReviewVerdict::Clean,
+        }));
+        assert!(
+            description
+                .header
+                .starts_with("Review clean for commits up to bbbbbbb in /workspace/solo."),
+            "{}",
+            description.header
+        );
     }
 
     // Hard-won: #4625: actorless and legacy-unknown merges must not render a by-clause.

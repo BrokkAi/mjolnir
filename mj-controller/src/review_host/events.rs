@@ -17,6 +17,7 @@ pub(super) enum HostEvent {
     },
     StartPush {
         session_id: String,
+        path: Option<String>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     },
     OverridePush {

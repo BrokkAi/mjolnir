@@ -289,6 +289,7 @@ fn view_of(
 struct FakeEnvironment {
     children: Mutex<Vec<(String, ReviewerIdentity, String)>>,
     child_relations: Mutex<Vec<ReviewerChildRelation>>,
+    registered_working_directories: Mutex<Vec<Option<PathBuf>>>,
     mailbox: Mutex<Vec<mj_core::mailbox::MailboxEvent>>,
     started: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
@@ -367,6 +368,7 @@ impl FakeEnvironment {
         Arc::new(Self {
             children: Mutex::new(Vec::new()),
             child_relations: Mutex::new(Vec::new()),
+            registered_working_directories: Mutex::new(Vec::new()),
             mailbox: Mutex::new(Vec::new()),
             started: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
@@ -490,6 +492,7 @@ impl ReviewEnvironment for FakeEnvironment {
         reviewer: &ReviewerIdentity,
         prompt: String,
         request_key: String,
+        working_directory: Option<PathBuf>,
     ) -> Result<String, String> {
         let gate = self.register_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
@@ -498,6 +501,10 @@ impl ReviewEnvironment for FakeEnvironment {
         if let Some(error) = self.register_error.lock().unwrap().take() {
             return Err(error);
         }
+        self.registered_working_directories
+            .lock()
+            .unwrap()
+            .push(working_directory);
         let canonical_key = mj_core::subagent::SubagentKind::Reviewer.request_key(&request_key);
         let mut relations = self.child_relations.lock().unwrap();
         if let Some(existing) = relations.iter().find(|relation| {
@@ -2422,7 +2429,7 @@ async fn startup_restores_group_before_push_or_override_admission() {
     let push = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.begin_push(&session).await })
+        tokio::spawn(async move { host.begin_push(&session, None).await })
     };
     let override_request = {
         let host = host.clone();
@@ -2671,6 +2678,83 @@ fn push_config_count(count: usize) -> ReviewConfigSource {
     })
 }
 
+#[tokio::test]
+async fn push_path_reaches_capture_and_old_worker_refuses_it() {
+    let session = session_id("pushworktree");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let mut running = view(
+        &session,
+        MaterializedExecutionState::Running { started_at_ms: 1 },
+    );
+    running
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(48);
+    manager
+        .publisher
+        .publish(session.clone(), running.clone())
+        .await
+        .unwrap();
+    assert!(
+        host.begin_push(&session, Some("../linked".into()))
+            .await
+            .unwrap_err()
+            .0
+            .contains("predates worktree review")
+    );
+    running
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(49);
+    manager
+        .publisher
+        .publish(session.clone(), running)
+        .await
+        .unwrap();
+    let request = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move { host.begin_push(&session, Some("../linked".into())).await })
+    };
+    let (_, action, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    assert!(
+        matches!(action, ReviewerAction::CaptureDelta { repositories: Some(paths), .. } if paths == vec![PathBuf::from("../linked")])
+    );
+    reply
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![mj_core::relay::RepoDelta {
+                root: "/workspace/linked".into(),
+                base_commit: Some("aaaaaaa123".into()),
+                head_commit: Some("bbbbbbb456".into()),
+                current_tree: "newtree".into(),
+                patch: "diff --git a/a b/a\n@@\n+one\n".into(),
+                files: vec![mj_core::relay::FileLineChange {
+                    path: "a".into(),
+                    insertions: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }))
+        .unwrap();
+    assert!(request.await.unwrap().is_ok());
+    let _child = wait_for_child(&environment, &host, &session).await;
+    assert_eq!(
+        *environment.registered_working_directories.lock().unwrap(),
+        vec![Some(PathBuf::from("/workspace/linked"))]
+    );
+    host.shutdown().await.unwrap();
+}
+
 async fn open_push(
     manager: &mut FakeManager,
     host: &TurnReviewHost,
@@ -2694,7 +2778,7 @@ async fn open_push(
     let request = {
         let host = host.clone();
         let session = manager.session.clone();
-        tokio::spawn(async move { host.begin_push(&session).await })
+        tokio::spawn(async move { host.begin_push(&session, None).await })
     };
     let (_, action, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
@@ -2702,6 +2786,7 @@ async fn open_push(
     assert!(matches!(
         action,
         ReviewerAction::CaptureDelta {
+            repositories: None,
             scope: mj_core::relay::CaptureScope::PushableCommits,
             ..
         }
@@ -2784,7 +2869,7 @@ async fn review_starts_report_child_registration_refusal_to_their_callers() {
             let session = manager.session.clone();
             tokio::spawn(async move {
                 if push {
-                    host.begin_push(&session).await.map(|_| ())
+                    host.begin_push(&session, None).await.map(|_| ())
                 } else {
                     host.start(&session, true).await
                 }
@@ -2850,12 +2935,18 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
         let environment = FakeEnvironment::new();
         if name == "pushclean" {
             pending_push_findings(&environment);
+            environment
+                .state
+                .lock()
+                .unwrap()
+                .baselines
+                .insert(PathBuf::from("/workspace/lib"), "libtree".into());
         }
         let host =
             TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
         let child = open_push(&mut manager, &host, &environment).await;
         assert_eq!(
-            host.begin_push(&session).await.unwrap_err().0,
+            host.begin_push(&session, None).await.unwrap_err().0,
             "a review is already open"
         );
         let finished = {
@@ -2904,6 +2995,10 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
                 .contains_key(&PathBuf::from("/workspace/app")),
             recorded
         );
+        if recorded {
+            // The review covered one repository; the other keeps its baseline.
+            assert_eq!(state.baselines[&PathBuf::from("/workspace/lib")], "libtree");
+        }
         assert_eq!(state.prior_review.is_some(), name == "pushfindings");
         assert_eq!(state.push_findings.is_some(), name == "pushfindings");
         if let Some(findings) = &state.push_findings {
@@ -3052,6 +3147,7 @@ async fn answer_override_capture(
     assert!(matches!(
         action,
         ReviewerAction::CaptureDelta {
+            repositories: None,
             scope: mj_core::relay::CaptureScope::PushableCommits,
             ..
         }
@@ -3224,7 +3320,7 @@ async fn push_override_keeps_reservation_during_save_and_drains_admitted_work_on
             .contains("review is open")
     );
     assert!(
-        host.begin_push(&session)
+        host.begin_push(&session, None)
             .await
             .unwrap_err()
             .0
@@ -3267,6 +3363,12 @@ async fn push_override_retries_after_reviewed_ref_was_recorded_but_state_save_fa
     let mut manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
     pending_push_findings(&environment);
+    environment
+        .state
+        .lock()
+        .unwrap()
+        .baselines
+        .insert(PathBuf::from("/workspace/lib"), "libtree".into());
     *environment.save_error.lock().unwrap() = Some("database busy".into());
     let host =
         TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
@@ -3292,6 +3394,11 @@ async fn push_override_retries_after_reviewed_ref_was_recorded_but_state_save_fa
             assert_eq!(
                 environment.state().baselines[&PathBuf::from("/workspace/app")],
                 "newtree"
+            );
+            // The override covered one repository; the other keeps its baseline.
+            assert_eq!(
+                environment.state().baselines[&PathBuf::from("/workspace/lib")],
+                "libtree"
             );
         }
     }
@@ -3324,7 +3431,7 @@ async fn push_override_load_waits_for_cancelled_review_open_clear_save() {
     let review = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.begin_push(&session).await })
+        tokio::spawn(async move { host.begin_push(&session, None).await })
     };
     let (_, _, capture) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
@@ -3403,7 +3510,7 @@ async fn push_review_refuses_unsupported_workers_and_non_push_sessions() {
         environment.clone(),
     );
     assert!(
-        host.begin_push(&session)
+        host.begin_push(&session, None)
             .await
             .unwrap_err()
             .0
@@ -3424,7 +3531,7 @@ async fn push_review_refuses_unsupported_workers_and_non_push_sessions() {
         .await
         .unwrap();
     assert_eq!(
-        host.begin_push(&session).await.unwrap_err().0,
+        host.begin_push(&session, None).await.unwrap_err().0,
         "the session's worker predates push review; restart the session"
     );
     assert!(!host.refuses_prompt(&session));
@@ -3480,7 +3587,7 @@ async fn push_review_refusals_leave_no_prompt_hold_or_reviewer_child() {
         TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
     let moving = crate::controller::move_session::MoveMutationGuard::reserve(&session).unwrap();
     assert_eq!(
-        host.begin_push(&session).await.unwrap_err().0,
+        host.begin_push(&session, None).await.unwrap_err().0,
         "session is moving"
     );
     drop(moving);
@@ -3506,7 +3613,7 @@ async fn push_review_refusals_leave_no_prompt_hold_or_reviewer_child() {
         let request = {
             let host = host.clone();
             let session = session.clone();
-            tokio::spawn(async move { host.begin_push(&session).await })
+            tokio::spawn(async move { host.begin_push(&session, None).await })
         };
         let (_, _, reply) = manager
             .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
