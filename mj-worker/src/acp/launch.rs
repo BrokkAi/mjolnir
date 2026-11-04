@@ -226,7 +226,7 @@ pub(super) fn session_request_meta(
         if spec
             .subagent_mcp_socket
             .as_ref()
-            .is_some_and(|socket| socket.review_gate && socket.role.supports_review())
+            .is_some_and(|socket| socket.review_gate && socket.role.supports_push_gate())
         {
             allowed.push("mcp__mj-agents__override_review".into());
         }
@@ -288,7 +288,7 @@ fn subagent_acp_mcp(spec: &LaunchSpec) -> Option<McpServer> {
         "--agent-mailboxes-enabled".into(),
         socket.agent_mailboxes_enabled.to_string(),
     ];
-    if socket.review_gate && socket.role.supports_review() {
+    if socket.review_gate && socket.role.supports_push_gate() {
         args.push("--review-gate".into());
     }
     if !socket.subtle_subagents {

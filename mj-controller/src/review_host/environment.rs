@@ -11,8 +11,8 @@ pub trait ReviewEnvironment: Send + Sync {
     fn check(&self, session_id: &str, profile: &str) -> Result<(), String>;
 
     /// Whether this session is a Mjolnir-managed sub-agent. Its changes are
-    /// reviewed through the parent's turn, so it is never reviewed on its
-    /// own. Blocking: it reads the controller's database.
+    /// included in the parent's automatic turn review; explicit commit reviews
+    /// are still allowed. Blocking: it reads the controller's database.
     fn is_subagent(&self, _session_id: &str) -> bool {
         false
     }

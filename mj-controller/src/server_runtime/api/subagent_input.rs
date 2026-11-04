@@ -88,11 +88,6 @@ impl ApiBackend {
                     "sender session {sender_for_auth} does not exist"
                 )))
             })?;
-            if state.is_subagent_session(&sender_for_auth) {
-                anyhow::bail!(mj_core::refusal::Refusal::unusable(
-                    "only a top-level session can send messages"
-                ));
-            }
             let target_id = resolve_session_target(
                 &state,
                 Some(&sender_for_auth),

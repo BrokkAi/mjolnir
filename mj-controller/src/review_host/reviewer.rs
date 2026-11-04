@@ -91,15 +91,16 @@ pub(super) async fn prepare_scoped(
     repositories: Option<Vec<std::path::PathBuf>>,
 ) -> Result<Prepared, StartRefusal> {
     let push = scope == mj_core::relay::CaptureScope::PushableCommits;
-    // A sub-agent's changes are reviewed through its parent's turn. Asking
-    // its worker for reviewer state would also race the parent's lifecycle
-    // operations on the child and surface their internal refusals.
-    let child = {
+    // Turn reviews cover children through their parent's turn. Explicit
+    // commit reviews use the child's own durable review group instead.
+    let child = if !push {
         let environment = environment.clone();
         let session = session_id.to_owned();
         tokio::task::spawn_blocking(move || environment.is_subagent(&session))
             .await
-            .unwrap_or(false)
+            .map_err(|error| StartRefusal(format!("checking review ownership: {error}")))?
+    } else {
+        false
     };
     if child {
         return Err(StartRefusal(SUBAGENT_REFUSAL.to_owned()));

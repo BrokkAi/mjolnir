@@ -892,7 +892,8 @@ pub const SUBAGENT_MCP_SERVER: &str = "mj-agents";
 
 /// Which tools a worker's `mj-agents` MCP server offers. A parent may delegate,
 /// a top-level session without Mjolnir delegation can message sessions, and a
-/// child only hands its report back.
+/// child also hands its report back. Messaging, fetch, and explicit reviews
+/// are common to every role.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentMcpRole {
@@ -906,9 +907,9 @@ pub enum SubagentMcpRole {
 }
 
 impl SubagentMcpRole {
-    /// Top-level sessions can request reviews independently of delegation policy.
+    /// Only top-level sessions enforce the automatic push-review gate.
     #[must_use]
-    pub fn supports_review(self) -> bool {
+    pub fn supports_push_gate(self) -> bool {
         matches!(self, Self::Parent | Self::MessageOnly)
     }
 
@@ -936,8 +937,8 @@ impl SubagentMcpRole {
                 "request_review",
             ],
             Self::MessageOnly => &["send_message", "fetch", "request_review"],
-            Self::FetchOnly => &["fetch"],
-            Self::Child => &["handback", "fetch"],
+            Self::FetchOnly => &["fetch", "send_message", "request_review"],
+            Self::Child => &["handback", "fetch", "send_message", "request_review"],
         }
     }
 }

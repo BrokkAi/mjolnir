@@ -2719,9 +2719,14 @@ impl State {
                 subagent.parent_session_id
             );
         }
-        if self.subagents.contains_key(&subagent.parent_session_id) {
+        if subagent.kind != crate::subagent::SubagentKind::Reviewer
+            && self.subagents.contains_key(&subagent.parent_session_id)
+        {
             bail!("sub-agent {child_id:?} cannot belong to another sub-agent");
         }
+        // The shared checkout derivation validates the complete ownership
+        // chain and rejects cycles for nested reviewer relationships.
+        self.checkout(child_id)?;
         if subagent.task_name.trim().is_empty()
             || subagent.profile_id.trim().is_empty()
             || subagent.request_key.trim().is_empty()

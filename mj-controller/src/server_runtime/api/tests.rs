@@ -2904,11 +2904,11 @@ async fn close_resolves_an_owned_child_prefix_and_persists_the_full_id() {
     ));
 }
 
+// Hard-won: 10e9fd277: common messaging was refused solely because its sender was a managed child.
 #[tokio::test]
-async fn send_message_refuses_stopped_self_foreign_child_unknown_target_and_child_sender() {
-    if !isolated_parked_test(
-        "send_message_refuses_stopped_self_foreign_child_unknown_target_and_child_sender",
-    ) {
+async fn send_message_accepts_child_senders_but_preserves_recipient_refusals() {
+    if !isolated_parked_test("send_message_accepts_child_senders_but_preserves_recipient_refusals")
+    {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
@@ -2938,6 +2938,7 @@ async fn send_message_refuses_stopped_self_foreign_child_unknown_target_and_chil
     for (sender, target, expected) in [
         ("parent-1", "stopped-peer", "stopped (suspended)"),
         ("parent-1", "parent-1", "itself"),
+        ("child-1", "child-1", "itself"),
         ("peer-1", "child-1", "another session's sub-agent"),
         (
             "parent-1",
@@ -2951,25 +2952,31 @@ async fn send_message_refuses_stopped_self_foreign_child_unknown_target_and_chil
         assert!(answer.is_error, "{sender} -> {target}: {}", answer.message);
         assert!(answer.message.contains(expected), "{}", answer.message);
     }
-    let claimed_child_sender = backend
-        .deliver_message(
-            "child-1".into(),
-            "peer-1".into(),
-            "hello".into(),
-            "claimed-child-sender".into(),
-            mj_core::clock::epoch_millis(),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        format!("{claimed_child_sender:#}").contains("only a top-level session can send messages"),
-        "{claimed_child_sender:#}"
-    );
     assert!(
         crate::database::pending_mailbox_events(10)
             .unwrap()
             .is_empty()
     );
+    let child_sender = backend
+        .deliver_message(
+            "child-1".into(),
+            "peer-1".into(),
+            "hello".into(),
+            "child-sender".into(),
+            mj_core::clock::epoch_millis(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(child_sender.via, "mailbox");
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&pending[0].event_json).unwrap();
+    assert!(matches!(event.body,
+        mj_core::mailbox::MailboxEventBody::SessionMessage {
+            from: mj_core::mailbox::Sender::Session { id, .. }, ..
+        } if id == "child-1"
+    ));
     assert!(delivered.try_recv().is_err());
 }
 

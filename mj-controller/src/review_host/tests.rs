@@ -3217,11 +3217,19 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
             Some("No findings."),
             "Review clean for commits",
         ),
+        (
+            "manualchild",
+            Some("No findings."),
+            "Review clean for commits",
+        ),
     ] {
         let session = session_id(name);
         let clean = report == Some("No findings.");
         let mut manager = FakeManager::new(&session).await;
         let environment = FakeEnvironment::new();
+        environment
+            .subagent
+            .store(name == "manualchild", std::sync::atomic::Ordering::Release);
         if name == "pushclean" {
             pending_push_findings(&environment);
             environment
@@ -3232,7 +3240,7 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
                 .insert(PathBuf::from("/workspace/lib"), "libtree".into());
         }
         let trigger = match name {
-            "manualoff" => mj_core::config::ReviewTrigger::Off,
+            "manualoff" | "manualchild" => mj_core::config::ReviewTrigger::Off,
             "manualturn" => mj_core::config::ReviewTrigger::Turn,
             _ => mj_core::config::ReviewTrigger::Push,
         };

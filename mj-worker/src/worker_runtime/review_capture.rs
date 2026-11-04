@@ -82,11 +82,10 @@ impl ReviewCapture {
         requested: Option<Vec<PathBuf>>,
     ) -> Result<RelayResponseBody> {
         anyhow::ensure!(
-            self.review_capture,
-            "this session was started without a review baseline, so a review \
+            self.review_capture || scope == mj_core::relay::CaptureScope::PushableCommits,
+            "this session was started without a review baseline, so a turn review \
              cannot tell its work from what the working tree already held; \
-             sub-agent children are never reviewed, and an ordinary session \
-             needs an eligible reviewer in Settings before it starts; resume or restart the session after configuring one"
+             configure an eligible reviewer in Settings and resume or restart the session"
         );
         let roots = self.roots();
         let cwd = self.cwd.clone();
@@ -239,6 +238,7 @@ mod tests {
         RELAY_PROTOCOL_VERSION, RelayRequest, RelayRequestEnvelope, ReviewerRequest,
     };
 
+    // Hard-won: 10e9fd277: explicit commit reviews were refused on child workers without turn baselines.
     #[tokio::test]
     async fn scoped_push_capture_ignores_dirty_root_and_accepts_linked_worktree() {
         use crate::test_support::git;
@@ -276,7 +276,7 @@ mod tests {
             session_id: "scoped-test".into(),
             cwd: root.clone(),
             additional_directories: Vec::new(),
-            review_capture: true,
+            review_capture: false,
             untracked_at_start: Default::default(),
             primary_relay: Arc::new(Mutex::new(
                 DurableRelay::open(&relay_dir, "scoped-test", "1.0.0").unwrap(),

@@ -461,10 +461,11 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
                 tools,
             )
         }
-        SubagentMcpRole::FetchOnly => (
-            "Use fetch to copy files or list paths from a Mjolnir session into your target.",
-            vec![fetch_tool()],
-        ),
+        SubagentMcpRole::FetchOnly => {
+            let mut tools = vec![fetch_tool(), send_message_tool()];
+            tools.extend(review_tool_definitions(false));
+            (MESSAGE_ONLY_INSTRUCTIONS, tools)
+        }
         SubagentMcpRole::Child => {
             let mut tools = child_tool_definitions();
             if let Some(budget) = &report_budget {
@@ -623,7 +624,7 @@ fn call_with_budget_and_options(
     let legacy_alias = params.name == "send_input"
         && matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly);
     let push_review =
-        params.name == "override_review" && role.supports_review() && options.review_gate;
+        params.name == "override_review" && role.supports_push_gate() && options.review_gate;
     if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias && !push_review {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
@@ -962,10 +963,9 @@ fn fetch_tool() -> Value {
     ))
 }
 
-/// Children can fetch shared files and hand back their report. Both tools
-/// leave the workspace unchanged, including for reviewers in plan mode.
+/// Keep handback first so the report budget can annotate it at launch.
 fn child_tool_definitions() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         read_only(tool(
             "handback",
             &format!(
@@ -975,7 +975,10 @@ fn child_tool_definitions() -> Vec<Value> {
             json!({"type":"object","properties":{"message":{"type":"string","description":"Your report, at most 4,000 characters; details go in files in your report directory."}},"required":["message"],"additionalProperties":false}),
         )),
         fetch_tool(),
-    ]
+        send_message_tool(),
+    ];
+    tools.extend(review_tool_definitions(false));
+    tools
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
@@ -1134,7 +1137,12 @@ mod tests {
     fn review_tools_send_durable_actions_with_or_without_delegation() {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
-        for role in [SubagentMcpRole::Parent, SubagentMcpRole::MessageOnly] {
+        for role in [
+            SubagentMcpRole::Parent,
+            SubagentMcpRole::MessageOnly,
+            SubagentMcpRole::Child,
+            SubagentMcpRole::FetchOnly,
+        ] {
             for (params, action, review_gate) in [
                 (
                     json!({"name":"request_review","arguments":{"path":"/workspace"}}),
@@ -1158,6 +1166,11 @@ mod tests {
                     true,
                 ),
             ] {
+                if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::FetchOnly)
+                    && params["name"] == "override_review"
+                {
+                    continue;
+                }
                 let directory = tempfile::tempdir().unwrap();
                 let socket = directory.path().join("subagents.sock");
                 let listener = UnixListener::bind(&socket).unwrap();
@@ -1243,7 +1256,7 @@ mod tests {
 
     // Hard-won: 32d96d199: push reviews granted the full parent tool catalog to sessions without delegation.
     #[test]
-    fn review_requests_are_always_offered_to_top_level_sessions_and_overrides_require_the_gate() {
+    fn every_role_gets_common_tools_and_only_flagged_primaries_get_overrides() {
         for role in [
             SubagentMcpRole::Parent,
             SubagentMcpRole::Child,
@@ -1281,10 +1294,9 @@ mod tests {
                 let tools = replies.iter().find(|r| r["id"] == 2).unwrap()["result"]["tools"]
                     .as_array()
                     .unwrap();
-                assert_eq!(
-                    tools.iter().any(|tool| tool["name"] == "request_review"),
-                    matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly)
-                );
+                for name in ["send_message", "fetch", "request_review"] {
+                    assert!(tools.iter().any(|tool| tool["name"] == name));
+                }
                 assert_eq!(
                     tools.iter().any(|tool| tool["name"] == "override_review"),
                     expected
@@ -1294,7 +1306,7 @@ mod tests {
                         .as_str()
                         .unwrap();
                 assert_eq!(instructions.contains(REVIEW_GATE_INSTRUCTIONS), expected);
-                if role == SubagentMcpRole::MessageOnly {
+                if role != SubagentMcpRole::Parent {
                     assert!(!instructions.contains(DELEGATION_ROUTING));
                     for name in ["spawn", "list_agents", "close"] {
                         assert!(tools.iter().all(|tool| tool["name"] != name));
@@ -1316,23 +1328,6 @@ mod tests {
                 }
                 if expected {
                     assert!(instructions.chars().count() <= 2048);
-                }
-                if !matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly) {
-                    assert!(
-                        call_with_budget_and_options(
-                            Path::new("unused.sock"),
-                            None,
-                            role,
-                            Some(&json!({"name":"request_review"})),
-                            &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
-                            |_| Duration::from_millis(1),
-                            ParentTools {
-                                review_gate,
-                                ..Default::default()
-                            }
-                        )
-                        .is_err()
-                    );
                 }
                 if !expected {
                     assert!(
@@ -1461,8 +1456,13 @@ mod tests {
                 match role {
                     SubagentMcpRole::FetchOnly => {
                         assert!(!instructions.contains(DELEGATION_ROUTING));
-                        assert_eq!(tools.len(), 1);
-                        assert_eq!(tools[0]["name"], "fetch");
+                        assert_eq!(
+                            tools
+                                .iter()
+                                .map(|tool| tool["name"].as_str().unwrap())
+                                .collect::<Vec<_>>(),
+                            ["fetch", "send_message", "request_review"]
+                        );
                     }
                     SubagentMcpRole::Child => {
                         assert!(!instructions.contains(DELEGATION_ROUTING));
@@ -1472,7 +1472,7 @@ mod tests {
                                 .iter()
                                 .map(|tool| tool["name"].as_str().unwrap())
                                 .collect::<Vec<_>>(),
-                            ["handback", "fetch"]
+                            ["handback", "fetch", "send_message", "request_review"]
                         );
                     }
                     SubagentMcpRole::MessageOnly => {
@@ -1954,13 +1954,16 @@ mod tests {
     }
 
     #[test]
-    fn a_child_is_offered_only_handback() {
+    fn a_child_gets_handback_and_common_tools_without_delegation() {
         let tools = child_tool_definitions();
         let names = tools
             .iter()
             .map(|tool| tool["name"].as_str().unwrap_or_default())
             .collect::<Vec<_>>();
-        assert_eq!(names, ["handback", "fetch"]);
+        assert_eq!(
+            names,
+            ["handback", "fetch", "send_message", "request_review"]
+        );
         assert_eq!(
             tools[0]["inputSchema"]["required"],
             json!(["message"]),

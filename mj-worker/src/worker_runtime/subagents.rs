@@ -114,7 +114,7 @@ pub(super) fn configure_claude_subagent_mcp(
             "--agent-mailboxes-enabled".to_owned(),
             agent_mailboxes_enabled.to_string(),
         ];
-        if review_gate && role.supports_review() {
+        if review_gate && role.supports_push_gate() {
             args.push("--review-gate".into());
         }
         if !subtle_subagents {
@@ -161,7 +161,7 @@ pub(super) fn configure_claude_subagent_mcp(
                 )
             })?;
         let mut tools = role.tool_names().to_vec();
-        if review_gate && role.supports_review() {
+        if review_gate && role.supports_push_gate() {
             tools.push("override_review");
         }
         for tool in tools {
@@ -463,7 +463,7 @@ fn configure_codex_mcp_with_mailboxes(
             "--agent-mailboxes-enabled".to_owned(),
             mailboxes_enabled.to_string(),
         ];
-        if review_gate && role.supports_review() {
+        if review_gate && role.supports_push_gate() {
             args.push("--review-gate".into());
         }
         if !subtle_subagents {
@@ -1660,7 +1660,9 @@ print(sys.argv[sys.argv.index('--role') + 1])
             [
                 "Bash(ls:*)",
                 "mcp__mj-agents__handback",
-                "mcp__mj-agents__fetch"
+                "mcp__mj-agents__fetch",
+                "mcp__mj-agents__send_message",
+                "mcp__mj-agents__request_review"
             ]
         );
         assert_eq!(
@@ -2783,13 +2785,12 @@ mod review_gate_tests {
                 let settings: serde_json::Value =
                     serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap())
                         .unwrap();
-                assert_eq!(
+                assert!(
                     settings["permissions"]["allow"]
                         .as_array()
                         .unwrap()
                         .iter()
-                        .any(|value| value == "mcp__mj-agents__request_review"),
-                    matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly)
+                        .any(|value| value == "mcp__mj-agents__request_review")
                 );
                 assert_eq!(
                     settings["permissions"]["allow"]
