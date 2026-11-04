@@ -1,36 +1,58 @@
+=== running review opens virtual workspace (80x16) ===
+╭ Conversation · Reviewing ────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                   ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ the reviewer is reading the change… ─────────────────────────────────────────╮
+│  Forward findings     Dismiss     Cancel                                     │
+│                                                                              │
+│                                                                              │
+╰ Reviewers · 1 › ─────────────────────────────────────────────────────────────╯
+Down review controls · Enter act │ ctrl+b then q detach · : / ? palette
+primary width: Some(76)
+captures pointer: true
+click: OpenReviewers
+keyboard: OpenReviewers
+
 === findings default action (64x14) ===
-╭ Conversation · Reviewing ────╮╭ Turn review · findings ──────╮
-│ No messages yet — send a pro▐││Reviewer running Verdict      │
-│                             ▐││[P1] src/lib.rs:1 -- unbounded│
-│                             ▐││retry                         │
-│                             ▐││                              │
-│                             ▐││                              │
-╰──────────────────────────────╯╰──────────────────────────────╯
-  ●··········· Reviewing
-  Forward findings     Dismiss     Cancel      Enter to act · Ta
-
-
-
-
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+╭ Turn review · findings ──────────────────────────────────────╮
+│Reviewer running Verdict                                      │
+│[P1] src/lib.rs:1 -- unbounded retry                          │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+╭ Enter to act · Tab changes view ─────────────────────────────╮
+│  Forward findings     Dismiss     Cancel                     │
+│                                                              │
+│                                                              │
+╰ Reviewers · 1 › ─────────────────────────────────────────────╯
+Down review controls │ ctrl+b then q detach · : / ? palette
 selected action: Some(Some(Forward))
 action: TurnReview(Resolve(Forwarded))
 
 === failed verdict allowed actions (64x14) ===
-╭ Conversation · Reviewing ────╮╭ Turn review · failed ────────╮
-│ No messages yet — send a pro▐││Reviewer running Verdict      │
-│                             ▐││reviewer exited with 1        │
-│                             ▐││                              │
-│                             ▐││                              │
-│                             ▐││                              │
-╰──────────────────────────────╯╰──────────────────────────────╯
-  ●··········· Reviewing
-  Forward findings     Dismiss     Cancel      Enter to act · Ta
-
-
-
-
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+╭ Turn review · failed ────────────────────────────────────────╮
+│Reviewer running Verdict                                      │
+│reviewer exited with 1                                        │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+╭ Enter to act · Tab changes view ─────────────────────────────╮
+│  Forward findings     Dismiss     Cancel                     │
+│                                                              │
+│                                                              │
+╰ Reviewers · 1 › ─────────────────────────────────────────────╯
+Down review controls │ ctrl+b then q detach · : / ? palette
 selected action: Some(Some(Dismiss))
 allowed actions: Some([(Forward, false), (Dismiss, true), (Cancel, true)])
 action: TurnReview(Resolve(Dismissed))
@@ -52,20 +74,20 @@ action: TurnReview(Resolve(Dismissed))
 ╰──────────────────────────────────────────────────────────────╯
 
 === verdict selects first enabled action and panel (64x14) ===
-╭ Conversation · Reviewing ────╮╭ Turn review · findings ──────╮
-│ No messages yet — send a pro▐││Reviewer running Verdict      │
-│                             ▐││[P1] src/lib.rs:1 -- unbounded│
-│                             ▐││retry                         │
-│                             ▐││                              │
-│                             ▐││                              │
-╰──────────────────────────────╯╰──────────────────────────────╯
-  ●··········· Reviewing
-  Forward findings     Dismiss     Cancel      Enter to act · Ta
-
-
-
-
-Tab pane · Cmd-V paste │ ctrl+b then q detach · : / ? palette
+╭ Turn review · findings ──────────────────────────────────────╮
+│Reviewer running Verdict                                      │
+│[P1] src/lib.rs:1 -- unbounded retry                          │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+╭ Enter to act · Tab changes view ─────────────────────────────╮
+│  Forward findings     Dismiss     Cancel                     │
+│                                                              │
+│                                                              │
+╰ Reviewers · 1 › ─────────────────────────────────────────────╯
+Down review controls │ ctrl+b then q detach · : / ? palette
 selected action: Some(Some(Forward))
 verdict selected: true
 

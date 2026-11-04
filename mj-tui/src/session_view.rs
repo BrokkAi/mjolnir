@@ -443,7 +443,7 @@ impl DashboardState {
                 self.sessions_filter.revision(),
                 self.sessions_text.revision(),
                 self.active_workspace_id.revision(),
-                self.subagent_parent_id.revision(),
+                self.child_workspace.revision(),
                 self.collapsed_project_keys.revision(),
             ],
             selected: self.selected_session_id().map(str::to_owned),

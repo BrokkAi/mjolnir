@@ -105,6 +105,10 @@ impl DashboardContext {
     /// the first one's conversation. The prompt border's click and the
     /// Sub-agents command both come here.
     pub(crate) fn open_subagents(&mut self, parent_id: String) {
+        self.open_child_workspace(parent_id, mj_core::subagent::SubagentKind::Worker);
+    }
+
+    fn open_child_workspace(&mut self, parent_id: String, kind: mj_core::subagent::SubagentKind) {
         self.capture_composer_draft(&parent_id);
         // Stopped children are not among the live sessions whose summaries
         // load at startup, so their rows would say "No messages yet". Read
@@ -114,7 +118,7 @@ impl DashboardContext {
             .state
             .subagents
             .values()
-            .filter(|child| child.parent_session_id == parent_id)
+            .filter(|child| child.parent_session_id == parent_id && child.kind == kind)
             .filter_map(|child| self.controller.state.sessions.get(&child.child_session_id))
             .filter(|session| !session.state.is_active())
             .map(|session| (session.id.clone(), session.viewed_through_event_ordinal))
@@ -126,7 +130,14 @@ impl DashboardContext {
                 self.dashboard_io_tx.clone(),
             );
         }
-        self.dashboard.open_subagent_workspace(parent_id);
+        match kind {
+            mj_core::subagent::SubagentKind::Worker => {
+                self.dashboard.open_subagent_workspace(parent_id)
+            }
+            mj_core::subagent::SubagentKind::Reviewer => {
+                self.dashboard.open_reviewer_workspace(parent_id)
+            }
+        }
         if let Some(child_id) = self.dashboard.selected_session_id().map(str::to_owned) {
             self.open_chat_session(&child_id);
         }
@@ -145,6 +156,13 @@ impl DashboardContext {
                     return;
                 };
                 self.open_subagents(parent_id);
+            }
+            mj_chat::chat::ChatEventOutcome::OpenReviewers => {
+                let Some(parent_id) = self.focused_chat().map(|chat| chat.session_id().to_owned())
+                else {
+                    return;
+                };
+                self.open_child_workspace(parent_id, mj_core::subagent::SubagentKind::Reviewer);
             }
             mj_chat::chat::ChatEventOutcome::RecallQueuedPrompt {
                 session_id,

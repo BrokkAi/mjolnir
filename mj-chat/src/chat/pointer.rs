@@ -124,6 +124,12 @@ impl ChatState {
         {
             return true;
         }
+        if self
+            .reviewer_control_area
+            .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
+        {
+            return true;
+        }
         if self.voice_form.captures_pointer()
             || self
                 .voice_button_area
@@ -214,7 +220,7 @@ impl ChatState {
         }
         // The topmost form receives the gesture before selection, scrollbars,
         // or a review pane. This also lets reviewer elicitations stay above
-        // their split while a stale scrollbar is being redrawn.
+        // the review while a stale scrollbar is being redrawn.
         if let Some(dialog) = self.elicitation.as_mut() {
             let over_form = dialog.component_handles_mouse_at(mouse.column, mouse.row);
             let over_message = dialog
@@ -328,6 +334,43 @@ impl ChatState {
         {
             return ChatAction::OpenSubagents;
         }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self
+                .reviewer_control_area
+                .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
+        {
+            return ChatAction::OpenReviewers;
+        }
+        if self.turn_review_active() {
+            let (handled, action) = self.handle_turn_review_mouse(mouse);
+            if handled {
+                return action;
+            }
+            if self
+                .reviewer_area
+                .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
+            {
+                let rows = isize::try_from(MOUSE_SCROLL_ROWS).unwrap_or(1);
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.scroll_turn_review(-rows);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.scroll_turn_review(rows);
+                    }
+                    _ => {}
+                }
+                return ChatAction::None;
+            }
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                && self
+                    .turn_review_action_areas
+                    .iter()
+                    .any(|(_, area)| area.contains(Position::new(mouse.column, mouse.row)))
+            {
+                return self.click_turn_review_action(mouse.column, mouse.row);
+            }
+        }
         if self.handle_transcript_scrollbar_mouse(mouse) {
             return ChatAction::None;
         }
@@ -350,43 +393,6 @@ impl ChatState {
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && self.toggle_transcript_at(mouse.column, mouse.row)
         {
-            return ChatAction::None;
-        }
-        // Hover decides which transcript scrolls while the split is up, so a
-        // reviewer answer never moves the reader's place in the primary.
-        if self.turn_review_split() {
-            let (component_handled, component_action) = self.handle_turn_review_mouse(mouse);
-            if component_handled {
-                return component_action;
-            }
-            let over_reviewer = self
-                .reviewer_area
-                .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)));
-            let rows = isize::try_from(MOUSE_SCROLL_ROWS).unwrap_or(1);
-            match (mouse.kind, over_reviewer) {
-                (MouseEventKind::ScrollUp, true) => {
-                    self.scroll_turn_review(-rows);
-                }
-                (MouseEventKind::ScrollDown, true) => {
-                    self.scroll_turn_review(rows);
-                }
-                (MouseEventKind::ScrollUp, false) => {
-                    self.scroll_history_up(MOUSE_SCROLL_ROWS);
-                }
-                (MouseEventKind::ScrollDown, false) => {
-                    self.scroll_history_down(MOUSE_SCROLL_ROWS);
-                }
-                (MouseEventKind::Down(MouseButton::Left), _) => {
-                    return self.click_turn_review_action(mouse.column, mouse.row);
-                }
-                _ => {}
-            }
-            return ChatAction::None;
-        }
-        // Setup modals do not enter the split branch above, but they still
-        // own the pane and must not expose a stale prompt hitbox from the
-        // preceding draw.
-        if self.turn_review_active() {
             return ChatAction::None;
         }
         // The model and effort chips sit on the prompt border next to the

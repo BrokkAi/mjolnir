@@ -215,6 +215,7 @@ impl DashboardContext {
             },
             harness_kind: Some(session_record.harness_kind),
             subagent_count: self.dashboard.subagent_count_for(&session_record.id),
+            reviewer_count: self.dashboard.reviewer_count_for(&session_record.id),
         };
         let sessions = self.worker_commands_tx.clone();
         let notices = self.notices.clone();

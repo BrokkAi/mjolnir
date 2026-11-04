@@ -2409,6 +2409,50 @@ fn dashboard_with_subagents(children: &[&str]) -> (DashboardState, String) {
     (dashboard, parent)
 }
 
+#[test]
+fn reviewer_workspace_filters_child_kinds_and_returns_through_nested_workspaces() {
+    use mj_core::subagent::SubagentKind;
+    let (mut dashboard, parent) = dashboard_with_subagents(&["worker-a", "reviewer-a"]);
+    let mut state = dashboard.state.clone();
+    state.subagents.get_mut("reviewer-a").unwrap().kind = SubagentKind::Reviewer;
+    dashboard.set_state(state);
+    dashboard.open_subagent_workspace(parent.clone());
+    assert_eq!(
+        dashboard
+            .ordered_sessions()
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        ["worker-a"]
+    );
+    dashboard.open_reviewer_workspace(parent.clone());
+    assert_eq!(
+        dashboard
+            .ordered_sessions()
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        ["reviewer-a"]
+    );
+    assert_eq!(dashboard.selected_session_id(), Some("reviewer-a"));
+    let text = crate::test_support::drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(text.contains("Reviewers"), "{text}");
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::ExitSubagentWorkspace
+    );
+    dashboard.close_subagent_workspace();
+    assert_eq!(dashboard.selected_session_id(), Some(parent.as_str()));
+    assert_eq!(dashboard.subagent_parent_id(), None);
+
+    // A reviewer's own child workspace returns to Reviewers, not Subagents.
+    dashboard.open_subagent_workspace("reviewer-a".into());
+    dashboard.close_subagent_workspace();
+    assert!(dashboard.reviewers_workspace_open());
+    assert_eq!(dashboard.subagent_parent_id(), Some(parent.as_str()));
+    assert_eq!(dashboard.selected_session_id(), Some("reviewer-a"));
+}
+
 fn set_cpu(dashboard: &mut DashboardState, entries: &[(&str, u16, u16)]) {
     let mut cpu = mj_core::snapshot_map::SnapshotMap::new();
     for (id, recent, hourly) in entries {

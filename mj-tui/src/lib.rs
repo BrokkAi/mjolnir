@@ -1133,7 +1133,7 @@ pub struct DashboardState {
     /// The local filter applied to the one global live session feed.
     active_workspace_id: Tracked<Option<String>>,
     /// Parent whose direct children temporarily replace the ordinary workspace tabs.
-    subagent_parent_id: Tracked<Option<String>>,
+    child_workspace: Tracked<Option<ChildWorkspace>>,
     pub(crate) native_agents: Tracked<BTreeMap<String, native_agents::NativeAgentPane>>,
     pub(crate) session_cpu: Tracked<
         mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>,
@@ -1209,6 +1209,7 @@ mod pane_controls;
 pub use dashboard_sessions::{AttentionEntry, AttentionLevel, InterruptAllTargets};
 mod dashboard_standby;
 mod dashboard_workspaces;
+use dashboard_workspaces::ChildWorkspace;
 pub use dashboard_workspaces::StoppedBySuspend;
 mod native_agents;
 mod session_cpu_report;
@@ -1345,7 +1346,7 @@ impl DashboardState {
             workspace_names: BTreeMap::new(),
             workspace_order: vec![mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()],
             active_workspace_id: Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()).into(),
-            subagent_parent_id: Default::default(),
+            child_workspace: Default::default(),
             native_agents: Default::default(),
             session_cpu: Default::default(),
             native_sources: Default::default(),

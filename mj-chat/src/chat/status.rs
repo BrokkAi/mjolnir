@@ -242,8 +242,8 @@ impl ChatState {
         if self.session_activity != activity {
             self.session_activity = activity;
         }
-        if self.background_task_count() == 0 && self.task_control_focused {
-            self.task_control_focused = false;
+        if self.background_task_count() == 0 && self.task_control_focused() {
+            self.prompt_control_focus = None;
         }
     }
 
@@ -282,21 +282,33 @@ impl ChatState {
     pub fn set_subagent_count(&mut self, count: usize) {
         if self.subagent_count != count {
             self.subagent_count = count;
-            if count == 0 {
-                self.subagent_control_focused = false;
+            if count == 0 && self.subagent_control_focused() {
+                self.prompt_control_focus = None;
             }
         }
     }
 
     #[must_use]
     pub(crate) fn subagent_control_focused(&self) -> bool {
-        self.subagent_control_focused
+        self.prompt_control_focus == Some(PromptControl::Subagents)
     }
 
     pub(crate) fn focus_subagent_control(&mut self) {
-        if self.subagent_count > 0 && !self.subagent_control_focused {
-            self.task_control_focused = false;
-            self.subagent_control_focused = true;
+        if self.subagent_count > 0 && !self.subagent_control_focused() {
+            self.prompt_control_focus = Some(PromptControl::Subagents);
+        }
+    }
+
+    pub fn set_reviewer_count(&mut self, count: usize) {
+        self.reviewer_count = count;
+        if count == 0 && self.prompt_control_focus == Some(PromptControl::Reviewers) {
+            self.prompt_control_focus = None;
+        }
+    }
+
+    pub(crate) fn focus_reviewer_control(&mut self) {
+        if self.reviewer_count > 0 {
+            self.prompt_control_focus = Some(PromptControl::Reviewers);
         }
     }
 
@@ -341,7 +353,7 @@ impl ChatState {
 
     #[must_use]
     pub(crate) fn task_control_focused(&self) -> bool {
-        self.task_control_focused
+        self.prompt_control_focus == Some(PromptControl::Tasks)
     }
 
     #[must_use]
@@ -362,15 +374,15 @@ impl ChatState {
     }
 
     pub(crate) fn focus_task_control(&mut self) {
-        if self.background_task_count() > 0 && !self.task_control_focused {
-            self.task_control_focused = true;
+        if self.background_task_count() > 0 && !self.task_control_focused() {
+            self.prompt_control_focus = Some(PromptControl::Tasks);
         }
     }
 
     pub(crate) fn open_task_dialog(&mut self) {
         if self.background_task_count() > 0 && !self.task_dialog_open {
             self.task_dialog_open = true;
-            self.task_control_focused = false;
+            self.prompt_control_focus = None;
             self.task_dialog_scroll = 0;
             self.task_dialog_max_scroll = 0;
         }

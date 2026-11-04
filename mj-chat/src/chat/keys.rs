@@ -33,13 +33,6 @@ impl ChatState {
         // wait for ever.
         let reviewing = !self.reviewer_elicitation_open();
 
-        // A turn review owns the pane on the same terms. Its actions are the
-        // only input while it is unresolved, which is what holds the primary
-        // agent still until the user has answered the findings.
-        if reviewing && self.turn_review_active() {
-            return self.handle_turn_review_event(key);
-        }
-
         if let Some(dialog) = self.elicitation.as_mut() {
             if code == KeyCode::Char('v')
                 && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
@@ -107,10 +100,10 @@ impl ChatState {
             return self.handle_config_picker_event(key);
         }
 
-        if self.task_control_focused {
+        if self.task_control_focused() {
             match code {
                 KeyCode::Esc | KeyCode::Up => {
-                    self.task_control_focused = false;
+                    self.prompt_control_focus = None;
                 }
                 KeyCode::Enter => {
                     self.open_task_dialog();
@@ -120,9 +113,13 @@ impl ChatState {
                     self.focus_subagent_control();
                     return ChatAction::None;
                 }
+                KeyCode::Right if self.reviewer_count > 0 => {
+                    self.focus_reviewer_control();
+                    return ChatAction::None;
+                }
                 KeyCode::Down => return ChatAction::None,
                 _ => {
-                    self.task_control_focused = false;
+                    self.prompt_control_focus = None;
                 }
             }
             if code == KeyCode::Esc || code == KeyCode::Up {
@@ -130,25 +127,65 @@ impl ChatState {
             }
         }
 
-        if self.subagent_control_focused {
+        if self.subagent_control_focused() {
             match code {
                 KeyCode::Esc | KeyCode::Up => {
-                    self.subagent_control_focused = false;
+                    self.prompt_control_focus = None;
                 }
                 KeyCode::Enter => return ChatAction::OpenSubagents,
                 KeyCode::Left if self.background_task_count() > 0 => {
-                    self.subagent_control_focused = false;
+                    self.prompt_control_focus = None;
                     self.focus_task_control();
+                    return ChatAction::None;
+                }
+                KeyCode::Right if self.reviewer_count > 0 => {
+                    self.focus_reviewer_control();
                     return ChatAction::None;
                 }
                 KeyCode::Down => return ChatAction::None,
                 _ => {
-                    self.subagent_control_focused = false;
+                    self.prompt_control_focus = None;
                 }
             }
             if code == KeyCode::Esc || code == KeyCode::Up {
                 return ChatAction::None;
             }
+        }
+
+        if self.prompt_control_focus == Some(PromptControl::Reviewers) {
+            match code {
+                KeyCode::Enter => return ChatAction::OpenReviewers,
+                KeyCode::Left if self.subagent_count > 0 => {
+                    self.focus_subagent_control();
+                    return ChatAction::None;
+                }
+                KeyCode::Left if self.background_task_count() > 0 => {
+                    self.focus_task_control();
+                    return ChatAction::None;
+                }
+                KeyCode::Down | KeyCode::Right => return ChatAction::None,
+                KeyCode::Esc | KeyCode::Up => {
+                    self.prompt_control_focus = None;
+                    return ChatAction::None;
+                }
+                _ => self.prompt_control_focus = None,
+            }
+        }
+        if reviewing && self.turn_review_active() && code == KeyCode::Down {
+            if self.background_task_count() > 0 {
+                self.focus_task_control();
+            } else if self.subagent_count > 0 {
+                self.focus_subagent_control();
+            } else {
+                self.focus_reviewer_control();
+            }
+            return ChatAction::None;
+        }
+        // A turn review owns the pane on the same terms. Its actions are the
+        // only input while it is unresolved, which is what holds the primary
+        // agent still until the user has answered the findings.
+        if reviewing && self.turn_review_active() {
+            return self.handle_turn_review_event(key);
         }
 
         if code == KeyCode::Char('v')
@@ -360,12 +397,16 @@ impl ChatState {
                 if self.history_index.is_some() {
                     self.move_history(1);
                 } else if self.cursor_is_on_last_prompt_line()
-                    && (self.background_task_count() > 0 || self.subagent_count > 0)
+                    && (self.background_task_count() > 0
+                        || self.subagent_count > 0
+                        || self.reviewer_count > 0)
                 {
                     if self.background_task_count() > 0 {
                         self.focus_task_control();
-                    } else {
+                    } else if self.subagent_count > 0 {
                         self.focus_subagent_control();
+                    } else {
+                        self.focus_reviewer_control();
                     }
                 } else {
                     self.move_vertical(1);

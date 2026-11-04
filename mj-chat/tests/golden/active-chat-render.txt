@@ -675,7 +675,7 @@ rule style fg=Rgb(62, 74, 78) bg=Rgb(15, 18, 20) modifiers=NONE
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Rgb(239, 237, 232) bg=Rgb(42, 58, 57) modifiers=BOLD tasks=" Tasks (1) › " fg=Rgb(239, 237, 232) bg=Rgb(42, 58, 57) modifiers=BOLD
 
@@ -702,9 +702,9 @@ subagents=" Subagents · 0 › " fg=Rgb(239, 237, 232) bg=Rgb(42, 58, 57) modifi
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Rgb(15, 18, 20) bg=Rgb(157, 229, 202) modifiers=BOLD tasks fg=Rgb(15, 18, 20) bg=Rgb(157, 229, 202) modifiers=BOLD
+subagents fg=Rgb(15, 18, 20) bg=Rgb(157, 229, 202) modifiers=BOLD tasks fg=Rgb(239, 237, 232) bg=Rgb(42, 58, 57) modifiers=BOLD
 
 === Light theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -729,7 +729,7 @@ subagents fg=Rgb(15, 18, 20) bg=Rgb(157, 229, 202) modifiers=BOLD tasks fg=Rgb(1
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Rgb(38, 51, 46) bg=Rgb(214, 229, 220) modifiers=BOLD tasks=" Tasks (1) › " fg=Rgb(38, 51, 46) bg=Rgb(214, 229, 220) modifiers=BOLD
 
@@ -756,9 +756,9 @@ subagents=" Subagents · 0 › " fg=Rgb(38, 51, 46) bg=Rgb(214, 229, 220) modifi
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Rgb(242, 241, 237) bg=Rgb(35, 104, 77) modifiers=BOLD tasks fg=Rgb(242, 241, 237) bg=Rgb(35, 104, 77) modifiers=BOLD
+subagents fg=Rgb(242, 241, 237) bg=Rgb(35, 104, 77) modifiers=BOLD tasks fg=Rgb(38, 51, 46) bg=Rgb(214, 229, 220) modifiers=BOLD
 
 === Darcula theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -783,7 +783,7 @@ subagents fg=Rgb(242, 241, 237) bg=Rgb(35, 104, 77) modifiers=BOLD tasks fg=Rgb(
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Rgb(169, 183, 198) bg=Rgb(39, 55, 78) modifiers=BOLD tasks=" Tasks (1) › " fg=Rgb(169, 183, 198) bg=Rgb(39, 55, 78) modifiers=BOLD
 
@@ -810,9 +810,9 @@ subagents=" Subagents · 0 › " fg=Rgb(169, 183, 198) bg=Rgb(39, 55, 78) modifi
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Rgb(43, 43, 43) bg=Rgb(112, 183, 255) modifiers=BOLD tasks fg=Rgb(43, 43, 43) bg=Rgb(112, 183, 255) modifiers=BOLD
+subagents fg=Rgb(43, 43, 43) bg=Rgb(112, 183, 255) modifiers=BOLD tasks fg=Rgb(169, 183, 198) bg=Rgb(39, 55, 78) modifiers=BOLD
 
 === High Contrast theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -837,7 +837,7 @@ subagents fg=Rgb(43, 43, 43) bg=Rgb(112, 183, 255) modifiers=BOLD tasks fg=Rgb(4
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Rgb(255, 255, 255) bg=Rgb(38, 38, 38) modifiers=BOLD tasks=" Tasks (1) › " fg=Rgb(255, 255, 255) bg=Rgb(38, 38, 38) modifiers=BOLD
 
@@ -864,9 +864,9 @@ subagents=" Subagents · 0 › " fg=Rgb(255, 255, 255) bg=Rgb(38, 38, 38) modifi
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Rgb(0, 0, 0) bg=Rgb(26, 235, 255) modifiers=BOLD tasks fg=Rgb(0, 0, 0) bg=Rgb(26, 235, 255) modifiers=BOLD
+subagents fg=Rgb(0, 0, 0) bg=Rgb(26, 235, 255) modifiers=BOLD tasks fg=Rgb(255, 255, 255) bg=Rgb(38, 38, 38) modifiers=BOLD
 
 === High Contrast Light theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -891,7 +891,7 @@ subagents fg=Rgb(0, 0, 0) bg=Rgb(26, 235, 255) modifiers=BOLD tasks fg=Rgb(0, 0,
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Rgb(0, 0, 0) bg=Rgb(222, 222, 222) modifiers=BOLD tasks=" Tasks (1) › " fg=Rgb(0, 0, 0) bg=Rgb(222, 222, 222) modifiers=BOLD
 
@@ -918,9 +918,9 @@ subagents=" Subagents · 0 › " fg=Rgb(0, 0, 0) bg=Rgb(222, 222, 222) modifiers
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Rgb(255, 255, 255) bg=Rgb(0, 60, 168) modifiers=BOLD tasks fg=Rgb(255, 255, 255) bg=Rgb(0, 60, 168) modifiers=BOLD
+subagents fg=Rgb(255, 255, 255) bg=Rgb(0, 60, 168) modifiers=BOLD tasks fg=Rgb(0, 0, 0) bg=Rgb(222, 222, 222) modifiers=BOLD
 
 === Colorblind Dark theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -945,7 +945,7 @@ subagents fg=Rgb(255, 255, 255) bg=Rgb(0, 60, 168) modifiers=BOLD tasks fg=Rgb(2
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Rgb(239, 237, 232) bg=Rgb(38, 50, 62) modifiers=BOLD tasks=" Tasks (1) › " fg=Rgb(239, 237, 232) bg=Rgb(38, 50, 62) modifiers=BOLD
 
@@ -972,9 +972,9 @@ subagents=" Subagents · 0 › " fg=Rgb(239, 237, 232) bg=Rgb(38, 50, 62) modifi
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Rgb(15, 18, 20) bg=Rgb(86, 180, 233) modifiers=BOLD tasks fg=Rgb(15, 18, 20) bg=Rgb(86, 180, 233) modifiers=BOLD
+subagents fg=Rgb(15, 18, 20) bg=Rgb(86, 180, 233) modifiers=BOLD tasks fg=Rgb(239, 237, 232) bg=Rgb(38, 50, 62) modifiers=BOLD
 
 === Colorblind Light theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -999,7 +999,7 @@ subagents fg=Rgb(15, 18, 20) bg=Rgb(86, 180, 233) modifiers=BOLD tasks fg=Rgb(15
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Rgb(38, 51, 46) bg=Rgb(224, 231, 241) modifiers=BOLD tasks=" Tasks (1) › " fg=Rgb(38, 51, 46) bg=Rgb(224, 231, 241) modifiers=BOLD
 
@@ -1026,9 +1026,9 @@ subagents=" Subagents · 0 › " fg=Rgb(38, 51, 46) bg=Rgb(224, 231, 241) modifi
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Rgb(242, 241, 237) bg=Rgb(0, 106, 170) modifiers=BOLD tasks fg=Rgb(242, 241, 237) bg=Rgb(0, 106, 170) modifiers=BOLD
+subagents fg=Rgb(242, 241, 237) bg=Rgb(0, 106, 170) modifiers=BOLD tasks fg=Rgb(38, 51, 46) bg=Rgb(224, 231, 241) modifiers=BOLD
 
 === Catppuccin Mocha theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -1053,7 +1053,7 @@ subagents fg=Rgb(242, 241, 237) bg=Rgb(0, 106, 170) modifiers=BOLD tasks fg=Rgb(
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Rgb(205, 214, 244) bg=Rgb(53, 55, 72) modifiers=BOLD tasks=" Tasks (1) › " fg=Rgb(205, 214, 244) bg=Rgb(53, 55, 72) modifiers=BOLD
 
@@ -1080,9 +1080,9 @@ subagents=" Subagents · 0 › " fg=Rgb(205, 214, 244) bg=Rgb(53, 55, 72) modifi
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Rgb(30, 30, 46) bg=Rgb(203, 166, 247) modifiers=BOLD tasks fg=Rgb(30, 30, 46) bg=Rgb(203, 166, 247) modifiers=BOLD
+subagents fg=Rgb(30, 30, 46) bg=Rgb(203, 166, 247) modifiers=BOLD tasks fg=Rgb(205, 214, 244) bg=Rgb(53, 55, 72) modifiers=BOLD
 
 === Catppuccin Latte theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -1107,7 +1107,7 @@ subagents fg=Rgb(30, 30, 46) bg=Rgb(203, 166, 247) modifiers=BOLD tasks fg=Rgb(3
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Rgb(76, 79, 105) bg=Rgb(222, 224, 230) modifiers=BOLD tasks=" Tasks (1) › " fg=Rgb(76, 79, 105) bg=Rgb(222, 224, 230) modifiers=BOLD
 
@@ -1134,9 +1134,9 @@ subagents=" Subagents · 0 › " fg=Rgb(76, 79, 105) bg=Rgb(222, 224, 230) modif
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Rgb(239, 241, 245) bg=Rgb(128, 45, 229) modifiers=BOLD tasks fg=Rgb(239, 241, 245) bg=Rgb(128, 45, 229) modifiers=BOLD
+subagents fg=Rgb(239, 241, 245) bg=Rgb(128, 45, 229) modifiers=BOLD tasks fg=Rgb(76, 79, 105) bg=Rgb(222, 224, 230) modifiers=BOLD
 
 === Campbell theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -1161,7 +1161,7 @@ subagents fg=Rgb(239, 241, 245) bg=Rgb(128, 45, 229) modifiers=BOLD tasks fg=Rgb
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Rgb(204, 204, 204) bg=Rgb(23, 42, 84) modifiers=BOLD tasks=" Tasks (1) › " fg=Rgb(204, 204, 204) bg=Rgb(23, 42, 84) modifiers=BOLD
 
@@ -1188,9 +1188,9 @@ subagents=" Subagents · 0 › " fg=Rgb(204, 204, 204) bg=Rgb(23, 42, 84) modifi
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Rgb(12, 12, 12) bg=Rgb(97, 214, 214) modifiers=BOLD tasks fg=Rgb(12, 12, 12) bg=Rgb(97, 214, 214) modifiers=BOLD
+subagents fg=Rgb(12, 12, 12) bg=Rgb(97, 214, 214) modifiers=BOLD tasks fg=Rgb(204, 204, 204) bg=Rgb(23, 42, 84) modifiers=BOLD
 
 === One Half Dark theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -1215,7 +1215,7 @@ subagents fg=Rgb(12, 12, 12) bg=Rgb(97, 214, 214) modifiers=BOLD tasks fg=Rgb(12
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Rgb(220, 223, 228) bg=Rgb(52, 64, 84) modifiers=BOLD tasks=" Tasks (1) › " fg=Rgb(220, 223, 228) bg=Rgb(52, 64, 84) modifiers=BOLD
 
@@ -1242,9 +1242,9 @@ subagents=" Subagents · 0 › " fg=Rgb(220, 223, 228) bg=Rgb(52, 64, 84) modifi
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Rgb(40, 44, 52) bg=Rgb(94, 186, 197) modifiers=BOLD tasks fg=Rgb(40, 44, 52) bg=Rgb(94, 186, 197) modifiers=BOLD
+subagents fg=Rgb(40, 44, 52) bg=Rgb(94, 186, 197) modifiers=BOLD tasks fg=Rgb(220, 223, 228) bg=Rgb(52, 64, 84) modifiers=BOLD
 
 === One Half Light theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -1269,7 +1269,7 @@ subagents fg=Rgb(40, 44, 52) bg=Rgb(94, 186, 197) modifiers=BOLD tasks fg=Rgb(40
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Rgb(56, 58, 66) bg=Rgb(222, 230, 242) modifiers=BOLD tasks=" Tasks (1) › " fg=Rgb(56, 58, 66) bg=Rgb(222, 230, 242) modifiers=BOLD
 
@@ -1296,9 +1296,9 @@ subagents=" Subagents · 0 › " fg=Rgb(56, 58, 66) bg=Rgb(222, 230, 242) modifi
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Rgb(250, 250, 250) bg=Rgb(1, 108, 154) modifiers=BOLD tasks fg=Rgb(250, 250, 250) bg=Rgb(1, 108, 154) modifiers=BOLD
+subagents fg=Rgb(250, 250, 250) bg=Rgb(1, 108, 154) modifiers=BOLD tasks fg=Rgb(56, 58, 66) bg=Rgb(222, 230, 242) modifiers=BOLD
 
 === Solarized Dark theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -1323,7 +1323,7 @@ subagents fg=Rgb(250, 250, 250) bg=Rgb(1, 108, 154) modifiers=BOLD tasks fg=Rgb(
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Rgb(238, 232, 213) bg=Rgb(12, 66, 80) modifiers=BOLD tasks=" Tasks (1) › " fg=Rgb(238, 232, 213) bg=Rgb(12, 66, 80) modifiers=BOLD
 
@@ -1350,9 +1350,9 @@ subagents=" Subagents · 0 › " fg=Rgb(238, 232, 213) bg=Rgb(12, 66, 80) modifi
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Rgb(0, 43, 54) bg=Rgb(91, 183, 176) modifiers=BOLD tasks fg=Rgb(0, 43, 54) bg=Rgb(91, 183, 176) modifiers=BOLD
+subagents fg=Rgb(0, 43, 54) bg=Rgb(91, 183, 176) modifiers=BOLD tasks fg=Rgb(238, 232, 213) bg=Rgb(12, 66, 80) modifiers=BOLD
 
 === Solarized Light theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -1377,7 +1377,7 @@ subagents fg=Rgb(0, 43, 54) bg=Rgb(91, 183, 176) modifiers=BOLD tasks fg=Rgb(0, 
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Rgb(7, 54, 66) bg=Rgb(229, 222, 196) modifiers=BOLD tasks=" Tasks (1) › " fg=Rgb(7, 54, 66) bg=Rgb(229, 222, 196) modifiers=BOLD
 
@@ -1404,9 +1404,9 @@ subagents=" Subagents · 0 › " fg=Rgb(7, 54, 66) bg=Rgb(229, 222, 196) modifie
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Rgb(253, 246, 227) bg=Rgb(28, 108, 102) modifiers=BOLD tasks fg=Rgb(253, 246, 227) bg=Rgb(28, 108, 102) modifiers=BOLD
+subagents fg=Rgb(253, 246, 227) bg=Rgb(28, 108, 102) modifiers=BOLD tasks fg=Rgb(7, 54, 66) bg=Rgb(229, 222, 196) modifiers=BOLD
 
 === Terminal Dark theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -1431,7 +1431,7 @@ subagents fg=Rgb(253, 246, 227) bg=Rgb(28, 108, 102) modifiers=BOLD tasks fg=Rgb
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Reset bg=Reset modifiers=BOLD | REVERSED tasks=" Tasks (1) › " fg=Reset bg=Reset modifiers=BOLD | REVERSED
 
@@ -1458,9 +1458,9 @@ subagents=" Subagents · 0 › " fg=Reset bg=Reset modifiers=BOLD | REVERSED tas
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Indexed(6) bg=Reset modifiers=BOLD | REVERSED tasks fg=Indexed(6) bg=Reset modifiers=BOLD | REVERSED
+subagents fg=Indexed(6) bg=Reset modifiers=BOLD | REVERSED tasks fg=Reset bg=Reset modifiers=BOLD | REVERSED
 
 === Terminal Light theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -1485,7 +1485,7 @@ subagents fg=Indexed(6) bg=Reset modifiers=BOLD | REVERSED tasks fg=Indexed(6) b
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Reset bg=Reset modifiers=BOLD | REVERSED tasks=" Tasks (1) › " fg=Reset bg=Reset modifiers=BOLD | REVERSED
 
@@ -1512,9 +1512,9 @@ subagents=" Subagents · 0 › " fg=Reset bg=Reset modifiers=BOLD | REVERSED tas
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
-subagents fg=Indexed(4) bg=Reset modifiers=BOLD | REVERSED tasks fg=Indexed(4) bg=Reset modifiers=BOLD | REVERSED
+subagents fg=Indexed(4) bg=Reset modifiers=BOLD | REVERSED tasks fg=Reset bg=Reset modifiers=BOLD | REVERSED
 
 === Monochrome theme: neutral navigation controls (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
@@ -1539,7 +1539,7 @@ subagents fg=Indexed(4) bg=Reset modifiers=BOLD | REVERSED tasks fg=Indexed(4) b
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents=" Subagents · 0 › " fg=Reset bg=Reset modifiers=BOLD | REVERSED tasks=" Tasks (1) › " fg=Reset bg=Reset modifiers=BOLD | REVERSED
 
@@ -1566,7 +1566,7 @@ subagents=" Subagents · 0 › " fg=Reset bg=Reset modifiers=BOLD | REVERSED tas
 │> What would you like to build?                                                                   │
 │                                                                                                  │
 │                                                                                                  │
-╰ Tasks (1) ›  · Subagents · 0 › ─────────────────────────────────────── Enter  send   /  commands ╯
+╰ Tasks (1) ›  · Subagents · 0 ›  · Reviewers · 1 › ──────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 subagents fg=Reset bg=Reset modifiers=BOLD | REVERSED tasks fg=Reset bg=Reset modifiers=BOLD | REVERSED
 

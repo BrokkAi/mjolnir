@@ -1,0 +1,65 @@
+# Open autoreview conversations through a Reviewers control
+
+This living ExecPlan follows `.agents/PLANS.md`.
+
+## Purpose / Big Picture
+
+Autoreview should use the same child-session workspace as subagents. Users click Reviewers on the prompt's bottom border to read full reviewer conversations, then return through the existing workspace close control or Escape in the Sessions list. The parent conversation keeps review status and resolution actions. Its transcript uses the full width while reviewing; a verdict uses the full width when it needs a decision.
+
+## Progress
+
+- [x] (2026-11-04) Trace review rendering, child kinds, workspace navigation and golden coverage.
+- [x] (2026-11-04) Extend the shared virtual workspace to select workers or reviewers with one navigation state.
+- [x] (2026-11-04) Add the prompt control, mouse and keyboard routing, and remove split rendering.
+- [x] (2026-11-04) Extend golden and navigation regression coverage; run affected crate suites and workspace clippy. The only failures are three existing CLI workspace-startup tests, detailed below.
+- [x] (2026-11-04) Review the integrated diff and prepare the validated implementation for commit. Publication requires the pre-push review described below.
+
+## Surprises & Discoveries
+
+Golden fixtures require TZ=UTC; a first run without it changed unrelated timestamps, which were restored. A rendered running review needs an explicit neutral focus stop; without it the form selected Cancel. The existing harmless-Enter regression now renders first and protects this condition.
+
+Reviewer sessions already use `SubagentKind::Reviewer` in durable child relations. Existing workspace membership and counts combine these with ordinary workers. Mjolnir delegation is disabled for this session (spawn returned that explicit error), so implementation and validation run in the parent.
+
+## Decision Log
+
+Use the durable child kind to filter one shared workspace implementation. Store parent and kind together, so membership and return navigation cannot disagree. Preserve the daemon-owned synchronous review and its resolution actions. The full-width verdict remains in the parent; reviewer conversations open as ordinary session panes.
+
+## Outcomes & Retrospective
+
+Reviewers now opens the shared child workspace filtered to reviewer records; worker children remain in Subagents. Both share selection, scrolling, draft retention and parent-return navigation. The split layout is gone. The parent transcript stays full width while review runs; findings and failures use the full width when a verdict arrives. One prompt-focus enum prevents simultaneous focus on multiple border controls.
+
+Validation: 420 chat tests, 562 TUI tests and 231 CLI unit tests passed (existing ignored tests remain ignored). CLI integration results: ACP 2 passed/1 failed; daemon startup 15 passed/2 failed; instance 4 passed; logging 2 passed; store divergence 3 passed; terminal PTY 14 passed. The three failures are the unchanged tests `an_unknown_workspace_is_refused_at_start_from_the_store_without_a_daemon`, `new_without_a_workspace_refuses_without_starting_a_daemon`, and `new_with_an_unknown_workspace_refuses_without_starting_a_daemon`. They expect direct workspace listing from the store without a daemon. The unchanged `listed_workspaces_without_starting` in `mj-cli/src/main.rs` explicitly only asks an existing daemon and returns None when none runs; this source mismatch explains all three. The ACP failure repeated in isolation. No startup or integration-test source was changed for this task.
+
+Both final workspace clippy and rustfmt checks passed. Logs are `/tmp/reviewers-tests.log`, `/tmp/reviewers-chat-final.log`, `/tmp/reviewers-cli-integration.log`, `/tmp/reviewers-cli-remaining.log`, `/tmp/reviewers-acp-retry.log` and `/tmp/reviewers-clippy-final.log`. The macOS golden variants were synchronized after verifying their only platform difference is Ctrl-V versus Cmd-V; they have not been executed on macOS.
+
+## Context and Orientation
+
+`mj-chat/src/chat/active/render.rs` currently divides the transcript into primary/reviewer halves and replaces the composer with actions. `mj-chat/src/chat/turn_review.rs` owns the projected review state, rendering and resolution input. `mj-tui/src/dashboard_workspaces.rs` opens a virtual workspace (a Sessions list filtered to one parent's children rather than a stored workspace). `mj-tui/src/dashboard_sessions.rs` supplies its rows, and `mj-tui/src/workspaces.rs` draws its return control. `mj-cli/src/dashboard/chat_tasks.rs` connects chat outcomes to workspace navigation. Child records in `mj_core::subagent` distinguish Worker and Reviewer.
+
+## Plan of Work
+
+First extend the virtual workspace state with a child kind and reuse its selection, scrolling and return logic. Keep ordinary subagent counts separate from reviewers. Then add Reviewers to the shared prompt border controls, route it through chat outcomes to the shared workspace, and render review content at full width. Retain findings, failure notices and resolution behavior. Update existing golden cases and add coverage for mixed child kinds and nested return navigation.
+
+## Concrete Steps
+
+From the repository root, edit the three crates described above. Run focused tests during fixes with `cargo test -p <crate> <filter>`. Run final `TZ=UTC cargo test -p brokk-mj-chat -p brokk-mj-tui -p brokk-mjolnir` and `cargo clippy --all-targets -- -D warnings` in the dev profile outside the sandbox. Use existing isolated test data directories; any live invocation must use `--instance reviewers-workspace`. Do not change build storage or Cargo configuration.
+
+## Validation and Acceptance
+
+Golden output shows no side-by-side primary/reviewer split and shows Reviewers on the prompt border. Mouse and keyboard activation produce the reviewer workspace outcome. Mixed worker/reviewer records produce disjoint workspace lists; closing a reviewer workspace restores its parent and the correct enclosing workspace. Findings and review failures remain readable and actionable. All touched crate tests and workspace clippy pass.
+
+## Idempotence and Recovery
+
+No store, protocol or configuration changes are needed. Tests use isolated state. Stage only task-owned changes, commit on the current branch, request the required review, then push HEAD to origin/master. If upstream moved, fetch and merge origin/master before retrying.
+
+## Artifacts and Notes
+
+The existing review golden is `mj-chat/tests/golden/turn-review-pane.txt`; platform variants use `-macos.txt`. Extend the existing test rather than adding a family of examples.
+
+## Interfaces and Dependencies
+
+Reuse `SubagentKind`, `DashboardState` child navigation, `ChatAction`/`ChatEventOutcome`, ratatui and existing review actions. Introduce no crates or external dependencies.
+
+Initial plan recorded after tracing the existing implementation.
+
+Completion note: the plan now records the implemented behavior, targeted focus and pointer-routing corrections, and the unrelated startup-test limitation. Git commit, required review and publication follow as delivery operations.

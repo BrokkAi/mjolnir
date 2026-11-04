@@ -1057,7 +1057,15 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         dashboard.subagent_workspace_close_area = Some(close_area);
         let label_area = Rect::new(inner.x, inner.y, inner.width.saturating_sub(close_width), 1);
         frame.render_widget(
-            Paragraph::new(workspace_label(title, label_area.width)).style(theme::selection(true)),
+            Paragraph::new(workspace_label(
+                &if dashboard.reviewers_workspace_open() {
+                    format!("Reviewers · {title}")
+                } else {
+                    title.to_owned()
+                },
+                label_area.width,
+            ))
+            .style(theme::selection(true)),
             label_area,
         );
         frame.render_widget(

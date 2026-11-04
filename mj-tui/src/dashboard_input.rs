@@ -446,7 +446,7 @@ impl DashboardState {
             // Inside a session's sub-agents, Escape on their list goes back
             // to the parent, the same as the X on the workspace strip.
             (KeyCode::Esc, _)
-                if self.focus == Focus::Sessions && self.subagent_parent_id.is_some() =>
+                if self.focus == Focus::Sessions && self.child_workspace.is_some() =>
             {
                 self.record_event_handled();
                 return DashboardAction::ExitSubagentWorkspace;

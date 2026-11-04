@@ -12,7 +12,7 @@ use crate::theme;
 use anyhow::Result;
 use crossterm::event::Event;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Padding, Paragraph, Wrap};
@@ -46,8 +46,6 @@ use super::rendering::{
     voice_button_glyph, voice_button_line, wrap_styled_line,
 };
 
-#[cfg(test)]
-use super::PromptPayload;
 use super::composer::ComposerIoUpdate;
 #[cfg(test)]
 use super::composer::{AttachmentResult, MAX_ATTACHMENT_TASKS};
@@ -57,6 +55,8 @@ use super::{
     ChatRegions, ChatSessionContext, ChatState, MOUSE_SCROLL_ROWS, Notices, SessionHeaderIdentity,
     queued_prompt_preview,
 };
+#[cfg(test)]
+use super::{PromptControl, PromptPayload};
 #[cfg(test)]
 use crate::clipboard::ClipboardContent;
 
@@ -656,6 +656,7 @@ impl ActiveChat {
         };
         state.set_history_context(&bundle_id);
         state.set_subagent_count(header.subagent_count);
+        state.set_reviewer_count(header.reviewer_count);
         state.set_header_summary(header.target, header.profile, header.title);
         state.restore_draft(draft);
         state.notices = notices;

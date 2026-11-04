@@ -1,8 +1,8 @@
-//! The chat's turn-review view: the split pane a completed turn is reviewed in.
+//! The parent conversation's review status, verdict and resolution controls.
 //!
-//! The reviewer's conversation sits beside the primary's, with actions in
-//! place of the composer. A review ends by forwarding findings, dismissing
-//! them, or cancelling.
+//! Reviewers opens full conversations in the dashboard's child workspace.
+//! The parent keeps its status and resolution actions, and shows findings at
+//! full width. A review ends by forwarding findings, dismissing them, or cancelling.
 //!
 //! The review itself runs in the controller daemon
 //! (`mj_core::review::host`), not here. This module is a projection of it:
@@ -112,7 +112,7 @@ pub(super) struct TurnReview {
     verdict_total_rows: usize,
     verdict_viewport_height: usize,
     /// The progress tab is short in a normal pane but remains scrollable when
-    /// a split is only a few rows high.
+    /// the view is only a few rows high.
     overview_viewport: RowViewport,
     overview_total_rows: usize,
     overview_viewport_height: usize,
@@ -134,6 +134,20 @@ impl std::fmt::Debug for TurnReview {
 }
 
 impl TurnReview {
+    pub(super) fn begin_actions_frame(&mut self) {
+        self.form.begin_frame();
+        // Keep the neutral keyboard stop when the running review has no
+        // visible tabs. Otherwise form reconciliation would select Cancel.
+        self.form.declare(
+            ReviewControl::Tabs,
+            ControlKind::Tabs {
+                len: 0,
+                selected: 0,
+            },
+        );
+        self.component_ready = true;
+    }
+
     fn preferred_action(view: &RuntimeReviewView) -> Option<ReviewAction> {
         // A running review must not make an accidental Enter a cancellation;
         // explicit arrow navigation or the Cancel button can still pick it.
@@ -522,11 +536,6 @@ impl super::ChatState {
         self.turn_review.is_some()
     }
 
-    /// Whether the split is up, which is when the transcript shares the frame.
-    pub(super) fn turn_review_split(&self) -> bool {
-        self.turn_review.is_some()
-    }
-
     pub(super) fn turn_review(&self) -> Option<&TurnReview> {
         self.turn_review.as_deref()
     }
@@ -769,7 +778,7 @@ impl super::ChatState {
     }
 }
 
-/// Draws the turn-review split's reviewer side. A verdict gets its own
+/// Draws the full-width review verdict. A verdict gets its own
 /// wrapped panel so findings and failure reasons remain readable even when
 /// the reviewer's journal is empty. The transcript remains reachable through
 /// Tab.
@@ -1296,6 +1305,7 @@ mod tests {
     fn enter_is_harmless_until_a_verdict_arrives() {
         let mut chat = chat();
         chat.set_turn_review(Some(running_view()));
+        let _ = review_golden_buffer(&mut chat, 80, 16);
         // Repeated Enter presses do not turn the absence of a selected action
         // into a cancellation request.
         assert_eq!(chat.turn_review().map(|review| review.action), Some(None));
@@ -1441,10 +1451,46 @@ mod tests {
         use mj_core::state::{TranscriptBody, TranscriptItem};
 
         fn fresh_chat() -> super::super::ChatState {
-            chat()
+            let mut chat = chat();
+            chat.set_reviewer_count(1);
+            chat
         }
 
         let mut output = String::new();
+
+        let mut running = fresh_chat();
+        running.set_turn_review(Some(running_view()));
+        let buffer = review_golden_buffer(&mut running, 80, 16);
+        let primary_width = running
+            .frame_surfaces
+            .surface(crate::selection::SurfaceId::Transcript)
+            .map(|surface| surface.rect.width);
+        let reviewer = running
+            .reviewer_control_area
+            .expect("reviewer button on prompt border");
+        let mouse = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: reviewer.x,
+            row: reviewer.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let captures_pointer = running.component_handles_mouse(mouse);
+        let clicked = running.handle_mouse(mouse);
+        running.handle_key(key(KeyCode::Down));
+        let keyboard = running.handle_key(key(KeyCode::Enter));
+        append_review_golden_state(
+            &mut output,
+            "running review opens virtual workspace",
+            80,
+            16,
+            &buffer,
+            &[
+                format!("primary width: {primary_width:?}"),
+                format!("captures pointer: {captures_pointer}"),
+                format!("click: {clicked:?}"),
+                format!("keyboard: {keyboard:?}"),
+            ],
+        );
 
         let mut chat = fresh_chat();
         chat.set_turn_review(Some(findings_view()));
@@ -1647,7 +1693,7 @@ mod tests {
         assert!(chat.turn_review_active());
         chat.set_turn_review(None);
         assert!(!chat.turn_review_active());
-        assert!(!chat.turn_review_split());
+        assert!(!chat.turn_review_active());
     }
 
     /// A form asked by the reviewer is answered back to that reviewer.
