@@ -181,19 +181,6 @@ pub(crate) fn spawn_workspace_management_load(
     })
 }
 
-/// Stored layouts of these workspaces, read by the daemon, which alone opens
-/// the store. Called from blocking tasks.
-fn stored_workspace_layouts(
-    workspace_ids: Vec<String>,
-) -> Result<mj_client::daemon::WorkspaceLayouts> {
-    mj_core::runtime::block_on(async {
-        daemon::connect_or_start()
-            .await?
-            .workspace_layouts(workspace_ids)
-            .await
-    })?
-}
-
 /// Reads layouts for workspace ids discovered after the dashboard opened.
 /// Loading is deliberately separate from the runtime snapshot so a late
 /// result cannot overwrite a pane size the local client already edited.
@@ -201,11 +188,15 @@ pub(crate) fn spawn_workspace_pane_sizes_load(
     workspace_ids: Vec<String>,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) -> JoinHandle<()> {
-    spawn_io(
+    spawn_background_async(
         "load workspace pane sizes",
         updates,
-        move || {
-            Ok(stored_workspace_layouts(workspace_ids)?
+        SAVE_ACK_TIMEOUT,
+        async move {
+            Ok(daemon::connect_or_start()
+                .await?
+                .workspace_layouts(workspace_ids)
+                .await?
                 .pane_sizes
                 .into_iter()
                 .collect())
@@ -220,11 +211,15 @@ pub(crate) fn spawn_workspace_layouts_load(
     workspace_ids: Vec<String>,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) -> JoinHandle<()> {
-    spawn_io(
+    spawn_background_async(
         "load workspace layouts",
         updates,
-        move || {
-            Ok(stored_workspace_layouts(workspace_ids)?
+        SAVE_ACK_TIMEOUT,
+        async move {
+            Ok(daemon::connect_or_start()
+                .await?
+                .workspace_layouts(workspace_ids)
+                .await?
                 .conversation_layouts
                 .into_iter()
                 .collect())
@@ -718,19 +713,18 @@ pub(crate) fn spawn_setup_save(
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
-    spawn_critical_io(
+    spawn_critical_async(
         tracker,
         "saving setup",
         updates,
-        move || {
+        SAVE_ACK_TIMEOUT,
+        async move {
             // The daemon checks the edit against the stored sessions it would
             // disturb; only it opens the store.
-            mj_core::runtime::block_on(async {
-                daemon::connect_or_start()
-                    .await?
-                    .save_setup(original, updated)
-                    .await
-            })?
+            daemon::connect_or_start()
+                .await?
+                .save_setup(original, updated)
+                .await
         },
         move |result| DashboardIoUpdate::SetupSaved {
             generation,
@@ -888,16 +882,15 @@ pub(crate) fn spawn_stopped_subagent_transcript(
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
     let reported_session_id = session_id.clone();
-    spawn_io(
+    spawn_background_async(
         "load a stopped sub-agent's transcript",
         updates,
-        move || {
-            mj_core::runtime::block_on(async {
-                daemon::connect_or_start()
-                    .await?
-                    .stored_projection_tail(session_id, mj_chat::chat::TAIL_SEED_ITEMS)
-                    .await
-            })?
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .stored_projection_tail(session_id, mj_chat::chat::TAIL_SEED_ITEMS)
+                .await
         },
         move |result| DashboardIoUpdate::StoppedSubagentTranscript {
             session_id: reported_session_id,
@@ -912,21 +905,26 @@ pub(crate) fn spawn_stored_session_summary(
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
     let reported_session_id = session_id.clone();
-    spawn_io(
+    spawn_background_async(
         "load stored session summary",
         updates,
-        move || {
-            let summary = mj_core::runtime::block_on(async {
-                daemon::connect_or_start()
-                    .await?
-                    .stored_session_summary(session_id.clone())
-                    .await
-            })??
-            .with_context(|| format!("session {session_id} has no stored projection"))?;
-            Ok(PreparedMaterializedSessionSummary::from_materialized(
-                summary,
-                viewed_through_event_ordinal,
-            ))
+        SAVE_ACK_TIMEOUT,
+        async move {
+            let summary = daemon::connect_or_start()
+                .await?
+                .stored_session_summary(session_id.clone())
+                .await?
+                .with_context(|| format!("session {session_id} has no stored projection"))?;
+            // Only CPU preparation needs a blocking thread. Acquiring one
+            // while awaiting the connection can starve its metadata read.
+            tokio::task::spawn_blocking(move || {
+                PreparedMaterializedSessionSummary::from_materialized(
+                    summary,
+                    viewed_through_event_ordinal,
+                )
+            })
+            .await
+            .context("prepare stored session summary task failed")
         },
         move |result| DashboardIoUpdate::StoredSessionSummary {
             session_id: reported_session_id,
@@ -939,10 +937,11 @@ pub(crate) fn spawn_lifecycle_reload(
     reload: LifecycleReload,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
-    spawn_io(
+    spawn_background_async(
         "reload lifecycle state",
         updates,
-        crate::dashboard::io::stored_session_metadata,
+        SAVE_ACK_TIMEOUT,
+        crate::dashboard::io::stored_session_metadata(),
         move |result| {
             DashboardIoUpdate::LifecycleReloaded(Box::new(LifecycleReloaded { reload, result }))
         },
@@ -1066,11 +1065,12 @@ pub(crate) fn spawn_dashboard_container_settings(
     tracker: CriticalOperationTracker,
 ) {
     let session_id = request.session_id.clone();
-    spawn_critical_io(
+    spawn_critical_async(
         tracker,
         format!("saving container settings for {}", short_id(&session_id)),
         updates,
-        move || {
+        SAVE_ACK_TIMEOUT,
+        async move {
             let ContainerSettingsRequest {
                 session_id,
                 cpus,
@@ -1078,22 +1078,20 @@ pub(crate) fn spawn_dashboard_container_settings(
                 additional_mounts,
                 mount_history,
             } = request;
-            mj_core::runtime::block_on(async {
-                daemon::connect_or_start()
-                    .await?
-                    .set_session_container_settings(
-                        session_id,
-                        cpus,
-                        memory,
-                        additional_mounts,
-                        mount_history,
-                    )
-                    .await
-            })??;
+            daemon::connect_or_start()
+                .await?
+                .set_session_container_settings(
+                    session_id,
+                    cpus,
+                    memory,
+                    additional_mounts,
+                    mount_history,
+                )
+                .await?;
             // Return a fresh durable snapshot so the dashboard can update its
             // state without synchronously reloading the database while it is
             // applying the worker result.
-            crate::dashboard::io::stored_session_metadata()
+            crate::dashboard::io::stored_session_metadata().await
         },
         move |result| DashboardIoUpdate::ContainerSettings { session_id, result },
     );

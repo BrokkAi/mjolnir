@@ -1,9 +1,8 @@
 //! One-shot background jobs the dashboard starts and the updates they report.
 //!
-//! Each job runs on a blocking task and answers over the dashboard's single
-//! [`DashboardIoUpdate`] channel, so no filesystem, database, or process work
-//! ever happens on the render loop. Failures travel as `Err` payloads rather
-//! than being dropped.
+//! Network jobs run as async tasks; synchronous work uses blocking tasks.
+//! Both answer over the dashboard's single [`DashboardIoUpdate`] channel,
+//! keeping work off the render loop and reporting failures as `Err` payloads.
 
 mod spawn;
 pub(crate) use spawn::*;
@@ -549,16 +548,13 @@ impl From<mj_client::daemon::StoredSessionMetadata> for DashboardMetadata {
     }
 }
 
-/// The store's session metadata, read by the daemon, which alone opens the
-/// store. Called from blocking tasks.
-pub(crate) fn stored_session_metadata() -> Result<DashboardMetadata> {
-    mj_core::runtime::block_on(async {
-        crate::daemon::connect_or_start()
-            .await?
-            .stored_session_metadata()
-            .await
-    })?
-    .map(DashboardMetadata::from)
+/// The store's session metadata, read by the daemon, which alone opens the store.
+pub(crate) async fn stored_session_metadata() -> Result<DashboardMetadata> {
+    crate::daemon::connect_or_start()
+        .await?
+        .stored_session_metadata()
+        .await
+        .map(DashboardMetadata::from)
 }
 
 impl DashboardMetadata {
@@ -2394,6 +2390,61 @@ mod tests {
             .is_err()
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    // Hard-won: 0bd61a289: summary hydration exhausted the blocking pool while awaiting nested metadata reads.
+    #[test]
+    fn stored_summary_bursts_leave_the_blocking_pool_available() {
+        const CHILD: &str = "MJ_TEST_SUMMARY_BLOCKING_POOL";
+        const TEST: &str =
+            "dashboard::io::tests::stored_summary_bursts_leave_the_blocking_pool_available";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        // Refuse before startup can launch anything. Even this refusal needs
+        // connection metadata, just as successful summary reads do.
+        let metadata = daemon::DaemonMetadata {
+            protocol_version: daemon::PROTOCOL_VERSION + 1,
+            pid: std::process::id(),
+            address: "127.0.0.1:1".parse().unwrap(),
+            token: "summary-pool-test".into(),
+            started_at: "2026-11-04T00:00:00Z".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+        };
+        std::fs::write(
+            daemon::metadata_path(),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let completed = runtime.block_on(async {
+            let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
+            for id in 0..64 {
+                spawn_stored_session_summary(id.to_string(), 0, updates.clone());
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                for _ in 0..64 {
+                    let Some(DashboardIoUpdate::StoredSessionSummary { result, .. }) =
+                        results.recv().await
+                    else {
+                        panic!("expected a summary result")
+                    };
+                    assert!(result.is_err(), "the newer daemon must be refused");
+                }
+                // Attachment renewal and chat preparation need this pool too.
+                tokio::task::spawn_blocking(|| ()).await.unwrap();
+            })
+            .await
+        });
+        // A regression must fail without hanging runtime shutdown on the
+        // deadlocked blocking task.
+        runtime.shutdown_timeout(Duration::from_secs(1));
+        completed.expect("summary network waits must not starve connection metadata reads");
     }
 
     #[test]
