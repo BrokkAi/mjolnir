@@ -92,11 +92,11 @@ pub(crate) fn attention_level(
         // A parked sub-agent is idle by definition: its turn ended, its parent
         // was told, and it has no worker to report anything else.
         SessionState::Parked => return AttentionLevel::Idle,
-        SessionState::Stopped
-        | SessionState::Provisioning
+        SessionState::Stopped => return AttentionLevel::Inactive,
+        SessionState::Provisioning
         | SessionState::Checkpointing
         | SessionState::Closing
-        | SessionState::Destroying => return AttentionLevel::Inactive,
+        | SessionState::Destroying => return AttentionLevel::Working,
         SessionState::Running => {}
     }
     if unreachable {

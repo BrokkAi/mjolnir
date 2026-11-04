@@ -1123,6 +1123,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
     );
 }
 
+// Hard-won: 6eb3146b8: provisioning children were hidden by the default not-idle scope.
 #[test]
 fn subagent_scope_filters_attention_without_selecting_an_idle_child() {
     let (mut dashboard, parent) = dashboard_with_one_subagent();
@@ -1137,6 +1138,10 @@ fn subagent_scope_filters_attention_without_selecting_an_idle_child() {
         ("c-working", false),
         ("d-blocked", false),
         ("e-unread", false),
+        ("f-provisioning", false),
+        ("g-checkpointing", false),
+        ("h-closing", false),
+        ("i-destroying", false),
     ] {
         let mut child = template.clone();
         child.id = id.into();
@@ -1147,6 +1152,14 @@ fn subagent_scope_filters_attention_without_selecting_an_idle_child() {
         child_relation.child_session_id = child.id.clone();
         state.subagents.insert(child.id.clone(), child_relation);
         state.sessions.insert(child.id.clone(), child);
+    }
+    for (id, lifecycle) in [
+        ("f-provisioning", SessionState::Provisioning),
+        ("g-checkpointing", SessionState::Checkpointing),
+        ("h-closing", SessionState::Closing),
+        ("i-destroying", SessionState::Destroying),
+    ] {
+        state.sessions.get_mut(id).unwrap().state = lifecycle;
     }
     dashboard.set_state(state);
     dashboard
@@ -1185,14 +1198,40 @@ fn subagent_scope_filters_attention_without_selecting_an_idle_child() {
         dashboard.sessions_filter.as_ref().unwrap().state,
         Some(SessionStateFilter::NotIdle)
     );
-    assert_eq!(ids(&dashboard), ["c-working", "d-blocked", "e-unread"]);
+    assert_eq!(
+        ids(&dashboard),
+        [
+            "c-working",
+            "d-blocked",
+            "e-unread",
+            "f-provisioning",
+            "g-checkpointing",
+            "h-closing",
+            "i-destroying"
+        ]
+    );
     assert_ne!(dashboard.selected_session_id(), Some("a-idle"));
     assert_ne!(dashboard.selected_session_id(), Some("b-parked"));
+
+    dashboard.handle_key(key(KeyCode::Char('w')));
+    assert_eq!(
+        ids(&dashboard),
+        [
+            "c-working",
+            "f-provisioning",
+            "g-checkpointing",
+            "h-closing",
+            "i-destroying"
+        ],
+        "Working includes lifecycle states even without local operation overlays"
+    );
+    dashboard.handle_key(key(KeyCode::Char('I')));
+    assert_eq!(ids(&dashboard).len(), 7);
 
     dashboard.handle_key(key(KeyCode::Char('a')));
     assert_eq!(
         ids(&dashboard).len(),
-        5,
+        9,
         "All reveals idle and parked children"
     );
     dashboard.close_subagent_workspace();
@@ -1206,7 +1245,7 @@ fn subagent_scope_filters_attention_without_selecting_an_idle_child() {
         dashboard.sessions_filter.is_none(),
         "the child's explicit All survives reopening"
     );
-    assert_eq!(ids(&dashboard).len(), 5);
+    assert_eq!(ids(&dashboard).len(), 9);
 }
 
 #[test]

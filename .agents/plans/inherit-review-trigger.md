@@ -32,6 +32,10 @@ After this change, reviewer options without `--review` inherit the configured tr
 - [x] (2026-11-04) Move the mandatory compatibility check to an independently supervised task and cancel optional target refresh on shutdown. All three store-divergence integration cases passed; strict breaking-revision exit passed in under one second.
 - [x] (2026-11-04) Repair isolated PTY profile/tool fixtures and implement completion of unnecessary first-run setup without leaving Welcome open or replacing another dialog.
 - [x] (2026-11-04) Pass nine PTY cases, all four Welcome dialog cases, final workspace Clippy, and formatting. The merged implementation is ready for the merge commit and renewed review.
+- [x] (2026-11-04) Commit the integration as `491e7a15f` and request renewed review against upstream `5238411cd`.
+- [x] (2026-11-04) Address the second review's lifecycle finding in canonical attention and extend the existing child-scope workflow for all four lifecycle states; the focused regression passed.
+- [x] (2026-11-04) Pass final terminal suite (570 passed, two ignored), workspace Clippy, and formatting for the lifecycle correction.
+- [ ] Commit the lifecycle correction, obtain a clean before-push review, and push.
 
 ## Surprises & Discoveries
 
@@ -149,3 +153,9 @@ Revision note (2026-11-04): Merged core/client/controller/CLI-library suites and
 Revision note (2026-11-04): Fixed mandatory schema-check scheduling and optional refresh cancellation; the strict exit test and all store-divergence cases pass. PTY fixtures now provide actual profile homes and required host commands. A separate production bug opened Welcome before the setup RPC and never retired it on a no-setup result; the completion transition and dialog-ordering regression are implemented. The nine PTY failures and final lint are being rerun before merge delivery.
 
 Revision note (2026-11-04): All remaining PTY, Welcome, and store-divergence regressions passed, and final workspace Clippy/formatting are clean. The integration is ready to commit and undergo renewed before-push review.
+
+Revision note (2026-11-04): Integration was committed as 491e7a15f. Renewed review found an active lifecycle child could inherit Inactive attention without a local operation and be hidden. The correction belongs in canonical attention classification, preserving a single owner rather than adding a filter-specific busy predicate.
+
+Revision note (2026-11-04): Provisioning, checkpointing, closing, and destroying now carry Working attention from their lifecycle state; stopped stays Inactive. The existing child-scope workflow covers all four without local overlays and passed. Full terminal validation and lint are running before the correction commit and renewed review.
+
+Revision note (2026-11-04): All 570 terminal tests passed (two ignored), as did final workspace Clippy and formatting. Parent reviewed the final diff; the only edit during lint was moving the hard-won comment immediately above its test attribute, with no behavioral change. The correction is ready to commit and review.
