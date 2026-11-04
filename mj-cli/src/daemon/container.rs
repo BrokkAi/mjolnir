@@ -53,6 +53,7 @@ const NOT_FORWARDED: &[&str] = &[
     "CONTAINER_HOST",
     "MJ_UPGRADE_RESUME_FILE",
     super::DAEMON_CONTAINER_ENV,
+    super::DAEMON_CONTAINER_RUNTIME_ENV,
     super::DEV_RESTART_STALE_DAEMON_ENV,
 ];
 
@@ -411,6 +412,18 @@ fn short_digest(bytes: &[u8]) -> String {
     digest[..12].to_owned()
 }
 
+/// Stop the daemon's container when it does not answer the protocol stop.
+pub(super) async fn stop(runtime: DaemonRuntime, name: &str) -> Result<()> {
+    let program = runtime
+        .engine()
+        .context("the daemon container has no engine")?;
+    let output = engine(program, ["stop", name], QUERY_TIMEOUT).await?;
+    if !output.status.success() {
+        return Err(failure(program, &format!("stop {name}"), &output));
+    }
+    Ok(())
+}
+
 async fn engine(
     program: &str,
     args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
@@ -579,6 +592,7 @@ async fn exec_daemon(program: &str, spec: &ContainerSpec, log_path: &Path) -> Re
         args.push(entry);
     }
     args.push(format!("--env={}={}", super::DAEMON_CONTAINER_ENV, spec.name).into());
+    args.push(format!("--env={}={program}", super::DAEMON_CONTAINER_RUNTIME_ENV).into());
     args.push(format!("--workdir={}", spec.home.display()).into());
     args.push(spec.name.clone().into());
     args.extend(["bash".into(), "-c".into(), LAUNCH_SCRIPT.into()]);

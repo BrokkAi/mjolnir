@@ -12,6 +12,8 @@ fn newer_daemon_protocol_requires_updating_the_client() {
         token: "tok".into(),
         started_at: "2026-09-01T07:48:14Z".into(),
         build_version: "9.9.9".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     assert!(ensure_supported_daemon_protocol(&metadata(PROTOCOL_VERSION)).is_ok());
     assert!(ensure_supported_daemon_protocol(&metadata(PROTOCOL_VERSION - 1)).is_ok());
@@ -1276,6 +1278,8 @@ pub(super) fn test_metadata(address: SocketAddr) -> DaemonMetadata {
         token: "right-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     }
 }
 
@@ -1618,6 +1622,8 @@ async fn daemon_stops_serving_data_actions_once_shutdown_begins() {
         token: "right-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     let cancellation = CancellationToken::new();
     cancellation.cancel();
@@ -1693,6 +1699,8 @@ async fn management_stop_is_bounded_when_the_daemon_never_acknowledges() {
         token: "test-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     let mut client = ManagementClient::new(DaemonClient::connect(metadata).await.unwrap());
     let (mut peer, _) = listener.accept().await.unwrap();
@@ -1718,6 +1726,8 @@ async fn daemon_rejects_a_request_with_the_wrong_owner_token() {
         token: "right-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     let server_metadata = metadata.clone();
     let server = tokio::spawn(async move {
@@ -1757,6 +1767,8 @@ async fn the_daemon_rejects_a_client_one_protocol_behind_before_dispatch() {
         token: "right-token".into(),
         started_at: "now".into(),
         build_version: "test".into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
     };
     let server_metadata = metadata.clone();
     let server = tokio::spawn(async move {
@@ -1858,6 +1870,8 @@ async fn daemon_serves_management_actions_for_any_protocol_version() {
             token: "right-token".into(),
             started_at: "now".into(),
             build_version: "test".into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         let server_metadata = metadata.clone();
         let server = tokio::spawn(async move {
@@ -2224,6 +2238,8 @@ async fn management_client_talks_to_every_released_protocol_version() {
             token: "tok".into(),
             started_at: "2026-09-01T07:48:14Z".into(),
             build_version: daemon_build.into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         let mut client = ManagementClient::new(DaemonClient::connect(metadata).await.unwrap());
         let status = client.status().await.unwrap();

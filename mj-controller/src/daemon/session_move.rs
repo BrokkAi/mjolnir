@@ -619,6 +619,8 @@ mod admission_tests {
             token: "right-token".into(),
             started_at: "now".into(),
             build_version: "test".into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         }
     }
 

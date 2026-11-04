@@ -133,6 +133,24 @@ pub(super) async fn run_daemon_runtime(
         // The version, with the revision and build times as semver build
         // metadata that older clients ignore; see `mj_client::build_identity`.
         build_version: mj_client::build_identity::this_build().published(),
+        // This is the daemon's own answer to "which start are you": a fresh
+        // random value every time the process starts, so a client can tell a
+        // replacement from the daemon it was talking to without a PID.
+        instance_id: random_hex::<16>()?,
+        // The launcher names the container in the environment. Keeping this
+        // answer in the daemon means clients no longer read `/proc`.
+        placement: match mj_core::config::env_override("DAEMON_CONTAINER") {
+            Some(name) if !name.trim().is_empty() => DaemonPlacement::Container {
+                name,
+                runtime: match mj_core::config::env_override("DAEMON_CONTAINER_RUNTIME").as_deref()
+                {
+                    Some("podman") => Some(mj_core::config::DaemonRuntime::Podman),
+                    Some("docker") => Some(mj_core::config::DaemonRuntime::Docker),
+                    _ => None,
+                },
+            },
+            _ => DaemonPlacement::Host,
+        },
     };
     // Startup recovery can run commands, and commands run on the node, so the
     // node has to be able to connect before this daemon is ready for clients.

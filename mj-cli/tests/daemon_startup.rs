@@ -371,6 +371,53 @@ fn the_daemon_is_listed_as_mj_daemon_run() {
     assert_eq!(arguments, ["mj", "daemon-run"]);
 }
 
+/// A replacement daemon is a new start, and a client proves that from the
+/// daemon alone: no PID, no `/proc`, and the same answer on every platform.
+#[test]
+fn a_daemon_reports_a_fresh_identity_for_each_start() {
+    fn identity(storage: &common::DaemonStorage) -> mj_client::daemon::DaemonIdentity {
+        let metadata: mj_client::daemon::DaemonMetadata =
+            serde_json::from_slice(&fs::read(storage.path().join("data/daemon.json")).unwrap())
+                .unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut client = mj_client::daemon::DaemonClient::connect(metadata.clone())
+                .await
+                .unwrap();
+            let identity = client.identity().await.unwrap();
+            assert_eq!(identity.build_version, metadata.build_version);
+            assert_eq!(identity.placement, mj_client::daemon::DaemonPlacement::Host);
+            assert!(!identity.instance_id.is_empty());
+            identity
+        })
+    }
+
+    let storage = upgrade_storage();
+    let output = mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let before = identity(&storage);
+
+    let output = mj_core::subprocess::run_with_input(
+        upgrade_command(&storage).args(["daemon", "restart"]),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after = identity(&storage);
+    assert_ne!(
+        before.instance_id, after.instance_id,
+        "a restarted daemon must report a new start identity"
+    );
+}
+
 #[cfg(target_os = "linux")]
 // Hard-won: 92b39c9da: suspending the launcher's session deleted the daemon's working directory.
 #[test]
@@ -518,6 +565,8 @@ fn old_daemon_fixture() {
             token: "isolated-upgrade-fixture".into(),
             started_at: chrono::Utc::now().to_rfc3339(),
             build_version: version,
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
         let stop = tokio_util::sync::CancellationToken::new();
@@ -556,6 +605,11 @@ fn old_daemon_fixture() {
                                     DaemonReply::Done
                                 }
                                 DaemonAction::PrepareUpgrade => if busy { DaemonReply::UpgradePending } else { DaemonReply::Done },
+                                // A daemon from before `Identity` cannot decode
+                                // the frame: it drops the connection. Clients
+                                // must treat that as an unknown identity, not
+                                // as a reason to keep asking.
+                                DaemonAction::Identity => break,
                                 other => panic!("new client reused the old daemon: {other:?}"),
                             };
                             write_frame(&mut stream, &ResponseEnvelope {

@@ -2414,6 +2414,8 @@ mod tests {
             token: "summary-pool-test".into(),
             started_at: "2026-11-04T00:00:00Z".into(),
             build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: crate::daemon::DaemonPlacement::Host,
         };
         std::fs::write(
             daemon::metadata_path(),

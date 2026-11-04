@@ -352,6 +352,8 @@ mod expired_tail_cursor_tests {
             token: "bootstrap-scope".into(),
             started_at: "2026-11-04T00:00:00Z".into(),
             build_version: "test".into(),
+            instance_id: String::new(),
+            placement: mj_client::daemon::DaemonPlacement::Host,
         };
         let path = mj_client::daemon::metadata_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -506,6 +508,8 @@ mod expired_tail_cursor_tests {
             token: "tail-cursor-test-token".into(),
             started_at: "2026-10-05T00:00:00Z".into(),
             build_version: "test".into(),
+            instance_id: String::new(),
+            placement: mj_client::daemon::DaemonPlacement::Host,
         };
         let metadata_path = mj_client::daemon::metadata_path();
         std::fs::create_dir_all(metadata_path.parent().unwrap()).expect("create isolated data dir");

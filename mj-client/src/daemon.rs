@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 /// Durable terminal results for caller-owned startup prompt identities.
@@ -35,6 +35,15 @@ pub fn metadata_path() -> PathBuf {
     data_dir().join("daemon.json")
 }
 
+/// The environment variable naming the container a daemon was launched in.
+///
+/// The launcher sets it, and the daemon reads it to report its placement. A
+/// host daemon does not have it.
+pub const DAEMON_CONTAINER_ENV: &str = "MJ_DAEMON_CONTAINER";
+
+/// The environment variable naming the engine that owns the daemon container.
+pub const DAEMON_CONTAINER_RUNTIME_ENV: &str = "MJ_DAEMON_CONTAINER_RUNTIME";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonMetadata {
@@ -44,6 +53,53 @@ pub struct DaemonMetadata {
     pub token: String,
     pub started_at: String,
     pub build_version: String,
+    /// Random per-start identity. It is skipped on disk so older clients keep
+    /// reading `daemon.json`; clients ask the daemon for it with `Identity`.
+    #[serde(skip)]
+    pub instance_id: String,
+    /// Where this daemon runs. Also skipped on disk: the running daemon is its
+    /// owner, and a container daemon can report it on every platform.
+    #[serde(skip)]
+    pub placement: DaemonPlacement,
+}
+
+/// Where the daemon runs, as the daemon itself reports it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "placement")]
+pub enum DaemonPlacement {
+    #[default]
+    Host,
+    Container {
+        name: String,
+        /// The engine that owns the container, when the launcher reported it.
+        /// `None` is a container daemon from before this action existed.
+        #[serde(default)]
+        runtime: Option<mj_core::config::DaemonRuntime>,
+    },
+}
+
+impl DaemonPlacement {
+    /// The container name when this placement is a container.
+    pub fn container(&self) -> Option<&str> {
+        match self {
+            Self::Host => None,
+            Self::Container { name, .. } => Some(name),
+        }
+    }
+}
+
+/// One daemon start, as the daemon reports it to a client.
+///
+/// Unlike the frozen [`DaemonStatus`], this action is not part of the
+/// management subset. It answers the questions clients used to ask the
+/// operating system: is this the daemon I connected to before, where does it
+/// run, and which build is it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonIdentity {
+    pub instance_id: String,
+    pub build_version: String,
+    pub placement: DaemonPlacement,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -497,6 +553,10 @@ pub enum DaemonAction {
     /// treat any failure, including a dropped connection or an error frame,
     /// as "unknown" and say nothing about what the upgrade is waiting for.
     UpgradeBlockers,
+    /// This daemon's per-start identity, build and placement. Added after
+    /// protocol 74, so it is deliberately not part of the frozen management
+    /// subset: a client asks only a daemon of its own protocol.
+    Identity,
     Status,
     WebViewerAccess,
     RecoverWebViewer(crate::web::WebViewerRecovery),
@@ -919,6 +979,7 @@ pub enum DaemonReply {
     /// Labels for the work holding an automatic handoff open, empty when
     /// nothing is. Answers `DaemonAction::UpgradeBlockers`.
     UpgradeBlockers(Vec<String>),
+    Identity(DaemonIdentity),
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
     WebListeners(Vec<crate::web::WebListenerProcess>),
@@ -1212,24 +1273,6 @@ pub fn process_is_zombie(pid: u32) -> bool {
         .is_some_and(|process| process.status() == sysinfo::ProcessStatus::Zombie)
 }
 
-/// Wait for a process to leave, within [`STOP_TIMEOUT`].
-///
-/// The error says the process was still running rather than that it "did not
-/// stop": a daemon that is still winding down has not refused, and the two
-/// read very differently to somebody deciding whether to reach for a kill.
-pub async fn wait_for_exit(pid: u32) -> Result<()> {
-    wait_for_exit_within(pid, STOP_TIMEOUT).await
-}
-
-async fn wait_for_exit_within(pid: u32, timeout: Duration) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    while daemon_process_is_alive(pid) {
-        ensure!(Instant::now() < deadline, "process {pid} is still running");
-        tokio::time::sleep(RETRY_DELAY).await;
-    }
-    Ok(())
-}
-
 /// Whether a daemon that Mjolnir launched in its own process group is alive.
 ///
 /// Reaping is deliberately confined to this daemon-specific path. Attachment
@@ -1456,11 +1499,6 @@ impl DaemonClient {
         })
     }
 
-    /// The process this client is connected to.
-    pub fn daemon_pid(&self) -> u32 {
-        self.metadata.pid
-    }
-
     /// Speak the daemon's advertised dialect, not this build's: management
     /// requests must reach daemons of any protocol version, and the frozen
     /// subset encodes identically across all of them.
@@ -1526,6 +1564,13 @@ impl DaemonClient {
         response
             .result
             .map_err(|message| anyhow::Error::new(DaemonRefusal(message)))
+    }
+
+    pub async fn identity(&mut self) -> Result<DaemonIdentity> {
+        match self.request(DaemonAction::Identity).await? {
+            DaemonReply::Identity(identity) => Ok(identity),
+            reply => bail!("unexpected daemon identity reply {reply:?}"),
+        }
     }
 
     pub async fn status(&mut self) -> Result<DaemonStatus> {
@@ -2667,6 +2712,10 @@ impl ManagementClient {
         self.inner.metadata.protocol_version
     }
 
+    pub async fn identity(&mut self) -> Result<DaemonIdentity> {
+        self.inner.identity().await
+    }
+
     pub async fn status(&mut self) -> Result<DaemonStatus> {
         self.inner.status().await
     }
@@ -2675,20 +2724,6 @@ impl ManagementClient {
         tokio::time::timeout(STOP_TIMEOUT, self.inner.stop())
             .await
             .context("Mjolnir daemon did not acknowledge the stop before the deadline")?
-    }
-
-    /// Ask the daemon to stop and wait for its process to actually exit.
-    pub async fn stop_and_wait(mut self) -> Result<()> {
-        let pid = self.inner.metadata.pid;
-        self.stop().await?;
-        wait_for_exit_within(pid, STOP_DRAIN_TIMEOUT)
-            .await
-            .with_context(|| {
-                format!(
-                    "Mjolnir daemon {pid} accepted the stop but was still running after {}s",
-                    STOP_DRAIN_TIMEOUT.as_secs()
-                )
-            })
     }
 }
 
@@ -2750,7 +2785,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Dashboard startup uses chunked replies, which older clients reject for this reply type.
 // Shared state publishes child metadata; launch intent remains in the daemon store.
 // Startup seeds runtime cursors with family scope; reply chunks use base64 bytes.
-pub const PROTOCOL_VERSION: u32 = 74;
+// The daemon reports its per-start identity, build and placement instead of
+// clients reading its PID and `/proc`.
+pub const PROTOCOL_VERSION: u32 = 75;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -2897,6 +2934,8 @@ mod tests {
             token: "old-restart-daemon".into(),
             started_at: "test".into(),
             build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -2927,6 +2966,8 @@ mod tests {
             token: "abandoned-prompt-test".into(),
             started_at: "test".into(),
             build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -2979,6 +3020,8 @@ mod tests {
             token: "subagent-discovery-test".into(),
             started_at: "test".into(),
             build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         let options: mj_core::subagent::SubagentOptions =
             serde_json::from_value(serde_json::json!({
@@ -3072,6 +3115,8 @@ mod tests {
             token: "test-token".into(),
             started_at: "test".into(),
             build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
         };
         let action = DaemonAction::SubmitSessionCommand {
             inherited_draft: None,

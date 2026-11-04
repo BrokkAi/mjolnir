@@ -33,6 +33,11 @@ pub(super) async fn handle_action(
                 .map(ToString::to_string)
                 .collect(),
         )),
+        DaemonAction::Identity => Ok(DaemonReply::Identity(DaemonIdentity {
+            instance_id: metadata.instance_id.clone(),
+            build_version: metadata.build_version.clone(),
+            placement: metadata.placement.clone(),
+        })),
         DaemonAction::Status => {
             state.prune_dead_clients();
             Ok(DaemonReply::Status(DaemonStatus {
@@ -950,6 +955,7 @@ pub(super) fn upgrade_request_activity(
             // work the handoff waits for.
             | DaemonAction::NodeConnect { .. }
             | DaemonAction::Ping
+            | DaemonAction::Identity
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade

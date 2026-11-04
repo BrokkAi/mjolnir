@@ -2307,6 +2307,8 @@ mod tests {
             token: "restart-test".into(),
             started_at: "test".into(),
             build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: crate::daemon::DaemonPlacement::Host,
         };
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();

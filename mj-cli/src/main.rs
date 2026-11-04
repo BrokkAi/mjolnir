@@ -2166,6 +2166,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 }
             };
             let status = daemon.status().await?;
+            let identity = daemon.identity().await?;
             println!(
                 "Mjolnir daemon {} (version {}) started {}; {} attached client{}; web viewer {}",
                 status.pid,
@@ -2180,20 +2181,29 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 },
                 status.phone_status
             );
+            if let daemon::DaemonPlacement::Container { name, .. } = &identity.placement {
+                println!("The daemon runs in container {name}.");
+            }
             // Two builds can report the same version, so the version line
-            // cannot answer "is my rebuilt code running?". The executable file
-            // can, and it is the question a development restart turns on.
-            match daemon::daemon_runs_this_build(status.pid, &status.build_version)? {
+            // cannot answer "is my rebuilt code running?". The build identity
+            // the daemon reports can, and it is the question a development
+            // restart turns on.
+            match daemon::daemon_runs_this_build(&identity)? {
                 Some(true) => println!("This daemon runs this build."),
-                Some(false) => println!(
-                    "This daemon runs a different executable ({}) than this client ({}); \
-                     commands work, but code you rebuilt is not running. \
-                     Run `mj daemon restart` from this build.",
-                    daemon::describe_executable(
-                        daemon::process_executable_path(status.pid).as_deref()
-                    ),
-                    daemon::describe_executable(daemon::running_executable_path().as_deref()),
-                ),
+                Some(false) => {
+                    let daemon_build =
+                        mj_client::build_identity::BuildIdentity::parse(&identity.build_version)
+                            .map_or_else(
+                                |_| identity.build_version.clone(),
+                                |build| build.describe(),
+                            );
+                    println!(
+                        "This daemon runs build {daemon_build}, not this client's build ({}); \
+                         commands work, but code you rebuilt is not running. \
+                         Run `mj daemon restart` from this build.",
+                        mj_client::build_identity::this_build().describe()
+                    );
+                }
                 None => {}
             }
             if daemon.protocol_version() != daemon::PROTOCOL_VERSION {
@@ -2212,8 +2222,9 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             )?;
             if stop.suspend_sessions {
                 let stopped = suspend_all_sessions(stop.acknowledge_unpublished_work).await?;
-                let daemon = daemon::connect_management().await?;
-                daemon.stop_and_wait().await?;
+                let mut daemon = daemon::connect_management().await?;
+                daemon.stop().await?;
+                daemon::wait_for_stopped_daemon().await?;
                 node::withdraw_endpoint();
                 match stopped {
                     0 => println!("Mjolnir daemon stopped; no sessions were active."),
@@ -2222,7 +2233,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 }
                 return Ok(());
             }
-            let daemon = match daemon::connect_management().await {
+            let mut daemon = match daemon::connect_management().await {
                 Ok(daemon) => daemon,
                 Err(error) if daemon::daemon_not_running(&error).is_some() => {
                     println!("Mjolnir daemon is already stopped.");
@@ -2230,7 +2241,8 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 }
                 Err(error) => return Err(error.context("Mjolnir daemon is not answering")),
             };
-            daemon.stop_and_wait().await?;
+            daemon.stop().await?;
+            daemon::wait_for_stopped_daemon().await?;
             node::withdraw_endpoint();
             println!(
                 "Mjolnir daemon stopped; detached workers remain active. \
