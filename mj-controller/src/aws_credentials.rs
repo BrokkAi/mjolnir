@@ -57,10 +57,12 @@ pub(crate) fn source(
     environment.insert("AWS_PROFILE".into(), selected);
     // Codex can select its AWS profile inside the provider table.
     if profile.kind == mj_core::config::HarnessKind::Codex
-        && let Some(config) = mj_core::codex_provider::effective_config(
+        && let Some(config) = mj_core::codex_provider::ConfigFiles::read_with(
             &profile.home,
             profile.codex_profile.as_deref(),
+            |path| crate::host_fs::read_optional_sync(path),
         )?
+        .layer(&profile.home)?
     {
         let config: toml::Value =
             toml::from_str(&config).context("read Codex AWS profile selection")?;
