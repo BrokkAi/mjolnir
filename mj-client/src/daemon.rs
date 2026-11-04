@@ -973,7 +973,10 @@ impl DaemonReply {
     pub fn is_chunked(&self) -> bool {
         matches!(
             self,
-            Self::RuntimeChanges(_) | Self::SessionTail(_) | Self::ResumeCandidates(_)
+            Self::DashboardStartup(_)
+                | Self::RuntimeChanges(_)
+                | Self::SessionTail(_)
+                | Self::ResumeCandidates(_)
         )
     }
 }
@@ -2721,7 +2724,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Dashboards read stored state through the daemon instead of opening the store,
 // and client attachments are renewable leases rather than client process IDs.
 // Nodes connect with NodeConnect and then speak the node protocol.
-pub const PROTOCOL_VERSION: u32 = 72;
+// Dashboard startup uses chunked replies, which older clients reject for this reply type.
+pub const PROTOCOL_VERSION: u32 = 73;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

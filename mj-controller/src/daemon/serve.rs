@@ -289,9 +289,10 @@ pub(super) async fn write_response(
     let result = std::mem::replace(&mut response.result, Ok(DaemonReply::Done));
     match result {
         Ok(reply) if reply.is_chunked() => {
-            // These replies grow with the store (a runtime bootstrap, the
-            // resume dialog's history). Encode away from the control loop,
-            // then bound each write without rebuilding the reply per page.
+            // These replies grow with the store (dashboard startup, a runtime
+            // bootstrap, the resume dialog's history). Encode away from the
+            // control loop, then bound each write without rebuilding the
+            // reply per page.
             let body = tokio::task::spawn_blocking(move || serde_json::to_vec(&reply))
                 .await
                 .context("reply encoder task failed")??;

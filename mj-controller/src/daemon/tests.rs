@@ -6261,6 +6261,66 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
     );
 }
 
+// Hard-won: 0bd61a289: dashboard startup failed when live session state exceeded one frame.
+#[tokio::test]
+async fn dashboard_startup_larger_than_a_frame_arrives_whole() {
+    let mut session = runtime_test_session("large-draft", "workspace", SessionState::Running);
+    session.draft_input = "draft 🙂\n".repeat(MAX_FRAME_BYTES / 8);
+    let startup = DashboardStartup {
+        state: mj_core::state::State {
+            sessions: [(session.id.clone(), session)].into_iter().collect(),
+            ..Default::default()
+        },
+        pane_sizes: Default::default(),
+        conversation_layouts: Default::default(),
+        queued_prompts: Default::default(),
+        launch_recency: Default::default(),
+    };
+    let expected = serde_json::to_value(&startup).unwrap();
+    assert!(serde_json::to_vec(&startup).unwrap().len() > MAX_FRAME_BYTES);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        for reply in [
+            DaemonReply::DashboardStartup(Box::new(startup)),
+            DaemonReply::Pong,
+        ] {
+            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+            match &reply {
+                DaemonReply::DashboardStartup(_) => assert!(matches!(
+                    request.action,
+                    DaemonAction::DashboardStartup { client_id } if client_id == "large-dashboard"
+                )),
+                _ => assert!(matches!(request.action, DaemonAction::Ping)),
+            }
+            super::serve::write_response(
+                &mut stream,
+                ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(reply),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    });
+    let mut client = mj_client::daemon::DaemonClient::connect(test_metadata(address))
+        .await
+        .unwrap();
+    let received = client
+        .dashboard_startup("large-dashboard".into())
+        .await
+        .expect("load the complete dashboard startup state");
+    assert_eq!(serde_json::to_value(received).unwrap(), expected);
+    assert!(matches!(
+        client.request(DaemonAction::Ping).await.unwrap(),
+        DaemonReply::Pong
+    ));
+    server.await.unwrap();
+}
+
 #[tokio::test]
 async fn oversized_response_reports_its_size_and_keeps_connection_usable() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
