@@ -16,6 +16,7 @@ pub mod controller;
 pub mod desktop;
 pub mod doctor;
 pub(crate) mod handoff;
+mod host_fs;
 pub mod image;
 pub mod import;
 pub mod opencode_logins;

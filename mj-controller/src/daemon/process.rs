@@ -31,6 +31,7 @@ pub async fn run_daemon_process() -> Result<()> {
     // Daemons that tests run inside their own process keep running commands
     // locally, because they never reach this line.
     crate::node_registry::install_command_host(cancellation.clone())?;
+    crate::node_registry::install_host_fs(cancellation.clone())?;
     let opening = Instant::now();
     let guard = ControllerStoreGuard::acquire()?;
     let database_writer = guard.start_database_writer()?;

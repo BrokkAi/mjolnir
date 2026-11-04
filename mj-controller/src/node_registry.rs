@@ -51,6 +51,16 @@ pub fn install_command_host(shutdown: tokio_util::sync::CancellationToken) -> Re
     mj_core::targets::install_command_host(Arc::new(host))
 }
 
+/// Route the daemon's host-file reads and writes to its node, local only in
+/// processes that never installed a command host.
+pub fn install_host_fs(shutdown: tokio_util::sync::CancellationToken) -> Result<()> {
+    crate::host_fs::install(
+        registry().slot.subscribe(),
+        tokio::runtime::Handle::current(),
+        shutdown,
+    )
+}
+
 impl NodeRegistry {
     /// Take over `stream`, which has just authenticated as node `node_id`, and
     /// make it the node this daemon uses.
