@@ -41,6 +41,79 @@ pub(super) async fn handle_action(
         DaemonAction::Configuration => Ok(DaemonReply::Configuration(Box::new(
             state.with_config(Clone::clone),
         ))),
+        DaemonAction::RunFirstRunSetup => {
+            let report = blocking(|| {
+                let executor = crate::targets::ProcessExecutor;
+                let report = crate::setup::run_setup(
+                    &mj_core::config::config_path(),
+                    &mj_core::config::data_dir(),
+                    false,
+                    &executor,
+                    &|| false,
+                    || {},
+                )?;
+                Ok(report.map(|report| FirstRunSetupReport {
+                    agents: report.agents,
+                    repository: report.repository,
+                }))
+            })
+            .await?;
+            if report.is_some() {
+                refresh_runtime_controller(state).await;
+            }
+            Ok(DaemonReply::FirstRunSetup(report))
+        }
+        DaemonAction::RunDoctor => {
+            let errors = blocking(|| {
+                let executor = crate::targets::ProcessExecutor;
+                let checks = crate::doctor::run_with_config_path(
+                    &mj_core::config::config_path(),
+                    &executor,
+                    crate::doctor::current_apple_platform(&executor),
+                    crate::doctor::DoctorOptions { smoke: false },
+                );
+                Ok(crate::setup::actionable_errors(&checks))
+            })
+            .await?;
+            Ok(DaemonReply::DoctorErrors(errors))
+        }
+        DaemonAction::NewSessionRemoteRepairs {
+            bundle_id,
+            target_id,
+        } => {
+            let controller = state
+                .with_config(|config| crate::controller::config_only_controller(config.clone()));
+            let repairs = blocking(move || {
+                let executor = crate::targets::CancellableProcessExecutor::new(
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                )
+                .with_deadline(Duration::from_secs(30));
+                let result =
+                    controller.preflight_new_session(&bundle_id, &target_id, None, &executor)?;
+                Ok(result.remote_repairs)
+            })
+            .await?;
+            Ok(DaemonReply::RemoteRepairs(repairs))
+        }
+        DaemonAction::RepairRepositoryRemotes { bundle_id, repairs } => {
+            let controller = state
+                .with_config(|config| crate::controller::config_only_controller(config.clone()));
+            blocking(move || {
+                let bundle = controller
+                    .config
+                    .bundles
+                    .get(&bundle_id)
+                    .context("unknown bundle")?;
+                let executor = crate::targets::CancellableProcessExecutor::new(
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                )
+                .with_deadline(Duration::from_secs(30));
+                mj_core::local_git::apply_repository_remote_repairs(bundle, &repairs, &executor)
+            })
+            .await?;
+            refresh_runtime_controller(state).await;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::Status => {
             state.prune_dead_clients();
             Ok(DaemonReply::Status(DaemonStatus {

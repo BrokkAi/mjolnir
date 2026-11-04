@@ -156,6 +156,27 @@ pub fn read_to_string_sync(path: &Path) -> Result<String> {
     String::from_utf8(bytes).with_context(|| format!("decode {} as UTF-8", path.display()))
 }
 
+/// Read a host text file, treating a missing file as `None`. A node reports a
+/// missing path as its own message rather than an `io::Error`, so the message
+/// is checked as well as the error kind.
+pub fn read_optional_sync(path: &Path) -> Result<Option<String>> {
+    match read_to_string_sync(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if is_not_found(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if let Some(error) = cause.downcast_ref::<std::io::Error>() {
+            return error.kind() == std::io::ErrorKind::NotFound;
+        }
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("no such file") || message.contains("not found")
+    })
+}
+
 /// Write a host file.
 pub async fn write(path: &Path, data: Vec<u8>) -> Result<()> {
     match installed() {

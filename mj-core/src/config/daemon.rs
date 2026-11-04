@@ -9,10 +9,11 @@ use std::path::PathBuf;
 /// [daemon]
 /// runtime = "podman"          # "host" (default), "podman" or "docker"
 /// image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
-/// mounts = ["/srv/projects"]  # host paths visible to the daemon, beside $HOME
+/// mounts = ["/srv/projects"]  # optional host paths, mounted explicitly
 /// ```
 ///
-/// `image` and `mounts` apply only to a container runtime.
+/// `image` and `mounts` apply only to a container runtime. A container
+/// otherwise has no host filesystem access; its data lives in a named volume.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DaemonConfig {
@@ -22,10 +23,9 @@ pub struct DaemonConfig {
     /// which carries the harnesses local sessions run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-    /// Host directories mounted into the daemon container at the same path,
-    /// in addition to `$HOME`, the data and configuration directories, `/tmp`
-    /// and the user's runtime directory. Local projects outside those belong
-    /// here.
+    /// Host directories explicitly mounted into the daemon container at the
+    /// same path. Nothing is mounted by default; the daemon's own data lives
+    /// in a named volume.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mounts: Vec<PathBuf>,
 }
@@ -38,9 +38,10 @@ impl DaemonConfig {
 }
 
 /// Where `mj daemon-run` runs. `Podman` and `Docker` run it in a long-lived
-/// per-instance container of that engine, sharing this computer's network and
-/// process namespaces. Local sessions' workers run in it too, so they outlive
-/// a daemon replacement exactly as host workers do.
+/// per-instance container of that engine. The container is its own machine:
+/// its data is a named volume, its network is private, and the only host
+/// directories it sees are the ones named in [`DaemonConfig::mounts`]. Local
+/// sessions' workers run inside it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DaemonRuntime {

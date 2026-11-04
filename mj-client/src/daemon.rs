@@ -102,6 +102,39 @@ pub struct DaemonIdentity {
     pub placement: DaemonPlacement,
 }
 
+/// What automatic first-run setup found and configured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirstRunSetupReport {
+    pub agents: Vec<mj_core::config::HarnessKind>,
+    pub repository: Option<String>,
+}
+
+impl FirstRunSetupReport {
+    pub fn summary(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self.agents.is_empty() {
+            lines.push(
+                "No installed coding agent was found. Mjolnir can install and sign in to one for you."
+                    .to_owned(),
+            );
+        } else {
+            lines.push(format!(
+                "Agents: {}.",
+                self.agents
+                    .iter()
+                    .map(|kind| kind.display_name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some(repository) = &self.repository {
+            lines.push(format!("Project: {repository}."));
+        }
+        lines
+    }
+}
+
 /// A project synthesized while importing a native session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -593,6 +626,25 @@ pub enum DaemonAction {
     /// The configuration the daemon serves. Clients read it here instead of
     /// opening `config.toml`, which belongs to the daemon.
     Configuration,
+    /// Discover and persist the first-run configuration in the daemon's own
+    /// environment. A client in another placement asks its daemon instead of
+    /// writing the client's `config.toml`.
+    RunFirstRunSetup,
+    /// Run the doctor in the daemon's own environment and return the
+    /// actionable errors, which a client shows after first-run setup.
+    RunDoctor,
+    /// Check a project's Git remotes before a new session starts, in the
+    /// environment that owns the project paths.
+    NewSessionRemoteRepairs {
+        bundle_id: String,
+        target_id: String,
+    },
+    /// Apply the remote-tracking repairs a preflight proposed, in the
+    /// environment that owns the project checkout.
+    RepairRepositoryRemotes {
+        bundle_id: String,
+        repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
+    },
     Status,
     WebViewerAccess,
     /// The daemon host's Git commit author, which its sessions inherit.
@@ -1028,6 +1080,9 @@ pub enum DaemonReply {
     UpgradeBlockers(Vec<String>),
     Identity(DaemonIdentity),
     Configuration(Box<Config>),
+    FirstRunSetup(Option<FirstRunSetupReport>),
+    DoctorErrors(Vec<String>),
+    RemoteRepairs(Vec<mj_core::local_git::LocalRemoteRepair>),
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
     GitIdentity(GitIdentity),
@@ -1629,6 +1684,51 @@ impl DaemonClient {
         match self.request(DaemonAction::Configuration).await? {
             DaemonReply::Configuration(config) => Ok(*config),
             reply => bail!("unexpected daemon configuration reply {reply:?}"),
+        }
+    }
+
+    pub async fn run_first_run_setup(&mut self) -> Result<Option<FirstRunSetupReport>> {
+        match self.request(DaemonAction::RunFirstRunSetup).await? {
+            DaemonReply::FirstRunSetup(report) => Ok(report),
+            reply => bail!("unexpected first-run setup reply {reply:?}"),
+        }
+    }
+
+    pub async fn run_doctor(&mut self) -> Result<Vec<String>> {
+        match self.request(DaemonAction::RunDoctor).await? {
+            DaemonReply::DoctorErrors(errors) => Ok(errors),
+            reply => bail!("unexpected doctor reply {reply:?}"),
+        }
+    }
+
+    pub async fn new_session_remote_repairs(
+        &mut self,
+        bundle_id: String,
+        target_id: String,
+    ) -> Result<Vec<mj_core::local_git::LocalRemoteRepair>> {
+        match self
+            .request(DaemonAction::NewSessionRemoteRepairs {
+                bundle_id,
+                target_id,
+            })
+            .await?
+        {
+            DaemonReply::RemoteRepairs(repairs) => Ok(repairs),
+            reply => bail!("unexpected new-session preflight reply {reply:?}"),
+        }
+    }
+
+    pub async fn repair_repository_remotes(
+        &mut self,
+        bundle_id: String,
+        repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::RepairRepositoryRemotes { bundle_id, repairs })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected remote-repair reply {reply:?}"),
         }
     }
 
@@ -2793,6 +2893,11 @@ impl ManagementClient {
         self.inner.metadata.protocol_version
     }
 
+    /// The endpoint this management client dialed.
+    pub fn metadata(&self) -> &DaemonMetadata {
+        &self.inner.metadata
+    }
+
     pub async fn identity(&mut self) -> Result<DaemonIdentity> {
         self.inner.identity().await
     }
@@ -2870,7 +2975,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // The daemon reports its per-start identity, build and placement instead of
 // clients reading its PID and `/proc`, and it serves the configuration that
 // owns the store instead of clients opening `config.toml`.
-pub const PROTOCOL_VERSION: u32 = 76;
+pub const PROTOCOL_VERSION: u32 = 80;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
