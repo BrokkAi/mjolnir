@@ -173,6 +173,8 @@ pub enum SessionStateFilter {
     Idle,
     /// `d`: finished with an unread answer.
     Done,
+    /// `I`: anything other than idle with nothing unread.
+    NotIdle,
 }
 
 impl SessionStateFilter {
@@ -183,6 +185,7 @@ impl SessionStateFilter {
             'w' => Some(Self::Working),
             'i' => Some(Self::Idle),
             'd' => Some(Self::Done),
+            'I' => Some(Self::NotIdle),
             _ => return None,
         })
     }
@@ -193,6 +196,7 @@ impl SessionStateFilter {
             Self::Working => "working",
             Self::Idle => "idle",
             Self::Done => "done",
+            Self::NotIdle => "not idle",
         }
     }
 
@@ -205,6 +209,7 @@ impl SessionStateFilter {
             Self::Working => level == AttentionLevel::Working,
             Self::Idle => matches!(level, AttentionLevel::Idle | AttentionLevel::Inactive),
             Self::Done => level == AttentionLevel::Unread,
+            Self::NotIdle => !Self::Idle.admits(level),
         }
     }
 }
@@ -1037,6 +1042,9 @@ pub struct DashboardState {
     pub(crate) session_menu_ids: Vec<String>,
     /// The Sessions pane's search and state filter, when one is open.
     pub(crate) sessions_filter: Tracked<Option<SessionsFilter>>,
+    /// Filters retained independently for the top-level list and each nested
+    /// sub-agent workspace. The active filter remains the single authority.
+    pub(crate) sessions_filters_by_scope: BTreeMap<Option<String>, Option<SessionsFilter>>,
     /// What the daemon said about the Sessions filter's text in conversations.
     pub(crate) sessions_text: Tracked<dashboard_sessions::SessionsTextSearch>,
     /// The commands run lately, newest first, for the palette's Recent group.
@@ -1309,6 +1317,7 @@ impl DashboardState {
             session_action_focus: None,
             session_menu_ids: Vec::new(),
             sessions_filter: Default::default(),
+            sessions_filters_by_scope: Default::default(),
             sessions_text: Default::default(),
             recent_commands: std::collections::VecDeque::new(),
             resume_rows: Vec::new(),

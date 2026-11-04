@@ -492,6 +492,10 @@ test('golden_viewer_dashboard', async ({ context }) => {
   await subagentPage.locator('#subagents-button').click();
   await expect(subagentPage).toHaveURL(/#subagents\/parent$/);
   await expect(subagentPage.locator('#workspaces .virtual-workspace')).toContainText('Parent session');
+  await expect(subagentPage.locator('#sessions')).toContainText('All 2 sub-agents are idle. Show idle to view them.');
+  await expect(card(subagentPage, 'child-one')).toHaveCount(0);
+  await subagentPage.getByRole('button', { name: 'Show idle' }).click();
+  await expect(card(subagentPage, 'child-one')).toBeVisible();
   await captureGoldenState(output, subagentPage, 'named subagent workspace lists child sessions');
   await card(subagentPage, 'child-one').click();
   await expect(subagentPage).toHaveURL(/#subagents\/parent\/child-one$/);
@@ -504,6 +508,66 @@ test('golden_viewer_dashboard', async ({ context }) => {
   await subagentPage.close();
 
   assertGolden('viewer_dashboard', output.join('\n'));
+});
+
+test('child workspace hides idle history while preserving active work and an opened conversation', async ({ page }) => {
+  const parent = session('parent', 'project', 'Project', {
+    title: 'Parent session',
+    subagentSessionIds: ['idle', 'working', 'blocked', 'failed', 'unknown'],
+  });
+  parent.native_subagents = [
+    { session_id: 'native-completed', name: 'Completed helper', state: 'completed', availability: 'available' },
+    { session_id: 'native-cancelled', name: 'Cancelled helper', state: 'cancelled', availability: 'available' },
+    { session_id: 'native-running', name: 'Running helper', state: 'running', availability: 'available' },
+    { session_id: 'native-failed', name: 'Failed helper', state: 'failed', availability: 'available' },
+    { session_id: 'native-disconnected', name: 'Disconnected helper', state: 'disconnected', availability: 'available' },
+    { session_id: 'native-unknown', name: 'Unknown helper', state: 'completed', availability: 'unknown' },
+  ];
+  const child = (id, options = {}) => session(id, 'project', 'Project', { subagentParentId: 'parent', ...options });
+  const unknown = child('unknown', { activityDetails: { kind: 'unknown' } });
+  delete unknown.is_idle;
+  await mount(page, [
+    parent,
+    child('idle'),
+    child('working', { isIdle: false, activityDetails: { kind: 'turn' } }),
+    child('blocked', { pendingElicitations: [{ id: 'question', question: 'Need input' }] }),
+    child('failed', { hasError: true }),
+    unknown,
+  ]);
+  await expect(card(page, 'parent')).toBeVisible();
+  await card(page, 'parent').click();
+  await page.locator('#subagents-button').click();
+  await expect(page).toHaveURL(/#subagents\/parent$/);
+  await expect(page.locator('#sessions')).toContainText('3 idle sub-agents hidden');
+  await expect(card(page, 'idle')).toHaveCount(0);
+  for (const id of ['working', 'blocked', 'failed', 'unknown']) await expect(card(page, id)).toBeVisible();
+  for (const name of ['Running helper', 'Failed helper', 'Disconnected helper', 'Unknown helper']) {
+    await expect(page.locator('#sessions')).toContainText(name);
+  }
+  for (const name of ['Completed helper', 'Cancelled helper']) {
+    await expect(page.locator('#sessions')).not.toContainText(name);
+  }
+
+  await page.getByRole('button', { name: 'Show idle' }).click();
+  await expect(card(page, 'idle')).toBeVisible();
+  for (const name of ['Completed helper', 'Cancelled helper']) await expect(page.locator('#sessions')).toContainText(name);
+  await card(page, 'idle').click();
+  await expect(page).toHaveURL(/#subagents\/parent\/idle$/);
+  await page.locator('#back').click();
+  await expect(page.getByRole('button', { name: 'Hide idle' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(card(page, 'idle')).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Hide idle' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(card(page, 'idle')).toBeVisible();
+  await page.getByRole('button', { name: 'Hide idle' }).click();
+  await expect(card(page, 'idle')).toHaveCount(0);
+  await page.evaluate(() => { location.hash = '#subagents/parent/idle'; });
+  await expect(page).toHaveURL(/#subagents\/parent\/idle$/);
+  await expect(page.locator('#conversation-title')).toContainText('idle');
+  await expect(page.locator('#conversation')).toBeVisible();
+  await page.locator('#back').click();
+  await expect(page).toHaveURL(/#subagents\/parent$/);
+  await expect(card(page, 'idle')).toHaveCount(0);
 });
 
 test('virtual subagent workspace fetches a summary child row before rendering its card', async ({ page }) => {
@@ -522,6 +586,7 @@ test('virtual subagent workspace fetches a summary child row before rendering it
   await expect(page).toHaveURL(/#conversation\/parent$/);
   await page.locator('#subagents-button').click();
   await expect(page).toHaveURL(/#subagents\/parent$/);
+  await page.getByRole('button', { name: 'Show idle', exact: true }).click();
   await expect(page.locator('#sessions')).toContainText('Loading session details…');
   await expect.poll(() => state.detailRequests).toEqual(['child']);
   releaseDetail();

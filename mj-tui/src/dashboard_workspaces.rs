@@ -33,21 +33,13 @@ impl DashboardState {
         if !self.state.sessions.contains_key(&parent_id) {
             return;
         }
-        *self.subagent_parent_id = Some(parent_id.clone());
+        self.switch_subagent_scope(Some(parent_id));
         // The pane now lists a different set of rows; the parent list's
         // scroll position means nothing here.
         self.sessions_scroll.set(0);
-        let child = self
-            .managed_child_ids(&parent_id)
-            .into_iter()
-            .next()
-            .or_else(|| {
-                self.native_by_parent
-                    .get(&parent_id)
-                    .and_then(|ids| ids.first().cloned())
-            });
         self.set_current_session(None);
-        if let Some(child) = child {
+        if let Some(child) = self.derive_ordered_sessions().0.first() {
+            let child = child.id.clone();
             self.select_active_session(&child);
         }
         self.focus = Focus::Sessions;
@@ -55,13 +47,28 @@ impl DashboardState {
     }
 
     pub fn close_subagent_workspace(&mut self) {
-        let Some(parent_id) = self.subagent_parent_id.take() else {
+        let Some(parent_id) = self.subagent_parent_id.as_ref().cloned() else {
             return;
         };
-        *self.subagent_parent_id = self.subagent_parent_for(&parent_id);
+        self.switch_subagent_scope(self.subagent_parent_for(&parent_id));
         self.sessions_scroll.set(0);
         self.select_active_session(&parent_id);
         self.clamp_selections();
+    }
+
+    fn switch_subagent_scope(&mut self, parent_id: Option<String>) {
+        let previous_parent = std::mem::replace(&mut *self.subagent_parent_id, parent_id.clone());
+        self.sessions_filters_by_scope
+            .insert(previous_parent, self.sessions_filter.take());
+        *self.sessions_filter = self
+            .sessions_filters_by_scope
+            .remove(&parent_id)
+            .unwrap_or_else(|| {
+                parent_id.map(|_| SessionsFilter {
+                    state: Some(SessionStateFilter::NotIdle),
+                    ..Default::default()
+                })
+            });
     }
 
     /// The active sub-agents that `next` no longer has because their parent's

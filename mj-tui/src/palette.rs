@@ -1315,6 +1315,8 @@ mod tests {
     fn a_native_childs_menu_offers_only_what_applies_to_it() {
         let (mut dashboard, parent_id, id) = dashboard_with_finished_native_child();
         dashboard.open_subagent_workspace(parent_id);
+        dashboard.handle_key(key(KeyCode::Char('a')));
+        dashboard.select_active_session(&id);
         assert_eq!(dashboard.selected_session_id(), Some(id.as_str()));
         dashboard.focus_sessions();
         dashboard.dispatch_command(CommandId::SessionActions);
@@ -1339,13 +1341,15 @@ mod tests {
     #[test]
     fn open_describes_a_read_only_conversation_as_read_only() {
         let read_only = "Show the selected agent's conversation (read-only).";
-        let (mut dashboard, parent_id, _) = dashboard_with_finished_native_child();
+        let (mut dashboard, parent_id, id) = dashboard_with_finished_native_child();
         assert_eq!(
             command_description(&dashboard, CommandId::OpenSession),
             spec(CommandId::OpenSession).description,
             "the parent itself is a session you can type in"
         );
         dashboard.open_subagent_workspace(parent_id);
+        dashboard.handle_key(key(KeyCode::Char('a')));
+        dashboard.select_active_session(&id);
         dashboard.focus_sessions();
         dashboard.dispatch_command(CommandId::SessionActions);
         let screen = drawn(&mut dashboard, 120, 40).join("\n");
@@ -1358,6 +1362,8 @@ mod tests {
             mj_core::state::SessionState::Stopped;
         dashboard.set_state(state);
         dashboard.open_subagent_workspace(parent_id);
+        dashboard.handle_key(key(KeyCode::Char('a')));
+        dashboard.select_active_session("child-session");
         dashboard.focus_sessions();
         assert_eq!(dashboard.selected_session_id(), Some("child-session"));
         assert_eq!(

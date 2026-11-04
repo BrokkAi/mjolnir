@@ -29,6 +29,8 @@ fn retained_subagents_do_not_count_as_working_after_profile_move() {
                 capabilities: NativeAgentCapabilities::default(),
                 state: if i < 17 {
                     NativeAgentState::Completed
+                } else if i == 17 {
+                    NativeAgentState::Failed
                 } else {
                     NativeAgentState::Disconnected
                 },
@@ -51,6 +53,13 @@ fn retained_subagents_do_not_count_as_working_after_profile_move() {
     assert_eq!(dashboard.subagent_count_for(&parent.id), 23);
     assert_eq!(dashboard.working_subagent_count_for(&parent.id), 0);
     dashboard.open_subagent_workspace(parent.id.clone());
+    assert_eq!(
+        dashboard.ordered_sessions().len(),
+        6,
+        "failed and disconnected native children need attention"
+    );
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Char('a')));
     assert_eq!(dashboard.ordered_sessions().len(), 23);
     let mut resumed = agents;
     resumed[0].agent.state = NativeAgentState::Running;
@@ -931,6 +940,9 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
     assert!(!dashboard.pane_session_is_suspended(&child.id));
 
     dashboard.open_subagent_workspace(parent.id.clone());
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    dashboard.select_active_session(&child.id);
     assert_eq!(
         dashboard.open_selected_session(),
         DashboardAction::Open {
@@ -1083,6 +1095,8 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
     );
 
     dashboard.open_subagent_workspace(parent.id.clone());
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Char('a')));
     let mut virtual_workspace_ids = dashboard
         .ordered_sessions()
         .iter()
@@ -1094,6 +1108,155 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         vec![first_child.id.clone(), second_child.id.clone()],
         "both children must appear in the virtual workspace"
     );
+}
+
+#[test]
+fn subagent_scope_filters_attention_without_selecting_an_idle_child() {
+    let (mut dashboard, parent) = dashboard_with_one_subagent();
+    let template = dashboard.state.sessions["child-session"].clone();
+    let relation = dashboard.state.subagents["child-session"].clone();
+    let mut state = dashboard.state.clone();
+    state.sessions.remove("child-session");
+    state.subagents.remove("child-session");
+    for (id, stopped) in [
+        ("a-idle", false),
+        ("b-parked", true),
+        ("c-working", false),
+        ("d-blocked", false),
+        ("e-unread", false),
+    ] {
+        let mut child = template.clone();
+        child.id = id.into();
+        if stopped {
+            child.state = SessionState::Stopped;
+        }
+        let mut child_relation = relation.clone();
+        child_relation.child_session_id = child.id.clone();
+        state.subagents.insert(child.id.clone(), child_relation);
+        state.sessions.insert(child.id.clone(), child);
+    }
+    dashboard.set_state(state);
+    dashboard
+        .session_details
+        .get_mut("c-working")
+        .unwrap()
+        .current_turn_started_at = Some(1);
+    dashboard
+        .session_details
+        .get_mut("d-blocked")
+        .unwrap()
+        .pending_elicitations = vec![question("d-blocked")];
+    dashboard
+        .session_details
+        .get_mut("e-unread")
+        .unwrap()
+        .unread_agent_messages = 1;
+
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Char('I')));
+    assert_eq!(dashboard.selected_session_id(), Some(parent.as_str()));
+    assert_eq!(
+        dashboard.ordered_sessions().len(),
+        1,
+        "idle parent stays on the top-level list"
+    );
+    dashboard.open_subagent_workspace(parent.clone());
+    let ids = |dashboard: &DashboardState| {
+        dashboard
+            .ordered_sessions()
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        dashboard.sessions_filter.as_ref().unwrap().state,
+        Some(SessionStateFilter::NotIdle)
+    );
+    assert_eq!(ids(&dashboard), ["c-working", "d-blocked", "e-unread"]);
+    assert_ne!(dashboard.selected_session_id(), Some("a-idle"));
+    assert_ne!(dashboard.selected_session_id(), Some("b-parked"));
+
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    assert_eq!(
+        ids(&dashboard).len(),
+        5,
+        "All reveals idle and parked children"
+    );
+    dashboard.close_subagent_workspace();
+    assert_eq!(dashboard.selected_session_id(), Some(parent.as_str()));
+    assert_eq!(
+        dashboard.sessions_filter.as_ref().unwrap().state,
+        Some(SessionStateFilter::NotIdle)
+    );
+    dashboard.open_subagent_workspace(parent);
+    assert!(
+        dashboard.sessions_filter.is_none(),
+        "the child's explicit All survives reopening"
+    );
+    assert_eq!(ids(&dashboard).len(), 5);
+}
+
+#[test]
+fn all_idle_subagent_scope_has_no_hidden_child_selected() {
+    let (mut dashboard, parent) = dashboard_with_one_subagent();
+    dashboard.open_subagent_workspace(parent);
+    assert!(dashboard.ordered_sessions().is_empty());
+    assert_eq!(dashboard.selected_session_id(), None);
+    assert_eq!(
+        dashboard.sessions_filter.as_ref().unwrap().state,
+        Some(SessionStateFilter::NotIdle)
+    );
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(dashboard.sessions_filter.is_none());
+    assert_eq!(dashboard.ordered_sessions().len(), 1);
+    assert_eq!(dashboard.selected_session_id(), None);
+}
+
+#[test]
+fn nested_subagent_scopes_restore_each_parent_filter_and_text() {
+    let (mut dashboard, parent) = dashboard_with_one_subagent();
+    let mut grandchild = dashboard.state.sessions["child-session"].clone();
+    grandchild.id = "grandchild".into();
+    let mut relation = dashboard.state.subagents["child-session"].clone();
+    relation.child_session_id = grandchild.id.clone();
+    relation.parent_session_id = "child-session".into();
+    let mut state = dashboard.state.clone();
+    state.subagents.insert(grandchild.id.clone(), relation);
+    state.sessions.insert(grandchild.id.clone(), grandchild);
+    dashboard.set_state(state);
+
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Char('I')));
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for letter in "session".chars() {
+        dashboard.handle_key(key(KeyCode::Char(letter)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    let top_filter = dashboard.sessions_filter_label();
+    assert!(top_filter.contains("/session") && top_filter.contains("not idle"));
+
+    dashboard.open_subagent_workspace(parent.clone());
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    assert!(dashboard.sessions_filter.is_none());
+    dashboard.open_subagent_workspace("child-session".into());
+    assert_eq!(
+        dashboard.sessions_filter.as_ref().unwrap().state,
+        Some(SessionStateFilter::NotIdle)
+    );
+    dashboard.handle_key(key(KeyCode::Char('b')));
+    dashboard.close_subagent_workspace();
+    assert_eq!(dashboard.subagent_parent_id(), Some(parent.as_str()));
+    assert!(dashboard.sessions_filter.is_none());
+    dashboard.open_subagent_workspace("child-session".into());
+    assert_eq!(
+        dashboard.sessions_filter.as_ref().unwrap().state,
+        Some(SessionStateFilter::Blocked)
+    );
+    dashboard.close_subagent_workspace();
+    dashboard.close_subagent_workspace();
+    assert_eq!(dashboard.sessions_filter_label(), top_filter);
+    assert_eq!(dashboard.selected_session_id(), Some(parent.as_str()));
 }
 
 #[test]
@@ -2908,6 +3071,9 @@ fn the_notice_log_wraps_a_long_failure_instead_of_cutting_its_tail() {
 fn a_finished_native_child_shows_its_stored_transcript_and_opens_on_enter() {
     let (mut dashboard, parent_id, id) = dashboard_with_finished_native_child();
     dashboard.open_subagent_workspace(parent_id);
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    dashboard.select_active_session(&id);
     assert_eq!(dashboard.selected_session_id(), Some(id.as_str()));
     assert!(
         !dashboard.pane_session_is_suspended(&id),
@@ -2961,6 +3127,8 @@ fn a_finished_native_child_shows_its_stored_transcript_and_opens_on_enter() {
 fn a_native_child_pane_header_names_the_child_first() {
     let (mut dashboard, parent_id, id) = dashboard_with_finished_native_child();
     dashboard.open_subagent_workspace(parent_id);
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Char('a')));
     let browse = dashboard.browse_pane();
     dashboard.set_pane_session(browse, Some(&id));
     for (width, title) in [

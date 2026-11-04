@@ -2722,6 +2722,7 @@ fn sessions_pane_shows_every_row_from_the_top_after_the_list_shrank() {
 fn subagents_pane_shows_every_child_from_the_top_with_a_stale_offset() {
     let (mut dashboard, parent) = dashboard_with_subagents(&["worker-a", "worker-b", "worker-c"]);
     dashboard.open_subagent_workspace(parent);
+    dashboard.clear_sessions_filter();
     dashboard.select_active_session("worker-c");
     dashboard.sessions_scroll.set(2);
     let text = crate::test_support::drawn(&mut dashboard, 120, 60).join("\n");
@@ -2742,6 +2743,8 @@ fn sessions_pane_keeps_the_keyboard_selection_centred_and_pins_the_ends() {
     let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
     let (mut dashboard, parent) = dashboard_with_subagents(&refs);
     dashboard.open_subagent_workspace(parent);
+    dashboard.clear_sessions_filter();
+    dashboard.select_active_session("child-00");
     dashboard.focus = Focus::Sessions;
     let lines = crate::test_support::drawn(&mut dashboard, 120, 40);
     let first = row_of_title(&lines, "child-00").expect("first child drawn at the top");

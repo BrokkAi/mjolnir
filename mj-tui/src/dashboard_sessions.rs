@@ -154,7 +154,7 @@ pub(crate) fn session_attention_level(
     session_id: &str,
     session: &SessionRecord,
 ) -> AttentionLevel {
-    attention_level(
+    let level = attention_level(
         dashboard.session_details.get(session_id),
         dashboard.session_review(session_id),
         session.state,
@@ -162,7 +162,22 @@ pub(crate) fn session_attention_level(
         dashboard.session_operations.contains_key(session_id)
             || dashboard.transition_kind(session_id).is_some(),
         dashboard.transition_failure_kind(session_id).is_some(),
-    )
+    );
+    let Some(native) = dashboard.native_agents.get(session_id) else {
+        return level;
+    };
+    use mj_core::native_agent::NativeAgentState;
+    match native.agent.state {
+        NativeAgentState::Running => match level {
+            AttentionLevel::Idle | AttentionLevel::Inactive | AttentionLevel::Unread => {
+                AttentionLevel::Working
+            }
+            _ => level,
+        },
+        NativeAgentState::Failed => AttentionLevel::Failed,
+        NativeAgentState::Disconnected => AttentionLevel::Unreachable,
+        NativeAgentState::Completed | NativeAgentState::Cancelled => AttentionLevel::Idle,
+    }
 }
 
 /// The daemon's answer to the Sessions filter's text: which sessions have it
