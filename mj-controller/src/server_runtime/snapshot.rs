@@ -783,6 +783,10 @@ pub(super) fn viewer_snapshot_selected(
                     )
                 })
             && session.operation.is_none();
+        session.question_message = question_message(
+            live.and_then(|state| state.assessment.as_deref()),
+            &activity_state,
+        );
         session.activity_state = Some(activity_state);
         let facts = live.map(|state| {
             mj_core::acp::AcpSessionFacts::from_operational(
@@ -928,6 +932,75 @@ pub(super) fn viewer_snapshot_selected(
         target.unavailable_reason = status.unavailable_reason;
     }
     snapshot
+}
+
+fn question_message(
+    assessment: Option<&mj_core::assessment::TurnAssessment>,
+    activity_state: &mj_core::activity::ActivityState,
+) -> Option<String> {
+    assessment
+        .filter(|assessment| {
+            assessment.inferred_question().is_some()
+                && matches!(
+                    activity_state,
+                    mj_core::activity::ActivityState::Idle { .. }
+                )
+        })
+        .and_then(|assessment| assessment.question_message.clone())
+}
+
+#[cfg(test)]
+mod question_message_tests {
+    use super::question_message;
+
+    fn assessment(
+        status: mj_core::assessment::Status,
+        action: mj_core::assessment::Action,
+    ) -> mj_core::assessment::TurnAssessment {
+        let mut assessment = mj_core::assessment::TurnAssessment::pending(
+            "turn-1".into(),
+            1,
+            1,
+            mj_core::activity::verdict::CompletionEvidence::bounded("EndTurn", None),
+        );
+        assessment.status = status;
+        assessment.action = Some(action);
+        assessment.question_message = Some("agent:msg_question".into());
+        assessment
+    }
+
+    #[test]
+    fn question_message_requires_current_await_input_and_idle_activity() {
+        let idle = mj_core::activity::ActivityState::Idle { since_ms: None };
+        let current = assessment(
+            mj_core::assessment::Status::Assessed,
+            mj_core::assessment::Action::AwaitInput,
+        );
+        assert_eq!(
+            question_message(Some(&current), &idle).as_deref(),
+            Some("agent:msg_question")
+        );
+
+        let dismissed = assessment(
+            mj_core::assessment::Status::Superseded,
+            mj_core::assessment::Action::AwaitInput,
+        );
+        let mut dismissed = dismissed;
+        dismissed.reason = "question_dismissed".into();
+        assert_eq!(question_message(Some(&dismissed), &idle), None);
+
+        let finished = assessment(
+            mj_core::assessment::Status::Assessed,
+            mj_core::assessment::Action::Finished,
+        );
+        assert_eq!(question_message(Some(&finished), &idle), None);
+
+        let busy = mj_core::activity::ActivityState::Turn {
+            started_at_ms: None,
+            last_activity_at_ms: None,
+        };
+        assert_eq!(question_message(Some(&current), &busy), None);
+    }
 }
 
 pub(super) fn viewer_activity_details(

@@ -316,6 +316,7 @@ impl ViewerSnapshot {
                     chat_phase: ViewerChatPhase::default(),
                     is_idle: false,
                     activity_state: None,
+                    question_message: None,
                     config_options: Vec::new(),
                     plan_mode_active: None,
                     turn_review: None,
@@ -676,6 +677,9 @@ pub struct ViewerSession {
     /// worker and report what was last known about it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_state: Option<mj_core::activity::ActivityState>,
+    /// Transcript entry containing the current unanswered question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_message: Option<String>,
     /// What this session is doing, in the words the dashboard row uses:
     /// `Turn 43m36s  Step 12s`, `BG 43m36s`, or `[idle]`.
     #[serde(default, skip_serializing_if = "String::is_empty")]

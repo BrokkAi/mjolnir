@@ -78,6 +78,7 @@ const SUMMARY_FIELDS: &[&str] = &[
     "last_message_at_ms",
     "capacity_retry",
     "retry_assessment_pending",
+    "question_message",
     "quota_recovery",
     "operation",
     "move_recovery",
