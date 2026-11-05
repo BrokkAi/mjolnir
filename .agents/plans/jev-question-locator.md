@@ -16,11 +16,11 @@ To see it working: in a session whose agent asked a question, then sent further 
 - [x] (2026-11-05) Measured the current verdict: no wording change is needed (see Surprises).
 - [x] (2026-11-05) Prototype locator question and held-out evaluation (see Surprises).
 - [x] Milestone 1: shared contract in `mj-core` (question file, request builder, answer parser, `TurnAssessment.question_message`).
-- [ ] Milestone 2: proxy route `/v1/question-locator`.
+- [x] Milestone 2: proxy route `/v1/question-locator` (not yet deployed).
 - [x] Milestone 3: worker calls the locator after an `AwaitInput` assessment and stores the target.
-- [ ] Milestone 4: TUI dashboard scrolls to the target when a marked session is opened.
-- [ ] Milestone 5: web viewer (and desktop, which hosts it) scrolls to the target.
-- [ ] Milestone 6: locator evaluation script and fixture labels; documentation in `.agents/docs/jev.md` and `.agents/docs/jev-proxy.md`.
+- [x] Milestone 4: TUI dashboard scrolls to the target when a marked session is opened.
+- [x] Milestone 5: web viewer (and desktop, which hosts it) scrolls to the target.
+- [x] Milestone 6: locator evaluation script and fixture labels; documentation in `.agents/docs/jev.md` and `.agents/docs/jev-proxy.md`.
 - [ ] Deploy the proxy, then release.
 
 ## Surprises & Discoveries
@@ -60,6 +60,10 @@ To see it working: in a session whose agent asked a question, then sent further 
   Rationale: `.agents/docs/jev.md` principle "Simplicity over bulletproofing": the user still sees the mark and can scroll; nothing double-executes.
   Date/Author: 2026-11-05, coordinator.
 
+- Decision: clients apply each distinct target id once per session, instead of once per assessment revision, and only to a chat that is not already open. The target is shown only while `TurnAssessment::inferred_question()` is present, so a dismissed question clears it.
+  Rationale: the id already changes when the question changes; `inferred_question()` is the predicate that draws the question marker, so the target and the marker cannot disagree.
+  Date/Author: 2026-11-05, coordinator.
+
 - Decision: use the argmax reply regardless of its probability, unless the choice is `none`.
   Rationale: held-out correct answers had probabilities as low as 0.25; a wrong scroll target is harmless because the user is already looking at the session.
   Date/Author: 2026-11-05, coordinator.
@@ -70,7 +74,9 @@ To see it working: in a session whose agent asked a question, then sent further 
 
 ## Outcomes & Retrospective
 
-(To be written at completion.)
+The checked-in evaluation (`scripts/jev-question-locator-eval.py`, three repeats over the 30 labeled scenarios with two or more replies) chose an acceptable reply in 81 of 90 requests. Eight misses answered `none`, which leaves today's behavior (the transcript opens at the bottom); one chose a wrong reply. The verdict question itself was left unchanged because a random sample of 72 genuine automation waits produced no false alerts.
+
+Remaining limits: targets are not produced for assistant entries that have no harness message id (the `agent:<ordinal>` fallback), and the locator sees at most the newest 32 replies since the user's last message. The web viewer searches at most 100 history pages for the target.
 
 ## Context and Orientation
 
