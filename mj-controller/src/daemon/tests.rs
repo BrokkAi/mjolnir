@@ -8216,6 +8216,8 @@ async fn exercise_child_close_with_a_nested_workspace(
         crate::database::save_turn_review_state(
             parent_id,
             &crate::database::TurnReviewState {
+                pending_followup: false,
+                forward_attempts: 0,
                 active_group: Some(mj_core::storage::ActiveReviewGroup {
                     driver: driver.snapshot(),
                     reviewer: Default::default(),

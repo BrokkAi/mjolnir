@@ -88,9 +88,9 @@ The reviewer receives the user's messages as the source of intent; the primary a
 
 ## Automatic review
 
-With `trigger = "turn"`, every completed prompt-driven turn arms review. Review runs between turns. If prompts are already queued, Mjolnir lets the queue drain and reviews the resulting batch. Preparation resolves the reviewer settings and captures the repository delta; when nothing changed, review resolves without sending a review prompt.
+With `trigger = "turn"`, every completed prompt-driven turn arms review. Review starts after a turn and runs in the background. New prompts remain available while reviewers inspect the captured change. Preparation resolves the reviewer settings and captures the repository delta; when nothing changed, review resolves without sending a review prompt.
 
-An open review holds new prompts for that session from preparation through a clean or findings verdict. This prevents more edits from racing ahead of work being inspected. A failed review releases the hold immediately, and other sessions remain independent throughout.
+The reviewer examines a captured change while the primary conversation stays available. Later edits are covered by a subsequent review.
 
 ## Review before push
 
@@ -135,17 +135,11 @@ mj review status --session <id>
 
 `mj review start` answers once the review has opened, or says why it cannot start. `mj review status` shows the session's trigger, review status, reviewer role, and verdict once it has one, or that no review is open.
 
-## Read and resolve a verdict
+## Follow a review
 
-The parent conversation stays visible at full width throughout review, including when findings arrive. The **Reviewers** button on the prompt’s bottom border opens the reviewer sessions using the same virtual workspace as Subagents. Use its close control, or Escape from the Sessions list, to return to the parent. Review status, a findings summary, and resolution actions appear in the prompt area. Reviewer conversations use the ordinary session view. **Read details** (or `v`) opens the complete findings, failure reason, or delivery/action error in the existing text reader; scroll with Page Up/Down and press Escape to return without resolving the review. The web viewer shows the same reviewer role and status.
+The parent conversation and its prompt remain available while reviewers work. A short status appears above the prompt. Open **Reviewers** to inspect reviewer sessions in the virtual workspace; close the workspace or press Escape in the Sessions list to return.
 
-Resolution depends on the verdict:
-
-- A **clean** verdict resolves automatically and advances the reviewed boundary.
-- A **findings** verdict is forwarded to the primary harness as a corrective prompt. If the primary rejects that prompt, the review stays open with **Forward findings** to retry, **Dismiss** to advance the reviewed boundary without requesting changes, and **Cancel** to close the review without advancing it.
-- A **failed** review offers **Dismiss** and **Cancel**. Its prompt hold has already been released, and neither choice advances the reviewed boundary; fix the profile, model, credential, or connectivity problem before trying again.
-
-Cancel is also available while review work is still running. It releases the prompt hold and leaves the unreviewed changes for a later pass.
+A clean review advances the reviewed boundary automatically. Findings are sent to the primary agent as a corrective prompt, and a failed review reports its reason. `mj review status` shows the current state and verdict.
 
 ## Lifecycle behavior
 

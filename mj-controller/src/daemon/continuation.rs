@@ -364,7 +364,6 @@ fn allowed(state: &RuntimeState, session: &str) -> bool {
     enabled
         && !crate::controller::move_session::move_owns_session(session)
         && !state.owner().lifecycle.contains_key(session)
-        && crate::review_host::prompt_refusal(session).is_none()
 }
 
 #[derive(Clone)]

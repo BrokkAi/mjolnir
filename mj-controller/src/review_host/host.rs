@@ -118,6 +118,8 @@ impl TurnReviewHost {
                 awaiting_capture_persistence: BTreeMap::new(),
                 next_epoch: 0,
                 sessions: BTreeMap::new(),
+                followups: BTreeSet::new(),
+                followup_saving: BTreeSet::new(),
                 recovery_candidates: BTreeSet::new(),
                 recovery_in_flight: BTreeSet::new(),
                 startup_ready: false,
@@ -244,7 +246,8 @@ impl TurnReviewHost {
         result.await.map_err(|_| "review host stopped".to_owned())?
     }
 
-    /// Forwards, dismisses, or cancels the open review.
+    /// Handles a legacy serialized resolution request. Only before-push
+    /// cancellation remains valid; ordinary turn reviews resolve themselves.
     pub async fn resolve(&self, session_id: &str, resolution: Resolution) -> Result<(), String> {
         let (reply, answer) = oneshot::channel();
         self.events
@@ -259,7 +262,7 @@ impl TurnReviewHost {
             .map_err(|_| "the review host stopped".to_owned())?
     }
 
-    /// Stops accepting review work, releases every prompt hold, and drains the
+    /// Stops accepting review work and drains the
     /// ordered persistence lane before the daemon shuts its database writer
     /// down.
     pub async fn shutdown(&self) -> Result<(), String> {
@@ -317,11 +320,5 @@ impl TurnReviewHost {
             })
             .ok()?;
         result.await.ok().flatten()
-    }
-
-    /// Whether an unresolved review is holding this session's prompts.
-    #[must_use]
-    pub fn refuses_prompt(&self, session_id: &str) -> bool {
-        prompt_refusal(session_id).is_some()
     }
 }

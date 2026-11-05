@@ -252,6 +252,8 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
         .execute_batch(
             "ALTER TABLE turn_review_state DROP COLUMN active_group;
          ALTER TABLE turn_review_state DROP COLUMN push_findings;
+         ALTER TABLE turn_review_state DROP COLUMN pending_followup;
+         ALTER TABLE turn_review_state DROP COLUMN forward_attempts;
          ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;
          ALTER TABLE mailbox_outbox DROP COLUMN failure;
          DROP TABLE quota_reset_cache;

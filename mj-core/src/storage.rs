@@ -206,6 +206,13 @@ pub struct TranscriptRetention {
 /// what makes a cancelled review lossless -- the next one covers both turns.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnReviewState {
+    /// A prompted turn ended while a review was open. The host starts one
+    /// follow-up from the current baseline after the open review closes.
+    #[serde(default)]
+    pub pending_followup: bool,
+    /// Number of rejected corrective submissions for the current command.
+    #[serde(default)]
+    pub forward_attempts: u8,
     #[serde(default)]
     pub child_session_id: Option<String>,
     pub baselines: std::collections::BTreeMap<std::path::PathBuf, String>,

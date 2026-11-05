@@ -2586,6 +2586,25 @@ async fn golden_active_chat_render() {
     append_active_golden_state(&mut output, "running conversation follow-up", &buffer, &[]);
 
     let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_turn_review(Some(mj_client::review::RuntimeReviewView {
+        child_session_id: None,
+        session_id: "session-review".into(),
+        phase: mj_core::review::driver::TurnReviewPhase::LaunchingReviewer,
+        roles: Vec::new(),
+        status: "Review running · 2 reviewers".into(),
+        verdict: None,
+        questions: Vec::new(),
+    }));
+    chat.set_input("Can you inspect the changes?".into());
+    let buffer = active_golden_buffer(&mut chat, 100, 24);
+    append_active_golden_state(
+        &mut output,
+        "review running with editable composer",
+        &buffer,
+        &[active_golden_rect(&chat, SurfaceId::PromptInput)],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_input("/".into());
     let buffer = active_golden_buffer(&mut chat, 80, 24);
     let popup = chat

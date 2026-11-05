@@ -13,7 +13,6 @@ pub(super) enum ActorCommand {
         queued_at: Instant,
         command_id: String,
         command: RelayCommand,
-        admission: Option<ReviewDeliveryAdmission>,
         reply: oneshot::Sender<std::result::Result<u64, SubmitFailure>>,
     },
     Sync {
@@ -177,7 +176,6 @@ pub(super) struct DeferredSubmit {
     pub(super) queued_at: Instant,
     pub(super) command_id: String,
     pub(super) command: RelayCommand,
-    pub(super) admission: Option<ReviewDeliveryAdmission>,
     pub(super) reply: oneshot::Sender<std::result::Result<u64, SubmitFailure>>,
 }
 

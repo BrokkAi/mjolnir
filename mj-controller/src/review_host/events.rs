@@ -94,6 +94,13 @@ pub(super) enum HostEvent {
         session_id: String,
         epoch: u64,
     },
+    RetryForward {
+        session_id: String,
+        epoch: u64,
+    },
+    RetryFollowUp {
+        session_id: String,
+    },
     QuestionTarget {
         session_id: String,
         child_session_id: String,
@@ -112,6 +119,7 @@ pub(super) enum HostEvent {
     },
     RestoreGroups {
         groups: Vec<(String, TurnReviewState)>,
+        pending_followups: Vec<String>,
         abandoned_children: Vec<String>,
     },
     StartupRecoveryFailed(String),
@@ -125,7 +133,9 @@ pub(super) enum PersistenceCompletion {
     Open,
     Captured,
     Forward,
+    ForwardRetry,
     Close,
+    FollowUp,
     LaunchChild { role: String },
 }
 
@@ -152,6 +162,9 @@ pub(super) enum PersistenceRequest {
         session_id: String,
         state: Box<TurnReviewState>,
         completion: Option<PersistenceCompletion>,
+    },
+    MarkFollowUp {
+        session_id: String,
     },
     /// Records that a review still preparing at shutdown was cut off, so the
     /// next daemon's startup sweep reports it like any other interrupted
@@ -241,7 +254,7 @@ pub(super) struct HostState {
     /// visible and start no agents until that write succeeds.
     pub(super) pending_open: BTreeMap<String, PendingOpen>,
     /// Reviews whose durable active marker is being cleared. Their resolved
-    /// view and prompt hold remain until the ordered write completes.
+    /// view remains until the ordered write completes.
     pub(super) closing: BTreeSet<String>,
     /// Primary handoff requests wait here until their durable pending record
     /// has been written. This prevents an accepted relay command from racing
@@ -255,6 +268,8 @@ pub(super) struct HostState {
     /// The last view seen per session: its execution state, for the
     /// Running→Idle edge, and its materialized transcript, for the seed.
     pub(super) sessions: BTreeMap<String, SessionWatch>,
+    pub(super) followups: BTreeSet<String>,
+    pub(super) followup_saving: BTreeSet<String>,
     /// Sessions already told that no reviewer is configured. One notice per
     /// session, not one per turn.
     /// Sessions whose durable handoff survived a restart and still needs the
@@ -270,6 +285,7 @@ pub(super) struct HostState {
 pub(super) enum PreparingOperation {
     Review {
         cancelled: Arc<std::sync::atomic::AtomicBool>,
+        push: bool,
     },
     Override {
         task: tokio::task::JoinHandle<()>,
@@ -336,6 +352,19 @@ pub(super) async fn persistence_loop(
             }
         };
         match request {
+            PersistenceRequest::MarkFollowUp { session_id } => {
+                let environment = environment.clone();
+                let owner = session_id.clone();
+                let result = tokio::task::spawn_blocking(move || environment.mark_followup(&owner))
+                    .await
+                    .map_err(|error| format!("follow-up marker task stopped: {error}"))
+                    .and_then(|result| result);
+                let _ = events.send(HostEvent::StateSaved {
+                    session_id,
+                    completion: PersistenceCompletion::FollowUp,
+                    result,
+                });
+            }
             PersistenceRequest::Load { session_id, reply } => {
                 let load = environment.clone();
                 let result = tokio::task::spawn_blocking(move || load.load_state(&session_id))
@@ -396,6 +425,7 @@ pub(super) async fn persistence_loop(
                 let sweep = environment.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let groups = sweep.active_groups()?;
+                    let pending_followups = sweep.pending_followups()?;
                     let mut retained = BTreeSet::new();
                     for (parent, state) in &groups {
                         let group = state
@@ -427,16 +457,17 @@ pub(super) async fn persistence_loop(
                         .collect();
                     sweep
                         .clear_interrupted()
-                        .map(|interrupted| (interrupted, children, groups))
+                        .map(|interrupted| (interrupted, children, groups, pending_followups))
                 })
                 .await;
                 match result {
-                    Ok(Ok((interrupted, children, groups))) => {
+                    Ok(Ok((interrupted, children, groups, pending_followups))) => {
                         if !interrupted.is_empty() {
                             let _ = events.send(HostEvent::Interrupted { interrupted });
                         }
                         let _ = events.send(HostEvent::RestoreGroups {
                             groups,
+                            pending_followups,
                             abandoned_children: children,
                         });
                     }

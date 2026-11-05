@@ -254,7 +254,7 @@ impl HostState {
             }
         }
         for operation in self.preparing.values() {
-            if let PreparingOperation::Review { cancelled } = operation {
+            if let PreparingOperation::Review { cancelled, .. } = operation {
                 cancelled.store(true, std::sync::atomic::Ordering::Release);
             }
         }
@@ -262,7 +262,6 @@ impl HostState {
         self.closing.clear();
         self.reviews.clear();
         for session_id in &session_ids {
-            release_prompts(session_id);
             self.publish(session_id);
         }
 

@@ -65,8 +65,8 @@ use crate::clipboard::ClipboardContent;
 /// What the chat asks the controller daemon to do.
 ///
 /// The chat runs in the terminal process, which owns no session state and no
-/// database: everything here crosses to the daemon, which does. Review actions
-/// travel this way too -- the review runs there.
+/// database: everything here crosses to the daemon, which does. Review start
+/// requests travel this way too -- the review runs there.
 pub enum ChatDaemonRequest {
     RecordAbandonedPrompt {
         session_id: String,
@@ -75,11 +75,6 @@ pub enum ChatDaemonRequest {
     },
     /// Review the turn this session just finished.
     StartTurnReview { session_id: String },
-    /// Forward the findings, dismiss them, or cancel the review.
-    ResolveTurnReview {
-        session_id: String,
-        resolution: mj_core::review::driver::Resolution,
-    },
 }
 
 const MAX_DIFFSTAT_TASKS: usize = 2;

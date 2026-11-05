@@ -116,13 +116,11 @@ pub(super) async fn run_remote_session_actor(
                 queued_at: _,
                 command_id,
                 command,
-                admission,
                 reply,
             } => RemoteSessionRequest::Submit {
                 session_id: session_id.clone(),
                 command_id,
                 command,
-                admission,
                 reply,
             },
             ActorCommand::Sync { reply } => RemoteSessionRequest::Sync {

@@ -59,7 +59,7 @@ pub(crate) fn render_in(
 ) {
     chat.footer_command_areas.borrow_mut().clear();
     chat.voice_form.begin_frame();
-    if chat.composer_replaced() || chat.turn_review_active() {
+    if chat.composer_replaced() {
         chat.voice_form.cancel_pointer();
     }
     chat.frame_surfaces.clear();
@@ -158,23 +158,7 @@ pub(crate) fn render_in(
         regions.title_lead,
         regions.pane_focused,
     );
-    if chat.turn_review_active() {
-        let status = chat
-            .turn_review()
-            .map(crate::chat::turn_review::TurnReview::status)
-            .unwrap_or_default();
-        let mut block = theme::panel(prompt_focused).title(format!(" {status} "));
-        for title in prompt_bottom_titles(chat, prompt_area, prompt_focused) {
-            block = block.title_bottom(title);
-        }
-        let actions_area = block.inner(prompt_area);
-        frame.render_widget(block, prompt_area);
-        if let Some(review) = chat.turn_review_mut() {
-            crate::chat::turn_review::render_turn_review_actions(frame, actions_area, review);
-        }
-    } else {
-        render_composer_band(frame, prompt_area, chat, prompt_focused, None);
-    }
+    render_composer_band(frame, prompt_area, chat, prompt_focused, None);
     if let Some(footer) = regions.footer {
         render_chat_footer(frame, footer, chat, prompt_focused);
     }
@@ -240,15 +224,6 @@ pub(crate) fn render_chat_footer(
     );
     let composer_keys = if !prompt_focused {
         format!("Tab pane{sep}PgUp/PgDn transcript")
-    } else if chat.turn_review_active() && chat.elicitation.is_none() {
-        if chat
-            .turn_review()
-            .is_some_and(crate::chat::turn_review::TurnReview::has_report)
-        {
-            format!("v details{sep}Down controls{sep}Enter act{sep}Esc cancel")
-        } else {
-            format!("Down review controls{sep}Enter act{sep}Esc cancel")
-        }
     } else if chat.voice_active {
         format!("Listening… click the microphone to stop{sep}PgUp/PgDn transcript")
     } else if !chat.queued_prompts.is_empty() {
@@ -386,6 +361,10 @@ pub(crate) fn render_composer_band(
             })
         })
         .or_else(|| chat.connection_feedback.clone())
+        .or_else(|| {
+            chat.turn_review()
+                .map(crate::chat::turn_review::TurnReview::status)
+        })
         .filter(|_| prompt_area.height > 3)
     {
         let feedback_area = Rect::new(prompt_area.x, prompt_area.y, prompt_area.width, 1);
@@ -897,26 +876,25 @@ fn prompt_bottom_titles(
     let reviewer_width = reviewer_label
         .as_ref()
         .map_or(0, |label| display_width(label));
-    let command_hints = (prompt_focused && !chat.turn_review_active() && prompt_area.width >= 56)
-        .then(|| {
-            // A standby composer cannot send, so the hint says what Enter does
-            // there instead of advertising a send that would be refused.
-            if chat.standby {
-                Line::from(vec![
-                    Span::styled(" Enter ", theme::key_hint()),
-                    Span::styled(" keeps the draft ", theme::hint_description()),
-                ])
-                .right_aligned()
-            } else {
-                Line::from(vec![
-                    Span::styled(" Enter ", theme::key_hint()),
-                    Span::styled(" send  ", theme::hint_description()),
-                    Span::styled(" / ", theme::key_hint()),
-                    Span::styled(" commands ", theme::hint_description()),
-                ])
-                .right_aligned()
-            }
-        });
+    let command_hints = (prompt_focused && prompt_area.width >= 56).then(|| {
+        // A standby composer cannot send, so the hint says what Enter does
+        // there instead of advertising a send that would be refused.
+        if chat.standby {
+            Line::from(vec![
+                Span::styled(" Enter ", theme::key_hint()),
+                Span::styled(" keeps the draft ", theme::hint_description()),
+            ])
+            .right_aligned()
+        } else {
+            Line::from(vec![
+                Span::styled(" Enter ", theme::key_hint()),
+                Span::styled(" send  ", theme::hint_description()),
+                Span::styled(" / ", theme::key_hint()),
+                Span::styled(" commands ", theme::hint_description()),
+            ])
+            .right_aligned()
+        }
+    });
     let queue_width = queue_control.as_ref().map_or(0, Line::width);
     let task_width = task_label.as_ref().map_or(0, |label| display_width(label));
     let subagent_width = subagent_label

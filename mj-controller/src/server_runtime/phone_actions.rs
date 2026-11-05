@@ -98,7 +98,6 @@ impl PendingActionReplies {
             ControllerAction::New { .. }
                 | ControllerAction::SetPlanMode { .. }
                 | ControllerAction::StartReview { .. }
-                | ControllerAction::ResolveReview { .. }
                 | ControllerAction::Prompt {
                     command_id: Some(_),
                     ..

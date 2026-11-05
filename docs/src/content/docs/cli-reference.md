@@ -604,9 +604,7 @@ which can take a few minutes while a reviewer is chosen and started, and fails
 with the reason when the session is still working, has queued prompts, is a
 sub-agent, or has no usable reviewer. `mj review status` prints the open
 review's status, reviewer role, and verdict, or `no review is open`.
-`mj review dismiss` and `mj review cancel` close the open review, for example a
-failed one, so another can start; `mj review forward` retries a forward the
-primary refused. See [turn review](/turn-review/).
+The conversation prompt stays available while the review runs. See [turn review](/turn-review/).
 
 `mj destroy` permanently removes the live session record, environment, and
 recovery archive. Its conversation is indexed in SessionWiki first:

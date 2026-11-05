@@ -243,14 +243,13 @@ impl HostState {
         if let Some(group) = slot.state.active_group.as_mut() {
             group.driver = slot.driver.snapshot();
         }
-        let failure = match slot.driver.verdict() {
+        let failure = match slot.driver.last_verdict() {
             Some(ReviewVerdict::Failed { reason }) => Some(reason.clone()),
             _ => None,
         };
         if let Some(reason) = &failure {
             answer(slot.start_reply.take(), Err(StartRefusal(reason.clone())));
             slot.state.active = None;
-            release_prompts(session_id);
         }
         let state = slot.state.clone();
         if let Err(error) = self.persist(session_id.to_owned(), state, None) {
@@ -322,7 +321,10 @@ impl HostState {
         if let Some(group) = slot.state.active_group.as_mut() {
             group.driver = slot.driver.snapshot();
         }
-        if matches!(slot.driver.verdict(), Some(ReviewVerdict::Failed { .. })) {
+        if matches!(
+            slot.driver.last_verdict(),
+            Some(ReviewVerdict::Failed { .. })
+        ) {
             slot.state.active = None;
         }
         slot.pending_outcome = Some(prior);
@@ -373,10 +375,6 @@ impl HostState {
             {
                 slot.driver = driver;
                 slot.state = prior;
-            }
-            if result.is_ok() && matches!(slot.driver.verdict(), Some(ReviewVerdict::Failed { .. }))
-            {
-                release_prompts(&session_id);
             }
             if result.is_ok() {
                 self.run(&session_id, requests);

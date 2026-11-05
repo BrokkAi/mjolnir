@@ -1,17 +1,18 @@
 use super::*;
 
 impl HostState {
-    /// Forwards, dismisses, or cancels an open review on a surface's request.
+    /// Applies a driver resolution. Ordinary findings forwarding calls this
+    /// internally; only legacy before-push Cancel remains externally callable.
     pub(super) fn resolve(
         &mut self,
         session_id: &str,
         resolution: Resolution,
     ) -> Result<(), String> {
         if resolution == Resolution::Cancelled
-            && let Some(PreparingOperation::Review { cancelled }) = self.preparing.get(session_id)
+            && let Some(PreparingOperation::Review { cancelled, .. }) =
+                self.preparing.get(session_id)
         {
             cancelled.store(true, std::sync::atomic::Ordering::Release);
-            release_prompts(session_id);
             return Ok(());
         }
         let (requests, pending_state) = {
@@ -68,12 +69,10 @@ impl HostState {
                 Some(PersistenceCompletion::Forward),
             ) {
                 self.awaiting_forward_persistence.remove(session_id);
-                if let Some(slot) = self.reviews.get_mut(session_id) {
-                    slot.driver.forward_failed(format!(
-                        "the handoff could not be recorded durably: {error}"
-                    ));
-                }
-                self.publish(session_id);
+                self.forward_failed(
+                    session_id,
+                    format!("the handoff could not be recorded durably: {error}"),
+                );
                 return Err(error);
             }
             self.publish(session_id);
@@ -83,9 +82,60 @@ impl HostState {
         Ok(())
     }
 
-    /// Ends a review that cannot continue. Every failure path is the same: a
-    /// verdict the user dismisses, and a baseline that stays where it was, so
-    /// the change is reviewed again rather than silently skipped.
+    pub(super) fn forward_failed(&mut self, session_id: &str, error: impl Into<String>) {
+        const MAX_ATTEMPTS: u8 = 3;
+        let Some(slot) = self.reviews.get_mut(session_id) else {
+            return;
+        };
+        let reason = error.into();
+        slot.driver.forward_failed(reason.clone());
+        slot.state.forward_attempts = slot.state.forward_attempts.saturating_add(1);
+        slot.sync_group();
+        if slot.state.forward_attempts >= MAX_ATTEMPTS {
+            self.stop_failed_forward(session_id, reason);
+            return;
+        }
+        let state = slot.state.clone();
+        if let Err(error) = self.persist(
+            session_id.to_owned(),
+            state,
+            Some(PersistenceCompletion::ForwardRetry),
+        ) {
+            self.stop_failed_forward(
+                session_id,
+                format!("could not record delivery retry: {error}"),
+            );
+        } else {
+            self.publish(session_id);
+        }
+    }
+
+    pub(super) fn schedule_forward_retry(&self, session_id: &str) {
+        let Some(slot) = self.reviews.get(session_id) else {
+            return;
+        };
+        let attempts = slot.state.forward_attempts;
+        let epoch = slot.epoch;
+        let events = self.events.clone();
+        let session_id = session_id.to_owned();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(1 << attempts.min(3))).await;
+            let _ = events.send(HostEvent::RetryForward { session_id, epoch });
+        });
+    }
+
+    pub(super) fn stop_failed_forward(&mut self, session_id: &str, reason: impl std::fmt::Display) {
+        let Some(slot) = self.reviews.get_mut(session_id) else {
+            return;
+        };
+        let attempts = slot.state.forward_attempts;
+        let requests = slot.driver.cancel();
+        slot.sync_group();
+        self.record_notice(session_id, format!("Review findings could not be delivered after {attempts} attempts: {reason}. The changes remain unreviewed."));
+        self.run(session_id, requests);
+    }
+
+    /// Ends a review that cannot continue without advancing its baseline.
     pub(super) fn fail(&mut self, session_id: &str, message: impl Into<String>) {
         let Some(slot) = self.reviews.get_mut(session_id) else {
             return;
@@ -96,9 +146,6 @@ impl HostState {
         let requests = slot.driver.request_failed(message);
         slot.sync_group();
         let state = slot.state.clone();
-        // A failed review remains visible so the person can dismiss it, but it
-        // no longer owns the turn or has work capable of progressing.
-        release_prompts(session_id);
         if let Err(error) = self.persist(session_id.to_owned(), state, None) {
             tracing::warn!(session_id, %error, "could not queue failed review persistence");
         }
@@ -128,9 +175,8 @@ impl HostState {
 
     /// A review someone asked for, automatic or manual, delivers its findings:
     /// there is no case where the agent should not see them, so a findings
-    /// verdict is forwarded as soon as it is reached instead of waiting for a
-    /// person to press Forward. A clean verdict already closes itself, and a
-    /// failed one still waits to be dismissed. Forwarding leaves the verdict
+    /// verdict is forwarded as soon as it is reached. A clean or failed
+    /// verdict already closes itself. Forwarding leaves the verdict
     /// phase, so this runs once per verdict.
     fn forward_fresh_findings(&mut self, session_id: &str) {
         let fresh = self.reviews.get(session_id).is_some_and(|slot| {

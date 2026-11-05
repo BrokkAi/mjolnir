@@ -570,34 +570,6 @@ fn validate_action_against(
             validate_public_id(session_id)?;
             require_session_record(snapshot, session_id)?;
         }
-        ControllerAction::ResolveReview {
-            session_id,
-            resolution,
-        } => {
-            validate_public_id(session_id)?;
-            let session = require_session_record(snapshot, session_id)?;
-            let Some(resolution) = resolution_from_name(resolution) else {
-                return Err(ApiError::bad_request(
-                    "a review is resolved by forward, dismiss, or cancel",
-                ));
-            };
-            let Some(review) = session.turn_review.as_ref() else {
-                return Err(ApiError::bad_request("no review is open for that session"));
-            };
-            // Cancel is always available; the rest wait for the verdict the
-            // daemon published, which is the same gate the daemon enforces
-            // when it actually resolves.
-            let allowed = resolution == mj_core::review::driver::Resolution::Cancelled
-                || review.verdict.as_ref().is_some_and(|verdict| {
-                    resolution_name(&resolution)
-                        .is_some_and(|name| verdict.allowed.iter().any(|allowed| allowed == name))
-                });
-            if !allowed {
-                return Err(ApiError::bad_request(
-                    "that review cannot be resolved that way yet",
-                ));
-            }
-        }
         ControllerAction::Rename { session_id, title } => {
             validate_public_id(session_id)?;
             validate_title(title)?;
@@ -751,15 +723,6 @@ fn validate_action_against(
             if !images.is_empty() && !session.prompt_images_supported {
                 return Err(ApiError::bad_request(
                     "this session does not support image prompts",
-                ));
-            }
-            // Review is synchronous: the turn under review stays where the
-            // review found it. The daemon's own submit path is what makes this
-            // true; refusing here as well is what turns it into an immediate
-            // answer rather than a rejected prompt.
-            if session.turn_review.is_some() {
-                return Err(ApiError::bad_request(
-                    crate::review_host::PROMPT_HELD_MESSAGE,
                 ));
             }
         }

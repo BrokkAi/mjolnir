@@ -554,9 +554,9 @@ test('child workspace hides idle history while preserving active work and an ope
 
   // This is the same published verdict shape used by the turn-review browser tests.
   reviewing.turn_review = {
-    status: 'Choose what to do with the findings.',
+    status: 'Findings sent to the agent',
     roles: [],
-    verdict: { text: '[P1] a concrete finding', allowed: ['forward', 'dismiss', 'cancel'] },
+    verdict: { text: '[P1] a concrete finding' },
   };
   await refresh(page, state);
   await expect(card(page, 'reviewing')).toBeVisible();
@@ -1212,4 +1212,17 @@ test('mobile Apply queued preserves the published target and keeps interruption 
   await page.getByRole('button', { name: 'Interrupt turn', exact: true }).click();
   await expect.poll(() => state.actions.length).toBe(2);
   expect(state.actions[1].command).toEqual(parent.turn_controls.interrupt);
+});
+
+test('a running review leaves the conversation composer usable', async ({ page }) => {
+  const reviewing = session('reviewing-primary', 'project-review', 'Review', {
+    capabilities: { prompt: true },
+  });
+  reviewing.turn_review = { status: 'Review running · 2 reviewers', roles: [], verdict: null };
+  await mount(page, [reviewing]);
+  await card(page, 'reviewing-primary').click();
+  await expect(page.locator('#turn-review')).toContainText('Review running · 2 reviewers');
+  await expect(page.locator('#send-button')).toBeEnabled();
+  await page.locator('#prompt-text').fill('Continue while reviewers work');
+  await expect(page.locator('#prompt-text')).toHaveText('Continue while reviewers work');
 });

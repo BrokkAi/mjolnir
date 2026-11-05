@@ -247,7 +247,10 @@ fn an_empty_report_fails_the_review_and_leaves_the_baseline_alone() {
             .any(|request| matches!(request, ReviewRequest::AdvanceBaseline { .. })),
         "a failed review never advances the baseline: {requests:?}"
     );
-    let ReviewVerdict::Failed { reason } = driver.verdict().expect("a verdict is on screen") else {
+    let ReviewVerdict::Failed { reason } = driver
+        .last_verdict()
+        .expect("the failed verdict is retained")
+    else {
         panic!(
             "an empty report must fail the review, got {:?}",
             driver.phase()
@@ -441,21 +444,22 @@ fn a_completion_for_another_command_is_ignored() {
 }
 
 #[test]
-fn a_request_failure_ends_as_a_dismissable_failed_verdict() {
+fn a_request_failure_closes_without_advancing_coverage() {
     let (mut driver, _) = running();
     let requests = driver.request_failed("the reviewer could not start");
     assert_eq!(
         requests,
-        vec![ReviewRequest::CloseReviewer {
-            role: "reviewer-1".to_owned()
-        }]
+        vec![
+            ReviewRequest::CloseReviewer {
+                role: "reviewer-1".to_owned()
+            },
+            ReviewRequest::Close
+        ]
     );
     assert!(matches!(
-        driver.verdict(),
+        driver.last_verdict(),
         Some(ReviewVerdict::Failed { .. })
     ));
-    let requests = driver.dismiss();
-    assert_eq!(requests, vec![ReviewRequest::Close]);
     assert!(driver.finished());
 }
 

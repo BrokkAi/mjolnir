@@ -2636,23 +2636,6 @@ impl DaemonClient {
         }
     }
 
-    pub async fn resolve_turn_review(
-        &mut self,
-        session_id: String,
-        resolution: Resolution,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::ResolveTurnReview {
-                session_id,
-                resolution,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected turn-review resolution reply {reply:?}"),
-        }
-    }
-
     pub async fn sync_session(&mut self, session_id: String) -> Result<()> {
         match self
             .request(DaemonAction::SyncSession { session_id })

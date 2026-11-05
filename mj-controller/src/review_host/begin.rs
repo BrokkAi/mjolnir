@@ -51,6 +51,28 @@ impl HostState {
                 && matches!(watch.execution, MaterializedExecutionState::Running { .. })
         }) && matches!(execution, MaterializedExecutionState::Idle);
         if !finished_turn || !(self.config)(&session_id).arms_turn_review() {
+            if matches!(execution, MaterializedExecutionState::Idle) {
+                self.begin_followup(&session_id);
+            }
+            return;
+        }
+        if self.reviews.contains_key(&session_id) {
+            if self.followups.insert(session_id.clone()) {
+                self.followup_saving.insert(session_id.clone());
+                if self.persistence.as_ref().is_none_or(|lane| {
+                    lane.send(PersistenceRequest::MarkFollowUp {
+                        session_id: session_id.clone(),
+                    })
+                    .is_err()
+                }) {
+                    tracing::warn!(%session_id, "could not queue pending follow-up review: persistence lane stopped");
+                    self.followup_saving.remove(&session_id);
+                }
+            }
+            return;
+        }
+        if self.followups.contains(&session_id) {
+            self.begin_followup(&session_id);
             return;
         }
         if !self.startup_ready {
@@ -62,6 +84,18 @@ impl HostState {
             return;
         }
         self.begin(session_id, false, None);
+    }
+
+    pub(super) fn begin_followup(&mut self, session_id: &str) {
+        if !self.startup_ready
+            || !self.followups.contains(session_id)
+            || self.followup_saving.contains(session_id)
+            || self.closing.contains(session_id)
+            || self.refuse_start(session_id).is_some()
+        {
+            return;
+        }
+        self.begin(session_id.to_owned(), false, None);
     }
 
     /// Decides whether a review can start, and prepares one if it can.
@@ -95,15 +129,12 @@ impl HostState {
         let events = self.events.clone();
         let prepare_session = session_id.clone();
         let environment = self.environment.clone();
-        // Admission and prompt refusal are one transition. Any prompt already
-        // ahead of the preparation's reviewer-status command is drained before
-        // `prepare` reads the actor view; every later prompt sees this hold.
-        hold_prompts(&session_id);
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.preparing.insert(
             session_id.clone(),
             PreparingOperation::Review {
                 cancelled: cancelled.clone(),
+                push: false,
             },
         );
         self.publish(&session_id);
@@ -149,6 +180,7 @@ impl HostState {
             session_id.clone(),
             PreparingOperation::Review {
                 cancelled: cancelled.clone(),
+                push: true,
             },
         );
         self.publish(&session_id);
@@ -217,14 +249,9 @@ impl HostState {
         let Some(watch) = self.sessions.get(session_id) else {
             return;
         };
-        if watch
-            .materialized
-            .as_ref()
-            .is_none_or(|snapshot| !snapshot.queued_prompts.is_empty())
-        {
+        if watch.materialized.is_none() {
             return;
         }
-        hold_prompts(session_id);
         self.recovery_in_flight.insert(session_id.to_owned());
         let control = self.control.clone();
         let environment = self.environment.clone();
@@ -252,13 +279,13 @@ impl HostState {
                     session_id.clone(),
                     PreparingOperation::Review {
                         cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        push: false,
                     },
                 );
                 self.prepared(session_id, false, None, Ok(prepared));
             }
             Ok(None) => {
                 self.recovery_candidates.remove(&session_id);
-                release_prompts(&session_id);
                 self.record_notice(
                     &session_id,
                     "Turn review was cancelled when Mjolnir restarted; the next review covers the same changes".to_owned(),
@@ -268,7 +295,6 @@ impl HostState {
                 // Keep the candidate so a later connected/idle observation can
                 // retry. No success notice is emitted for an unknown outcome.
                 tracing::warn!(session_id = %session_id, %error, "could not reconcile an interrupted review handoff");
-                release_prompts(&session_id);
             }
         }
     }
@@ -276,8 +302,8 @@ impl HostState {
     /// The gates that need nothing but the host's own state.
     pub(super) fn refuse_start(&self, session_id: &str) -> Option<StartRefusal> {
         if let Some(slot) = self.reviews.get(session_id) {
-            // Name what the open review waits for when it waits on a person,
-            // since that is what lets the next one start.
+            // Name the reviewer's pending question so the person can find it
+            // in the virtual workspace.
             let question = slot.state.active_group.as_ref().and_then(|group| {
                 group
                     .registrations
@@ -291,7 +317,7 @@ impl HostState {
             return Some(StartRefusal(match question {
                 Some(question) => format!(
                     "the previous review is waiting for your answer to a question ({}); \
-                     answer or dismiss it",
+                     answer it in the virtual workspace",
                     quoted_question(&question.message)
                 ),
                 None => "a review is already open".to_owned(),
@@ -310,17 +336,6 @@ impl HostState {
         if !matches!(watch.execution, MaterializedExecutionState::Idle) {
             return Some(StartRefusal(
                 "a review runs between turns; this one is still working".to_owned(),
-            ));
-        }
-        let queued = watch
-            .materialized
-            .as_ref()
-            .is_some_and(|materialized| !materialized.queued_prompts.is_empty());
-        if queued {
-            // Reviewing now would hold prompts the user has already sent. The
-            // review after the queue drains covers the whole batch instead.
-            return Some(StartRefusal(
-                "prompts are queued; the review waits for them".to_owned(),
             ));
         }
         None

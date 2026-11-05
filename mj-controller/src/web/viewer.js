@@ -6791,8 +6791,7 @@ function buildElicitationCard(session, request) {
 /// on a button does not lose it every two seconds.
 function renderTurnReview(session) {
   const review = session?.turn_review || null;
-  // The session belongs in the identity too. Two sessions can publish an
-  // identical review, but their controls must still close over different ids.
+  // Include the session so switching between identical review states refreshes the line.
   const signature = JSON.stringify([session?.id || null, review]);
   if (reviewSignature === signature) return;
   reviewSignature = signature;
@@ -6800,76 +6799,8 @@ function renderTurnReview(session) {
     reviewHost.replaceChildren();
     return;
   }
-  const card = el('section', 'card turn-review');
-  card.append(el('strong', '', 'Reviewing this turn'));
-  const roles = review.roles || [];
-  if (roles.length) {
-    const strip = el('div', 'dim turn-review-roles');
-    for (const role of roles) {
-      const label = `${role.label}: ${role.state}`;
-      if (role.child_session_id) {
-        const transcript = el('a', '', label);
-        transcript.href = routeHash({
-          name: 'conversation',
-          sessionId: role.child_session_id,
-          subagentParentId: session.id,
-        });
-        strip.append(transcript);
-      } else {
-        strip.append(el('span', '', label));
-      }
-    }
-    card.append(strip);
-  }
-  const verdict = review.verdict || null;
-  if (verdict && verdict.text) {
-    const findings = el('pre', 'turn-review-findings');
-    findings.textContent = verdict.text;
-    card.append(findings);
-  }
-  card.append(el('p', 'dim', review.status));
-  const actions = el('div', 'row');
-  for (const [resolution, label, className] of [
-    ['forward', 'Forward findings', ''],
-    ['dismiss', 'Dismiss', 'secondary'],
-    ['cancel', 'Cancel', 'danger'],
-  ]) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = label;
-    if (className) button.className = className;
-    // Cancel always works; the rest wait for the verdict the daemon
-    // published, and the daemon refuses anything else anyway.
-    button.disabled =
-      pendingReviewSessions.has(session.id) ||
-      (resolution !== 'cancel' && !(verdict?.allowed || []).includes(resolution));
-    button.addEventListener('click', async () => {
-      if (pendingReviewSessions.has(session.id)) return;
-      pendingReviewSessions.add(session.id);
-      // One resolution owns the whole card while it is in flight. Otherwise a
-      // second tap can race a different answer into the same review.
-      for (const control of actions.children) control.disabled = true;
-      try {
-        await sendAction({
-          action: 'resolve-review',
-          session_id: session.id,
-          resolution,
-        });
-      } finally {
-        pendingReviewSessions.delete(session.id);
-        // A failed request leaves the review open. Rebuild the still-current
-        // card from its published gates so every valid action becomes usable
-        // again; never revive controls from a conversation already left behind.
-        if (currentSession === session.id) {
-          reviewSignature = null;
-          renderTurnReview(activeSession());
-        }
-      }
-    });
-    actions.append(button);
-  }
-  card.append(actions);
-  reviewHost.replaceChildren(card);
+  const status = el('p', 'dim', `Review: ${review.status}`);
+  reviewHost.replaceChildren(status);
 }
 
 function renderElicitations(session) {
@@ -7059,7 +6990,6 @@ function syncSendButtonDisabled() {
   const canPrompt = Boolean(
     session
     && session.capabilities?.prompt !== false
-    && !session.turn_review
     && !isTransitioningSession(session)
     && !isLoadingConversationSession(session),
   );
@@ -8664,15 +8594,7 @@ function renderConversationHeader(session) {
     ? 'The agent is working; this will queue'
     : 'Message the agent or use !command';
   sendButton.textContent = running || queued ? 'Queue' : 'Send';
-  // A review holds the turn it reviewed: the daemon refuses prompts for this
-  // session until it resolves, so the composer says so rather than letting a
-  // person type into a refusal.
-  const reviewing = Boolean(session.turn_review);
-  if (reviewing) {
-    promptText.dataset.placeholder =
-      'A review of the last turn is open \u2014 forward, dismiss or cancel it';
-  }
-  const canPrompt = session.capabilities?.prompt !== false && !reviewing;
+  const canPrompt = session.capabilities?.prompt !== false;
   promptText.setAttribute('contenteditable', String(canPrompt));
   syncSendButtonDisabled();
   if (session.plan_mode_active) {

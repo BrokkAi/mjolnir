@@ -590,15 +590,8 @@ pub(super) async fn forward_remote_session_request(request: RemoteSessionRequest
             session_id,
             command_id,
             command,
-            admission,
             reply,
         } => {
-            if admission.is_some() {
-                let _ = reply.send(Err(
-                    "review delivery admissions cannot cross the daemon request bridge".into(),
-                ));
-                return;
-            }
             let result = async {
                 mj_client::daemon::connect_existing()
                     .await?

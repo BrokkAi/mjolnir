@@ -296,9 +296,7 @@ impl ChatState {
     }
 
     pub(super) fn clipboard_target(&self) -> ClipboardTarget {
-        if self.earlier.is_some()
-            || (!self.reviewer_elicitation_open() && (self.turn_review_active()))
-        {
+        if self.earlier.is_some() {
             ClipboardTarget::Unavailable
         } else if let Some(dialog) = &self.elicitation {
             ClipboardTarget::Answer(dialog.request().id.clone())
@@ -959,13 +957,6 @@ impl ChatState {
     ) -> ChatAction {
         if matches!(self.phase, WorkerPhase::Closing | WorkerPhase::Closed) {
             self.set_notice("The worker is closing; this prompt was not sent");
-            return ChatAction::None;
-        }
-        // Review is synchronous. While one is unresolved the agent it reviewed
-        // stays where the review found it, so findings can never arrive in the
-        // middle of the next turn.
-        if self.turn_review_active() {
-            self.set_notice("A review of the last turn is open; answer it first");
             return ChatAction::None;
         }
         if !history.is_empty() {
