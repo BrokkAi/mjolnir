@@ -918,8 +918,20 @@ impl DashboardContext {
                         } else { chat };
                         let mut chat = chat.open();
                         if let Some(composer) = composer { chat.adopt_live_composer(composer); }
-                        if let Some(position) = self.transcript_positions.get(&session_id) {
-                            chat.restore_transcript_position(position.clone());
+                        // Only a newly opened chat may receive a locator jump. A warm
+                        // chat retains the reader's current position.
+                        let target = (!self.chats.contains_key(&session_id))
+                            .then(|| self.dashboard.question_message(&session_id))
+                            .flatten()
+                            .map(str::to_owned);
+                        let position = target.and_then(|id| {
+                            let seen = self.question_targets_seen
+                                .entry(session_id.clone()).or_default();
+                            seen.insert(id.clone())
+                                .then(|| mj_chat::chat::TranscriptPosition::at_stable_id(id))
+                        }).or_else(|| self.transcript_positions.get(&session_id).cloned());
+                        if let Some(position) = position {
+                            chat.restore_transcript_position(position);
                         }
                         self.restore_question_draft(&session_id, &mut chat);
                         for (prompt,inherited_draft) in chat.startup_retry_prompts() {self.startup_prompts.resume(session_id.clone(),prompt,inherited_draft,self.dashboard_io_tx.clone(),self.critical_operations.clone());}
