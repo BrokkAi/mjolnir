@@ -112,8 +112,9 @@ impl Meter {
         self.pass_sample = sample;
     }
 
-    /// The pass handed the terminal to another program on purpose, so the
-    /// time it waited is not a freeze.
+    /// Starts the pass over from now: the time before it was not spent
+    /// reading input, such as startup before the loop or a handover of the
+    /// terminal to another program.
     pub(super) fn forget_pass(&mut self) {
         let now = Instant::now();
         self.phase_started = now;

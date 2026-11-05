@@ -635,6 +635,9 @@ pub(crate) async fn run_dashboard_for_workspace(
     // at once. The first frame is drawn before anything is awaited.
     let mut pacer = FramePacer::new(FRAME_INTERVAL);
     pacer.mark_urgent();
+    // Startup awaited the daemon and restored state before this point; the
+    // first pass starts here, so only the first frame's own work is counted.
+    context.loop_stalls.forget_pass();
     loop {
         context.loop_stalls.phase(loop_stalls::Phase::Housekeeping);
         context.update_subagent_scope();
