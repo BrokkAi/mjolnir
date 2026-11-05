@@ -15,6 +15,7 @@ mod attachment;
 mod auto_afk;
 mod composer_drafts;
 pub(crate) mod io;
+mod loop_stalls;
 mod read_receipts;
 mod startup_prompts;
 mod summary_reads;
@@ -332,6 +333,9 @@ pub(crate) struct DashboardContext {
     shutdown_requested: bool,
     pub(crate) critical_operations: CriticalOperationTracker,
     critical_operations_changed: watch::Receiver<u64>,
+    /// Built here because it reads the scheduler statistics of the thread
+    /// that opens the dashboard, which is the thread that runs its loop.
+    loop_stalls: loop_stalls::Meter,
     /// What the two-second keep-alive last saw. It never starts a daemon, so
     /// a daemon that goes away stays away until the user asks for it back.
     daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
@@ -632,6 +636,7 @@ pub(crate) async fn run_dashboard_for_workspace(
     let mut pacer = FramePacer::new(FRAME_INTERVAL);
     pacer.mark_urgent();
     loop {
+        context.loop_stalls.phase(loop_stalls::Phase::Housekeeping);
         context.update_subagent_scope();
         context.reconcile_stored_session_summaries();
         if !context.shutdown_requested {
@@ -660,15 +665,18 @@ pub(crate) async fn run_dashboard_for_workspace(
         ) {
             pacer.mark_urgent();
         }
+        context.loop_stalls.phase(loop_stalls::Phase::Draw);
         let started = tokio::time::Instant::now();
         if pacer.should_draw(started) {
             context.draw()?;
             pacer.drew(started, tokio::time::Instant::now());
         }
+        context.loop_stalls.phase(loop_stalls::Phase::Notifications);
         // After the frame, so a bell never precedes the row it is about.
         if !pacer.pending() {
             context.emit_notifications()?;
         }
+        context.loop_stalls.phase(loop_stalls::Phase::Housekeeping);
         let now = tokio::time::Instant::now();
         let feed_gate = pacer.feed_gate(now);
         let deferred_frame = pacer.deferred_frame(now);
@@ -681,13 +689,16 @@ pub(crate) async fn run_dashboard_for_workspace(
         // the timers, which fire at most once per period and so cannot
         // starve the feeds after them. Feeds are held until a paced frame
         // could show what they bring.
+        context.loop_stalls.select_started();
         tokio::select! {
             biased;
             _ = termination.cancelled(), if !context.shutdown_requested => {
+                context.loop_stalls.woke("termination");
                 context.begin_shutdown(false);
                 pacer.mark_urgent();
             }
             event = next_terminal_event(&mut context.events) => {
+                context.loop_stalls.woke("input");
                 input = true;
                 pacer.mark_urgent();
                 let Some(event) = event else { break };
@@ -723,7 +734,9 @@ pub(crate) async fn run_dashboard_for_workspace(
                     if previous_consumed
                         && (matches!(event, Event::Mouse(_)) || context.dashboard.modal_open())
                     {
+                        context.loop_stalls.phase(loop_stalls::Phase::Draw);
                         context.draw()?;
+                        context.loop_stalls.phase(loop_stalls::Phase::Arm);
                     }
                     if opening_cancel_event(&event, context.focused_pane_is_opening(), context.dashboard.modal_open()) {
                         context.cancel_chat_open();
@@ -807,18 +820,23 @@ pub(crate) async fn run_dashboard_for_workspace(
             // and keeps extending the selection, the way a held pointer does
             // in a terminal's own selection.
             _ = autoscroll_tick.tick(), if context.autoscroll_request().is_some() => {
+                context.loop_stalls.woke("autoscroll");
                 input = true;
                 pacer.mark_urgent();
                 context.apply_autoscroll()?;
             }
             () = tokio::time::sleep_until(deferred_frame.unwrap_or_else(frame_pacer::never)),
-                if deferred_frame.is_some() => {}
+                if deferred_frame.is_some() => {
+                context.loop_stalls.woke("deferred_frame");
+            }
             _ = splash_tick.tick(), if context.splash.is_some() => {
+                context.loop_stalls.woke("splash");
                 pacer.mark();
             }
             // Poll displayed time values without forcing a frame when none
             // of the visible clocks or countdowns changed.
             _ = clock_tick.tick() => {
+                context.loop_stalls.woke("clock");
                 // Resume search covers the moving "Last active" text, so the
                 // same clock that redraws the dialog rebuilds its rows.
                 context.dashboard.rebuild_resume_rows();
@@ -845,6 +863,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             // Input redraws never advance animations. Only visible activity
             // arms this timer; settled conversations keep the slow clock.
             _ = animation_tick.tick(), if context.needs_animation() => {
+                context.loop_stalls.woke("animation");
                 if context.dashboard.animation_changed()
                     || context.visible_chat().is_some_and(|chat| chat.animation_changed())
                 {
@@ -854,6 +873,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             // The keep-alive no longer starts a daemon, so a daemon that is
             // gone has to be visible instead of silently replaced.
             changed = context.daemon_presence.changed() => {
+                context.loop_stalls.woke("daemon_presence");
                 if changed.is_ok() {
                     pacer.mark();
                     let presence = context.daemon_presence.borrow_and_update().clone();
@@ -882,20 +902,25 @@ pub(crate) async fn run_dashboard_for_workspace(
                 }
             }
             Some(error) = context.auto_afk.errors.recv() => {
+                context.loop_stalls.woke("auto_afk");
                 context.dashboard.set_failure_notice(error);
                 pacer.mark();
             }
             _ = context.critical_operations_changed.changed(),
                 if context.shutdown_requested => {
+                context.loop_stalls.woke("critical_operations");
                 pacer.mark_urgent();
             }
             () = context.sidebar_size_persistence.wait(), if context.sidebar_size_persistence.is_running() => {
+                context.loop_stalls.woke("sidebar_size_persistence");
                 pacer.mark();
             }
             () = context.pane_size_persistence.wait(), if context.pane_size_persistence.is_running() => {
+                context.loop_stalls.woke("pane_size_persistence");
                 pacer.mark();
             }
             () = context.layout_persistence.wait(), if context.layout_persistence.is_running() => {
+                context.loop_stalls.woke("layout_persistence");
                 pacer.mark();
             }
             // The warm chat's own feeds: remote command results, its clipboard
@@ -903,6 +928,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             // whether or not the chat is on screen, which is what keeps an
             // off-screen chat current.
             () = paced(feed_gate, pump_chats(&mut context.chats)) => {
+                context.loop_stalls.woke("chats");
                 pacer.mark();
                 // A warm chat may be hidden by another tab or selection.
                 // Only conversations that were on screen advance their read
@@ -910,51 +936,67 @@ pub(crate) async fn run_dashboard_for_workspace(
                 context.acknowledge_visible_chats();
             }
             update = paced(feed_gate, context.quota.wait()), if context.quota.is_open() => {
+                context.loop_stalls.woke("quota");
                 context.quota.accept(update);
             }
             update = paced(feed_gate, context.profile_capabilities.wait()), if context.profile_capabilities.is_open() => {
+                context.loop_stalls.woke("profile_capabilities");
                 context.profile_capabilities.accept(update);
             }
             update = paced(feed_gate, context.worker.wait()), if context.worker.is_open() => {
+                context.loop_stalls.woke("worker");
                 context.worker.accept(update);
             }
             update = paced(feed_gate, context.runtime_reviews.wait()), if context.runtime_reviews.is_open() => {
+                context.loop_stalls.woke("runtime_reviews");
                 context.runtime_reviews.accept(update);
             }
             update = paced(feed_gate, context.runtime_notices.wait()), if context.runtime_notices.is_open() => {
+                context.loop_stalls.woke("runtime_notices");
                 context.runtime_notices.accept(update);
             }
             update = paced(feed_gate, context.runtime_ui_requests.wait()), if context.runtime_ui_requests.is_open() => {
+                context.loop_stalls.woke("runtime_ui_requests");
                 context.runtime_ui_requests.accept(update);
             }
             update = paced(feed_gate, context.runtime_config.wait()), if context.runtime_config.is_open() => {
+                context.loop_stalls.woke("runtime_config");
                 context.runtime_config.accept(update);
             }
             update = paced(feed_gate, context.runtime_health.wait()), if context.runtime_health.is_open() => {
+                context.loop_stalls.woke("runtime_health");
                 context.runtime_health.accept(update);
             }
             update = paced(feed_gate, context.runtime_state.wait()), if context.runtime_state.is_open() => {
+                context.loop_stalls.woke("runtime_state");
                 context.runtime_state.accept(update);
             }
             update = paced(feed_gate, context.capacity.wait()), if context.capacity.is_open() => {
+                context.loop_stalls.woke("capacity");
                 context.capacity.accept(update);
             }
             update = paced(feed_gate, context.aws_options.wait()), if context.aws_options.is_open() => {
+                context.loop_stalls.woke("aws_options");
                 context.aws_options.accept(update);
             }
             update = paced(feed_gate, context.import_profiles.wait()), if context.import_profiles.is_open() => {
+                context.loop_stalls.woke("import_profiles");
                 context.import_profiles.accept(update);
             }
             update = paced(feed_gate, context.import_tasks.wait()), if context.import_tasks.is_open() => {
+                context.loop_stalls.woke("import_tasks");
                 context.import_tasks.accept(update);
             }
             update = paced(feed_gate, context.lifecycle.wait()), if context.lifecycle.is_open() => {
+                context.loop_stalls.woke("lifecycle");
                 context.lifecycle.accept(update);
             }
             update = paced(feed_gate, context.dashboard_io.wait()), if context.dashboard_io.is_open() => {
+                context.loop_stalls.woke("dashboard_io");
                 context.dashboard_io.accept(update);
             }
         }
+        context.loop_stalls.phase(loop_stalls::Phase::DrainFeeds);
         if input {
             // The frame that shows this input is drawn before any queued
             // feed message is applied; the next wakeup drains them. Only the
@@ -966,6 +1008,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             // the screen even when the timer itself had nothing to show.
             pacer.mark();
         }
+        context.loop_stalls.phase(loop_stalls::Phase::Persistence);
         if let Some(workspace_id) = context.dashboard.active_workspace_id()
             && context.known_workspace_layouts.contains(workspace_id)
             && context
@@ -981,6 +1024,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             context.dashboard.pane_size(mj_tui::SupportPane::Sessions),
         );
         context.save_active_workspace_layout();
+        context.loop_stalls.phase(loop_stalls::Phase::Actions);
         if !context.shutdown_requested {
             context.apply_chat_outcome(chat_outcome).await;
             actions::apply_dashboard_action(&mut context, action).await?;
@@ -1036,6 +1080,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                 )
                 .await?;
             }
+            context.loop_stalls.phase(loop_stalls::Phase::Housekeeping);
             // The Sessions pane is a list of conversations, not a list of
             // things to go and open, so the transcript follows its selection.
             context.reconcile_conversation_attachments();
@@ -1849,6 +1894,7 @@ impl DashboardContext {
             shutdown_requested: false,
             critical_operations,
             critical_operations_changed,
+            loop_stalls: loop_stalls::Meter::new(),
             daemon_presence,
             auto_afk: auto_afk::AutoAfkReporter::new(auto_afk_enabled, auto_afk_away),
             quota: Feed::new(quota_rx),
