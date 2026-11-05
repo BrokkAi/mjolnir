@@ -130,8 +130,10 @@ Deployed on 2026-10-09 as version `8bdbc740-9b8a-402d-a37e-2d059a639263` from `d
 
 Deployed on 2026-10-07 as version `684c5a50-d4ba-4392-822e-09152a1cb57b`, replacing `14ca6393-f397-40c7-a1c2-615c9bb32b6e`, following explicit user authorization. TypeScript check, 28 proxy tests and the dry run passed first. Synthetic smoke checks without a User-Agent: a pull request the session's turns show it opening scored interested 0.96 and created 0.97; an unrelated README typo issue scored 0.03 and 0.02; a malformed item returned 400; v6 (running turn), v1 turn-verdict and v1 continuation returned 200. A v6 request with `phase: replied` and no `completion` correctly returns 400. No private conversation was sent.
 
-## Question locator (not deployed)
+## Question locator
 
 `POST /v1/question-locator` accepts exactly `{latest_user_message, replies}`, where the first field is a string of at most 4096 UTF-8 bytes and `replies` contains 1–32 ordered `{reply, text}` objects. Each `reply` equals its zero-based array index, each text is at most 3008 UTF-8 bytes, unknown fields are rejected, and the whole request is limited to 64 KiB. Invalid evidence returns HTTP 400 with `invalid_evidence`.
 
-The proxy builds the `request_reply` choice question from `mj-core/src/activity/question_locator.json` and the number of replies, then calls `jev-latest`. It uses `TURN_RATE_LIMITER`. A valid response is `{"choice":"r0","probabilities":{"r0":0.8,"none":0.2},"confidence":0.8}` (keys vary with reply count); `none` means no reply was located. Malformed upstream answers return HTTP 502. This route is implemented locally and has not been deployed.
+The proxy builds the `request_reply` choice question from `mj-core/src/activity/question_locator.json` and the number of replies, then calls `jev-latest`. It uses `TURN_RATE_LIMITER`. A valid response is `{"choice":"r0","probabilities":{"r0":0.8,"none":0.2},"confidence":0.8}` (keys vary with reply count); `none` means no reply was located. Malformed upstream answers return HTTP 502.
+
+Deployed on 2026-11-05 as version `bb1bb11b-4b4f-4f9b-afa3-b3d01567b717`, from commit `f598ac442`; the previous version was `8bdbc740-9b8a-402d-a37e-2d059a639263`. Synthetic requests without a User-Agent returned HTTP 200 for a three-reply locator case (`r0` at 0.96, the reply that assigned a decision), HTTP 400 `invalid_evidence` for a reply index that did not match its position, and HTTP 200 with all five answers from `/v7/turn-verdict`. No private conversation text was sent.

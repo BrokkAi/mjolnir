@@ -16,12 +16,13 @@ To see it working: in a session whose agent asked a question, then sent further 
 - [x] (2026-11-05) Measured the current verdict: no wording change is needed (see Surprises).
 - [x] (2026-11-05) Prototype locator question and held-out evaluation (see Surprises).
 - [x] Milestone 1: shared contract in `mj-core` (question file, request builder, answer parser, `TurnAssessment.question_message`).
-- [x] Milestone 2: proxy route `/v1/question-locator` (not yet deployed).
+- [x] Milestone 2: proxy route `/v1/question-locator`.
 - [x] Milestone 3: worker calls the locator after an `AwaitInput` assessment and stores the target.
 - [x] Milestone 4: TUI dashboard scrolls to the target when a marked session is opened.
 - [x] Milestone 5: web viewer (and desktop, which hosts it) scrolls to the target.
 - [x] Milestone 6: locator evaluation script and fixture labels; documentation in `.agents/docs/jev.md` and `.agents/docs/jev-proxy.md`.
-- [ ] Deploy the proxy, then release.
+- [x] (2026-11-05) Deployed the proxy (version `bb1bb11b-4b4f-4f9b-afa3-b3d01567b717`); smoke checks in `.agents/docs/jev-proxy.md`.
+- [ ] Release mj so direct-key and hosted workers carry the locator.
 
 ## Surprises & Discoveries
 
