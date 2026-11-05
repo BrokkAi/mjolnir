@@ -42,7 +42,7 @@ The status says the daemon is in a container. `docker inspect` shows no host net
 
 The old container placement shared the host network and PID namespaces and bind-mounted the host home, data directory, and configuration directory. That made the container look like a host process, so `daemon.json`, worker PIDs, and the SessionWiki scan all worked by accident. The first container-native implementation exposed every one of those assumptions: the host metadata file must be written by the launcher, the daemon cannot use the host store guard, and code that reads `~` means the container's home.
 
-A local worker's `HOME` comes from the account database (`/home/hel` in the image), not from the daemon's `HOME=/var/lib/mjolnir/home`. Managed installations made by session workers therefore landed in the container's writable layer and were lost when the container was recreated, while `mj login` and the daemon's Codex quota check use the volume's cache. Using the image's harnesses for sessions removes the session-side copy; the model-discovery probe, `mj login` and the Codex quota check still use managed installations.
+A local worker's `HOME` comes from the account database (`/home/hel` in the image), not from the daemon's `HOME=/var/lib/mjolnir/home`. Managed installations made by session workers therefore landed in the container's writable layer and were lost when the container was recreated. Using the image's harnesses for sessions removes that copy.
 
 Host mode still uses those assumptions deliberately. This plan changes only the container placement. The `HostFs` and `mj node` work from the superseded plan remains useful for host placement but is not part of the container path.
 
