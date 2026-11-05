@@ -466,6 +466,12 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
                             .any(|option| option.title == "Explain instead"),
                         "{request:?}"
                     );
+                    // The host's option description and preview reach the form.
+                    assert_eq!(
+                        options[0].description.as_deref(),
+                        Some("Keep the current design")
+                    );
+                    assert_eq!(options[0].preview.as_deref(), Some("fn first() {}"));
                     let response = if choice == "accept" {
                         ElicitationResponse::Accept {
                             content: BTreeMap::from([(

@@ -748,12 +748,18 @@ fn parse_options(schema: &Map<String, Value>, key: &str) -> Result<Vec<Elicitati
             let value = string(option, "const")?.to_owned();
             let title = optional_text(option, "title")?.unwrap_or_else(|| value.clone());
             let description = optional_text(option, "description")?;
-            let preview = option
-                .get("_meta")
-                .and_then(Value::as_object)
+            // claude-agent-acp puts the preview text under its
+            // AskUserQuestion key; muse-acp sends `{content, format}` under
+            // `_meta.muse.preview`, and the content is the text to show.
+            let meta = option.get("_meta").and_then(Value::as_object);
+            let preview = meta
                 .and_then(|meta| meta.get("_claude/askUserQuestionOption"))
-                .and_then(Value::as_object)
-                .and_then(|meta| meta.get("preview"))
+                .and_then(|claude| claude.get("preview"))
+                .or_else(|| {
+                    meta.and_then(|meta| meta.get("muse"))
+                        .and_then(|muse| muse.get("preview"))
+                        .and_then(|preview| preview.get("content"))
+                })
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             if let Some(preview) = &preview {
