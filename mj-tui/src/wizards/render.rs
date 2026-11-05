@@ -1065,7 +1065,7 @@ pub(crate) fn render_review_wizard(
         Some(WizardControl::ReviewAttachments) => Some(
             summary_height.saturating_add(
                 mounts
-                    .history_index
+                    .selected_mount
                     .min(mounts.mounts.len().saturating_sub(1)) as u16,
             ),
         ),
@@ -1164,7 +1164,7 @@ pub(crate) fn render_review_wizard(
             frame,
             list_area,
             &rows,
-            mounts.history_index,
+            mounts.selected_mount,
             form,
             WizardControl::ReviewAttachments,
         );
@@ -1436,31 +1436,6 @@ pub(crate) fn render_mount_wizard(
             ))
         }));
     }
-    if form.is_focused(WizardControl::MountSource)
-        && mounts.source.is_empty()
-        && !mounts.history.is_empty()
-    {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            "Recent sources:",
-            Style::default().fg(theme::palette().muted),
-        ));
-        lines.extend(
-            mounts
-                .history
-                .iter()
-                .take(5)
-                .enumerate()
-                .map(|(index, source)| {
-                    let marker = if index == mounts.history_index {
-                        "› "
-                    } else {
-                        "  "
-                    };
-                    Line::raw(format!("{marker}{}", source.display()))
-                }),
-        );
-    }
     if let Some(error) = &mounts.error {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
@@ -1473,7 +1448,13 @@ pub(crate) fn render_mount_wizard(
     let popup = wizard_modal(frame, surfaces, area);
     let lines = wrap_lines(lines, popup.width.saturating_sub(4));
     let info_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-    let total_height = info_height.saturating_add(5);
+    let history = mounts.available_history();
+    let history_height = if history.is_empty() {
+        0
+    } else {
+        2 + history.len().min(5) as u16
+    };
+    let total_height = info_height.saturating_add(5).saturating_add(history_height);
     let inner = DialogShell::padded_inner(popup);
     let title_line = dismissible_modal_title(form, popup, title.trim(), theme::title(true), true);
     frame.render_widget(theme::modal().title(title_line), popup);
@@ -1482,6 +1463,11 @@ pub(crate) fn render_mount_wizard(
         Some(WizardControl::MountSource) => Some(info_height),
         Some(WizardControl::MountDestination) => Some(info_height.saturating_add(2)),
         Some(WizardControl::MountAccess) => Some(info_height.saturating_add(4)),
+        Some(WizardControl::MountHistory) => Some(
+            info_height
+                .saturating_add(7)
+                .saturating_add(mounts.history_selection.min(4) as u16),
+        ),
         _ => None,
     };
     let viewport = form.viewport(body, total_height, focused_row.map(|row| row..row + 1));
@@ -1516,10 +1502,6 @@ pub(crate) fn render_mount_wizard(
         &mounts.source,
         form,
         WizardControl::MountSource,
-    );
-    form.set_field_uses_vertical_keys(
-        WizardControl::MountSource,
-        mounts.source.is_empty() && !mounts.history.is_empty(),
     );
     let destination_row = viewport.row(info_height.saturating_add(2), 1);
     frame.render_widget(
@@ -1572,6 +1554,26 @@ pub(crate) fn render_mount_wizard(
         form,
         WizardControl::MountAccess,
     );
+    if !history.is_empty() {
+        let label = viewport.row(info_height.saturating_add(6), 1);
+        frame.render_widget(
+            Paragraph::new(Line::styled("Recent on this host:", theme::muted())),
+            label,
+        );
+        let rows = history
+            .iter()
+            .map(|path| Line::raw(path.display().to_string()))
+            .collect::<Vec<_>>();
+        let list = viewport.row(info_height.saturating_add(7), rows.len().min(5) as u16);
+        ChoiceList::render(
+            frame,
+            list,
+            &rows,
+            mounts.history_selection.min(rows.len() - 1),
+            form,
+            WizardControl::MountHistory,
+        );
+    }
     Dialog::render_actions(
         frame,
         DialogShell::layout(inner, 1).actions,

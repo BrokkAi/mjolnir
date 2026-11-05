@@ -132,11 +132,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Stopped  podman  codex-                                                                                                                 │
 │  │ No messages yet        ╭ × Choose a project ──────────────────────────────────────────────────────────────╮                           │
 │  │                        │                                                                                  │                           │
-│                           │   ●Recent     GitHub     Folders     Paste URL                                   │                           │
+│                           │   ●Recent     GitHub     URL or Path                                             │                           │
 │                           │                                                                                  │                           │
-│                           │ Pick up a recent project, or find another on GitHub or in Folders.               │                           │
+│                           │ Pick up a recent project, or find another on GitHub or by URL or path.           │                           │
 │                           │                                                                                  │                           │
-│                           │ No recent projects yet. Choose GitHub or Folders above to get started.           │                           │
+│                           │ No recent projects yet. Choose GitHub or URL or path above to get started.       │                           │
 │                           │                                                                                  │                           │
 │                           │ ☐ Use several repositories together                                              │                           │
 │                           │                                                                                  │                           │
@@ -400,12 +400,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 
   ╭ × Choose a project ──────────────────────────────────╮
   │                                                      │
-  │   ●Recent     GitHub     Folders     Paste URL       │
+  │   ●Recent     GitHub     URL or Path                 │
   │                                                      │
   │ Pick up a recent project, or find another on GitHub  │
-  │ or in Folders.                                       │
+  │ or by URL or path.                                   │
   │                                                      │
-  │ No recent projects yet. Choose GitHub or Folders     │
+  │ No recent projects yet. Choose GitHub or URL or path │
   │ above to get started.                                │
   │                                                      │
   │ ☐ Use several repositories together                  │

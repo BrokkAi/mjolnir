@@ -67,7 +67,7 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
                     WizardControl::ReviewAttachments,
                     ControlKind::ChoiceList {
                         len: wizard.mounts().mounts.len(),
-                        selected: wizard.mounts().history_index,
+                        selected: wizard.mounts().selected_mount,
                     },
                     true,
                 );
@@ -136,10 +136,6 @@ fn declare_mount_controls(form: &mut Dialog<WizardControl>, mounts: &MountWizard
         mounts.source.control_kind(),
         true,
     );
-    form.set_field_uses_vertical_keys(
-        WizardControl::MountSource,
-        mounts.source.is_empty() && !mounts.history.is_empty(),
-    );
     form.declare_with_enabled(
         WizardControl::MountDestination,
         ControlKind::TextField,
@@ -155,6 +151,17 @@ fn declare_mount_controls(form: &mut Dialog<WizardControl>, mounts: &MountWizard
         ),
         true,
     );
+    let history_len = mounts.available_history().len();
+    if history_len > 0 {
+        form.declare_with_enabled(
+            WizardControl::MountHistory,
+            ControlKind::ChoiceList {
+                len: history_len,
+                selected: mounts.history_selection.min(history_len - 1),
+            },
+            true,
+        );
+    }
     form.declare_with_enabled(WizardControl::Cancel, ControlKind::Button, true);
     form.declare_with_enabled(WizardControl::Back, ControlKind::Button, true);
     form.declare_with_enabled(WizardControl::Add, ControlKind::Button, true);
@@ -315,12 +322,20 @@ impl DashboardState {
                 }
                 self.keep(wizard)
             }
+            Interaction::Select(WizardControl::MountHistory, selected) => {
+                let len = wizard.mounts().available_history().len();
+                if len > 0 {
+                    wizard.mounts_mut().history_selection = selected.min(len - 1);
+                    wizard.form_mut().focus(WizardControl::MountHistory);
+                }
+                self.keep(wizard)
+            }
             Interaction::Select(WizardControl::ReviewAttachments, selected) => {
                 let next = selected.min(wizard.mounts().mounts.len().saturating_sub(1));
                 let focused_elsewhere =
                     wizard.form().borrow().focused() != Some(WizardControl::ReviewAttachments);
-                if wizard.mounts().history_index != next || focused_elsewhere {
-                    wizard.mounts_mut().history_index = next;
+                if wizard.mounts().selected_mount != next || focused_elsewhere {
+                    wizard.mounts_mut().selected_mount = next;
                     wizard.form_mut().focus(WizardControl::ReviewAttachments);
                 }
                 self.keep(wizard)
@@ -364,25 +379,8 @@ impl DashboardState {
         self.apply_mount_field_edit(wizard.mounts_mut(), id, edit);
     }
 
-    /// Edits the attachment editor's two path fields. Up and Down walk the
-    /// source history when the source is empty, before the field itself sees
-    /// the key. An open completion popup takes those keys first, in the form.
+    /// Edits the attachment editor's two path fields.
     fn apply_mount_field_edit(&self, mounts: &mut MountWizard, id: WizardControl, edit: FieldEdit) {
-        if let FieldEdit::Key(key) = edit
-            && id == WizardControl::MountSource
-            && mounts.source.is_empty()
-            && !mounts.history.is_empty()
-            && matches!(key.code, KeyCode::Up | KeyCode::Down)
-        {
-            let delta = if key.code == KeyCode::Up { -1 } else { 1 };
-            let len = mounts.history.len();
-            move_index(&mut mounts.history_index, len, delta);
-            mounts.source = mounts.history[mounts.history_index]
-                .to_string_lossy()
-                .into_owned()
-                .into();
-            return;
-        }
         let input = match id {
             WizardControl::MountSource => &mut mounts.source,
             WizardControl::MountDestination => &mut mounts.destination,
@@ -653,6 +651,27 @@ impl DashboardState {
             }
             WizardControl::MountAccess => {
                 open_mount_access(wizard.mounts_mut());
+                self.keep(wizard)
+            }
+            WizardControl::MountHistory => {
+                let source = wizard
+                    .mounts()
+                    .available_history()
+                    .get(wizard.mounts().history_selection)
+                    .map(|path| (*path).clone());
+                if let Some(source) = source {
+                    wizard.mounts_mut().source = source.to_string_lossy().into_owned().into();
+                    if wizard.mounts().destination.is_empty() {
+                        let destination = default_resource_destination(
+                            &self.config.targets[&target_template_id],
+                            &source,
+                            &wizard.mounts().mounts,
+                        );
+                        wizard.mounts_mut().destination =
+                            destination.to_string_lossy().into_owned().into();
+                    }
+                    return self.activate_wizard_mount(WizardControl::Add, wizard);
+                }
                 self.keep(wizard)
             }
             WizardControl::MountDestination | WizardControl::Add => {

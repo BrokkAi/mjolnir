@@ -425,12 +425,7 @@ impl WizardDraft for NewWizard {
                 Ok(())
             }
             WizardControl::ProjectQuery => {
-                let input = if self.project_picker.tab == ProjectTab::Folders {
-                    &mut self.project_picker.folder_filter
-                } else {
-                    &mut self.project_picker.query
-                };
-                if PathField::apply(input, edit) == EditOutcome::Changed {
+                if PathField::apply(&mut self.project_picker.query, edit) == EditOutcome::Changed {
                     self.project_picker.github_query_changed();
                     self.project_picker.focus_results = false;
                     dashboard.record_event_handled();
