@@ -6,9 +6,7 @@
 
 use mj_core::file_lock::FileLock;
 use std::collections::{HashMap, VecDeque};
-#[cfg(unix)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
