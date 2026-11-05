@@ -588,6 +588,42 @@ mod tests {
             Some("agent:one")
         );
         assert!(!relay.store_question_target(revision, "agent:two").unwrap());
+
+        let mut one_reply = relay.snapshot.assessment.clone().unwrap();
+        one_reply.question_message = None;
+        one_reply
+            .evidence
+            .as_mut()
+            .unwrap()
+            .authorization
+            .as_mut()
+            .unwrap()
+            .messages
+            .pop();
+        relay.store_assessment(one_reply).unwrap();
+        assert_eq!(
+            relay
+                .question_locator_request(revision)
+                .unwrap()
+                .message_ids,
+            ["agent:one"]
+        );
+
+        for action in [
+            mj_core::assessment::Action::Finished,
+            mj_core::assessment::Action::Wait,
+        ] {
+            let mut non_input = relay.snapshot.assessment.clone().unwrap();
+            non_input.action = Some(action);
+            relay.store_assessment(non_input).unwrap();
+            assert!(relay.question_locator_request(revision).is_none());
+        }
+        let mut other_failure = relay.snapshot.assessment.clone().unwrap();
+        other_failure.action = Some(mj_core::assessment::Action::AwaitInput);
+        other_failure.verdict.as_mut().unwrap().input.choice = Input::None;
+        other_failure.verdict.as_mut().unwrap().failure.choice = Failure::Other;
+        relay.store_assessment(other_failure).unwrap();
+        assert!(relay.question_locator_request(revision).is_none());
     }
 
     fn completed(root: &Path) -> DurableRelay {
