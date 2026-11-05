@@ -1168,7 +1168,7 @@ pub(super) fn worker_launch_config_with_checkout(
             reviewer_launch: None,
             goal_resume_request: None,
             target_environment,
-            seed_image_environment: backend.container_engine().is_some(),
+            seed_image_environment: worker_runs_in_image(backend),
             run_mode: Default::default(),
             session_id: session_id.to_string(),
             subagents: mj_core::subagent::SubagentPolicy::Native,
@@ -1241,7 +1241,22 @@ pub(super) fn exclude_harness_environment(
     excluded
 }
 
+/// Whether the worker's own environment is a container image's: a container
+/// target, or a local session of a daemon that itself runs in a container,
+/// whose workers start beside it in the agent-dev image.
+fn worker_runs_in_image(backend: &targets::TargetLocator) -> bool {
+    backend.container_engine().is_some()
+        || matches!(backend, targets::TargetLocator::LocalBare { .. })
+            && crate::daemon::placement() != crate::daemon::DaemonPlacement::Host
+}
+
+/// An image already carries the pinned harnesses, so its workers use them and
+/// install a pinned copy only when one is missing or incompatible. A bare
+/// machine has no such guarantee.
 pub(super) fn harness_runtime_policy(backend: &targets::TargetLocator) -> HarnessRuntimePolicy {
+    if worker_runs_in_image(backend) {
+        return HarnessRuntimePolicy::Ambient;
+    }
     match backend {
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::AwsEc2 { .. }

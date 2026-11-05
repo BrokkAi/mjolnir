@@ -37,6 +37,11 @@ The image carries the daemon, the session worker, and every harness, so local
 sessions run their worker inside the same container. Files and harness logins
 created there persist in the volume.
 
+Local sessions run the harnesses the image ships, at the versions this release
+pins. Mjolnir does not download its own copy of each harness the way it does on
+a host. It installs a pinned copy only when the image lacks a harness or carries
+an incompatible version, for example with a custom `[daemon] image`.
+
 ## Data and restarts
 
 The volume is the durable part. Stopping the daemon, replacing its build, or
