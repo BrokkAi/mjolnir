@@ -2027,6 +2027,7 @@ fn a_source_that_cannot_hold_the_overlay_skips_copy_on_write() {
     assert!(dashboard.dialog_confirmation_open());
 }
 
+// Hard-won: 6c5ea1b36: default destinations were joined with `\` on Windows (`/mnt\cache`).
 #[test]
 fn recent_mount_entry_uses_add_validation_and_returns_to_review() {
     let mut dashboard = dashboard_at_mount_editor("");

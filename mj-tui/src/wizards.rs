@@ -779,19 +779,26 @@ fn default_resource_destination(
     let basename = default
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("resource"));
+    // EC2 paths are POSIX paths on a Windows controller too.
+    use mj_core::target_path::join;
     let home = if ssh_user == "root" {
         std::path::PathBuf::from("/root")
     } else {
-        std::path::PathBuf::from("/home").join(ssh_user)
+        join(
+            std::path::Path::new("/home"),
+            std::path::Path::new(ssh_user),
+        )
     };
-    let base = home.join("mj-resources").join(basename);
+    let resources = join(&home, std::path::Path::new("mj-resources"));
+    let base = join(&resources, std::path::Path::new(basename));
     if !existing.iter().any(|resource| resource.destination == base) {
         return base;
     }
     for number in 2.. {
-        let candidate = home
-            .join("mj-resources")
-            .join(format!("{}-{number}", basename.to_string_lossy()));
+        let candidate = join(
+            &resources,
+            std::path::Path::new(&format!("{}-{number}", basename.to_string_lossy())),
+        );
         if !existing
             .iter()
             .any(|resource| resource.destination == candidate)

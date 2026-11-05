@@ -706,13 +706,17 @@ pub fn default_mount_destination(source: &Path, existing: &[AdditionalMount]) ->
         .file_name()
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| std::ffi::OsStr::new("mount"));
-    let base = PathBuf::from("/mnt").join(basename);
+    // A container path: POSIX separators on a Windows controller too.
+    let mnt = Path::new("/mnt");
+    let base = crate::target_path::join(mnt, Path::new(basename));
     if !existing.iter().any(|mount| mount.destination == base) {
         return base;
     }
     for number in 2.. {
-        let candidate =
-            PathBuf::from("/mnt").join(format!("{}-{number}", basename.to_string_lossy()));
+        let candidate = crate::target_path::join(
+            mnt,
+            Path::new(&format!("{}-{number}", basename.to_string_lossy())),
+        );
         if !existing.iter().any(|mount| mount.destination == candidate) {
             return candidate;
         }
