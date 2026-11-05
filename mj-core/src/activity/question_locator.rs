@@ -23,8 +23,27 @@ pub struct State {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     pub state: State,
-    /// These are already transcript stable IDs, copied from materialized items.
+    /// Authorization message IDs in reply order. Live context can carry raw ACP IDs.
     pub message_ids: Vec<String>,
+}
+
+/// Resolve an authorization assistant ID to a materialized transcript ID.
+///
+/// Both the live context and transcript projection use the same relay event
+/// ordinal when ACP supplies no message ID. The projection can nevertheless
+/// coalesce that chunk into an earlier item, so the numeric fallback is not a
+/// reliable target without consulting the materialized transcript.
+pub fn transcript_stable_id(id: &str) -> Option<String> {
+    if id.is_empty() {
+        return None;
+    }
+    if let Some(suffix) = id.strip_prefix("agent:") {
+        if suffix.is_empty() || suffix.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        return Some(id.to_owned());
+    }
+    Some(format!("agent:{id}"))
 }
 
 fn clip(text: &str, budget: usize) -> String {
@@ -179,6 +198,25 @@ mod tests {
         assert!(request.state.latest_user_message.len() <= 4096);
         assert!(request.state.replies[0].text.contains(" [...] "));
         assert_eq!(request.state.replies[1].reply, 1);
+    }
+
+    #[test]
+    fn live_and_seeded_message_ids_resolve_to_the_same_transcript_item() {
+        let mut live = ContextHistory::default();
+        live.assistant(Some("msg_011CgihPmwyh6hJGX2Azu5L5"), 42, "Choose?");
+        assert_eq!(
+            transcript_stable_id(&live.messages[0].id).as_deref(),
+            Some("agent:msg_011CgihPmwyh6hJGX2Azu5L5")
+        );
+        let seeded = message("agent:msg_011CgihPmwyh6hJGX2Azu5L5", "assistant", "Choose?");
+        assert_eq!(
+            transcript_stable_id(&seeded.id).as_deref(),
+            Some("agent:msg_011CgihPmwyh6hJGX2Azu5L5")
+        );
+        let mut fallback = ContextHistory::default();
+        fallback.assistant(None, 42, "Choose?");
+        assert_eq!(fallback.messages[0].id, "agent:42");
+        assert_eq!(transcript_stable_id(&fallback.messages[0].id), None);
     }
 
     #[test]

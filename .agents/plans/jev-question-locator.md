@@ -38,7 +38,7 @@ To see it working: in a session whose agent asked a question, then sent further 
 
 - Observation: worker evidence message ids are harness message ids such as `msg_011CgihPmwyh6hJGX2Azu5L5`, while the controller's materialized transcript stable ids look like `agent:msg_011Cfqu8fwMo43bEgWdstBgT` (and `tool:toolu_…`). The id the clients receive must be resolvable to a rendered transcript entry; Milestone 3 must establish the mapping and test it for Claude and Codex sessions.
 
-- Observation: `mj-transcript/src/authorization.rs` copies each materialized item's `stable_id` directly into authorization evidence. `mj-transcript/src/projection/session_update.rs` gives all ACP assistant text chunks `agent:<message_id>` when the harness supplies an id and `agent:<event ordinal>` otherwise. The locator therefore stores the selected authorization message id without adding a harness-specific prefix. This covers Claude, Codex, and the other ACP harnesses through the same projection.
+- Observation: two authorization paths supply assistant IDs. A daemon-seeded context copies each materialized `stable_id` in `mj-transcript/src/authorization.rs`. Live worker context stores the raw ACP message ID in `ContextHistory::assistant` (`mj-core/src/assessment.rs`), while `mj-transcript/src/projection/session_update.rs` prefixes it with `agent:`. Both paths use the relay event ordinal for the no-ID fallback, but projection may coalesce that chunk into an earlier transcript item, so `agent:<ordinal>` is not reliably resolvable. The locator normalizes raw IDs, preserves prefixed IDs, and leaves numeric fallback targets unset.
 
 - Observation: `TurnAssessment` has no `deny_unknown_fields`; the strict relay snapshot and observation wrappers deserialize their assessment fields through this permissive type. The new optional field is omitted from old JSON and defaults to `None` when absent. No compatibility change was needed in controller wait-policy storage.
 
@@ -64,9 +64,9 @@ To see it working: in a session whose agent asked a question, then sent further 
   Rationale: held-out correct answers had probabilities as low as 0.25; a wrong scroll target is harmless because the user is already looking at the session.
   Date/Author: 2026-11-05, coordinator.
 
-- Decision: preserve the stable id already carried by authorization history rather than deriving a new id from a harness message id.
-  Rationale: the transcript projection is the sole producer of stable ids and also supplies authorization history, including the ordinal fallback for harnesses without message ids.
-  Date/Author: 2026-11-05, jql-worker.
+- Decision: map raw ACP assistant IDs to `agent:<id>` and preserve already prefixed seeded IDs; do not store the numeric ordinal fallback without a materialized transcript lookup.
+  Rationale: live and seeded authorization paths differ, and no-ID chunks can coalesce into an earlier transcript item.
+  Date/Author: 2026-11-05, user correction and jql-worker.
 
 ## Outcomes & Retrospective
 

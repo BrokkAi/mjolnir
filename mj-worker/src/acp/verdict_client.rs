@@ -170,7 +170,12 @@ impl Drop for VerdictAttempt {
 
 #[cfg_attr(not(unix), allow(dead_code))]
 impl VerdictClient {
-    pub(crate) fn log_single_question(&self, session: &str, request: &question_locator::Request) {
+    pub(crate) fn log_single_question(
+        &self,
+        session: &str,
+        request: &question_locator::Request,
+        stable_id: &str,
+    ) {
         if let Some(log) = &self.log {
             let attempt = log.start(
                 session,
@@ -180,7 +185,7 @@ impl VerdictClient {
             );
             attempt.update(
                 None,
-                serde_json::json!({"state":request.state,"selected_message":request.message_ids[0],"reason":"single_reply"}),
+                serde_json::json!({"state":request.state,"selected_message":stable_id,"reason":"single_reply"}),
             );
             attempt.finish(
                 "applied",

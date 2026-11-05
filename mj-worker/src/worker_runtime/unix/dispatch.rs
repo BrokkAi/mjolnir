@@ -298,9 +298,11 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                                     && let Some(request) = relay.question_locator_request(generation)
                                 {
                                     if request.message_ids.len() == 1 {
-                                        relay.store_question_target(generation, &request.message_ids[0])?;
-                                        if let Some(client) = &verdict {
-                                            client.log_single_question(&relay.turn_context().session_id(), &request);
+                                        if let Some(id) = mj_core::activity::question_locator::transcript_stable_id(&request.message_ids[0]) {
+                                            relay.store_question_target(generation, &id)?;
+                                            if let Some(client) = &verdict {
+                                                client.log_single_question(&relay.turn_context().session_id(), &request, &id);
+                                            }
                                         }
                                     } else if let Some(client) = verdict.clone() {
                                         let session = relay.turn_context().session_id();
@@ -330,9 +332,9 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
             result = locator_tasks.join_next(), if !locator_tasks.is_empty() && !held => {
                 match result {
                     Some(Ok((revision, ids, Ok(Some(index))))) => {
-                        if let Some(id) = ids.get(index) {
+                        if let Some(id) = ids.get(index).and_then(|id| mj_core::activity::question_locator::transcript_stable_id(id)) {
                             let stored = relay.lock().expect("relay state lock poisoned")
-                                .store_question_target(revision, id)?;
+                                .store_question_target(revision, &id)?;
                             tracing::info!(target: "mj_jev", revision, stable_id = %id,
                                 outcome = if stored { "stored" } else { "stale" },
                                 "question locator target resolved");
