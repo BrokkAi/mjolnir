@@ -4664,6 +4664,27 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
     );
 }
 
+// Hard-won: ee65b804b: a follow-up for a never-reviewed session had no row to mark and was never durable.
+#[test]
+fn a_followup_for_a_never_reviewed_session_survives_a_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-new", "project-1")).unwrap();
+    mark_review_followup_in(&database, "session-new").unwrap();
+    mark_review_followup_in(&database, "session-new").unwrap();
+    assert_eq!(
+        pending_review_followups_in(&database).unwrap(),
+        vec!["session-new".to_owned()]
+    );
+    assert_eq!(
+        turn_review_state_in(&database, "session-new").unwrap(),
+        TurnReviewState {
+            pending_followup: true,
+            ..Default::default()
+        }
+    );
+}
+
 /// A projection page must carry the whole turn record, not just the transcript
 /// rows: the wait endpoint reads the outcome back from these columns long after
 /// the session's actor is gone.

@@ -24,15 +24,18 @@ pub fn mark_review_followup(session_id: &str) -> Result<()> {
 }
 
 pub(super) fn mark_review_followup_in(path: &Path, session_id: &str) -> Result<()> {
+    // A session that has never been reviewed has no row yet; it gets the row
+    // `turn_review_state_in` would report for it, plus the marker.
     let connection = open(path)?;
-    let updated = connection.execute(
-        "UPDATE turn_review_state SET pending_followup = 1 WHERE session_id = ?1",
-        [session_id],
+    connection.execute(
+        "INSERT INTO turn_review_state(session_id, baselines, reviewed_through_ordinal, pending_followup)
+         VALUES (?1, ?2, 0, 1)
+         ON CONFLICT(session_id) DO UPDATE SET pending_followup = 1",
+        params![
+            session_id,
+            serde_json::to_string(&TurnReviewState::default().baselines)?
+        ],
     )?;
-    anyhow::ensure!(
-        updated == 1,
-        "open review state disappeared before follow-up was recorded"
-    );
     Ok(())
 }
 
