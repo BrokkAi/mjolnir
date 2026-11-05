@@ -1506,6 +1506,18 @@ fn session_titles_are_bounded_by_characters_at_word_boundaries() {
     );
 }
 
+/// An agent sets its own title, and `mj sessions` prints stored titles to the
+/// operator's terminal, so a title must not carry a working escape sequence.
+#[test]
+fn session_titles_drop_terminal_controls_an_agent_supplies() {
+    let clipboard_write = "pwn\x1b]52;c;Y3VybCBldmlsfHNo\x07 build\x1b[31m red\x1b\\\u{9b}2J";
+    assert_eq!(
+        normalize_session_title(clipboard_write).as_deref(),
+        Some("pwn build red2J")
+    );
+    assert_eq!(normalize_session_title("\x1b]0;only a title\x07"), None);
+}
+
 #[test]
 fn provisional_title_is_cleaned_and_bounded() {
     assert_eq!(
