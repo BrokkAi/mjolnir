@@ -104,6 +104,19 @@ impl PaidCredits {
 }
 
 impl ProfileQuota {
+    /// Billing mode inferred from the daemon's cached report.
+    pub fn billing_class(&self) -> QuotaBilling {
+        if self.error.is_some() {
+            QuotaBilling::Unknown
+        } else if self.is_usage_priced() {
+            QuotaBilling::Usage
+        } else if !self.windows.is_empty() || self.paid_credits.is_some() {
+            QuotaBilling::Subscription
+        } else {
+            QuotaBilling::Unknown
+        }
+    }
+
     /// `rate limited · retry in N min` while the provider's hold lasts.
     pub fn rate_limit_label(&self, now: u64) -> Option<String> {
         let until = self
@@ -233,6 +246,13 @@ impl ProfileQuota {
     pub fn error_label(&self) -> Option<String> {
         self.error.as_deref().map(quota_error_label)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaBilling {
+    Usage,
+    Subscription,
+    Unknown,
 }
 
 fn quota_error_label(error: &str) -> String {

@@ -429,7 +429,10 @@ mj new --workspace eval --bundle product --target builder \
   `--overwrite`.
 - `mj fetch` copies a file, or a directory as a zip archive, from a session's
   target to this machine and prints where it landed. See below.
-- `mj models` lists the models and efforts a profile offers.
+- `mj models` lists the models and efforts a profile offers. Usage-priced profiles
+  include known per-million-token rates; subscription and unknown billing modes
+  are labeled without per-token prices. JSON includes a `billing` field and a
+  `price` object or `null` for each model.
 - `mj set-config` applies any selectable session setting the harness advertises,
   such as the model, effort, approval mode, or collaboration mode.
   Without `--key` and `--value` it lists the settings the session's agent

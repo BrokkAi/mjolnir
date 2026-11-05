@@ -16,15 +16,17 @@ pub enum CandidateQuota {
 
 impl CandidateQuota {
     pub(crate) fn from_report(report: Option<&crate::quota::ProfileQuota>) -> Self {
-        match report.filter(|report| report.error.is_none()) {
-            Some(report) if report.is_usage_priced() => Self::UsagePriced,
-            Some(report) if !report.windows.is_empty() || report.paid_credits.is_some() => {
-                Self::Subscription {
-                    windows: report.windows.clone(),
-                    paid_credits: report.paid_credits.clone(),
-                }
-            }
-            _ => Self::Unknown,
+        use mj_client::quota::QuotaBilling;
+        let Some(report) = report else {
+            return Self::Unknown;
+        };
+        match report.billing_class() {
+            QuotaBilling::Usage => Self::UsagePriced,
+            QuotaBilling::Subscription => Self::Subscription {
+                windows: report.windows.clone(),
+                paid_credits: report.paid_credits.clone(),
+            },
+            QuotaBilling::Unknown => Self::Unknown,
         }
     }
 }

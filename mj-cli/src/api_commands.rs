@@ -2417,24 +2417,98 @@ pub(crate) struct SetConfigArgs {
     json: bool,
 }
 pub(crate) async fn models(args: ModelsArgs) -> Result<()> {
+    let mut daemon = crate::daemon::connect_or_start().await?;
+    let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } =
+        daemon.runtime_changes(None, false).await?
+    else {
+        bail!("daemon did not return a runtime snapshot for cached quota reports");
+    };
+    let quota = projection.metadata.quotas.reports.get(&args.profile);
+    let billing = quota
+        .map(mj_client::quota::ProfileQuota::billing_class)
+        .unwrap_or(mj_client::quota::QuotaBilling::Unknown);
     let choices = ApiClient::connect()
         .await?
         .models(&args.profile, args.model)
         .await?;
-    if args.json {
-        return print_json(&choices);
+    let rendered = render_models(&choices, billing, args.json)?;
+    println!("{rendered}");
+    Ok(())
+}
+
+fn render_models(
+    choices: &mj_core::worker_launch::ProfileConfig,
+    billing: mj_client::quota::QuotaBilling,
+    json: bool,
+) -> Result<String> {
+    let rates = |model: &str| {
+        (billing == mj_client::quota::QuotaBilling::Usage)
+            .then(|| mj_core::usage::pricing::rates(model))
+            .flatten()
+    };
+    if json {
+        let mut value = serde_json::to_value(choices).context("serialize model catalog")?;
+        value["billing"] = serde_json::Value::String(
+            match billing {
+                mj_client::quota::QuotaBilling::Usage => "usage",
+                mj_client::quota::QuotaBilling::Subscription => "subscription",
+                mj_client::quota::QuotaBilling::Unknown => "unknown",
+            }
+            .to_owned(),
+        );
+        value["models"] = serde_json::Value::Array(
+            choices
+                .models
+                .iter()
+                .map(|model| {
+                    let mut item = serde_json::to_value(model).expect("model choice serializes");
+                    item["price"] = rates(&model.value)
+                        .map(|r| {
+                            serde_json::json!({
+                                "input": r[0] as f64 / 1000.0,
+                                "output": r[1] as f64 / 1000.0,
+                                "cached_input": r[2] as f64 / 1000.0,
+                                "cache_write": r[3] as f64 / 1000.0
+                            })
+                        })
+                        .unwrap_or(serde_json::Value::Null);
+                    item
+                })
+                .collect(),
+        );
+        return serde_json::to_string_pretty(&value).context("serialize model catalog");
+    }
+    let mut lines = Vec::new();
+    if billing != mj_client::quota::QuotaBilling::Usage {
+        lines.push(format!(
+            "billing: {}",
+            match billing {
+                mj_client::quota::QuotaBilling::Subscription => "subscription",
+                _ => "unknown",
+            }
+        ));
     }
     if choices.models.is_empty() && choices.efforts.is_empty() {
-        println!("this profile's harness reports no models or efforts");
+        lines.push("this profile's harness reports no models or efforts".to_owned());
     }
     for model in &choices.models {
-        println!("{}  {}", model.value, model.name);
+        let price = rates(&model.value)
+            .map(|r| {
+                format!(
+                    "  ${:.3} in / ${:.3} cached / ${:.3} out per 1M",
+                    r[0] as f64 / 1000.0,
+                    r[2] as f64 / 1000.0,
+                    r[1] as f64 / 1000.0
+                )
+            })
+            .unwrap_or_default();
+        lines.push(format!("{}  {}{}", model.value, model.name, price));
     }
     // A harness without efforts, or one whose efforts are not known yet,
     // printed a bare "effort (default):" line, which reads as a value that
     // failed to print (F-16).
     if !choices.efforts.is_empty() {
-        println!(
+        lines.push(format!(
             "effort ({}): {}",
             choices.model.as_deref().unwrap_or("default model"),
             choices
@@ -2443,9 +2517,9 @@ pub(crate) async fn models(args: ModelsArgs) -> Result<()> {
                 .map(|c| c.value.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        ));
     }
-    Ok(())
+    Ok(lines.join("\n"))
 }
 pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
@@ -3966,5 +4040,38 @@ mod tests {
             usage_tree_lines(&tree).join("\n")
         );
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-usage-tree", &output);
+    }
+
+    #[test]
+    fn api_models_matches_cli_golden() {
+        let choices = mj_core::worker_launch::ProfileConfig {
+            model: Some("deepseek-flash".to_owned()),
+            models: vec![
+                mj_core::acp::SessionConfigChoice {
+                    value: "deepseek-flash".to_owned(),
+                    name: "DeepSeek Flash".to_owned(),
+                    description: None,
+                },
+                mj_core::acp::SessionConfigChoice {
+                    value: "unknown-model".to_owned(),
+                    name: "Unknown Model".to_owned(),
+                    description: None,
+                },
+            ],
+            efforts: vec![],
+            observed_at: 1,
+        };
+        let mut output = String::from("=== mj models text and JSON output ===");
+        for (name, billing) in [
+            ("usage", mj_client::quota::QuotaBilling::Usage),
+            ("subscription", mj_client::quota::QuotaBilling::Subscription),
+            ("unknown", mj_client::quota::QuotaBilling::Unknown),
+        ] {
+            output.push_str(&format!("\n--- {name} text ---\n"));
+            output.push_str(&render_models(&choices, billing, false).unwrap());
+            output.push_str(&format!("\n--- {name} JSON ---\n"));
+            output.push_str(&render_models(&choices, billing, true).unwrap());
+        }
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-models", &output);
     }
 }
