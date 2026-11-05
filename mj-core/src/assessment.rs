@@ -279,6 +279,11 @@ pub struct TurnAssessment {
     pub reason: String,
     pub failures: u32,
     pub retry_at_ms: Option<i64>,
+    /// Transcript stable id of the assistant reply that holds the open
+    /// request, located after an `AwaitInput` assessment. Clients scroll to it
+    /// when the user opens the session. Unset when no reply was located.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_message: Option<String>,
 }
 impl TurnAssessment {
     pub fn pending(turn_id: String, ordinal: u64, at: i64, completion: CompletionEvidence) -> Self {
@@ -295,6 +300,7 @@ impl TurnAssessment {
             reason: "awaiting_classification".into(),
             failures: 0,
             retry_at_ms: None,
+            question_message: None,
         }
     }
     pub fn current(&self) -> bool {
