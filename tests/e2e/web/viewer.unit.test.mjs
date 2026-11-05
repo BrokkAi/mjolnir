@@ -71,6 +71,7 @@ test('conversation deltas carry the last presentation key and accept older respo
       return responses.shift();
     },
     renderEntries: (entries, replace) => renders.push({ entries, replace }),
+    scrollToQuestionTarget: async () => {},
     isTransitioningSession: () => false,
     isLoadingConversationSession: () => false,
     renderConversationTransition: () => assert.fail('conversation unexpectedly transitioned'),
@@ -94,6 +95,42 @@ test('conversation deltas carry the last presentation key and accept older respo
   );
   assert.equal(context.presentationKey, null, 'missing keys remain compatible with an older server');
   assert.deepEqual(renders[1], { entries: [{ id: 2 }], replace: false });
+});
+
+test('question target loads older transcript pages and applies each target once', async () => {
+  const requests = [];
+  const rows = [];
+  const feed = {
+    querySelectorAll: () => rows,
+    prepend(...items) { rows.unshift(...items); },
+  };
+  const context = vm.createContext({
+    feed,
+    currentSession: 'session/1',
+    conversationGeneration: 4,
+    URLSearchParams,
+    encodeURIComponent,
+    request: async url => {
+      requests.push(url);
+      return requests.length === 1
+        ? { items: [{ stable_id: 'agent:older', position: 9 }], before: { position: 9, stable_id: 'agent:older' } }
+        : { items: [{ stable_id: 'agent:question', position: 3 }], before: null };
+    },
+    historyEntryRow: item => ({ dataset: { entryId: item.stable_id }, scrollIntoView() { this.scrolled = true; } }),
+  });
+  vm.runInContext(
+    sourceBetween('const appliedQuestionTargets = new Map();', '\nasync function openNativeHistory('),
+    context,
+  );
+
+  await vm.runInContext("scrollToQuestionTarget({ id: 'session/1', question_message: 'agent:question' }, 4)", context);
+  assert.deepEqual(requests, [
+    '/api/v1/sessions/session%2F1/history',
+    '/api/v1/sessions/session%2F1/history?before_position=9&before_id=agent%3Aolder',
+  ]);
+  assert.equal(rows.find(row => row.dataset.entryId === 'agent:question').scrolled, true);
+  await vm.runInContext("scrollToQuestionTarget({ id: 'session/1', question_message: 'agent:question' }, 4)", context);
+  assert.equal(requests.length, 2);
 });
 
 test('runtime rows resolve interned values, merge metadata and reject gaps without partial updates', () => {

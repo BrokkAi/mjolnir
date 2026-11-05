@@ -1254,11 +1254,40 @@ function renderNativeSubagents(parent, includeIdle) {
 
 function historyEntryRow(item) {
   const row = el('section');
+  if (item.stable_id) row.dataset.entryId = item.stable_id;
   const heading = el('h3', '', item.label || item.role);
   const time = entryTimestamp(item);
   if (time) heading.append(' · ', time);
   row.append(heading, renderMarkdown(item.text));
   return row;
+}
+
+const appliedQuestionTargets = new Map();
+
+async function scrollToQuestionTarget(session, generation) {
+  const target = session?.question_message;
+  if (!target || appliedQuestionTargets.get(session.id) === target) return;
+  const stillCurrent = () => currentSession === session.id && conversationGeneration === generation;
+  let node = [...feed.querySelectorAll('[data-entry-id]')].find(item => item.dataset.entryId === target);
+  let before = null;
+  for (let pageNumber = 0; !node && pageNumber < 100 && stillCurrent(); pageNumber += 1) {
+    const query = new URLSearchParams();
+    if (before) {
+      query.set('before_position', String(before.position));
+      query.set('before_id', before.stable_id);
+    }
+    const suffix = query.size ? `?${query}` : '';
+    const page = await request(`/api/v1/sessions/${encodeURIComponent(session.id)}/history${suffix}`);
+    if (!stillCurrent()) return;
+    const rows = page.items.map(historyEntryRow);
+    feed.prepend(...rows);
+    before = page.before;
+    node = [...feed.querySelectorAll('[data-entry-id]')].find(item => item.dataset.entryId === target);
+    if (!before || !page.items.length) break;
+  }
+  if (!stillCurrent() || !node) return;
+  node.scrollIntoView({ block: 'start' });
+  appliedQuestionTargets.set(session.id, target);
 }
 
 async function openNativeHistory(owner, agent) {
@@ -8231,6 +8260,9 @@ async function loadConversation(delta = false) {
       || isTransitioningSession(latest)
     ) return;
     renderEntries(result.entries, !delta || result.reset);
+    if (!delta) {
+      await scrollToQuestionTarget(latest, generation);
+    }
     presentationKey = typeof result.presentation_key === 'string'
       ? result.presentation_key
       : null;
