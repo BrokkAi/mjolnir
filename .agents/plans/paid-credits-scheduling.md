@@ -18,7 +18,7 @@ the banked reset credits already displayed in the quota pane.
 - [x] (2026-11-05) Extract one scheduler and use its weighted ordering for both paths.
 - [x] (2026-11-05) Extend provider, MCP spawn, cache, model-scope, recovery, and weighted-distribution regressions; focused paid tests pass.
 - [x] (2026-11-05) Complete the full client/controller/TUI suites and workspace Clippy; both isolated controller reruns pass.
-- [ ] Commit, obtain required review, and push the current branch to origin/master.
+- [x] (2026-11-05) Commit `51315050e`, obtain clean review, merge concurrent upstream changes as `f0177e583`, and push to origin/master. The merged tree is recorded as reviewed, and all 54 Codex integration checks pass after the merge.
 
 ## Surprises & Discoveries
 
@@ -64,7 +64,13 @@ individually. Those were a login-shell startup timeout under parallel load and
 a Settings golden whose default port was changed by the supplied MJ_INSTANCE.
 The full TUI suite and workspace Clippy pass. Existing provider failure marks
 and the long-window threshold for automatic session moves remain unchanged.
-The implementation is ready for commit and required pre-push review.
+The implementation is published on origin/master in `51315050e` and merge
+`f0177e583`. Review of the implementation was clean; the automatic upstream
+merge introduced no additional review diff and its tree was recorded as
+reviewed. After merging upstream's harness-source refactor, all 54 selected
+Codex integration checks passed. Total original validation was 2,889 passing
+tests with 21 ignored, plus workspace Clippy with warnings denied. No live
+daemon or account settings were changed.
 
 ## Context and Orientation
 
@@ -145,3 +151,4 @@ Revision 2026-11-05: Initial plan, incorporating the user's paid-usage clarifica
 Revision 2026-11-05: Record implemented collection, shared scheduling, reset-clock fix, focused evidence, and the existing macOS reporting limitation.
 Revision 2026-11-05: Record full-suite evidence and correct the unit-test command environment: their own isolated stores are sufficient, and a global named instance changes golden port text.
 Revision 2026-11-05: Record successful isolated reruns, full TUI validation, and workspace Clippy.
+Revision 2026-11-05: Close the plan with reviewed commits, successful publication, and the post-merge Codex integration results.
