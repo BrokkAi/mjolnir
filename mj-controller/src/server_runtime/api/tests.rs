@@ -61,6 +61,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
 
 fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuota {
     ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness,
@@ -87,6 +88,7 @@ fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuo
 /// A pay-per-use profile's report: no windows, the API label instead.
 fn usage_priced(profile_id: &str) -> ProfileQuota {
     ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Codex,
@@ -300,6 +302,31 @@ async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the
     );
     assert_eq!(registered.model.as_deref(), Some("luna"));
     assert_eq!(registered.effort.as_deref(), Some("low"));
+
+    // The same MCP spawn must use published paid balances after every
+    // subscription is empty, without mistaking reset grants for paid funds.
+    {
+        let mut reports = backend.quota_reports.lock().unwrap();
+        for report in reports.values_mut() {
+            for window in &mut report.windows {
+                window.remaining_percent = Some(0);
+            }
+        }
+        reports.get_mut("parent").unwrap().banked_resets = Some(100);
+        reports.get_mut("parent").unwrap().paid_credits =
+            mj_client::quota::PaidCredits::limited(0.0);
+        reports.get_mut("codex-high").unwrap().paid_credits =
+            mj_client::quota::PaidCredits::limited(12.75);
+    }
+    let result = backend
+        .execute_subagent_tool("parent-1".into(), spawn_with())
+        .await;
+    assert!(
+        result.message.contains("registration recorded"),
+        "{}",
+        result.message
+    );
+    assert_eq!(exports.registered().profile_id, "codex-high");
 }
 
 /// Profiles offering the same models are one choice for the parent, shown as
@@ -2797,16 +2824,31 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
         too_short.message
     );
 
-    let foreign_child = refusals
-        .execute_subagent_tool(CALLER.into(), send("foreign-child", "c0ffee00"))
+    let foreign_child = backend_for(
+        FOREIGN_CHILD,
+        ParkingExports::with_modern_worker(SessionState::Running, None, true),
+    )
+    .execute_subagent_tool(CALLER.into(), send("foreign-child", "c0ffee00"))
+    .await;
+    assert!(!foreign_child.is_error, "{}", foreign_child.message);
+    let response: serde_json::Value = serde_json::from_str(&foreign_child.message).unwrap();
+    assert_eq!(response["session_id"], FOREIGN_CHILD);
+    let close = refusals
+        .execute_subagent_tool(
+            CALLER.into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "foreign-child-close".into(),
+                created_at_ms: mj_core::clock::epoch_millis(),
+                action: mj_core::subagent::SubagentToolAction::CloseAgent {
+                    child_session_id: "c0ffee00".into(),
+                },
+            },
+        )
         .await;
-    assert!(foreign_child.is_error);
     assert!(
-        foreign_child
-            .message
-            .contains("another session's sub-agent"),
-        "{}",
-        foreign_child.message
+        close.is_error,
+        "message permission must not grant child lifecycle control"
     );
 
     let stopped = refusals
@@ -2841,8 +2883,7 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
         self_prefix.message
     );
 
-    // A message from the user is the user's prompt, and the user may prompt
-    // any session, so the prefix a session may not use names the sub-agent.
+    // User prompts and common session messages both resolve managed children.
     assert_eq!(
         refusals
             .resolve_message_target("C0FFEE00".into())
@@ -2904,11 +2945,11 @@ async fn close_resolves_an_owned_child_prefix_and_persists_the_full_id() {
     ));
 }
 
+// Hard-won: 2f18a1e20: managed-child messages could be sent but recipients could not reply.
 #[tokio::test]
-async fn send_message_refuses_stopped_self_foreign_child_unknown_target_and_child_sender() {
-    if !isolated_parked_test(
-        "send_message_refuses_stopped_self_foreign_child_unknown_target_and_child_sender",
-    ) {
+async fn send_message_accepts_child_senders_but_preserves_recipient_refusals() {
+    if !isolated_parked_test("send_message_accepts_child_senders_but_preserves_recipient_refusals")
+    {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
@@ -2920,7 +2961,7 @@ async fn send_message_refuses_stopped_self_foreign_child_unknown_target_and_chil
     let exports = ParkingExports::with_modern_worker(SessionState::Running, None, true);
     let (backend, mut delivered) = message_backend_for_session(
         "peer-1",
-        exports,
+        exports.clone(),
         &[],
         Arc::new(|| {}),
         mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL,
@@ -2938,7 +2979,7 @@ async fn send_message_refuses_stopped_self_foreign_child_unknown_target_and_chil
     for (sender, target, expected) in [
         ("parent-1", "stopped-peer", "stopped (suspended)"),
         ("parent-1", "parent-1", "itself"),
-        ("peer-1", "child-1", "another session's sub-agent"),
+        ("child-1", "child-1", "itself"),
         (
             "parent-1",
             "missing-peer",
@@ -2951,25 +2992,84 @@ async fn send_message_refuses_stopped_self_foreign_child_unknown_target_and_chil
         assert!(answer.is_error, "{sender} -> {target}: {}", answer.message);
         assert!(answer.message.contains(expected), "{}", answer.message);
     }
-    let claimed_child_sender = backend
-        .deliver_message(
-            "child-1".into(),
-            "peer-1".into(),
-            "hello".into(),
-            "claimed-child-sender".into(),
-            mj_core::clock::epoch_millis(),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        format!("{claimed_child_sender:#}").contains("only a top-level session can send messages"),
-        "{claimed_child_sender:#}"
-    );
     assert!(
         crate::database::pending_mailbox_events(10)
             .unwrap()
             .is_empty()
     );
+    let child_sender = backend
+        .deliver_message(
+            "child-1".into(),
+            "peer-1".into(),
+            "hello".into(),
+            "child-sender".into(),
+            mj_core::clock::epoch_millis(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(child_sender.via, "mailbox");
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&pending[0].event_json).unwrap();
+    assert!(matches!(event.body,
+        mj_core::mailbox::MailboxEventBody::SessionMessage {
+            from: mj_core::mailbox::Sender::Session { id, .. }, ..
+        } if id == "child-1"
+    ));
+    let mut parked_child = parent_record("child-1", "helper");
+    parked_child.state = SessionState::Parked;
+    crate::database::save_session(&parked_child).unwrap();
+    exports.set_child_state(SessionState::Parked);
+    let (reply_backend, _) = message_backend_for_session(
+        "child-1",
+        exports.clone(),
+        &[],
+        Arc::new(|| {}),
+        mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL,
+    );
+    let reply = reply_backend
+        .deliver_message(
+            "peer-1".into(),
+            "child-1".into(),
+            "Here is the answer.".into(),
+            "peer-reply".into(),
+            mj_core::clock::epoch_millis(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply.via, "mailbox");
+    assert_eq!(exports.unparks(), 1);
+    let mut nested = crate::database::load_subagent("child-1").unwrap().unwrap();
+    nested.kind = mj_core::subagent::SubagentKind::Reviewer;
+    nested.child_session_id = "nested-reviewer".into();
+    nested.parent_session_id = "child-1".into();
+    nested.request_key = "nested-message-reviewer".into();
+    crate::database::save_subagent_session(&parent_record("nested-reviewer", "reviewer"), &nested)
+        .unwrap();
+    reply_backend
+        .deliver_message(
+            "nested-reviewer".into(),
+            "child-1".into(),
+            "A question for my parent.".into(),
+            "reviewer-parent-message".into(),
+            mj_core::clock::epoch_millis(),
+        )
+        .await
+        .unwrap();
+    for (key, sender) in [
+        ("session-message-peer-reply", "peer-1"),
+        ("session-message-reviewer-parent-message", "nested-reviewer"),
+    ] {
+        let pending = crate::database::pending_mailbox_events(10).unwrap();
+        let row = pending.iter().find(|row| row.event_key == key).unwrap();
+        assert_eq!(row.target_session_id, "child-1");
+        assert!(row.unpark);
+        let event: mj_core::mailbox::MailboxEvent = serde_json::from_str(&row.event_json).unwrap();
+        assert!(
+            matches!(event.body, mj_core::mailbox::MailboxEventBody::SessionMessage { from: mj_core::mailbox::Sender::Session { id, .. }, .. } if id == sender)
+        );
+    }
     assert!(delivered.try_recv().is_err());
 }
 

@@ -14,7 +14,7 @@ pub struct RuntimeReviewView {
     pub roles: Vec<RoleStatus>,
     /// What the review is doing, in one line.
     pub status: String,
-    /// Present once the review has reached a verdict the user must answer.
+    /// Present once the review has reached a verdict.
     pub verdict: Option<VerdictView>,
     /// Forms a reviewing harness is waiting for a person to answer. The
     /// child owns them; the host projects its session's pending requests.
@@ -114,8 +114,7 @@ pub struct VerdictView {
     /// The findings, or the failure's reason. Empty for a clean verdict, which
     /// resolves itself and is never on screen.
     pub text: String,
-    /// Which resolutions this verdict accepts right now. A surface shows the
-    /// rest disabled rather than hiding them, so the buttons do not move.
+    /// Legacy resolution data retained for terminal handoff compatibility.
     pub allowed: Vec<Resolution>,
 }
 

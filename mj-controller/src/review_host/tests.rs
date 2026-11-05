@@ -5,9 +5,8 @@ use crate::session_manager::{
 use mj_core::state::{ManagedSessionSnapshot, MaterializedSession};
 use std::path::PathBuf;
 
-/// One session id per test. The prompt lock is process-wide -- there is
-/// one daemon per machine and one host in it -- so tests that shared a
-/// session id would release each other's locks.
+/// One session id per test keeps the fake manager and durable review state
+/// independent across concurrent test execution.
 fn session_id(test: &str) -> String {
     format!("018f9dd2-a3b4-7c8d-9000-{test}")
 }
@@ -52,6 +51,8 @@ fn seed_uses_the_latest_real_prompt_and_keeps_history_for_intent() {
         user_prompt(5, "[HARNESS NOTE: forwarded findings]"),
     ];
     let mut state = TurnReviewState {
+        pending_followup: false,
+        forward_attempts: 0,
         reviewed_through_ordinal: 1,
         ..TurnReviewState::default()
     };
@@ -488,6 +489,13 @@ impl ReviewEnvironment for FakeEnvironment {
             .map(|owner| vec![(owner, state)])
             .unwrap_or_default())
     }
+
+    fn pending_followups(&self) -> Result<Vec<String>, String> {
+        if !self.state().pending_followup {
+            return Ok(Vec::new());
+        }
+        Ok(self.owner.lock().unwrap().clone().into_iter().collect())
+    }
     fn register_child(
         &self,
         session: &str,
@@ -625,14 +633,26 @@ impl ReviewEnvironment for FakeEnvironment {
         {
             return Err(error);
         }
-        *self
+        let mut stored = self
             .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = state.clone();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut next = state.clone();
+        if !(stored.active_group.is_none() && next.active_group.is_some()) {
+            next.pending_followup |= stored.pending_followup;
+        }
+        *stored = next.clone();
+        drop(stored);
         self.writes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((state.clone(), std::thread::current().id()));
+            .push((next, std::thread::current().id()));
+        Ok(())
+    }
+
+    fn mark_followup(&self, session_id: &str) -> Result<(), String> {
+        *self.owner.lock().unwrap() = Some(session_id.to_owned());
+        self.state.lock().unwrap().pending_followup = true;
         Ok(())
     }
 
@@ -785,7 +805,7 @@ async fn a_review_refused_for_another_reason_does_not_wait() {
         }],
     }));
     tokio::time::timeout(Duration::from_secs(5), async {
-        while host.refuses_prompt(session) {
+        while environment.live_holds() != 0 {
             tokio::task::yield_now().await;
         }
     })
@@ -854,25 +874,6 @@ async fn wait_for_group_children(
     })
     .await
     .expect("every reviewer child starts")
-}
-
-#[test]
-fn delivery_admission_bypasses_only_the_matching_held_prompt() {
-    let session = session_id("admission");
-    hold_prompts(&session);
-    let admission = admit_review_delivery(&session, 7, "forward-7")
-        .expect("the live review hold grants its own corrective command");
-    assert!(review_delivery_admitted(&session, &admission));
-    assert!(!review_delivery_admitted(
-        &session,
-        &ReviewDeliveryAdmission::new(session.clone(), 7, "other-command".to_owned())
-    ));
-    assert!(!review_delivery_admitted(
-        &session,
-        &ReviewDeliveryAdmission::new(session.clone(), 8, "forward-7".to_owned())
-    ));
-    assert!(prompt_refusal(&session).is_some());
-    release_prompts(&session);
 }
 
 #[tokio::test]
@@ -965,27 +966,6 @@ async fn a_self_started_turn_does_not_arm_an_automatic_review() {
     host.shutdown().await.expect("shutdown the host");
 }
 
-/// Automatic-review preparation remains visible while it is pending, and
-/// cancelling it releases the session's prompt hold.
-#[tokio::test]
-async fn auto_preparation_is_visible_and_can_be_cancelled() {
-    let session = session_id("autoprepare");
-    let mut manager = FakeManager::new(&session).await;
-    let environment = FakeEnvironment::new();
-    let host = TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment);
-    finish_a_turn(&manager, &host).await;
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
-        .await;
-    assert!(host.view(&session).unwrap().status.contains("Preparing"));
-    host.resolve(&session, Resolution::Cancelled).await.unwrap();
-    assert!(!host.refuses_prompt(&session));
-    let _ = reply.send(Ok(ReviewerOutcome::Delta {
-        repositories: Vec::new(),
-    }));
-    host.shutdown().await.unwrap();
-}
-
 /// I2-9: a Mjolnir sub-agent's turn is reviewed through its parent's turn.
 /// Reviewing the child on its own raced the parent's lifecycle operations
 /// and posted their internal refusals into the child's transcript.
@@ -1006,7 +986,6 @@ async fn a_subagent_turn_is_not_reviewed_on_its_own() {
             .is_err(),
         "a sub-agent's turn asks its worker for nothing"
     );
-    assert!(!host.refuses_prompt(&session));
     let view = host.view(&session);
     assert!(
         view.as_ref()
@@ -1019,83 +998,6 @@ async fn a_subagent_turn_is_not_reviewed_on_its_own() {
 /// Resolutions are gated on the verdict the review actually reached, in
 /// the host rather than in any surface, so every surface gets the same
 /// answer.
-#[tokio::test]
-async fn resolving_a_review_that_has_no_verdict_is_refused() {
-    let session = session_id("resolution0");
-    let session = session.as_str();
-    let mut manager = FakeManager::new(session).await;
-    let environment = FakeEnvironment::new();
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-
-    let error = host
-        .resolve(session, Resolution::Forwarded)
-        .await
-        .expect_err("there is no review at all");
-    assert!(error.contains("no review is open"), "{error}");
-
-    finish_a_turn(&manager, &host).await;
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
-        .await;
-    let _ = reply.send(Ok(ReviewerOutcome::Delta {
-        repositories: vec![mj_core::relay::RepoDelta {
-            base_commit: None,
-            head_commit: None,
-            base_kind: None,
-            root: std::path::PathBuf::from("/workspace/app"),
-            baseline_tree: Some("base".to_owned()),
-            current_tree: "new".to_owned(),
-            patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
-            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
-            changed_lines: 1,
-            files: Vec::new(),
-            merged_in: Vec::new(),
-            unattributed: None,
-            push_review_warning: None,
-        }],
-    }));
-
-    // The capture now arrives while the review is still being prepared
-    // (I2-10), so wait for the review itself rather than for any view.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while host
-            .view(session)
-            .is_none_or(|view| view.status.contains("Preparing"))
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the review is open");
-
-    let error = host
-        .resolve(session, Resolution::Forwarded)
-        .await
-        .expect_err("nothing has been found yet");
-    assert!(error.contains("no findings"), "{error}");
-    let error = host
-        .resolve(session, Resolution::Dismissed)
-        .await
-        .expect_err("nothing has been decided yet");
-    assert!(error.contains("verdict"), "{error}");
-    // Cancel is always available, which is what keeps a surface from ever
-    // being stuck with an open review it cannot end.
-    host.resolve(session, Resolution::Cancelled)
-        .await
-        .expect("cancel needs no verdict");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while host.refuses_prompt(session) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("cancelling releases the prompts");
-}
-
 // Hard-won: 1f754710: lifecycle cancellation was presented as an internal review failure
 #[test]
 fn a_lifecycle_cancellation_is_not_shown_as_an_internal_error() {
@@ -1167,7 +1069,7 @@ async fn a_turn_that_changed_nothing_resolves_without_choosing_a_reviewer() {
     .expect("the review records its outcome in the conversation");
     assert_eq!(notice, "Nothing to review: the turn changed no files");
     tokio::time::timeout(Duration::from_secs(5), async {
-        while host.refuses_prompt(session) || host.view(session).is_some() {
+        while host.view(session).is_some() {
             tokio::task::yield_now().await;
         }
     })
@@ -1243,7 +1145,7 @@ async fn a_capture_the_recovery_copy_refused_is_retried_before_choosing_a_review
     .expect("the review records its outcome in the conversation");
     assert_eq!(notice, "Nothing to review: the turn changed no files");
     tokio::time::timeout(Duration::from_secs(5), async {
-        while host.refuses_prompt(session) || host.view(session).is_some() {
+        while host.view(session).is_some() {
             tokio::task::yield_now().await;
         }
     })
@@ -1252,11 +1154,10 @@ async fn a_capture_the_recovery_copy_refused_is_retried_before_choosing_a_review
     host.shutdown().await.unwrap();
 }
 
-/// A prompt that landed before the admission hold is reflected by the
-/// live actor recheck, so preparation refuses and gives the prompt lock
-/// back instead of reviewing a stale idle snapshot.
+/// A new primary turn is reflected by the live actor recheck, so preparation
+/// refuses instead of reviewing a stale idle snapshot.
 #[tokio::test]
-async fn preparation_rechecks_the_live_actor_after_installing_the_prompt_hold() {
+async fn preparation_rechecks_the_live_actor_without_holding_prompts() {
     let session = session_id("preparelive");
     let session = session.as_str();
     let mut manager = FakeManager::new(session).await;
@@ -1273,7 +1174,7 @@ async fn preparation_rechecks_the_live_actor_after_installing_the_prompt_hold() 
     tokio::time::timeout(Duration::from_secs(5), gate.entered())
         .await
         .unwrap();
-    assert!(host.refuses_prompt(session));
+    assert!(host.view(session).is_some());
 
     manager
         .publisher
@@ -1289,12 +1190,12 @@ async fn preparation_rechecks_the_live_actor_after_installing_the_prompt_hold() 
     gate.release();
 
     tokio::time::timeout(Duration::from_secs(5), async {
-        while host.refuses_prompt(session) {
+        while host.view(session).is_some() {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("a refused preparation releases its prompt hold");
+    .expect("a stale preparation is refused");
     assert!(host.view(session).is_none());
     assert_eq!(environment.state().active, None);
     assert!(
@@ -1367,7 +1268,7 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
         .await
         .expect("start task")
         .expect("the retained idle edge admits the review");
-    assert!(host.refuses_prompt(session));
+    assert!(host.view(session).is_some());
     host.shutdown().await.expect("shutdown the host");
 }
 
@@ -1442,10 +1343,6 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
     assert!(
         !second.is_finished(),
         "concurrent shutdown joins the same drain"
-    );
-    assert!(
-        !host.refuses_prompt(session),
-        "logical shutdown releases prompts before persistence finishes"
     );
     close_gate.release();
     first
@@ -1525,6 +1422,18 @@ async fn a_review_open_at_a_restart_keeps_its_child_and_baseline() {
     let child = wait_for_child(&environment, &old, session).await;
     assert!(environment.state().active.is_some());
 
+    // Two more completed turns while the review is open coalesce into one
+    // durable follow-up. Restart before the first verdict is delivered.
+    finish_a_turn(&manager, &old).await;
+    finish_a_turn(&manager, &old).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !environment.state().pending_followup {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the follow-up is durable before restart");
+
     old.shutdown().await.unwrap();
 
     let new = TurnReviewHost::spawn_in(
@@ -1557,6 +1466,42 @@ async fn a_review_open_at_a_restart_keeps_its_child_and_baseline() {
         "before-turn",
         "the baseline did not advance, so the next review covers both turns"
     );
+    finish_child(&new, &environment, session, &child, Some("No findings.")).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    reply
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![mj_core::relay::RepoDelta {
+                root: PathBuf::from("/workspace/app"),
+                baseline_tree: Some("after-turn".into()),
+                current_tree: "latest".into(),
+                patch: "+later".into(),
+                changed_lines: 1,
+                diffstat: "1 file changed".into(),
+                ..Default::default()
+            }],
+        }))
+        .unwrap();
+    let followup_child = wait_for_child(&environment, &new, session).await;
+    assert_ne!(followup_child, child);
+    assert!(!environment.state().pending_followup);
+    finish_child(
+        &new,
+        &environment,
+        session,
+        &followup_child,
+        Some("No findings."),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while new.view(session).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the one coalesced follow-up closes");
+    assert_eq!(environment.children.lock().unwrap().len(), 2);
     new.shutdown().await.unwrap();
 }
 
@@ -1622,9 +1567,7 @@ async fn a_review_still_preparing_at_a_restart_is_reported_by_the_next_daemon() 
     new.shutdown().await.unwrap();
 }
 
-/// Queued prompts hold the review back: reviewing now would hold work the
-/// user has already sent, and the review after the queue drains covers the
-/// whole batch anyway.
+/// Queued primary prompts do not block independent review preparation.
 #[tokio::test]
 async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_the_same_id() {
     let session = session_id("handoff0000");
@@ -1657,17 +1600,12 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
         })
         .unwrap();
     let RemoteSessionRequest::Submit {
-        command_id,
-        admission,
-        reply,
-        ..
+        command_id, reply, ..
     } = manager.next().await
     else {
-        panic!("recovery submits the pending handoff directly, without starting a reviewer");
+        panic!("recovery submits the pending handoff directly");
     };
     assert_eq!(command_id, pending.command_id);
-    assert!(review_delivery_admitted(&session, &admission.unwrap()));
-    assert!(host.refuses_prompt(&session));
     assert_eq!(environment.state().pending_forward, Some(pending.clone()));
     assert_eq!(
         environment.state().baselines[&PathBuf::from("/workspace/app")],
@@ -1697,18 +1635,15 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
     .await
     .expect("rejection remains actionable");
     assert_eq!(environment.state().pending_forward, Some(pending.clone()));
-    host.resolve(&session, Resolution::Forwarded).await.unwrap();
     let RemoteSessionRequest::Submit {
-        command_id,
-        admission,
-        reply,
-        ..
-    } = manager.next().await
+        command_id, reply, ..
+    } = tokio::time::timeout(Duration::from_secs(5), manager.next())
+        .await
+        .unwrap()
     else {
-        panic!("retry submits the same handoff");
+        panic!("automatic retry submits the same handoff");
     };
     assert_eq!(command_id, pending.command_id);
-    let _epoch = admission.unwrap().epoch();
     let (stale_reply, stale_answer) = oneshot::channel();
     host.events
         .send(HostEvent::ReviewerFinished {
@@ -1741,13 +1676,74 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
     assert!(state.pending_forward.is_none());
     assert!(state.prior_review.is_some());
     assert_eq!(state.baselines[&PathBuf::from("/workspace/app")], "new");
-    assert!(!host.refuses_prompt(&session));
     assert!(environment.children.lock().unwrap().is_empty());
     host.shutdown().await.unwrap();
 }
 
+// Hard-won: f47500b6c: a turn ending during preparation lost its follow-up
 #[tokio::test]
-async fn queued_prompts_hold_a_review_back() {
+async fn turn_finishing_during_review_preparation_starts_one_followup() {
+    let session = session_id("prepfollowup");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &host).await;
+    let (_, _, first_capture) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    finish_a_turn(&manager, &host).await;
+    finish_a_turn(&manager, &host).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !environment.state().pending_followup {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("follow-up is durable during preparation");
+    first_capture
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![mj_core::relay::RepoDelta {
+                root: PathBuf::from("/workspace/app"),
+                baseline_tree: Some("base".into()),
+                current_tree: "first".into(),
+                patch: "+first".into(),
+                changed_lines: 1,
+                diffstat: "1 file changed".into(),
+                ..Default::default()
+            }],
+        }))
+        .unwrap();
+    let child = wait_for_child(&environment, &host, &session).await;
+    finish_child(&host, &environment, &session, &child, Some("No findings.")).await;
+    let (_, _, second_capture) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    second_capture
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![mj_core::relay::RepoDelta {
+                root: PathBuf::from("/workspace/app"),
+                baseline_tree: Some("first".into()),
+                current_tree: "second".into(),
+                patch: "+second".into(),
+                changed_lines: 1,
+                diffstat: "1 file changed".into(),
+                ..Default::default()
+            }],
+        }))
+        .unwrap();
+    let child = wait_for_child(&environment, &host, &session).await;
+    finish_child(&host, &environment, &session, &child, Some("No findings.")).await;
+    assert_eq!(environment.children.lock().unwrap().len(), 2);
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: f47500b6c: the live queued-prompt snapshot refused review with a spurious notice
+#[tokio::test]
+async fn queued_prompts_do_not_hold_a_review_back() {
     let session = session_id("queued00000");
     let session = session.as_str();
     let mut manager = FakeManager::new(session).await;
@@ -1775,27 +1771,45 @@ async fn queued_prompts_hold_a_review_back() {
             mj_core::state::MaterializedExecutionState::Running { started_at_ms: 0 },
         ),
     );
+    manager
+        .publisher
+        .publish(session.to_owned(), queued.clone())
+        .await
+        .unwrap();
     host.observe(session, &queued);
-
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !environment.state().pending_followup {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("queued turn retains durable follow-up");
     assert!(
-        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+        tokio::time::timeout(Duration::from_millis(100), manager.requests.recv())
             .await
             .is_err(),
-        "no review starts while prompts are queued"
+        "queued prompts must not emit a refusal notice or start capture"
     );
-    let refusal = host
-        .start(session, true)
+    let idle = view(session, mj_core::state::MaterializedExecutionState::Idle);
+    manager
+        .publisher
+        .publish(session.to_owned(), idle.clone())
         .await
-        .expect_err("a manual review is refused for the same reason");
-    assert!(refusal.0.contains("queued"), "{refusal}");
+        .unwrap();
+    host.observe(session, &idle);
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: Vec::new(),
+    }));
+    host.shutdown().await.unwrap();
 }
 
-/// A reviewer launch failure is a durable failed verdict, but it no longer
-/// owns the primary turn: the active marker and admission hold are both
-/// cleared before the user dismisses the visible failure.
+/// A reviewer launch failure closes on its own and preserves the baseline.
 // Hard-won: #1448: failed reviewer starts retained borrowed targets after their review ended.
 #[tokio::test]
-async fn a_failed_review_clears_durable_active_state_and_the_prompt_hold() {
+async fn a_failed_review_closes_without_advancing_coverage() {
     let session = session_id("failedrole0");
     let session = session.as_str();
     let mut manager = FakeManager::new(session).await;
@@ -1834,16 +1848,7 @@ async fn a_failed_review_clears_durable_active_state_and_the_prompt_hold() {
     }));
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let failed = host.view(session).is_some_and(|view| {
-                matches!(
-                    view.verdict,
-                    Some(VerdictView {
-                        kind: VerdictKind::Failed,
-                        ..
-                    })
-                )
-            });
-            if failed && !host.refuses_prompt(session) && environment.state().active.is_none() {
+            if host.view(session).is_none() && environment.state().active.is_none() {
                 break;
             }
             tokio::task::yield_now().await;
@@ -1861,17 +1866,29 @@ async fn a_failed_review_clears_durable_active_state_and_the_prompt_hold() {
     .expect("a failed reviewer is closed, retrying a transient cleanup refusal");
     assert_eq!(environment.closed.lock().unwrap().len(), 1);
     assert!(environment.state().baselines.is_empty());
-
-    host.resolve(session, Resolution::Dismissed)
-        .await
-        .expect("the visible failure can be dismissed");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while host.view(session).is_some() {
-            tokio::task::yield_now().await;
+    // Hard-won: f47500b6c: the close notice hid the reviewer launch failure reason.
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RemoteSessionRequest::Submit {
+                command: RelayCommand::RecordNotice { text },
+                reply,
+                ..
+            } = manager.next().await
+            {
+                let _ = reply.send(Ok(1));
+                if text.starts_with("Review failed:") {
+                    break text;
+                }
+            }
         }
     })
     .await
-    .expect("dismissal closes the failed review");
+    .expect("failed review records a notice");
+    assert!(
+        notice.contains("review harness failed to launch"),
+        "{notice}"
+    );
+
     host.shutdown().await.expect("shutdown the host");
 }
 
@@ -1903,7 +1920,7 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     assert!(children[0].2.contains("Do not edit files or push"));
     finish_child(&host, &environment, &session, &child, Some("No findings.")).await;
     tokio::time::timeout(Duration::from_secs(5), async {
-        while host.view(&session).is_some() || host.refuses_prompt(&session) {
+        while host.view(&session).is_some() {
             tokio::task::yield_now().await;
         }
     })
@@ -1915,6 +1932,138 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     assert!(state.active.is_none());
     assert!(environment.closed.lock().unwrap().contains(&child));
     assert_eq!(environment.live_holds(), 0);
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn primary_prompt_and_corrective_delivery_queue_while_review_is_running() {
+    let session = session_id("nonblocking-review");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    let child = open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
+    let handle = manager.control.session(session.clone()).await.unwrap();
+    let user_submit = tokio::spawn(async move {
+        handle
+            .submit(
+                "user-while-reviewing".into(),
+                prompt_command("next task".into()),
+            )
+            .await
+    });
+    let RemoteSessionRequest::Submit {
+        command_id,
+        command: RelayCommand::Prompt { .. },
+        reply,
+        ..
+    } = manager.next().await
+    else {
+        panic!("the primary prompt is admitted during review");
+    };
+    assert_eq!(command_id, "user-while-reviewing");
+    reply.send(Ok(13)).unwrap();
+    user_submit.await.unwrap().unwrap();
+    assert!(host.view(&session).is_some(), "the review continues");
+
+    host.observe(
+        &session,
+        &view(
+            &session,
+            MaterializedExecutionState::Running { started_at_ms: 1 },
+        ),
+    );
+    finish_child(
+        &host,
+        &environment,
+        &session,
+        &child,
+        Some("[P2] src/lib.rs:1 -- fix boundary"),
+    )
+    .await;
+    let RemoteSessionRequest::Submit {
+        command: RelayCommand::Prompt { .. },
+        reply,
+        ..
+    } = manager.next().await
+    else {
+        panic!("findings enter the ordinary prompt queue, not steering");
+    };
+    reply.send(Ok(14)).unwrap();
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn rejected_corrective_delivery_retries_one_command_then_closes_without_coverage() {
+    let session = session_id("forward-retries");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    let child = open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
+    finish_child(
+        &host,
+        &environment,
+        &session,
+        &child,
+        Some("[P2] src/lib.rs:1 -- defect"),
+    )
+    .await;
+    let mut command_id = None;
+    for _ in 0..3 {
+        let RemoteSessionRequest::Submit {
+            command_id: next,
+            command: RelayCommand::Prompt { .. },
+            reply,
+            ..
+        } = tokio::time::timeout(Duration::from_secs(10), manager.next())
+            .await
+            .unwrap()
+        else {
+            panic!("a corrective attempt is an ordinary prompt");
+        };
+        if let Some(first) = &command_id {
+            assert_eq!(&next, first, "a retry must use the same command id");
+        } else {
+            command_id = Some(next);
+        }
+        reply.send(Err("primary unavailable".into())).unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.view(&session).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the third rejection closes the review");
+    let state = environment.state();
+    assert!(state.baselines.is_empty());
+    assert!(state.pending_forward.is_none());
+    assert_eq!(state.forward_attempts, 3);
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RemoteSessionRequest::Submit {
+                command: RelayCommand::RecordNotice { text },
+                reply,
+                ..
+            } = manager.next().await
+            {
+                reply.send(Ok(1)).unwrap();
+                if text.contains("could not be delivered") {
+                    break text;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(notice.contains("unreviewed"));
     host.shutdown().await.unwrap();
 }
 
@@ -2053,7 +2202,7 @@ async fn parallel_findings_keep_launch_order_when_children_finish_out_of_order()
 }
 
 #[tokio::test]
-async fn clean_and_failed_group_releases_prompt_hold_without_advancing_baseline() {
+async fn clean_and_failed_group_closes_without_advancing_baseline() {
     let session = session_id("parallel-failed-hold");
     let mut manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
@@ -2071,24 +2220,12 @@ async fn clean_and_failed_group_releases_prompt_hold_without_advancing_baseline(
     .await;
     finish_child(&host, &environment, &session, &children[1], None).await;
     tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(view) = host.view(&session)
-                && matches!(
-                    view.verdict,
-                    Some(VerdictView {
-                        kind: VerdictKind::Failed,
-                        ..
-                    })
-                )
-                && !host.refuses_prompt(&session)
-            {
-                break;
-            }
+        while host.view(&session).is_some() || environment.state().active.is_some() {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .unwrap();
+    .expect("the failed group closes itself");
     assert!(environment.state().baselines.is_empty());
     assert!(environment.state().active.is_none());
     host.shutdown().await.unwrap();
@@ -2306,7 +2443,7 @@ async fn a_review_asked_for_while_the_open_one_waits_on_a_question_says_so() {
     assert_eq!(
         refusal.0,
         "the previous review is waiting for your answer to a question \
-         (\"Retry with claude-opus-4-8?\"); answer or dismiss it"
+         (\"Retry with claude-opus-4-8?\"); answer it in the virtual workspace"
     );
     host.shutdown().await.expect("shutdown the host");
 }
@@ -2344,7 +2481,6 @@ async fn a_reviewer_handback_arriving_after_restart_completes_the_saved_group() 
         "new"
     );
     assert!(environment.state().active_group.is_none());
-    assert!(!new.refuses_prompt(&session));
     new.shutdown().await.unwrap();
 }
 
@@ -2424,6 +2560,8 @@ async fn startup_restores_group_before_push_or_override_admission() {
     );
     driver.delta_captured(vec![push_delta("/workspace/app", "newtree")]);
     let state = TurnReviewState {
+        pending_followup: false,
+        forward_attempts: 0,
         active: Some("group-1".into()),
         active_group: Some(mj_core::storage::ActiveReviewGroup {
             driver: driver.snapshot(),
@@ -2544,6 +2682,8 @@ async fn startup_reaps_settled_and_orphaned_reviewers_but_preserves_their_busy_p
         });
     *environment.owner.lock().unwrap() = Some(session.clone());
     *environment.state.lock().unwrap() = TurnReviewState {
+        pending_followup: false,
+        forward_attempts: 0,
         active: Some("partly-failed-group".into()),
         active_group: Some(mj_core::storage::ActiveReviewGroup {
             driver: driver.snapshot(),
@@ -2664,7 +2804,7 @@ async fn a_reviewer_child_starts_without_taking_its_parents_reviewer_lease() {
             .is_err(),
         "launching the child sends no reviewer command to its parent"
     );
-    host.resolve(&session, Resolution::Cancelled).await.unwrap();
+    finish_child(&host, &environment, &session, &child, Some("No findings.")).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while !environment.closed.lock().unwrap().contains(&child) {
             tokio::task::yield_now().await;
@@ -2672,7 +2812,6 @@ async fn a_reviewer_child_starts_without_taking_its_parents_reviewer_lease() {
     })
     .await
     .unwrap();
-    assert!(environment.state().baselines.is_empty());
     host.shutdown().await.unwrap();
 }
 
@@ -2688,66 +2827,15 @@ async fn a_reviewer_without_a_handback_fails_without_advancing_the_baseline() {
     );
     let child = open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
     finish_child(&host, &environment, &session, &child, None).await;
-    let review = host.view(&session).unwrap();
-    assert!(matches!(
-        review.verdict,
-        Some(VerdictView {
-            kind: VerdictKind::Failed,
-            ..
-        })
-    ));
-    assert!(environment.state().baselines.is_empty());
-    assert!(environment.state().active.is_none());
-    assert!(!host.refuses_prompt(&session));
-    host.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn cancelling_during_registration_closes_the_late_child_without_starting_it() {
-    let session = session_id("cancelregister");
-    let mut manager = FakeManager::new(&session).await;
-    let environment = FakeEnvironment::new();
-    let gate = SaveGate::new();
-    *environment.register_gate.lock().unwrap() = Some(gate.clone());
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-    finish_a_turn(&manager, &host).await;
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
-        .await;
-    reply
-        .send(Ok(ReviewerOutcome::Delta {
-            repositories: vec![mj_core::relay::RepoDelta {
-                base_commit: None,
-                head_commit: None,
-                base_kind: None,
-                root: "/workspace/app".into(),
-                baseline_tree: Some("base".into()),
-                current_tree: "new".into(),
-                patch: "+one".into(),
-                changed_lines: 1,
-                ..Default::default()
-            }],
-        }))
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), gate.entered())
-        .await
-        .unwrap();
-    host.resolve(&session, Resolution::Cancelled).await.unwrap();
-    gate.release();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while environment.closed.lock().unwrap().is_empty() {
+        while host.view(&session).is_some() {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .unwrap();
-    assert!(environment.started.lock().unwrap().is_empty());
-    assert!(!host.refuses_prompt(&session));
+    .expect("failed reviewer resolves itself");
     assert!(environment.state().baselines.is_empty());
+    assert!(environment.state().active.is_none());
     host.shutdown().await.unwrap();
 }
 
@@ -2767,7 +2855,6 @@ async fn push_trigger_does_not_arm_review_at_the_end_of_a_turn() {
             .is_err()
     );
     assert!(host.view(&session).is_none());
-    assert!(!host.refuses_prompt(&session));
     host.shutdown().await.unwrap();
 }
 
@@ -2902,7 +2989,6 @@ async fn open_push(
             ..
         }
     ));
-    assert!(!host.refuses_prompt(&manager.session));
     reply
         .send(Ok(ReviewerOutcome::Delta {
             repositories: vec![mj_core::relay::RepoDelta {
@@ -2996,7 +3082,6 @@ async fn review_starts_report_child_registration_refusal_to_their_callers() {
                 ..
             } if scope == if push { mj_core::relay::CaptureScope::PushableCommits } else { mj_core::relay::CaptureScope::TurnDelta }
         ));
-        assert_eq!(host.refuses_prompt(&manager.session), !push);
         reply
             .send(Ok(ReviewerOutcome::Delta {
                 repositories: vec![mj_core::relay::RepoDelta {
@@ -3021,7 +3106,6 @@ async fn review_starts_report_child_registration_refusal_to_their_callers() {
             refusal.0.contains("review child registration refused"),
             "{refusal}"
         );
-        assert!(!host.refuses_prompt(&session));
         host.shutdown().await.unwrap();
     }
 }
@@ -3192,6 +3276,7 @@ async fn old_git_push_delta_records_warning_and_clean_tree_without_reviewer() {
     host.shutdown().await.unwrap();
 }
 
+// Hard-won: c5e89cf12: explicit review requests were refused unless automatic review ran on push.
 #[tokio::test]
 async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_primary() {
     for (name, report, expected) in [
@@ -3206,10 +3291,29 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
             "Review of commits",
         ),
         ("pushfailed", None, "Review of commits"),
+        (
+            "manualoff",
+            Some("No findings."),
+            "Review clean for commits",
+        ),
+        (
+            "manualturn",
+            Some("No findings."),
+            "Review clean for commits",
+        ),
+        (
+            "manualchild",
+            Some("No findings."),
+            "Review clean for commits",
+        ),
     ] {
         let session = session_id(name);
+        let clean = report == Some("No findings.");
         let mut manager = FakeManager::new(&session).await;
         let environment = FakeEnvironment::new();
+        environment
+            .subagent
+            .store(name == "manualchild", std::sync::atomic::Ordering::Release);
         if name == "pushclean" {
             pending_push_findings(&environment);
             environment
@@ -3219,8 +3323,18 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
                 .baselines
                 .insert(PathBuf::from("/workspace/lib"), "libtree".into());
         }
-        let host =
-            TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+        let trigger = match name {
+            "manualoff" | "manualchild" => mj_core::config::ReviewTrigger::Off,
+            "manualturn" => mj_core::config::ReviewTrigger::Turn,
+            _ => mj_core::config::ReviewTrigger::Push,
+        };
+        let config: ReviewConfigSource = Arc::new(move |_| ReviewConfig {
+            trigger,
+            profile: Some("reviewer".into()),
+            count: std::num::NonZeroUsize::new(1).unwrap(),
+            ..Default::default()
+        });
+        let host = TurnReviewHost::spawn_in(manager.control.clone(), config, environment.clone());
         let child = open_push(&mut manager, &host, &environment).await;
         assert_eq!(
             host.begin_push(&session, None).await.unwrap_err().0,
@@ -3237,13 +3351,12 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
         let mut advanced = false;
         tokio::time::timeout(Duration::from_secs(5), async {
             while host.view(&session).is_some() {
-                assert!(!host.refuses_prompt(&session));
-                tokio::select! {
+                            tokio::select! {
                     _ = tokio::task::yield_now() => {},
                     request = manager.requests.recv() => match request.unwrap() {
                         RemoteSessionRequest::Reviewer { action, reply, .. } => {
                             match &action {
-                                ReviewerAction::RecordReviewed { trees } => { assert_eq!(name, "pushclean"); assert_eq!(trees[&PathBuf::from("/workspace/app")], ("newtree".into(), "bbbbbbb456".into())); recorded = true; },
+                                ReviewerAction::RecordReviewed { trees } => { assert!(clean); assert_eq!(trees[&PathBuf::from("/workspace/app")], ("newtree".into(), "bbbbbbb456".into())); recorded = true; },
                                 ReviewerAction::AdvanceBaseline { .. } => { assert!(recorded); advanced = true; },
                                 _ => panic!("unexpected review operation {action:?}"),
                             }
@@ -3259,7 +3372,7 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
             }
         }).await.unwrap();
         finished.await.unwrap().unwrap();
-        assert_eq!(recorded, name == "pushclean");
+        assert_eq!(recorded, clean);
         assert_eq!(advanced, recorded);
         let mailbox = environment.mailbox.lock().unwrap().clone();
         assert_eq!(mailbox.len(), 1);
@@ -3272,7 +3385,7 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
                 .contains_key(&PathBuf::from("/workspace/app")),
             recorded
         );
-        if recorded {
+        if name == "pushclean" {
             // The review covered one repository; the other keeps its baseline.
             assert_eq!(state.baselines[&PathBuf::from("/workspace/lib")], "libtree");
         }
@@ -3394,6 +3507,8 @@ async fn push_delivery_retries_same_mailbox_key_after_final_state_save_fails() {
 
 fn pending_push_findings(environment: &FakeEnvironment) {
     *environment.state.lock().unwrap() = TurnReviewState {
+        pending_followup: false,
+        forward_attempts: 0,
         prior_review: Some(mj_core::review::lanes::PriorReviewContext {
             synthesis: "fix the regression".into(),
             evidence: Default::default(),
@@ -3784,23 +3899,10 @@ async fn shutdown_cancels_unadmitted_push_override_without_marking_a_review_inte
 }
 
 #[tokio::test]
-async fn push_review_refuses_unsupported_workers_and_non_push_sessions() {
+async fn explicit_commit_review_refuses_unsupported_workers() {
     let session = session_id("pushrefusals");
     let manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-    assert!(
-        host.begin_push(&session, None)
-            .await
-            .unwrap_err()
-            .0
-            .contains("trigger is not push")
-    );
-    host.shutdown().await.unwrap();
     let host = TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment);
     let mut published = view(&session, MaterializedExecutionState::Idle);
     published
@@ -3818,7 +3920,6 @@ async fn push_review_refuses_unsupported_workers_and_non_push_sessions() {
         host.begin_push(&session, None).await.unwrap_err().0,
         "the session's worker predates push review; restart the session"
     );
-    assert!(!host.refuses_prompt(&session));
     host.shutdown().await.unwrap();
 }
 
@@ -3904,7 +4005,6 @@ async fn push_review_refusals_leave_no_prompt_hold_or_reviewer_child() {
             .await;
         reply.send(Err(reason.into())).unwrap();
         assert_eq!(request.await.unwrap().unwrap_err().0, reason);
-        assert!(!host.refuses_prompt(&session));
     }
     assert!(environment.children.lock().unwrap().is_empty());
     host.shutdown().await.unwrap();
@@ -3931,7 +4031,6 @@ async fn cancelling_a_push_review_closes_the_child_and_leaves_the_gate_blocked()
     .unwrap();
     assert!(environment.mailbox.lock().unwrap().is_empty());
     assert!(environment.state().baselines.is_empty());
-    assert!(!host.refuses_prompt(&session));
     host.shutdown().await.unwrap();
 }
 

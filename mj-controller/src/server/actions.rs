@@ -231,12 +231,6 @@ pub enum ControllerAction {
     StartReview {
         session_id: String,
     },
-    /// Forward the findings, dismiss them, or cancel the open review.
-    ResolveReview {
-        session_id: String,
-        /// `forward`, `dismiss`, or `cancel`.
-        resolution: String,
-    },
     RemoveQueuedPrompt {
         session_id: String,
         queue_id: String,

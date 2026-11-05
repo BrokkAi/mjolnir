@@ -237,6 +237,18 @@ impl DashboardState {
         if !matches!(self.mode, Mode::Dashboard) {
             return DashboardAction::None;
         }
+        match self.workspace_scrollbar.handle_mouse(mouse) {
+            mj_chat::components::ScrollbarPointer::ScrollTo(offset) => {
+                self.workspace_scroll.set(offset);
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
+            mj_chat::components::ScrollbarPointer::Consumed => {
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
+            mj_chat::components::ScrollbarPointer::Ignored => {}
+        }
         if let Some(action) = self.handle_surface_mouse(mouse) {
             return action;
         }
@@ -294,8 +306,8 @@ impl DashboardState {
             // a stray click elsewhere can't pair up with the next row click.
             self.last_row_click = None;
         }
-        // The workspace tabs are a single horizontal row, so the wheel over
-        // that pane switches tabs even when the pane is not focused.
+        // Expanded workspaces scroll their rows; the collapsed selector keeps
+        // the adjacent-workspace wheel navigation.
         if matches!(
             mouse.kind,
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
@@ -309,7 +321,11 @@ impl DashboardState {
                 1
             };
             self.record_event_handled();
-            return self.select_adjacent_workspace(delta);
+            if self.workspace_dropdown_area.is_some() {
+                return self.select_adjacent_workspace(delta);
+            }
+            self.scroll_workspaces(delta);
+            return DashboardAction::None;
         }
         let hovered = self.pane_areas.and_then(|areas| {
             areas

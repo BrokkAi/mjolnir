@@ -25,9 +25,7 @@ impl HostState {
                 prompt,
             } => self.register_reviewer_child(session_id, role, prompt),
             ReviewRequest::PromptPrimary { command_id, prompt } => {
-                // The review's own corrective prompt must not be held by the
-                // review's own lock, and by this point the review has
-                // resolved, so the lock is already released below.
+                // The worker queues this behind any primary turn in progress.
                 self.prompt_primary(session_id, command_id, prompt);
             }
             ReviewRequest::CloseReviewer { role } => {
@@ -123,7 +121,6 @@ impl HostState {
                     // acceptance before Close can be requested. Releasing now
                     // lets later user prompts queue behind that accepted
                     // corrective turn; no held prompt can overtake it.
-                    release_prompts(session_id);
                     if let Err(error) = self.persist(
                         session_id.to_owned(),
                         state,
@@ -132,29 +129,16 @@ impl HostState {
                         tracing::warn!(session_id, %error, "could not queue review close persistence");
                         self.closing.remove(session_id);
                         self.reviews.remove(session_id);
-                        release_prompts(session_id);
                     }
                 }
             }
         }
     }
 
-    /// Sends the review's corrective prompt to the primary agent. The actor
-    /// receives a scoped admission that is valid only for this review and
-    /// command id; the hold remains until the resulting event acknowledges a
-    /// durable relay acceptance.
+    /// Sends the review's corrective prompt through the primary's normal
+    /// queue. The stable command id makes an ambiguous acceptance retry safe.
     pub(super) fn prompt_primary(&mut self, session_id: &str, command_id: String, prompt: String) {
         let Some(epoch) = self.reviews.get(session_id).map(|slot| slot.epoch) else {
-            return;
-        };
-        let Some(admission) = admit_review_delivery(session_id, epoch, &command_id) else {
-            self.step(
-                session_id.to_owned(),
-                epoch,
-                ReviewStep::PrimaryPrompted(Err(
-                    "the review handoff admission is no longer valid".to_owned()
-                )),
-            );
             return;
         };
         let control = self.control.clone();
@@ -167,7 +151,7 @@ impl HostState {
                     .await
                     .map_err(|error| format!("{error:#}"))?;
                 handle
-                    .submit_review_delivery(admission, prompt_command(prompt))
+                    .submit(command_id, prompt_command(prompt))
                     .await
                     .map(|_| ())
                     .map_err(|error| format!("{error:#}"))

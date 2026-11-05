@@ -2046,16 +2046,19 @@ fn model_candidate_with_efforts(
                 .collect(),
             observed_at: 1,
         },
-        quota: crate::server::api::CandidateQuota::Windows(vec![crate::quota::QuotaWindow {
-            label: "Week".into(),
-            remaining_percent: Some(remaining_percent),
-            duration_seconds: None,
-            model_scope: None,
-            used: None,
-            limit: None,
-            resets: None,
-            resets_at_epoch_seconds: None,
-        }]),
+        quota: crate::server::api::CandidateQuota::Subscription {
+            paid_credits: None,
+            windows: vec![crate::quota::QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(remaining_percent),
+                duration_seconds: None,
+                model_scope: None,
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: None,
+            }],
+        },
         unhealthy: Default::default(),
     }
 }
@@ -6184,7 +6187,6 @@ async fn review_status_reports_the_open_review_or_none() {
             verdict: Some(crate::server::ViewerReviewVerdict {
                 kind: "findings".into(),
                 text: "[P1] src/lib.rs:1 -- unbounded retry loop".into(),
-                allowed: vec!["forward".into(), "dismiss".into(), "cancel".into()],
             }),
         });
         snapshot.sessions.push(session);
@@ -6204,110 +6206,6 @@ async fn review_status_reports_the_open_review_or_none() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-/// Dismissing, cancelling, or forwarding sends the same controller action as
-/// the viewer's buttons. A resolution the open review does not allow, or no
-/// open review, is refused up front (400); a refusal the daemon reaches
-/// itself, such as a review that closed meanwhile, is a 409 with its reason.
-#[tokio::test]
-async fn resolving_a_review_sends_the_controller_action_or_explains_the_refusal() {
-    let (app, mut actions, snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |_| {});
-    let post = |path: &str| {
-        bearer(Request::post(path.to_owned()))
-            .body(Body::empty())
-            .unwrap()
-    };
-    async fn next(actions: &mut mpsc::Receiver<ControllerRequest>) -> ControllerRequest {
-        tokio::time::timeout(std::time::Duration::from_secs(5), actions.recv())
-            .await
-            .expect("the action reaches the controller")
-            .unwrap()
-    }
-
-    let response = app
-        .clone()
-        .oneshot(post("/api/v1/sessions/session-1/review/dismiss"))
-        .await
-        .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::BAD_REQUEST,
-        "no review is open"
-    );
-
-    snapshot_tx.send_modify(|snapshot| {
-        let mut session = snapshot
-            .sessions
-            .iter()
-            .find(|session| session.id == "session-1")
-            .unwrap()
-            .clone();
-        session.turn_review = Some(crate::server::ViewerTurnReview {
-            child_session_id: None,
-            status: "the review failed: relay reviewer_start timed out after 300 seconds".into(),
-            roles: Vec::new(),
-            verdict: Some(crate::server::ViewerReviewVerdict {
-                kind: "failed".into(),
-                text: "relay reviewer_start timed out after 300 seconds".into(),
-                allowed: vec!["dismiss".into(), "cancel".into()],
-            }),
-        });
-        snapshot.sessions.push(session);
-    });
-
-    let response = tokio::spawn(
-        app.clone()
-            .oneshot(post("/api/v1/sessions/session-1/review/dismiss")),
-    );
-    let request = next(&mut actions).await;
-    assert_eq!(
-        request.action,
-        ControllerAction::ResolveReview {
-            session_id: "session-1".into(),
-            resolution: "dismiss".into(),
-        }
-    );
-    request.reply.send(ActionOutcome::accepted()).unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert_eq!(json_body(response).await["resolution"], "dismiss");
-
-    let response = app
-        .clone()
-        .oneshot(post("/api/v1/sessions/session-1/review/forward"))
-        .await
-        .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::BAD_REQUEST,
-        "a failed review has no findings to forward"
-    );
-
-    let response = tokio::spawn(
-        app.clone()
-            .oneshot(post("/api/v1/sessions/session-1/review/cancel")),
-    );
-    let request = next(&mut actions).await;
-    request
-        .reply
-        .send(ActionOutcome::Refused(
-            mj_core::refusal::Refusal::precondition("no review is open for that session"),
-        ))
-        .unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        json_body(response).await["error"],
-        "no review is open for that session"
-    );
-
-    let response = app
-        .oneshot(post("/api/v1/sessions/session-1/review/approve"))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

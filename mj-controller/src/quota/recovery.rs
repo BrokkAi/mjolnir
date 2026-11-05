@@ -25,13 +25,13 @@ pub(crate) fn quota_score(windows: &[QuotaWindow], model: &str, now_seconds: i64
                 })
             })?;
             let remaining = remaining.min(100.0);
-            let score = if remaining == 0.0 {
-                0.0
-            } else if window
+            let score = if window
                 .resets_at_epoch_seconds
                 .is_some_and(|reset| reset <= now_seconds)
             {
                 1.0
+            } else if remaining == 0.0 {
+                0.0
             } else if let (Some(reset), Some(duration)) = (
                 window.resets_at_epoch_seconds,
                 window.duration_seconds.filter(|d| *d > 0),
@@ -189,6 +189,10 @@ mod scoring_tests {
         );
         assert_eq!(
             quota_score(&[window(20, Some(now), Some(10))], "x", now),
+            Some(1.0)
+        );
+        assert_eq!(
+            quota_score(&[window(0, Some(now), Some(10))], "x", now),
             Some(1.0)
         );
         assert_eq!(quota_score(&[window(25, None, None)], "x", now), Some(0.5));

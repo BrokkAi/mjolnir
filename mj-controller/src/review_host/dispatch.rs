@@ -122,6 +122,30 @@ impl HostState {
                     self.run(&session_id, requests);
                 }
             }
+            HostEvent::RetryForward { session_id, epoch } => {
+                if self
+                    .reviews
+                    .get(&session_id)
+                    .is_some_and(|slot| slot.epoch == epoch && slot.driver.can_forward())
+                    && let Err(error) = self.resolve(&session_id, Resolution::Forwarded)
+                {
+                    self.forward_failed(&session_id, error);
+                }
+            }
+            HostEvent::RetryFollowUp { session_id } => {
+                if self.followups.contains(&session_id)
+                    && self.followup_saving.insert(session_id.clone())
+                    && self.persistence.as_ref().is_none_or(|lane| {
+                        lane.send(PersistenceRequest::MarkFollowUp {
+                            session_id: session_id.clone(),
+                        })
+                        .is_err()
+                    })
+                {
+                    self.followup_saving.remove(&session_id);
+                    tracing::warn!(%session_id, "could not retry pending follow-up persistence: lane stopped");
+                }
+            }
             HostEvent::ReviewerOutcomeSaved {
                 session_id,
                 epoch,
@@ -170,7 +194,22 @@ impl HostState {
                 resolution,
                 reply,
             } => {
-                let answer = self.resolve(&session_id, resolution);
+                // Keep the serialized action readable during terminal
+                // handoff, but ordinary turn reviews no longer accept a
+                // person's resolution. Before-push cancellation is separate.
+                let answer = if resolution == Resolution::Cancelled
+                    && (self
+                        .reviews
+                        .get(&session_id)
+                        .is_some_and(|slot| slot.push.is_some())
+                        || matches!(
+                            self.preparing.get(&session_id),
+                            Some(PreparingOperation::Review { push: true, .. })
+                        )) {
+                    self.resolve(&session_id, resolution)
+                } else {
+                    Err("turn reviews resolve automatically".to_owned())
+                };
                 let _ = reply.send(answer);
             }
             HostEvent::Step {
@@ -190,8 +229,10 @@ impl HostState {
             }
             HostEvent::RestoreGroups {
                 groups,
+                pending_followups,
                 abandoned_children,
             } => {
+                self.followups.extend(pending_followups);
                 for (session_id, state) in groups {
                     if let Err(error) = self.restore_group(session_id, state) {
                         let _ =
@@ -203,6 +244,10 @@ impl HostState {
                     self.close_child(child);
                 }
                 self.startup_ready = true;
+                let followups: Vec<_> = self.followups.iter().cloned().collect();
+                for session_id in followups {
+                    self.begin_followup(&session_id);
+                }
                 for (session_id, handback) in std::mem::take(&mut self.deferred_handbacks) {
                     self.reviewer_finished(
                         session_id,
@@ -317,18 +362,18 @@ impl HostState {
                 }
             }
             ReviewStep::PrimaryPrompted(result) => {
-                let requests = match result {
-                    Ok(()) => self
-                        .reviews
-                        .get_mut(&session_id)
-                        .map(|slot| slot.driver.forward_succeeded())
-                        .unwrap_or_default(),
-                    Err(error) => self
-                        .reviews
-                        .get_mut(&session_id)
-                        .map(|slot| slot.driver.forward_failed(error))
-                        .unwrap_or_default(),
-                };
+                if let Err(error) = result {
+                    self.forward_failed(&session_id, error);
+                    return;
+                }
+                let requests = self
+                    .reviews
+                    .get_mut(&session_id)
+                    .map(|slot| {
+                        slot.state.forward_attempts = 0;
+                        slot.driver.forward_succeeded()
+                    })
+                    .unwrap_or_default();
                 let state = self.reviews.get_mut(&session_id).map(|slot| {
                     slot.sync_group();
                     slot.state.clone()

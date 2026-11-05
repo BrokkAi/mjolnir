@@ -80,7 +80,7 @@ impl ApiBackend {
     ) -> Result<crate::server::api::SessionMessageResponse> {
         let requested_target_for_auth = requested_target_id.clone();
         let sender_for_auth = sender_session_id.clone();
-        let (target_session_id, own_child, sender_title) =
+        let (target_session_id, own_child, managed_child, sender_title) =
             blocking("authorize session message", move || {
             let state = Controller::load()?.state;
             let sender = state.sessions.get(&sender_for_auth).ok_or_else(|| {
@@ -88,14 +88,9 @@ impl ApiBackend {
                     "sender session {sender_for_auth} does not exist"
                 )))
             })?;
-            if state.is_subagent_session(&sender_for_auth) {
-                anyhow::bail!(mj_core::refusal::Refusal::unusable(
-                    "only a top-level session can send messages"
-                ));
-            }
             let target_id = resolve_session_target(
                 &state,
-                Some(&sender_for_auth),
+                None,
                 &requested_target_for_auth,
             )?;
             let target = state.sessions.get(&target_id).cloned().ok_or_else(|| {
@@ -114,11 +109,7 @@ impl ApiBackend {
                     .subagents
                     .get(&target_id)
                     .is_some_and(|relation| relation.parent_session_id == sender_for_auth);
-            if state.is_subagent_session(&target_id) && !own_child {
-                anyhow::bail!(mj_core::refusal::Refusal::unusable(
-                    "a session cannot message another session's sub-agent"
-                ));
-            }
+            let managed_child = state.subagents.contains_key(&target_id);
             if target.state == SessionState::DestroyedWithDataLoss {
                 anyhow::bail!(mj_core::refusal::Refusal::precondition(
                     "target session was destroyed and cannot receive messages"
@@ -137,15 +128,14 @@ impl ApiBackend {
                         | SessionState::StartupCleanup
                         | SessionState::Lost
                         | SessionState::Error
-                        | SessionState::Parked
-                ) {
+                ) || (target.state == SessionState::Parked && !managed_child) {
                     anyhow::bail!(mj_core::refusal::Refusal::precondition(format!(
                         "target session is {:?} and cannot receive messages",
                         target.state
                     )));
                 }
             }
-            Ok((target_id, own_child, sender.title.clone()))
+            Ok((target_id, own_child, managed_child, sender.title.clone()))
         })
         .await?;
 
@@ -160,7 +150,7 @@ impl ApiBackend {
                 },
             };
             let delivery = self
-                .deliver_subagent_input(&sender_session_id, &target_session_id, &text, &request)
+                .deliver_subagent_input(&target_session_id, &text, &request)
                 .await?;
             let (via, turn_id) = match delivery {
                 SubagentInputDelivery::Mailbox => ("mailbox", None),
@@ -172,6 +162,14 @@ impl ApiBackend {
                 turn_id,
                 managed_child: true,
             });
+        }
+
+        if managed_child {
+            ensure!(
+                !self.exports.close_is_requested(&target_session_id),
+                "child session is closing; queued message was not delivered"
+            );
+            self.unpark_child(&target_session_id).await?;
         }
 
         let sender = mj_core::mailbox::Sender::Session {
@@ -197,7 +195,7 @@ impl ApiBackend {
         };
 
         if mailbox_route_exists {
-            self.enqueue_session_message(&target_session_id, &event, &event_key)
+            self.enqueue_session_message(&target_session_id, &event, &event_key, managed_child)
                 .await?;
             return Ok(crate::server::api::SessionMessageResponse {
                 session_id: target_session_id,
@@ -238,7 +236,7 @@ impl ApiBackend {
         let mailbox_supported = protocol
             .is_some_and(|protocol| protocol >= mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL);
         if mailbox_supported {
-            self.enqueue_session_message(&target_session_id, &event, &event_key)
+            self.enqueue_session_message(&target_session_id, &event, &event_key, managed_child)
                 .await?;
             return Ok(crate::server::api::SessionMessageResponse {
                 session_id: target_session_id,
@@ -265,6 +263,7 @@ impl ApiBackend {
         target: &str,
         event: &mj_core::mailbox::MailboxEvent,
         event_key: &str,
+        unpark: bool,
     ) -> Result<()> {
         let event_json = serde_json::to_string(event)?;
         let event_key = event_key.to_owned();
@@ -272,7 +271,7 @@ impl ApiBackend {
         let admission = crate::upgrade::activity_unless_draining("session message outbox write")?;
         blocking("enqueue session message", move || {
             let _admission = admission;
-            crate::database::enqueue_mailbox_event(&event_key, &target, &event_json, true, false)
+            crate::database::enqueue_mailbox_event(&event_key, &target, &event_json, true, unpark)
         })
         .await
         .map(|_| ())
@@ -307,7 +306,6 @@ impl ApiBackend {
 
     pub(super) async fn deliver_subagent_input(
         &self,
-        parent: &str,
         child: &str,
         message: &str,
         request: &SubagentToolRequest,
@@ -409,12 +407,6 @@ impl ApiBackend {
                 continue;
             }
             if record.state == SessionState::Parked || self.exports.subagent_park_running(child) {
-                let parent_id = parent.to_owned();
-                let child_id = child.to_owned();
-                blocking("admit parked child restart", move || {
-                    Controller::load()?.ensure_subagent_slot_available(&parent_id, Some(&child_id))
-                })
-                .await?;
                 match self.unpark_child(child).await {
                     Err(error)
                         if mj_core::refusal::Refusal::of(&error).is_some_and(|refusal| {
@@ -559,11 +551,9 @@ impl ApiBackend {
     }
 }
 
-/// Resolve a session target without widening the sender's existing target
-/// scope. Exact IDs are passed through so the authorization checks below keep
-/// returning their established refusals for self and foreign-child targets.
-/// With no sender the message is the user's prompt, and the user may prompt
-/// any session, a sub-agent included.
+/// Resolve any message recipient, including managed children. Supplying an
+/// owner retains the narrower child-management scope for lifecycle operations.
+/// Exact IDs pass through for the operation's final authorization check.
 pub(super) fn resolve_session_target(
     state: &mj_core::state::State,
     sender_session_id: Option<&str>,

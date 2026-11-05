@@ -878,11 +878,6 @@ pub struct ViewerReviewVerdict {
     pub kind: String,
     /// The findings, or the failure's reason.
     pub text: String,
-    /// The resolutions this verdict accepts: `forward`, `dismiss`, `cancel`.
-    /// A phone shows the rest disabled rather than hiding them, so the buttons
-    /// do not move under a thumb.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allowed: Vec<String>,
 }
 
 impl ViewerTurnReview {
@@ -909,39 +904,8 @@ impl ViewerTurnReview {
                 }
                 .to_owned(),
                 text: verdict.text.clone(),
-                allowed: verdict
-                    .allowed
-                    .iter()
-                    .filter_map(resolution_name)
-                    .map(str::to_owned)
-                    .collect(),
             }),
         }
-    }
-}
-
-/// The wire name of one resolution, shared by the projection and the action
-/// that performs it, so a button's name is the name the server accepts.
-#[must_use]
-pub fn resolution_name(resolution: &mj_core::review::driver::Resolution) -> Option<&'static str> {
-    match resolution {
-        mj_core::review::driver::Resolution::Forwarded => Some("forward"),
-        mj_core::review::driver::Resolution::Dismissed => Some("dismiss"),
-        mj_core::review::driver::Resolution::Cancelled => Some("cancel"),
-        // Not resolutions a surface asks for: the review reaches these itself.
-        mj_core::review::driver::Resolution::NothingToReview
-        | mj_core::review::driver::Resolution::CoverageStarted => None,
-    }
-}
-
-/// The resolution a phone's button asked for.
-#[must_use]
-pub fn resolution_from_name(name: &str) -> Option<mj_core::review::driver::Resolution> {
-    match name {
-        "forward" => Some(mj_core::review::driver::Resolution::Forwarded),
-        "dismiss" => Some(mj_core::review::driver::Resolution::Dismissed),
-        "cancel" => Some(mj_core::review::driver::Resolution::Cancelled),
-        _ => None,
     }
 }
 

@@ -311,6 +311,28 @@ pub(super) async fn handle_action(
             }
             Ok(DaemonReply::Done)
         }
+        DaemonAction::SaveSidebarSize { size } => {
+            // Hold the configuration owner through persistence and publication:
+            // an acknowledged save must be visible to the next dashboard.
+            let mut inactivity = state.config_mutation.lock().await;
+            let config = blocking(move || {
+                Config::update(|config| {
+                    config.sidebar_size = size;
+                    Ok(())
+                })
+                .map(|(config, ())| config)
+            })
+            .await?;
+            state.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
+            state
+                .review_config
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone_from(&config.review);
+            state.owner().install_config(config);
+            state.publish_revision();
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::SaveWorkspacePaneSizes {
             workspace_id,
             sizes,
@@ -1064,6 +1086,9 @@ pub(super) async fn handle_action(
 pub(super) fn upgrade_request_activity(
     action: &DaemonAction,
 ) -> Result<Option<crate::upgrade::Work>> {
+    if matches!(action, DaemonAction::SaveSidebarSize { .. }) {
+        return crate::upgrade::activity("sidebar size setting").map(Some);
+    }
     if matches!(action, DaemonAction::RemoveProject { .. }) {
         return crate::upgrade::activity("project removal").map(Some);
     }

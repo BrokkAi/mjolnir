@@ -913,8 +913,7 @@ it, or `"review": null` when none is open:
     "roles": [{ "label": "reviewer", "state": "findings" }],
     "verdict": {
       "kind": "findings",
-      "text": "[P1] src/lib.rs:1 -- unbounded retry loop",
-      "allowed": ["forward", "dismiss", "cancel"]
+      "text": "[P1] src/lib.rs:1 -- unbounded retry loop"
     }
   }
 }
@@ -922,16 +921,7 @@ it, or `"review": null` when none is open:
 
 A role's `state` is `pending`, `running`, `done`, `findings`, or `failed`.
 `verdict` appears once the review has one; its `kind` is `clean`, `findings`,
-or `failed`, and `allowed` lists the resolutions it accepts. An unknown session
-answers `404`.
-
-`POST …/review/{resolution}` resolves the open review as the viewer's buttons
-do and answers `202` with `{ "session_id": "…", "resolution": "dismiss" }`.
-Findings are forwarded automatically, so `forward` only retries a forward the
-primary refused. `cancel` is always accepted while a review is open; `forward`
-and `dismiss` only when the verdict's `allowed` lists them. No open review, a
-resolution the verdict does not allow, or another word answers `400`; a review
-that closed before the daemon reached it answers `409` with the reason.
+or `failed`. An unknown session answers `404`.
 
 ### Resume a suspended session
 
@@ -1108,7 +1098,6 @@ viewer does not act on these requests.
 | `mj interrupt-turn --session <id>` | `POST /sessions/{id}/interrupt-turn` |
 | `mj review start --session <id>` | `POST /sessions/{id}/review` |
 | `mj review status --session <id>` | `GET /sessions/{id}/review` |
-| `mj review forward\|dismiss\|cancel --session <id>` | `POST /sessions/{id}/review/{resolution}` |
 | `mj stop-task --session <id> <task-id>` | `POST /sessions/{id}/background-tasks/stop` |
 | `mj ui pane\|show\|settings …` | `POST /ui/requests` |
 

@@ -22,7 +22,7 @@ To see it working: on Windows, run the installer, open a new terminal, run `mj -
 - [x] (2026-10-07) Milestone 1: build and package the Windows zip in `.github/workflows/release.yml`, attach it to the release, and keep npm publication's asset count correct; extend `scripts/release-workflow.test.mjs`. The package step was run locally against fixtures (with `tar -a` standing in for `zip`) and its sidecar verified with `shasum -c`; the full test runs in the Linux `licenses` CI job.
 - [ ] Milestone 2: let the release-installer update path replace running binaries and restart on Windows (`mj-controller/src/controller/update.rs`), and recognize Cargo installs that record `mj.exe`.
 - [x] (2026-10-07) Milestone 3: add `install.ps1` and its Windows test `scripts/install-ps1.test.mjs`, run in the Windows CI lane. The test passes on Windows 11 (ARM64, Windows PowerShell 5.1).
-- [ ] Milestone 4: document the Windows install and update path.
+- [x] (2026-11-05) Milestone 4: document the Windows install as a preview in `docs/src/content/docs/install.md`, including that it does not update itself until Milestone 2 lands.
 
 
 ## Surprises & Discoveries

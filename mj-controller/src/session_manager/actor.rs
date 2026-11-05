@@ -590,7 +590,6 @@ pub(super) async fn run_session_actor(
                         queued_at,
                         command_id,
                         command,
-                        admission,
                         reply,
                     } => {
                         if crate::controller::move_session::move_refuses_command(
@@ -601,42 +600,6 @@ pub(super) async fn run_session_actor(
                                 "session is moving; keep the draft and retry after Move finishes"
                                     .into(),
                             ));
-                            continue;
-                        }
-                        // A turn under review holds its session's prompts. The
-                        // sole exception is a capability issued by the review
-                        // host for this exact corrective command; ordinary
-                        // prompts and controller-authored notices still take
-                        // the refusal path below.
-                        let admitted = admission.as_ref().is_some_and(|admission| {
-                            matches!(&command, RelayCommand::Prompt { .. })
-                                && admission.command_id() == command_id
-                                && crate::review_host::review_delivery_admitted(
-                                    &target.session_id,
-                                    admission,
-                                )
-                        });
-                        if admission.is_some() && !admitted {
-                            let _ = reply
-                                .send(Err("review delivery admission is no longer valid".into()));
-                            continue;
-                        }
-                        if matches!(
-                            &command,
-                            RelayCommand::Prompt { .. }
-                                | RelayCommand::ContinueAuthorizedWork { .. }
-                                | RelayCommand::ResumeAfterQuota { .. }
-                                | RelayCommand::ClearContext
-                        ) && !admitted
-                            && let Some(refusal) =
-                                crate::review_host::prompt_refusal(&target.session_id)
-                        {
-                            tracing::debug!(
-                                session_id = %target.session_id,
-                                %command_id,
-                                "refusing a prompt while a turn review is unresolved"
-                            );
-                            let _ = reply.send(Err(refusal.to_owned().into()));
                             continue;
                         }
                         if lifecycle.is_leased()
@@ -676,7 +639,6 @@ pub(super) async fn run_session_actor(
                                 queued_at,
                                 command_id,
                                 command,
-                                admission,
                                 reply,
                             });
                             continue;
@@ -688,7 +650,6 @@ pub(super) async fn run_session_actor(
                                 queued_at,
                                 command_id,
                                 command,
-                                admission,
                                 reply,
                             },
                             &view_tx,
@@ -994,9 +955,7 @@ pub(super) async fn run_session_actor(
                         reply,
                     } => {
                         if idle_harness.is_some()
-                            && (lifecycle.is_leased()
-                                || !reviewer_tasks.is_empty()
-                                || crate::review_host::prompt_refusal(&target.session_id).is_some())
+                            && (lifecycle.is_leased() || !reviewer_tasks.is_empty())
                         {
                             if reply
                                 .send(Err(super::handle::SessionNotIdle.into()))
@@ -1139,7 +1098,6 @@ pub(super) async fn deliver_submit(
         queued_at,
         command_id,
         command,
-        admission,
         reply,
     } = submission;
     if crate::controller::move_session::move_refuses_command(&target.session_id, &command) {
@@ -1148,25 +1106,12 @@ pub(super) async fn deliver_submit(
         ));
         return;
     }
-    if let Some(admission) = admission.as_ref()
-        && (!matches!(&command, RelayCommand::Prompt { .. })
-            || admission.command_id() != command_id
-            || !crate::review_host::review_delivery_admitted(&target.session_id, admission))
-    {
-        let _ = reply.send(Err("review delivery admission is no longer valid".into()));
-        return;
-    }
     if matches!(
         command,
         RelayCommand::ContinueAuthorizedWork { .. } | RelayCommand::ResumeAfterQuota { .. }
-    ) {
-        if reply.is_closed() {
-            return;
-        }
-        if let Some(refusal) = crate::review_host::prompt_refusal(&target.session_id) {
-            let _ = reply.send(Err(refusal.into()));
-            return;
-        }
+    ) && reply.is_closed()
+    {
+        return;
     }
     let started = Instant::now();
     tracing::debug!(target: "mj_controller::latency", session_id = %target.session_id,

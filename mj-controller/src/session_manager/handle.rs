@@ -14,38 +14,6 @@ pub struct ManagedSessionHandle {
     pub(super) view: watch::Receiver<ManagedSessionView>,
 }
 
-/// A one-command capability issued by the review host while its prompt hold
-/// is open. It is intentionally opaque to callers: the session actor checks
-/// it against the host's live hold registry before bypassing prompt refusal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReviewDeliveryAdmission {
-    pub(super) session_id: String,
-    pub(super) epoch: u64,
-    pub(super) command_id: String,
-}
-
-impl ReviewDeliveryAdmission {
-    pub(crate) fn new(session_id: String, epoch: u64, command_id: String) -> Self {
-        Self {
-            session_id,
-            epoch,
-            command_id,
-        }
-    }
-
-    pub(crate) fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    pub(crate) const fn epoch(&self) -> u64 {
-        self.epoch
-    }
-
-    pub(crate) fn command_id(&self) -> &str {
-        &self.command_id
-    }
-}
-
 /// Exclusive ownership of a session actor's existing relay connection.
 ///
 /// Lifecycle operations use this instead of opening a competing projection
@@ -155,28 +123,12 @@ impl ManagedSessionHandle {
         self.enqueue_submit(command_id, command).await?.wait().await
     }
 
-    /// Submit the review's corrective prompt through the one admission that
-    /// corresponds to its live prompt hold. Generic submissions continue to
-    /// use [`Self::submit`] and remain subject to review refusal.
-    pub(crate) async fn submit_review_delivery(
-        &self,
-        admission: ReviewDeliveryAdmission,
-        command: RelayCommand,
-    ) -> Result<u64> {
-        let command_id = admission.command_id.clone();
-        self.enqueue_submit_with_admission(command_id, command, Some(admission))
-            .await?
-            .wait()
-            .await
-    }
-
     pub async fn enqueue_submit(
         &self,
         command_id: String,
         command: RelayCommand,
     ) -> Result<PendingRelaySubmit> {
-        self.enqueue_submit_with_admission(command_id, command, None)
-            .await
+        self.enqueue_submit_inner(command_id, command).await
     }
 
     /// Mailbox submissions share ordinary actor admission and command-ID
@@ -221,11 +173,10 @@ impl ManagedSessionHandle {
         }
     }
 
-    pub(super) async fn enqueue_submit_with_admission(
+    pub(super) async fn enqueue_submit_inner(
         &self,
         command_id: String,
         command: RelayCommand,
-        admission: Option<ReviewDeliveryAdmission>,
     ) -> Result<PendingRelaySubmit> {
         let (reply, response) = oneshot::channel();
         self.commands
@@ -233,7 +184,6 @@ impl ManagedSessionHandle {
                 queued_at: Instant::now(),
                 command_id,
                 command,
-                admission,
                 reply,
             })
             .await

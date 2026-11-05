@@ -2719,9 +2719,14 @@ impl State {
                 subagent.parent_session_id
             );
         }
-        if self.subagents.contains_key(&subagent.parent_session_id) {
+        if subagent.kind != crate::subagent::SubagentKind::Reviewer
+            && self.subagents.contains_key(&subagent.parent_session_id)
+        {
             bail!("sub-agent {child_id:?} cannot belong to another sub-agent");
         }
+        // The shared checkout derivation validates the complete ownership
+        // chain and rejects cycles for nested reviewer relationships.
+        self.checkout(child_id)?;
         if subagent.task_name.trim().is_empty()
             || subagent.profile_id.trim().is_empty()
             || subagent.request_key.trim().is_empty()
@@ -2980,11 +2985,14 @@ pub fn default_session_title(
 pub const MAX_SESSION_TITLE_CHARS: usize = 256;
 
 /// Clean a title and bound it at a word boundary, including the ellipsis.
+///
+/// Titles come from agents, so terminal controls are removed with the rest of
+/// the cleanup: an escape sequence in a stored title would otherwise run in
+/// every terminal that prints it (an OSC 52 clipboard write, for example).
 pub fn normalize_session_title(title: &str) -> Option<String> {
-    let normalized = crate::relay::strip_hidden_prompt_context(title)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let visible =
+        crate::transcript::sanitize_terminal_text(crate::relay::strip_hidden_prompt_context(title));
+    let normalized = visible.split_whitespace().collect::<Vec<_>>().join(" ");
     (!normalized.is_empty()).then(|| truncate_session_title(normalized, MAX_SESSION_TITLE_CHARS))
 }
 

@@ -102,7 +102,6 @@ fn ordering_request(session_id: &str, command_id: &str) -> RemoteSessionRequest 
             key: "effort".into(),
             value: "high".into(),
         },
-        admission: None,
         reply,
     }
 }
@@ -1814,7 +1813,6 @@ async fn retirement_ends_a_connect_that_never_answers() {
             command: RelayCommand::Prompt {
                 prompt: vec![ContentBlock::Text(TextContent::new("hello"))],
             },
-            admission: None,
             reply,
         })
         .await
@@ -3110,7 +3108,6 @@ async fn full_leased_queue_refuses_excess_and_still_processes_release() {
                 queued_at: Instant::now(),
                 command_id: new_command_id("bounded-queue").unwrap(),
                 command: RelayCommand::Cancel,
-                admission: None,
                 reply,
             })
             .await
@@ -3156,7 +3153,6 @@ async fn submit_a_deferred_prompt(
             command: RelayCommand::Prompt {
                 prompt: vec![ContentBlock::Text(TextContent::new("hello"))],
             },
-            admission: None,
             reply,
         })
         .await
@@ -3332,7 +3328,6 @@ async fn a_quiet_session_stops_polling_its_worker_until_work_is_in_flight() {
             command: RelayCommand::Prompt {
                 prompt: vec![ContentBlock::Text(TextContent::new("hello"))],
             },
-            admission: None,
             reply,
         })
         .await

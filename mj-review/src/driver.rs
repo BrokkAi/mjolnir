@@ -622,6 +622,11 @@ impl TurnReviewDriver {
             // A clean review releases the turn itself: there is nothing for
             // the user to decide, so it advances the baseline and closes.
             requests.extend(self.resolve(Resolution::Dismissed));
+        } else if matches!(self.last_verdict, Some(ReviewVerdict::Failed { .. })) {
+            // Failed coverage remains pending for the next review. No person
+            // needs to dismiss a terminal reviewer failure.
+            self.phase = TurnReviewPhase::Resolved(Resolution::Cancelled);
+            requests.push(ReviewRequest::Close);
         }
         self.emit(requests)
     }

@@ -847,7 +847,7 @@ pub(crate) fn refresh_subagent_counts(
     for chat in chats.values_mut() {
         let session_id = chat.session_id().to_owned();
         chat.set_subagent_count(dashboard.subagent_count_for(&session_id));
-        chat.set_reviewer_count(dashboard.reviewer_count_for(&session_id));
+        chat.set_reviewer_counts(dashboard.reviewer_counts_for(&session_id));
         chat.set_subagent_working_count(dashboard.working_subagent_count_for(&session_id));
     }
 }

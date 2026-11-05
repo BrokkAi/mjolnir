@@ -6286,6 +6286,71 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
     );
 }
 
+// Hard-won: 1b13e4a69: reopening a dashboard before the config refresh restored a stale sidebar size.
+#[cfg(unix)]
+#[tokio::test]
+async fn saved_sidebar_size_is_in_the_next_dashboard_startup_without_a_refresh() {
+    const CHILD: &str = "MJ_SIDEBAR_SAVE_STARTUP_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "saved_sidebar_size_is_in_the_next_dashboard_startup_without_a_refresh",
+            ),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "sidebar-save-startup")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let state = test_runtime_state_loading_the_store();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    // No periodic config refresher runs in this fixture: the save itself must
+    // install the preference before acknowledging it to the terminal.
+    for size in [
+        mj_core::workspace::PaneSize::Minimized,
+        mj_core::workspace::PaneSize::Standard,
+    ] {
+        let reply = handle_action(
+            DaemonAction::SaveSidebarSize { size },
+            &metadata,
+            &state,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(reply, DaemonReply::Done));
+        assert_eq!(Config::load().unwrap().sidebar_size, size);
+        let reply = handle_action(
+            DaemonAction::DashboardStartup {
+                client_id: "reopened-dashboard".into(),
+                workspace_id: "default".into(),
+            },
+            &metadata,
+            &state,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+        let DaemonReply::DashboardStartup(startup) = reply else {
+            panic!("dashboard startup reply");
+        };
+        assert_eq!(
+            startup
+                .runtime
+                .projection
+                .metadata
+                .installed_config()
+                .sidebar_size,
+            size
+        );
+    }
+}
+
 // Hard-won: 0bd61a289: dashboard startup failed when live session state exceeded one frame.
 #[tokio::test]
 async fn dashboard_startup_larger_than_a_frame_arrives_whole() {
@@ -8151,6 +8216,8 @@ async fn exercise_child_close_with_a_nested_workspace(
         crate::database::save_turn_review_state(
             parent_id,
             &crate::database::TurnReviewState {
+                pending_followup: false,
+                forward_attempts: 0,
                 active_group: Some(mj_core::storage::ActiveReviewGroup {
                     driver: driver.snapshot(),
                     reviewer: Default::default(),

@@ -36,10 +36,7 @@ pub fn metadata_path() -> PathBuf {
 }
 
 /// The environment variable naming the container a daemon was launched in.
-///
-/// The launcher sets it, and the daemon reads it to report its placement. A
-/// host daemon does not have it.
-pub const DAEMON_CONTAINER_ENV: &str = "MJ_DAEMON_CONTAINER";
+pub use mj_core::placement::DAEMON_CONTAINER_ENV;
 
 /// The environment variable naming the engine that owns the daemon container.
 pub const DAEMON_CONTAINER_RUNTIME_ENV: &str = "MJ_DAEMON_CONTAINER_RUNTIME";
@@ -712,6 +709,10 @@ pub enum DaemonAction {
         session_id: String,
         bundle_id: String,
         text: String,
+    },
+    /// Persist the shared sidebar preference and publish it before replying.
+    SaveSidebarSize {
+        size: mj_core::workspace::PaneSize,
     },
     SaveWorkspacePaneSizes {
         workspace_id: String,
@@ -2003,6 +2004,13 @@ impl DaemonClient {
         }
     }
 
+    pub async fn save_sidebar_size(&mut self, size: mj_core::workspace::PaneSize) -> Result<()> {
+        match self.request(DaemonAction::SaveSidebarSize { size }).await? {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected sidebar-size save reply {reply:?}"),
+        }
+    }
+
     pub async fn save_workspace_pane_sizes(
         &mut self,
         workspace_id: String,
@@ -2625,23 +2633,6 @@ impl DaemonClient {
         {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected turn-review reply {reply:?}"),
-        }
-    }
-
-    pub async fn resolve_turn_review(
-        &mut self,
-        session_id: String,
-        resolution: Resolution,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::ResolveTurnReview {
-                session_id,
-                resolution,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected turn-review resolution reply {reply:?}"),
         }
     }
 

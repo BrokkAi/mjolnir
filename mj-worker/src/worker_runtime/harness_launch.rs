@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use mj_core::config::{ExecutionPolicy, HarnessKind};
-use mj_core::harness_runtime::{harness_uses_node_runtime, npm_bridge};
+use mj_core::harness_runtime::harness_uses_node_runtime;
 use mj_core::worker_launch::HarnessRuntimePolicy;
 
 use super::{AcpSupervisorSpec, harness};
@@ -50,7 +50,9 @@ pub async fn prepare_harness_launch(
         environment.insert("PATH".into(), path.clone());
         spec.environment.insert("PATH".into(), path);
     }
-    let managed_node = if needs_node_runtime(harness, &environment).await? {
+    // The image's harnesses bring their own Node.js; only a source that may
+    // install prepares Mjolnir's.
+    let managed_node = if policy.may_install() && needs_node_runtime(harness, &environment).await? {
         let node = harness::ensure_node_runtime(&mut environment)
             .await
             .with_context(|| format!("prepare Node.js for {}", harness.display_name()))?;
@@ -84,82 +86,22 @@ pub async fn prepare_harness_launch(
         .context("build cache preparation task failed")??;
     spec = prepared_spec;
     environment = prepared_environment;
-    let bridge =
-        npm_bridge(harness).filter(|bridge| bridge.matches_launcher(&spec.command, &spec.args));
-    let mut selected_policy = policy;
-    if policy == HarnessRuntimePolicy::Ambient
-        && let Some(bridge) = bridge
-    {
-        let search_environment = environment.clone();
-        let selected = tokio::task::spawn_blocking(move || {
-            find_command(Path::new(bridge.command), &search_environment)
-        })
-        .await
-        .context("find target bridge task failed")??;
-        let usable = if let Some(command) = &selected {
-            if harness == HarnessKind::Codex {
-                let mut probe = tokio::process::Command::new(command);
-                probe
-                    .arg("--version")
-                    .current_dir(&spec.cwd)
-                    .env_clear()
-                    .envs(&environment);
-                let output = mj_core::subprocess::run_bounded(
-                    &mut probe,
-                    64 * 1024,
-                    Duration::from_secs(10),
-                )
-                .await
-                .context("check installed Codex bridge version")?;
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).trim_end_matches('\n')
-                        == format!("{} {}", bridge.package, bridge.version)
-            } else {
-                true
-            }
-        } else {
-            false
-        };
-        if usable {
-            spec.command = selected.expect("usable bridge has a command");
-            spec.args.clear();
-        } else {
-            tracing::info!(
-                harness = harness.id(),
-                "target bridge is missing or incompatible; preparing the pinned installation"
-            );
-            selected_policy = HarnessRuntimePolicy::Managed;
-        }
-    }
-    if is_managed_fallback_candidate(
+    let located = harness::locate(
+        policy,
         harness,
-        selected_policy,
         execution_policy,
         &spec.command,
         &spec.args,
-    ) {
-        let search_environment = environment.clone();
-        let available = tokio::task::spawn_blocking(move || {
-            ambient_native_harness_is_available(harness, &search_environment)
-        })
-        .await
-        .context("find target-native harness task failed")??;
-        if !available {
-            tracing::info!(
-                harness = harness.id(),
-                "installing the pinned harness in the target instead of relying on missing image-provided tools"
-            );
-            selected_policy = HarnessRuntimePolicy::Managed;
-        }
-    }
-    let managed = harness::resolve(selected_policy, harness, execution_policy, &environment)
-        .await
-        .with_context(|| format!("prepare {}", harness.display_name()))?;
+        &environment,
+    )
+    .await
+    .with_context(|| format!("prepare {}", harness.display_name()))?;
+    spec.command = located.command;
+    spec.args = located.args;
+    spec.environment.extend(located.environment.clone());
+    environment.extend(located.environment);
+    let managed = located.managed;
     if let Some(managed) = &managed {
-        spec.command = managed.command.clone();
-        spec.args = managed.args.clone();
-        spec.environment.extend(managed.environment.clone());
-        environment.extend(managed.environment.clone());
         spec.harness_lease = Some(managed.lease_path.clone());
     }
     let (spec, environment) = tokio::task::spawn_blocking(move || -> Result<_> {
@@ -198,66 +140,6 @@ pub async fn prepare_harness_launch(
         managed,
         managed_node,
     })
-}
-
-fn is_managed_fallback_candidate(
-    harness: HarnessKind,
-    policy: HarnessRuntimePolicy,
-    execution_policy: ExecutionPolicy,
-    command: &Path,
-    args: &[String],
-) -> bool {
-    policy == HarnessRuntimePolicy::Ambient
-        && harness != HarnessKind::Dsh
-        && mj_core::harness_runtime::is_fallback_launch(harness, execution_policy, command, args)
-}
-
-fn ambient_native_harness_is_available(
-    harness: HarnessKind,
-    environment: &BTreeMap<String, String>,
-) -> Result<bool> {
-    let home = environment.get("HOME").map(Path::new);
-    let command = match harness {
-        HarnessKind::Kimi => "kimi",
-        HarnessKind::Grok => "grok",
-        HarnessKind::OpenCode => "opencode",
-        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Muse | HarnessKind::Dsh => {
-            return Ok(false);
-        }
-    };
-    if !environment.contains_key("PATH") {
-        return Ok(false);
-    }
-    if find_command(Path::new(command), environment)?.is_some() {
-        return Ok(true);
-    }
-    let home_suffix = match harness {
-        HarnessKind::Kimi => Some(Path::new(".kimi-code/bin/kimi")),
-        HarnessKind::OpenCode => Some(Path::new(".opencode/bin/opencode")),
-        _ => None,
-    };
-    if let (Some(home), Some(suffix)) = (home, home_suffix)
-        && super::harness::entrypoint_is_executable(&home.join(suffix))
-    {
-        return Ok(true);
-    }
-    if harness == HarnessKind::Grok {
-        for home in [
-            environment
-                .get("GROK_HOME")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from),
-            home.map(|home| home.join(".grok")),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if super::harness::entrypoint_is_executable(&home.join("bin/grok")) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
 }
 
 /// DSH can launch its own native binary. Its npm fallback is the only branch
@@ -389,47 +271,8 @@ fn resolve_command(command: &Path, environment: &BTreeMap<String, String>) -> Re
         .context("runtime command is not executable on the selected PATH")
 }
 
-pub(super) fn find_command(
-    command: &Path,
-    environment: &BTreeMap<String, String>,
-) -> Result<Option<PathBuf>> {
-    let Some(selected) = find_command_path(command, environment)? else {
-        return Ok(None);
-    };
-    selected
-        .canonicalize()
-        .map(Some)
-        .context("resolve selected runtime command")
-}
-
-fn find_command_path(
-    command: &Path,
-    environment: &BTreeMap<String, String>,
-) -> Result<Option<PathBuf>> {
-    let selected = if command.is_absolute() {
-        command.to_path_buf()
-    } else {
-        ensure!(
-            command.components().count() == 1,
-            "relative runtime command is ambiguous"
-        );
-        let selected = std::env::split_paths(
-            environment
-                .get("PATH")
-                .context("runtime PATH is unavailable")?,
-        )
-        .map(|directory| directory.join(command))
-        .find(|path| super::harness::entrypoint_is_executable(path));
-        let Some(selected) = selected else {
-            return Ok(None);
-        };
-        selected
-    };
-    if !super::harness::entrypoint_is_executable(&selected) {
-        return Ok(None);
-    }
-    Ok(Some(selected))
-}
+pub(super) use harness::find_command;
+use harness::find_command_path;
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -471,69 +314,6 @@ mod tests {
                 .await
                 .unwrap(),
             "a pre-native loader needs the pinned Node.js npx fallback"
-        );
-    }
-
-    #[test]
-    fn built_in_native_container_fallbacks_are_managed_only_when_target_tools_are_missing() {
-        for harness in [HarnessKind::Kimi, HarnessKind::Grok, HarnessKind::OpenCode] {
-            let (command, args) =
-                mj_core::harness_runtime::fallback_launch(harness, ExecutionPolicy::Unconstrained);
-            assert!(
-                is_managed_fallback_candidate(
-                    harness,
-                    HarnessRuntimePolicy::Ambient,
-                    ExecutionPolicy::Unconstrained,
-                    Path::new(&command),
-                    &args,
-                ),
-                "{} should install its exact managed runtime",
-                harness.display_name()
-            );
-        }
-        let tools = tempfile::tempdir().unwrap();
-        for command in ["kimi", "grok", "opencode"] {
-            mj_core::test_hooks::install_fake_command(tools.path(), command, "#!/bin/sh\nexit 0\n");
-        }
-        let environment = BTreeMap::from([(
-            "PATH".to_owned(),
-            tools.path().to_string_lossy().into_owned(),
-        )]);
-        for harness in [HarnessKind::Kimi, HarnessKind::Grok, HarnessKind::OpenCode] {
-            assert!(
-                ambient_native_harness_is_available(harness, &environment).unwrap(),
-                "{} should reuse its target-provided executable",
-                harness.display_name()
-            );
-            assert!(
-                !ambient_native_harness_is_available(harness, &BTreeMap::new()).unwrap(),
-                "{} should fall back when its executable is absent",
-                harness.display_name()
-            );
-        }
-        let (command, args) = mj_core::harness_runtime::fallback_launch(
-            HarnessKind::Dsh,
-            ExecutionPolicy::Unconstrained,
-        );
-        assert!(
-            !is_managed_fallback_candidate(
-                HarnessKind::Dsh,
-                HarnessRuntimePolicy::Ambient,
-                ExecutionPolicy::Unconstrained,
-                Path::new(&command),
-                &args,
-            ),
-            "DSH has no managed harness; its npx fallback already uses managed Node"
-        );
-        assert!(
-            !is_managed_fallback_candidate(
-                HarnessKind::Kimi,
-                HarnessRuntimePolicy::Ambient,
-                ExecutionPolicy::Unconstrained,
-                Path::new("/opt/custom-kimi"),
-                &[],
-            ),
-            "a custom launch command must be preserved"
         );
     }
 

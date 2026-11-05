@@ -25,7 +25,7 @@ static SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-static MESSAGE_ONLY_INSTRUCTIONS: &str = "Use send_message to contact another top-level Mjolnir session or one of your own Mjolnir sub-agents. The recipient sees your full session ID and can reply with send_message.";
+static MESSAGE_ONLY_INSTRUCTIONS: &str = "Use send_message to contact another Mjolnir session, including managed children. The recipient sees your full session ID and can reply with send_message.";
 
 /// Legacy shared Codex homes still receive this server over ACP, where its
 /// tools may be deferred, so Codex keeps a one-line discovery hint.
@@ -422,6 +422,8 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
             "Call mj-agents tools directly. If these tools are not visible, find mj-agents in the tool catalog."
         )
     });
+    static MESSAGE_PUSH_INSTRUCTIONS: LazyLock<String> =
+        LazyLock::new(|| format!("{REVIEW_GATE_INSTRUCTIONS} {MESSAGE_ONLY_INSTRUCTIONS}"));
     let parent_instructions = if options.review_gate {
         if harness == Some(HarnessKind::Codex) {
             CODEX_PUSH_INSTRUCTIONS.as_str()
@@ -447,14 +449,23 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
             parent_instructions,
             tool_definitions_with_options(harness, options),
         ),
-        SubagentMcpRole::MessageOnly => (
-            MESSAGE_ONLY_INSTRUCTIONS,
-            vec![send_message_tool(), fetch_tool()],
-        ),
-        SubagentMcpRole::FetchOnly => (
-            "Use fetch to copy files or list paths from a Mjolnir session into your target.",
-            vec![fetch_tool()],
-        ),
+        SubagentMcpRole::MessageOnly => {
+            let mut tools = vec![send_message_tool(), fetch_tool()];
+            tools.extend(review_tool_definitions(options.review_gate));
+            (
+                if options.review_gate {
+                    MESSAGE_PUSH_INSTRUCTIONS.as_str()
+                } else {
+                    MESSAGE_ONLY_INSTRUCTIONS
+                },
+                tools,
+            )
+        }
+        SubagentMcpRole::FetchOnly => {
+            let mut tools = vec![fetch_tool(), send_message_tool()];
+            tools.extend(review_tool_definitions(false));
+            (MESSAGE_ONLY_INSTRUCTIONS, tools)
+        }
         SubagentMcpRole::Child => {
             let mut tools = child_tool_definitions();
             if let Some(budget) = &report_budget {
@@ -612,9 +623,8 @@ fn call_with_budget_and_options(
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
     let legacy_alias = params.name == "send_input"
         && matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly);
-    let push_review = matches!(params.name.as_str(), "request_review" | "override_review")
-        && role == SubagentMcpRole::Parent
-        && options.review_gate;
+    let push_review =
+        params.name == "override_review" && role.supports_push_gate() && options.review_gate;
     if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias && !push_review {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
@@ -893,9 +903,22 @@ fn tool_definitions_with_options(
         ),
         fetch_tool(),
     ];
-    if options.review_gate {
-        tools.push(tool("request_review", "Request review of committed work before pushing. Reviews HEAD of `path`, a worktree of a workspace repository (default: the session working directory). The verdict arrives later as a Mjolnir message.", json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false})));
-        tools.push(tool("override_review", "Override the last complete before-push findings verdict and record the reviewed tree so the push can proceed. Use it only for findings you have judged incorrect or unreasonable; the reason is written into the session transcript. Refused if a review is running, a reviewer failed, or the reviewed tree contents changed.", json!({"type":"object","properties":{"reason":{"type":"string","description":"Why the findings do not need to be addressed."}},"required":["reason"],"additionalProperties":false})));
+    tools.extend(review_tool_definitions(options.review_gate));
+    tools
+}
+
+fn review_tool_definitions(review_gate: bool) -> Vec<Value> {
+    let mut tools = vec![tool(
+        "request_review",
+        "Request review of committed work before pushing. Reviews HEAD of `path`, a worktree of a workspace repository (default: the session working directory). The verdict arrives later as a Mjolnir message.",
+        json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}),
+    )];
+    if review_gate {
+        tools.push(tool(
+            "override_review",
+            "Override the last complete before-push findings verdict and record the reviewed tree so the push can proceed. Use it only for findings you have judged incorrect or unreasonable; the reason is written into the session transcript. Refused if a review is running, a reviewer failed, or the reviewed tree contents changed.",
+            json!({"type":"object","properties":{"reason":{"type":"string","description":"Why the findings do not need to be addressed."}},"required":["reason"],"additionalProperties":false}),
+        ));
     }
     tools
 }
@@ -915,11 +938,11 @@ struct OverrideReviewArgs {
 fn send_message_tool() -> Value {
     tool(
         "send_message",
-        "Send a message to another top-level session or one of your own Mjolnir sub-agents by `session_id`, using its full ID or a unique case-insensitive hexadecimal prefix of at least 8 characters. Mjolnir refuses your own session, an unknown or destroyed target, a stopped (suspended) target, and another session's sub-agent. A parked child is restarted before delivery. The parked child starts a turn and can take tens of seconds. Peer mailbox delivery requires a protocol-36 worker; a busy recipient sees it at the next tool boundary without turn cancellation and an idle recipient wakes. Otherwise Mjolnir queues a turn. The response includes the resolved full session ID. The recipient sees your full session ID and a reply instruction; they can use send_message with that ID or its unique prefix. Check pending_messages and message_deliveries in list_agents before retrying; do not resend an acknowledged message.",
+        "Send a message to another Mjolnir session, including managed children, by `session_id`, using its full ID or a unique case-insensitive hexadecimal prefix of at least 8 characters. Mjolnir refuses your own session, an unknown or destroyed target, and a stopped (suspended) target. A parked child is restarted before delivery. The parked child starts a turn and can take tens of seconds. Peer mailbox delivery requires a protocol-36 worker; a busy recipient sees it at the next tool boundary without turn cancellation and an idle recipient wakes. Otherwise Mjolnir queues a turn. The response includes the resolved full session ID. The recipient sees your full session ID and a reply instruction; they can use send_message with that ID or its unique prefix. Do not resend an acknowledged message.",
         json!({
             "type":"object",
             "properties":{
-                "session_id":{"type":"string","description":"Full ID or unique case-insensitive hexadecimal prefix (at least 8 characters) of a top-level session or one of your own Mjolnir sub-agents."},
+                "session_id":{"type":"string","description":"Full ID or unique case-insensitive hexadecimal prefix (at least 8 characters) of a Mjolnir session, including managed children."},
                 "message":{"type":"string"}
             },
             "required":["session_id","message"],
@@ -940,10 +963,9 @@ fn fetch_tool() -> Value {
     ))
 }
 
-/// Children can fetch shared files and hand back their report. Both tools
-/// leave the workspace unchanged, including for reviewers in plan mode.
+/// Keep handback first so the report budget can annotate it at launch.
 fn child_tool_definitions() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         read_only(tool(
             "handback",
             &format!(
@@ -953,7 +975,10 @@ fn child_tool_definitions() -> Vec<Value> {
             json!({"type":"object","properties":{"message":{"type":"string","description":"Your report, at most 4,000 characters; details go in files in your report directory."}},"required":["message"],"additionalProperties":false}),
         )),
         fetch_tool(),
-    ]
+        send_message_tool(),
+    ];
+    tools.extend(review_tool_definitions(false));
+    tools
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
@@ -1107,48 +1132,78 @@ mod tests {
     }
 
     #[cfg(unix)]
+    // Hard-won: 32d96d199: sessions without delegation could not request push reviews under their own role.
     #[test]
-    fn override_review_sends_reason_in_durable_action() {
+    fn review_tools_send_durable_actions_with_or_without_delegation() {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
-        let directory = tempfile::tempdir().unwrap();
-        let socket = directory.path().join("subagents.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let worker = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let request: SubagentToolRequest = serde_json::from_str(&line).unwrap();
-            assert_eq!(
-                request.action,
-                SubagentToolAction::OverrideReview {
-                    reason: "finding is unreasonable".into()
-                }
-            );
-            reader
-                .into_inner()
-                .write_all(b"{\"result\":{\"accepted\":true}}\n")
-                .unwrap();
-        });
-        let (value, is_error) = call_with_budget_and_options(
-            &socket,
-            None,
+        for role in [
             SubagentMcpRole::Parent,
-            Some(
-                &json!({"name":"override_review","arguments":{"reason":"finding is unreasonable"}}),
-            ),
-            &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
-            |_| Duration::from_secs(5),
-            ParentTools {
-                review_gate: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        worker.join().unwrap();
-        assert!(!is_error);
-        assert_eq!(value["accepted"], true);
+            SubagentMcpRole::MessageOnly,
+            SubagentMcpRole::Child,
+            SubagentMcpRole::FetchOnly,
+        ] {
+            for (params, action, review_gate) in [
+                (
+                    json!({"name":"request_review","arguments":{"path":"/workspace"}}),
+                    SubagentToolAction::RequestReview {
+                        path: Some("/workspace".into()),
+                    },
+                    false,
+                ),
+                (
+                    json!({"name":"request_review","arguments":{"path":"/workspace"}}),
+                    SubagentToolAction::RequestReview {
+                        path: Some("/workspace".into()),
+                    },
+                    true,
+                ),
+                (
+                    json!({"name":"override_review","arguments":{"reason":"finding is unreasonable"}}),
+                    SubagentToolAction::OverrideReview {
+                        reason: "finding is unreasonable".into(),
+                    },
+                    true,
+                ),
+            ] {
+                if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::FetchOnly)
+                    && params["name"] == "override_review"
+                {
+                    continue;
+                }
+                let directory = tempfile::tempdir().unwrap();
+                let socket = directory.path().join("subagents.sock");
+                let listener = UnixListener::bind(&socket).unwrap();
+                let worker = std::thread::spawn(move || {
+                    let (stream, _) = listener.accept().unwrap();
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let request: SubagentToolRequest = serde_json::from_str(&line).unwrap();
+                    assert_eq!(request.action, action);
+                    reader
+                        .into_inner()
+                        .write_all(b"{\"result\":{\"accepted\":true}}\n")
+                        .unwrap();
+                });
+                let (value, is_error) = call_with_budget_and_options(
+                    &socket,
+                    None,
+                    role,
+                    Some(&params),
+                    &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
+                    |_| Duration::from_secs(5),
+                    ParentTools {
+                        review_gate,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                worker.join().unwrap();
+                assert!(!is_error);
+                assert_eq!(value["accepted"], true);
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -1199,12 +1254,14 @@ mod tests {
         assert_eq!(reply["report"], expected);
     }
 
+    // Hard-won: 32d96d199: push reviews granted the full parent tool catalog to sessions without delegation.
     #[test]
-    fn review_gate_is_offered_only_to_flagged_parents() {
+    fn every_role_gets_common_tools_and_only_flagged_primaries_get_overrides() {
         for role in [
             SubagentMcpRole::Parent,
             SubagentMcpRole::Child,
             SubagentMcpRole::MessageOnly,
+            SubagentMcpRole::FetchOnly,
         ] {
             for review_gate in [false, true] {
                 let input = format!(
@@ -1231,14 +1288,15 @@ mod tests {
                     .lines()
                     .map(|line| serde_json::from_str(line).unwrap())
                     .collect();
-                let expected = role == SubagentMcpRole::Parent && review_gate;
+                let expected =
+                    matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly)
+                        && review_gate;
                 let tools = replies.iter().find(|r| r["id"] == 2).unwrap()["result"]["tools"]
                     .as_array()
                     .unwrap();
-                assert_eq!(
-                    tools.iter().any(|tool| tool["name"] == "request_review"),
-                    expected
-                );
+                for name in ["send_message", "fetch", "request_review"] {
+                    assert!(tools.iter().any(|tool| tool["name"] == name));
+                }
                 assert_eq!(
                     tools.iter().any(|tool| tool["name"] == "override_review"),
                     expected
@@ -1248,25 +1306,30 @@ mod tests {
                         .as_str()
                         .unwrap();
                 assert_eq!(instructions.contains(REVIEW_GATE_INSTRUCTIONS), expected);
-                if expected {
-                    assert!(instructions.chars().count() <= 2048);
-                }
-                if !expected {
-                    assert!(
-                        call_with_budget_and_options(
+                if role != SubagentMcpRole::Parent {
+                    assert!(!instructions.contains(DELEGATION_ROUTING));
+                    for name in ["spawn", "list_agents", "close"] {
+                        assert!(tools.iter().all(|tool| tool["name"] != name));
+                        let error = call_with_budget_and_options(
                             Path::new("unused.sock"),
                             None,
                             role,
-                            Some(&json!({"name":"request_review"})),
+                            Some(&json!({"name":name})),
                             &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
                             |_| Duration::from_millis(1),
                             ParentTools {
                                 review_gate,
                                 ..Default::default()
-                            }
+                            },
                         )
-                        .is_err()
-                    );
+                        .unwrap_err();
+                        assert!(error.to_string().contains("unknown sub-agent tool"));
+                    }
+                }
+                if expected {
+                    assert!(instructions.chars().count() <= 2048);
+                }
+                if !expected {
                     assert!(
                         call_with_budget_and_options(
                             Path::new("unused.sock"),
@@ -1393,8 +1456,13 @@ mod tests {
                 match role {
                     SubagentMcpRole::FetchOnly => {
                         assert!(!instructions.contains(DELEGATION_ROUTING));
-                        assert_eq!(tools.len(), 1);
-                        assert_eq!(tools[0]["name"], "fetch");
+                        assert_eq!(
+                            tools
+                                .iter()
+                                .map(|tool| tool["name"].as_str().unwrap())
+                                .collect::<Vec<_>>(),
+                            ["fetch", "send_message", "request_review"]
+                        );
                     }
                     SubagentMcpRole::Child => {
                         assert!(!instructions.contains(DELEGATION_ROUTING));
@@ -1404,7 +1472,7 @@ mod tests {
                                 .iter()
                                 .map(|tool| tool["name"].as_str().unwrap())
                                 .collect::<Vec<_>>(),
-                            ["handback", "fetch"]
+                            ["handback", "fetch", "send_message", "request_review"]
                         );
                     }
                     SubagentMcpRole::MessageOnly => {
@@ -1414,7 +1482,7 @@ mod tests {
                                 .iter()
                                 .map(|tool| tool["name"].as_str().unwrap())
                                 .collect::<Vec<_>>(),
-                            ["send_message", "fetch"]
+                            ["send_message", "fetch", "request_review"]
                         );
                         let send_message = &tools[0];
                         assert_eq!(
@@ -1424,7 +1492,7 @@ mod tests {
                         assert_eq!(send_message["inputSchema"]["additionalProperties"], false);
                         let description = send_message["description"].as_str().unwrap();
                         for behavior in [
-                            "another top-level session",
+                            "another Mjolnir session",
                             "stopped (suspended)",
                             "full session ID",
                         ] {
@@ -1491,7 +1559,7 @@ mod tests {
                         assert_eq!(send_message["inputSchema"]["additionalProperties"], false);
                         let description = send_message["description"].as_str().unwrap();
                         for behavior in [
-                            "another top-level session",
+                            "another Mjolnir session",
                             "stopped (suspended)",
                             "next tool boundary",
                             "without turn cancellation",
@@ -1886,13 +1954,16 @@ mod tests {
     }
 
     #[test]
-    fn a_child_is_offered_only_handback() {
+    fn a_child_gets_handback_and_common_tools_without_delegation() {
         let tools = child_tool_definitions();
         let names = tools
             .iter()
             .map(|tool| tool["name"].as_str().unwrap_or_default())
             .collect::<Vec<_>>();
-        assert_eq!(names, ["handback", "fetch"]);
+        assert_eq!(
+            names,
+            ["handback", "fetch", "send_message", "request_review"]
+        );
         assert_eq!(
             tools[0]["inputSchema"]["required"],
             json!(["message"]),

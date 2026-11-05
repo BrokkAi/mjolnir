@@ -1,3 +1,7 @@
+#[cfg(test)]
+use crate::profile_scheduler::order_by_draw;
+use crate::profile_scheduler::{draw_candidates, rank_candidates};
+
 use super::*;
 
 pub(super) const MAX_SUBAGENT_CONTEXT_BYTES: usize = 256 * 1024;
@@ -528,123 +532,6 @@ fn all_unhealthy(model: &str, notes: &[String], profile_description: &str) -> Ap
     ))
 }
 
-/// Order candidates for a spawn so that simultaneous spawns spread out
-/// instead of all taking the same profile. Subscriptions with quota left get
-/// a weighted random order; the rest follow in ranked order.
-fn draw_candidates(
-    candidates: &mut Vec<SubagentCandidate>,
-    ranking_anchor: Option<&str>,
-    model: &str,
-    now_seconds: i64,
-) -> Result<(), ApiFailure> {
-    let mut units = Vec::with_capacity(candidates.len());
-    for _ in 0..candidates.len() {
-        let bits = getrandom::u64().map_err(|error| {
-            ApiFailure::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("draw a profile: {error}"),
-            )
-        })?;
-        // 53 random bits as a float in (0, 1], so its logarithm is finite.
-        units.push(((bits >> 11) + 1) as f64 / (1u64 << 53) as f64);
-    }
-    order_by_draw(candidates, ranking_anchor, &units, model, now_seconds);
-    Ok(())
-}
-
-/// The ordering `draw_candidates` describes, with one uniform (0, 1] number
-/// per candidate in ranked order. Sorting by ln(u) / score is the
-/// Efraimidis–Spirakis weighted sample without replacement.
-fn order_by_draw(
-    candidates: &mut Vec<SubagentCandidate>,
-    ranking_anchor: Option<&str>,
-    units: &[f64],
-    model: &str,
-    now_seconds: i64,
-) {
-    rank_candidates(candidates, ranking_anchor, model, now_seconds);
-    let mut keyed = candidates
-        .drain(..)
-        .zip(units)
-        .map(|(candidate, unit)| {
-            let key = match quota_rank(&candidate, model, now_seconds) {
-                QuotaRank::Available(score) => unit.ln() / score,
-                _ => f64::NEG_INFINITY,
-            };
-            (key, candidate)
-        })
-        .collect::<Vec<_>>();
-    // A stable sort keeps the ranked order among the undrawn candidates.
-    keyed.sort_by(|left, right| right.0.total_cmp(&left.0));
-    candidates.extend(keyed.into_iter().map(|(_, candidate)| candidate));
-}
-
-/// Order candidates by [`QuotaRank`], subscriptions with quota left by pace
-/// score; then the optional anchor's profile and profile id, so the order
-/// never depends on how the configuration happens to list them.
-pub(crate) fn rank_candidates(
-    candidates: &mut [SubagentCandidate],
-    ranking_anchor: Option<&str>,
-    model: &str,
-    now_seconds: i64,
-) {
-    candidates.sort_by(|left, right| {
-        quota_rank(left, model, now_seconds)
-            .order(quota_rank(right, model, now_seconds))
-            .then_with(|| {
-                let left_is_anchor = ranking_anchor == Some(left.profile_id.as_str());
-                let right_is_anchor = ranking_anchor == Some(right.profile_id.as_str());
-                right_is_anchor.cmp(&left_is_anchor)
-            })
-            .then_with(|| left.profile_id.cmp(&right.profile_id))
-    });
-}
-
-/// Where a candidate's quota places it, best first. Usage-priced (API)
-/// profiles bill each request, so every subscription that may still run the
-/// model comes before them; a subscription known to be out of quota for the
-/// model would only fail, so it comes after them.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum QuotaRank {
-    /// Quota left, with its pace score; a higher score ranks first.
-    Available(f64),
-    Unknown,
-    UsagePriced,
-    Exhausted,
-}
-
-impl QuotaRank {
-    fn tier(self) -> u8 {
-        match self {
-            Self::Available(_) => 0,
-            Self::Unknown => 1,
-            Self::UsagePriced => 2,
-            Self::Exhausted => 3,
-        }
-    }
-
-    fn order(self, other: Self) -> std::cmp::Ordering {
-        match (self, other) {
-            (Self::Available(left), Self::Available(right)) => right.total_cmp(&left),
-            _ => self.tier().cmp(&other.tier()),
-        }
-    }
-}
-
-fn quota_rank(candidate: &SubagentCandidate, model: &str, now_seconds: i64) -> QuotaRank {
-    match &candidate.quota {
-        CandidateQuota::Unknown => QuotaRank::Unknown,
-        CandidateQuota::UsagePriced => QuotaRank::UsagePriced,
-        CandidateQuota::Windows(windows) => {
-            match crate::quota::quota_score(windows, model, now_seconds) {
-                Some(score) if score > 0.0 => QuotaRank::Available(score),
-                Some(_) => QuotaRank::Exhausted,
-                None => QuotaRank::Unknown,
-            }
-        }
-    }
-}
-
 fn now_epoch_seconds() -> i64 {
     mj_core::clock::epoch_millis() / 1000
 }
@@ -991,16 +878,19 @@ mod tests {
                 observed_at: 1,
             },
             quota: remaining.map_or(CandidateQuota::Unknown, |remaining| {
-                CandidateQuota::Windows(vec![crate::quota::QuotaWindow {
-                    label: "Week".into(),
-                    remaining_percent: Some(remaining),
-                    duration_seconds: None,
-                    model_scope: None,
-                    used: None,
-                    limit: None,
-                    resets: None,
-                    resets_at_epoch_seconds: None,
-                }])
+                CandidateQuota::Subscription {
+                    paid_credits: None,
+                    windows: vec![crate::quota::QuotaWindow {
+                        label: "Week".into(),
+                        remaining_percent: Some(remaining),
+                        duration_seconds: None,
+                        model_scope: None,
+                        used: None,
+                        limit: None,
+                        resets: None,
+                        resets_at_epoch_seconds: None,
+                    }],
+                }
             }),
             unhealthy: Default::default(),
         }
@@ -1044,9 +934,14 @@ mod tests {
             Some(80),
             &["claude-fable-5-1", "claude-opus-5"],
         );
-        let CandidateQuota::Windows(windows) = &mut fable.quota else {
+        let CandidateQuota::Subscription {
+            windows,
+            paid_credits,
+        } = &mut fable.quota
+        else {
             unreachable!("the fixture has a reading");
         };
+        *paid_credits = mj_client::quota::PaidCredits::limited(1e12);
         windows.push(crate::quota::QuotaWindow {
             label: "Week (Fable)".into(),
             remaining_percent: Some(0),
@@ -1069,21 +964,9 @@ mod tests {
     }
 
     #[test]
-    fn drawing_picks_in_proportion_to_quota_before_unknown_api_and_empty() {
-        let profiles = || {
-            vec![
-                SubagentCandidate {
-                    quota: CandidateQuota::UsagePriced,
-                    ..candidate("api", None, &["luna"])
-                },
-                candidate("unknown", None, &["luna"]),
-                candidate("empty", Some(0), &["luna"]),
-                candidate("sixty", Some(60), &["luna"]),
-                candidate("thirty-a", Some(30), &["luna"]),
-                candidate("thirty-b", Some(30), &["luna"]),
-            ]
-        };
-        // A fixed linear congruential stream keeps the test deterministic.
+    fn drawing_picks_in_proportion_to_quota_then_paid_balances() {
+        // A fixed stream proves the distribution and prevents one large paid
+        // wallet from jumping ahead of included subscription usage.
         let mut state = 0x2545_f491_4f6c_dd1d_u64;
         let mut unit = || {
             state = state
@@ -1091,19 +974,49 @@ mod tests {
                 .wrapping_add(1_442_695_040_888_963_407);
             ((state >> 11) + 1) as f64 / (1u64 << 53) as f64
         };
-        let draws = 40_000;
-        let mut first = std::collections::BTreeMap::<String, u32>::new();
-        for _ in 0..draws {
-            let mut candidates = profiles();
-            let units = (0..candidates.len()).map(|_| unit()).collect::<Vec<_>>();
-            order_by_draw(&mut candidates, Some("thirty-b"), &units, "luna", 0);
-            assert_eq!(ids(&candidates)[3..], ["unknown", "api", "empty"]);
-            *first.entry(candidates[0].profile_id.clone()).or_default() += 1;
+        for included in [true, false] {
+            let mut profiles = vec![
+                SubagentCandidate {
+                    quota: CandidateQuota::UsagePriced,
+                    ..candidate("api", None, &["luna"])
+                },
+                candidate("unknown", None, &["luna"]),
+                candidate("empty", Some(0), &["luna"]),
+            ];
+            for (id, amount) in [("sixty", 60), ("thirty-a", 30), ("thirty-b", 30)] {
+                let mut profile = candidate(id, Some(if included { amount } else { 0 }), &["luna"]);
+                let CandidateQuota::Subscription { paid_credits, .. } = &mut profile.quota else {
+                    unreachable!()
+                };
+                // Opposite paid weights while quota remains must have no effect.
+                *paid_credits = mj_client::quota::PaidCredits::limited(if included {
+                    if amount == 60 { 0.01 } else { 1e12 }
+                } else {
+                    f64::from(amount)
+                });
+                profiles.push(profile);
+            }
+            let draws = 40_000;
+            let mut first = std::collections::BTreeMap::<String, u32>::new();
+            for _ in 0..draws {
+                let mut candidates = profiles.clone();
+                let units = (0..candidates.len()).map(|_| unit()).collect::<Vec<_>>();
+                order_by_draw(&mut candidates, Some("thirty-b"), &units, "luna", 0);
+                let chosen = if included {
+                    assert_eq!(ids(&candidates)[3..], ["unknown", "api", "empty"]);
+                    &candidates[0]
+                } else {
+                    assert_eq!(candidates[0].profile_id, "unknown");
+                    assert_eq!(ids(&candidates)[4..], ["api", "empty"]);
+                    &candidates[1]
+                };
+                *first.entry(chosen.profile_id.clone()).or_default() += 1;
+            }
+            let share = |id: &str| f64::from(first[id]) / f64::from(draws);
+            assert!((share("sixty") - 0.5).abs() < 0.01, "{first:?}");
+            assert!((share("thirty-a") - 0.25).abs() < 0.01, "{first:?}");
+            assert!((share("thirty-b") - 0.25).abs() < 0.01, "{first:?}");
         }
-        let share = |id: &str| f64::from(first[id]) / f64::from(draws);
-        assert!((share("sixty") - 0.5).abs() < 0.01, "{first:?}");
-        assert!((share("thirty-a") - 0.25).abs() < 0.01, "{first:?}");
-        assert!((share("thirty-b") - 0.25).abs() < 0.01, "{first:?}");
     }
 
     #[test]

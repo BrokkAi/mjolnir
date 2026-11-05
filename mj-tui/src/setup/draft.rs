@@ -496,7 +496,7 @@ impl SetupDialog {
             .insert(profile_id.clone(), profile);
         self.managed_setup = None;
         self.notice = Some(format!(
-            "Created {}. Next, Mjolnir will install it and open sign-in.",
+            "Created {}. Next, Mjolnir prepares it and opens sign-in.",
             kind.display_name()
         ));
         self.pending_login = Some(profile_id);

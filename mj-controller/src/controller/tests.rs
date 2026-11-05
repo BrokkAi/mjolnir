@@ -2691,6 +2691,7 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
     );
 }
 
+// Hard-won: 10e9fd277: managed children could not register their requested reviewer sessions.
 #[test]
 #[cfg_attr(windows, ignore = "local bare target fixture")]
 fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capacity() {
@@ -2839,5 +2840,65 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     assert_ne!(
         worker.child_session_id, child.child_session_id,
         "kind belongs to the idempotent key"
+    );
+    let child_record = controller
+        .state
+        .sessions
+        .get_mut(&worker.child_session_id)
+        .unwrap();
+    child_record.state = SessionState::Running;
+    child_record.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    crate::database::save_session(child_record).unwrap();
+    let request = RegisterSubagentRequest {
+        kind: mj_core::subagent::SubagentKind::Reviewer,
+        reviewer_launch: Some(launch),
+        parent_session_id: worker.child_session_id.clone(),
+        task_name: "child's review".into(),
+        profile_id: "resolved-reviewer".into(),
+        model: None,
+        effort: None,
+        fast_mode: false,
+        working_directory: Default::default(),
+        initial_prompt: "Review the child's commits".into(),
+        request_key: "nested-review".into(),
+        report_root: None,
+    };
+    let nested = controller.register_subagent(request.clone()).unwrap();
+    assert_eq!(nested.parent_session_id, worker.child_session_id);
+    assert_eq!(
+        crate::database::load_subagent(&nested.child_session_id)
+            .unwrap()
+            .unwrap()
+            .parent_session_id,
+        worker.child_session_id
+    );
+    let error = controller
+        .register_subagent(RegisterSubagentRequest {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
+            ..request
+        })
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("sub-agents cannot spawn other sub-agents")
+    );
+    controller
+        .state
+        .subagents
+        .get_mut(&worker.child_session_id)
+        .unwrap()
+        .parent_session_id = nested.child_session_id.clone();
+    assert!(
+        controller
+            .state
+            .validate_subagent(&nested.child_session_id)
+            .unwrap_err()
+            .to_string()
+            .contains("cycle")
     );
 }

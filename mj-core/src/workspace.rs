@@ -8,9 +8,8 @@ pub const DEFAULT_WORKSPACE_ID: &str = "default";
 
 /// The explicit height requested for one support pane in the dashboard.
 ///
-/// This lives with the workspace model because the dashboard persists the
-/// user's layout per workspace. The serialized spelling is part of that
-/// persisted representation.
+/// Its serialized spelling is shared by the global sidebar preference and
+/// the persisted workspace support-pane layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PaneSize {
@@ -21,6 +20,11 @@ pub enum PaneSize {
 }
 
 impl PaneSize {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
     /// The next title-bar control, wrapping from maximum to minimum.
     #[must_use]
     pub const fn cycled(self) -> Self {

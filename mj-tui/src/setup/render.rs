@@ -657,7 +657,7 @@ fn render_managed_setup(frame: &mut Frame, popup: Rect, inner: Rect, dialog: &Se
     );
     frame.render_widget(theme::modal().title(title), popup);
     let intro = Paragraph::new(
-        "Choose an agent. Mjolnir will install its exact pinned version and open its sign-in flow.",
+        "Choose an agent. Mjolnir prepares its exact pinned version and opens its sign-in flow.",
     )
     .wrap(Wrap { trim: false })
     .style(theme::muted());

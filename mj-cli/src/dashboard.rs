@@ -254,6 +254,7 @@ pub(crate) struct DashboardContext {
     pub(crate) client_id: String,
     pub(crate) dashboard: DashboardState,
     pane_size_persistence: workspace_settings::WorkspaceSettingPersistence<PaneSizes>,
+    sidebar_size_persistence: workspace_settings::WorkspaceSettingPersistence<mj_tui::PaneSize>,
     layout_persistence: workspace_settings::WorkspaceSettingPersistence<ConversationLayout>,
     known_workspace_layouts: BTreeSet<String>,
     /// The conversation pane arrangement loaded for each workspace. M4 hands
@@ -881,6 +882,9 @@ pub(crate) async fn run_dashboard_for_workspace(
                 if context.shutdown_requested => {
                 pacer.mark_urgent();
             }
+            () = context.sidebar_size_persistence.wait(), if context.sidebar_size_persistence.is_running() => {
+                pacer.mark();
+            }
             () = context.pane_size_persistence.wait(), if context.pane_size_persistence.is_running() => {
                 pacer.mark();
             }
@@ -965,6 +969,10 @@ pub(crate) async fn run_dashboard_for_workspace(
                 .pane_size_persistence
                 .update(workspace_id, context.dashboard.pane_sizes());
         }
+        context.sidebar_size_persistence.update(
+            "global",
+            context.dashboard.pane_size(mj_tui::SupportPane::Sessions),
+        );
         context.save_active_workspace_layout();
         if !context.shutdown_requested {
             context.apply_chat_outcome(chat_outcome).await;
@@ -1070,7 +1078,12 @@ pub(crate) async fn run_dashboard_for_workspace(
         }
         Ok(())
     };
-    let (panes, layout, workspace) = tokio::join!(
+    let (sidebar, panes, layout, workspace) = tokio::join!(
+        finish_shutdown_save(
+            "sidebar size",
+            deadline,
+            context.sidebar_size_persistence.finish()
+        ),
         finish_shutdown_save(
             "workspace pane sizes",
             deadline,
@@ -1083,7 +1096,7 @@ pub(crate) async fn run_dashboard_for_workspace(
         ),
         finish_shutdown_save("last workspace", deadline, last_workspace),
     );
-    for result in [panes, layout, workspace] {
+    for result in [sidebar, panes, layout, workspace] {
         if let Err(error) = result {
             tracing::warn!(%error, "dashboard final persistence was not confirmed");
             eprintln!("{error:#}");
@@ -1753,6 +1766,11 @@ impl DashboardContext {
         let (dashboard_io_tx, dashboard_io_rx) =
             tokio::sync::mpsc::unbounded_channel::<DashboardIoUpdate>();
         let known_workspace_layouts = layouts.keys().cloned().collect();
+        let sidebar_size_persistence =
+            workspace_settings::WorkspaceSettingPersistence::start_sidebar_size(
+                controller.config.sidebar_size,
+                notices.clone(),
+            );
         let pane_size_persistence =
             workspace_settings::WorkspaceSettingPersistence::start_pane_sizes(
                 layouts,
@@ -1772,6 +1790,7 @@ impl DashboardContext {
             client_id,
             dashboard,
             pane_size_persistence,
+            sidebar_size_persistence,
             layout_persistence,
             known_workspace_layouts,
             workspace_layouts: conversation_layouts,

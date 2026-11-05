@@ -98,15 +98,8 @@ pub(super) async fn forward_in_process_session_request(
             session_id,
             command_id,
             command,
-            admission,
             reply,
         } => {
-            if admission.is_some() {
-                let _ = reply.send(Err(
-                    "review delivery admissions cannot cross the daemon request bridge".into(),
-                ));
-                return;
-            }
             let result = async {
                 manager
                     .wait_for_session(&session_id, Duration::from_secs(5))
@@ -398,7 +391,6 @@ mod bridge_admission_tests {
                     session_id: "bridge-test".into(),
                     command_id: id.into(),
                     command: mj_core::relay::RelayCommand::Cancel,
-                    admission: None,
                     reply,
                 },
                 response,

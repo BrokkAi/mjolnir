@@ -1562,7 +1562,10 @@ impl LaunchWarnings {
         if let Some(metadata) = metadata {
             for notice in metadata.notices {
                 if notice.id > self.last_notice && notice.session_id == session_id {
-                    eprintln!("{}", notice.text);
+                    eprintln!(
+                        "{}",
+                        mj_core::transcript::sanitize_terminal_text(&notice.text)
+                    );
                 }
                 self.last_notice = self.last_notice.max(notice.id);
             }

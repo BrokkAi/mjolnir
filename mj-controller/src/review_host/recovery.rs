@@ -59,9 +59,6 @@ impl HostState {
                 finishing: false,
                 retry_delay: std::time::Duration::from_secs(1),
             });
-        if push.is_none() && state.active.is_some() {
-            hold_prompts(&session_id);
-        }
         self.reviews.insert(
             session_id.clone(),
             ReviewSlot {

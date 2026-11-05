@@ -159,11 +159,13 @@ You do not need to create or name a bundle first. The project picker offers:
 - **GitHub**: browse repositories available to the GitHub account already signed
   in on the computer running Mjolnir, or search by name. If needed, the picker
   explains how to install or sign in to GitHub CLI on that computer.
-- **Folders**: open folders, go up a level, and choose a Git repository without
-  typing its path. These folders belong to the computer running Mjolnir, not
-  the phone or browser device.
-- **Paste URL**: enter a GitHub URL, `owner/repository`, or an existing local
-  repository path.
+- **URL or Path** (terminal) or **Paste URL** (browser): enter a GitHub URL,
+  `owner/repository`, or an existing local repository path. Local paths belong
+  to the computer running Mjolnir, not the phone or browser device.
+- **Folders** (browser only): open folders, go up a level, and choose a Git
+  repository without typing its path. These folders also belong to the computer
+  running Mjolnir. In the terminal, type the path in **URL or Path**; it
+  completes folder names as you type.
 
 Choose a repository to continue directly to the session review. Mjolnir saves
 it for next time. In the terminal, **Use several repositories together** lets you

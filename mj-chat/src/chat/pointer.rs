@@ -147,7 +147,7 @@ impl ChatState {
         if self.config_picker_active() {
             return true;
         }
-        self.turn_review_handles_mouse(mouse.column, mouse.row)
+        false
     }
 
     /// Whether a dialog of this conversation's own currently stands in for the
@@ -167,7 +167,6 @@ impl ChatState {
         if let Some(dialog) = self.elicitation.as_ref() {
             dialog.cancel_component_pointer();
         }
-        self.cancel_turn_review_pointer();
     }
 
     /// Clears rendered component geometry before a host redraw. Persistent
@@ -186,7 +185,6 @@ impl ChatState {
         if let Some(dialog) = self.elicitation.as_ref() {
             dialog.reset_component_geometry();
         }
-        self.reset_turn_review_geometry();
     }
 
     /// Scrolls the elicitation message pane, for a drag held at its edge.
@@ -340,12 +338,6 @@ impl ChatState {
                 .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
         {
             return ChatAction::OpenReviewers;
-        }
-        if self.turn_review_active() {
-            let (handled, action) = self.handle_turn_review_mouse(mouse);
-            if handled {
-                return action;
-            }
         }
         if self.handle_transcript_scrollbar_mouse(mouse) {
             return ChatAction::None;

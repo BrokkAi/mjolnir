@@ -349,7 +349,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                 let mut spec = reload_fallback_spec(harness);
                 spec.execution_policy = policy;
                 let mut socket = worker_socket(role);
-                socket.review_gate = role == SubagentMcpRole::Parent;
+                socket.review_gate = true;
                 spec.subagent_mcp_socket = Some(socket);
                 spec.project_memory = Some(ProjectMemoryLaunchConfig {
                     history_socket: Some("/worker/history.sock".into()),
@@ -394,7 +394,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                         let args = delegation["args"].as_array().unwrap();
                         assert_eq!(
                             args.iter().any(|arg| arg == "--review-gate"),
-                            role == SubagentMcpRole::Parent,
+                            matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly),
                             "{request}"
                         );
                     }
@@ -437,8 +437,10 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                                     .iter()
                                     .map(|tool| format!("mcp__mj-agents__{tool}")),
                             );
-                            if role == SubagentMcpRole::Parent {
-                                expected.push("mcp__mj-agents__request_review".into());
+                            if matches!(
+                                role,
+                                SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly
+                            ) {
                                 expected.push("mcp__mj-agents__override_review".into());
                             }
                             assert_eq!(allowed, Some(&serde_json::json!(expected)), "{request}");
@@ -1768,25 +1770,6 @@ async fn answer_to_ext_request(
     answer
 }
 
-/// Muse's form asking whether to answer its question or explain instead.
-fn muse_route_form() -> serde_json::Value {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": "route-1",
-        "method": "elicitation/create",
-        "params": {
-            "sessionId": "scripted",
-            "mode": "form",
-            "message": "Choose how to respond to this question:\nChoose an architecture",
-            "requestedSchema": {
-                "type": "object",
-                "properties": {"route": {"type": "string", "enum": ["Answer questions", "Explain instead"]}},
-                "required": ["route"]
-            }
-        }
-    })
-}
-
 fn architecture_form() -> serde_json::Value {
     serde_json::json!({
         "jsonrpc": "2.0",
@@ -1820,13 +1803,11 @@ fn architecture_form() -> serde_json::Value {
     })
 }
 
-/// Scripts one prompt that asks the architecture question. With `routed`,
-/// the question is preceded by Muse's route form, whose answer is published.
+/// Scripts one prompt that asks the architecture question.
 async fn elicitation_bridge(
     stream: tokio::io::DuplexStream,
     initialized: oneshot::Sender<serde_json::Value>,
     answered: oneshot::Sender<serde_json::Value>,
-    mut routed: Option<oneshot::Sender<serde_json::Value>>,
     finish_before_answer: bool,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1838,16 +1819,6 @@ async fn elicitation_bridge(
     let mut prompt_id = None;
     while let Some(line) = lines.next_line().await.expect("read bridge input") {
         let message: serde_json::Value = serde_json::from_str(&line).expect("valid JSON-RPC");
-        if message.get("id").and_then(serde_json::Value::as_str) == Some("route-1") {
-            if let Some(routed) = routed.take() {
-                let _ = routed.send(message);
-            }
-            write
-                .write_all(format!("{}\n", architecture_form()).as_bytes())
-                .await
-                .expect("ask the question");
-            continue;
-        }
         if message.get("id").and_then(serde_json::Value::as_str) == Some("ask-1") {
             if let Some(answered) = answered.take() {
                 let _ = answered.send(message);
@@ -1894,11 +1865,7 @@ async fn elicitation_bridge(
             "session/set_mode" => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}}),
             "session/prompt" => {
                 prompt_id = Some(id);
-                if routed.is_some() {
-                    muse_route_form()
-                } else {
-                    architecture_form()
-                }
+                architecture_form()
             }
             _ => continue,
         };
@@ -1925,17 +1892,13 @@ async fn elicitation_bridge(
 // Hard-won: #1265: an async question must remain answerable after its originating turn ends.
 #[tokio::test]
 async fn form_elicitation_is_advertised_rendered_and_answered() {
-    answer_architecture_form(HarnessKind::Claude, None, false).await;
-    answer_architecture_form(HarnessKind::Codex, None, true).await;
+    answer_architecture_form(HarnessKind::Claude, false).await;
+    answer_architecture_form(HarnessKind::Codex, true).await;
 }
 
 /// Drives one prompt whose question the person answers. It fails if any
 /// form other than the architecture question reaches the person first.
-async fn answer_architecture_form(
-    harness: HarnessKind,
-    routed: Option<oneshot::Sender<serde_json::Value>>,
-    finish_before_answer: bool,
-) {
+async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bool) {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (initialized_tx, initialized_rx) = oneshot::channel();
     let (answered_tx, answered_rx) = oneshot::channel();
@@ -1943,7 +1906,6 @@ async fn answer_architecture_form(
         bridge_stream,
         initialized_tx,
         answered_tx,
-        routed,
         finish_before_answer,
     ));
     let (client_read, client_write) = tokio::io::split(client_stream);

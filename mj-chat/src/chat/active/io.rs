@@ -89,8 +89,7 @@ impl ActiveChat {
 
     /// Shows the review the daemon is running for this session.
     ///
-    /// The terminal hosts no part of a review: it projects the daemon's status
-    /// and actions into the prompt area and sends resolutions back.
+    /// The terminal projects the daemon's status above the ordinary composer.
     /// A review therefore survives this view closing.
     pub fn apply_review_view(&mut self, view: Option<mj_client::review::RuntimeReviewView>) {
         self.state.set_turn_review(view);
@@ -104,25 +103,14 @@ impl ActiveChat {
         self.send_daemon_request(ChatDaemonRequest::StartTurnReview { session_id });
     }
 
-    /// Sends one resolution to the daemon, which owns the review.
     pub(crate) fn run_turn_review(&mut self, intent: crate::chat::TurnReviewRequest) {
-        use crate::chat::TurnReviewRequest;
-
-        let session_id = self.session.session_id().to_owned();
         match intent {
-            TurnReviewRequest::Start => self.request_turn_review(),
-            TurnReviewRequest::Resolve(resolution) => {
-                self.send_daemon_request(ChatDaemonRequest::ResolveTurnReview {
-                    session_id,
-                    resolution,
-                });
-            }
+            crate::chat::TurnReviewRequest::Start => self.request_turn_review(),
         }
     }
 
     /// Hands one request to the daemon bridge, or reports that this chat has
-    /// none: a chat without a bridge cannot reach the daemon at all, and
-    /// silently dropping a review action would leave the prompt held.
+    /// none: a chat without a bridge cannot reach the daemon at all.
     pub(crate) fn send_daemon_request(&mut self, request: ChatDaemonRequest) {
         let Some(persistence) = &self.persistence else {
             self.state

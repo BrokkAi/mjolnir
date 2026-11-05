@@ -18,6 +18,7 @@ use mj_controller::server::api::{
 use mj_client::daemon::WikiSessionStatus;
 use mj_controller::server::ViewerLifecycleCategory;
 use mj_controller::sessionwiki::WikiContinuation;
+use mj_core::transcript::sanitize_terminal_text;
 
 use crate::api_client::{ApiClient, ExportResult};
 
@@ -460,9 +461,7 @@ pub(crate) async fn usage(args: UsageArgs) -> Result<()> {
         if args.json {
             return print_json(&tree);
         }
-        for line in usage_tree_lines(&tree) {
-            println!("{line}");
-        }
+        print_lines(usage_tree_lines(&tree));
     } else {
         let session = args
             .session
@@ -471,9 +470,7 @@ pub(crate) async fn usage(args: UsageArgs) -> Result<()> {
         if args.json {
             return print_json(&page);
         }
-        for line in usage_lines(&page) {
-            println!("{line}");
-        }
+        print_lines(usage_lines(&page));
     }
     Ok(())
 }
@@ -496,6 +493,10 @@ fn model_usage_lines(groups: &[mj_core::storage::UsageModelTotal]) -> Vec<String
     lines
 }
 
+fn turn_cost_usd(ticks: u64) -> String {
+    mj_core::usage::ProviderTurnCost::from_usd_ticks(ticks, false).usd
+}
+
 fn usage_tree_lines(tree: &mj_core::storage::UsageTree) -> Vec<String> {
     let coverage = &tree.summary.coverage;
     let mut lines = vec![
@@ -513,6 +514,13 @@ fn usage_tree_lines(tree: &mj_core::storage::UsageTree) -> Vec<String> {
     lines.push(format!(
         "not in totals: {} last-request, {} unknown-scope, {} missing reports",
         coverage.last_request_reports, coverage.unspecified_reports, coverage.missing_reports
+    ));
+    lines.push(format!(
+        "priced turn cost: {} USD ({} provider, {} estimated, {} missing costs)",
+        turn_cost_usd(tree.summary.turn_cost_usd_ticks),
+        coverage.provider_cost_turns,
+        coverage.estimated_cost_turns,
+        coverage.missing_cost_turns
     ));
     for session in &tree.sessions {
         lines.push(format!(
@@ -532,6 +540,14 @@ fn usage_tree_lines(tree: &mj_core::storage::UsageTree) -> Vec<String> {
                 cost.amount, cost.currency
             ));
         }
+        let cost_coverage = &session.summary.coverage;
+        lines.push(format!(
+            "  priced turn cost: {} USD ({} provider, {} estimated, {} missing costs)",
+            turn_cost_usd(session.summary.turn_cost_usd_ticks),
+            cost_coverage.provider_cost_turns,
+            cost_coverage.estimated_cost_turns,
+            cost_coverage.missing_cost_turns
+        ));
     }
     lines
 }
@@ -580,6 +596,13 @@ fn usage_lines(page: &mj_core::storage::UsagePage) -> Vec<String> {
             cost.amount, cost.currency
         ));
     }
+    lines.push(format!(
+        "priced turn cost: {} USD ({} provider, {} estimated, {} missing costs)",
+        turn_cost_usd(page.turn_cost_usd_ticks),
+        coverage.provider_cost_turns,
+        coverage.estimated_cost_turns,
+        coverage.missing_cost_turns
+    ));
     lines.extend(model_usage_lines(&page.by_model));
     if coverage.unfinished_turns > 0 {
         lines.push(format!(
@@ -1017,7 +1040,9 @@ pub(crate) async fn workspaces_list(args: WorkspacesListArgs) -> Result<()> {
     for workspace in &list.workspaces {
         println!(
             "{:id_width$}  {:8}  {}",
-            workspace.id, workspace.session_count, workspace.name
+            workspace.id,
+            workspace.session_count,
+            sanitize_terminal_text(&workspace.name)
         );
     }
     Ok(())
@@ -1034,7 +1059,8 @@ pub(crate) async fn workspaces_create(args: WorkspaceCreateArgs) -> Result<()> {
     }
     println!(
         "workspace {}  {}",
-        created.workspace.id, created.workspace.name
+        created.workspace.id,
+        sanitize_terminal_text(&created.workspace.name)
     );
     Ok(())
 }
@@ -1213,7 +1239,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let client = ApiClient::connect().await?;
     let response = client.start(&request).await.map_err(name_launch_flags)?;
     if let Some(notice) = &response.notice {
-        eprintln!("{notice}");
+        eprintln!("{}", sanitize_terminal_text(notice));
     }
     if args.json {
         return print_json(&response);
@@ -1454,9 +1480,7 @@ fn report_wait(response: &WaitResponse, json: bool) -> Result<()> {
     if json {
         print_json(response)?;
     } else {
-        for line in wait_report_lines(response) {
-            println!("{line}");
-        }
+        print_lines(wait_report_lines(response));
         if !response.pending_elicitations.is_empty() {
             print_json(&response.pending_elicitations)?;
         }
@@ -1749,9 +1773,7 @@ pub(crate) async fn fetch(args: FetchArgs) -> Result<()> {
         if args.json {
             return print_json(&listing);
         }
-        for line in listing_lines(&listing) {
-            println!("{line}");
-        }
+        print_lines(listing_lines(&listing));
         return Ok(());
     }
     if args.stdout {
@@ -1817,9 +1839,10 @@ pub(crate) async fn sessions(
         if args.json {
             return print_json(&session);
         }
-        for line in session_report_lines(&session, mj_core::clock::epoch_millis()) {
-            println!("{line}");
-        }
+        print_lines(session_report_lines(
+            &session,
+            mj_core::clock::epoch_millis(),
+        ));
         return Ok(());
     }
     let workspace = match requested_workspace {
@@ -1850,7 +1873,7 @@ pub(crate) async fn sessions(
             "{:id_width$}  {:state_width$}  {}",
             session.id,
             listed_state(session),
-            session.title
+            sanitize_terminal_text(&session.title)
         );
         if session.has_error {
             println!(
@@ -1883,9 +1906,7 @@ async fn wiki_session(client: &ApiClient, wiki_id: &str, json: bool) -> Result<(
     if json {
         return print_json(&info);
     }
-    for line in wiki_session_lines(&info) {
-        println!("{line}");
-    }
+    print_lines(wiki_session_lines(&info));
     Ok(())
 }
 
@@ -2188,14 +2209,6 @@ enum ReviewCommand {
     /// Show the review the session has open: what it is doing, each reviewing
     /// role, and its verdict once it has one.
     Status(SessionArgs),
-    /// Send the open review's findings to the primary agent. Findings are
-    /// forwarded automatically; this retries a forward the agent refused.
-    Forward(SessionArgs),
-    /// Close the open review and accept the change as reviewed.
-    Dismiss(SessionArgs),
-    /// Close the open review without accepting the change, so a later review
-    /// covers it again.
-    Cancel(SessionArgs),
 }
 
 pub(crate) async fn review(args: ReviewArgs) -> Result<()> {
@@ -2219,24 +2232,10 @@ pub(crate) async fn review(args: ReviewArgs) -> Result<()> {
                 return print_json(&status);
             }
             println!("Review trigger: {}", status.trigger);
-            for line in review_lines(status.review.as_ref()) {
-                println!("{line}");
-            }
+            print_lines(review_lines(status.review.as_ref()));
             Ok(())
         }
-        ReviewCommand::Forward(args) => resolve_review(&client, &args, "forward").await,
-        ReviewCommand::Dismiss(args) => resolve_review(&client, &args, "dismiss").await,
-        ReviewCommand::Cancel(args) => resolve_review(&client, &args, "cancel").await,
     }
-}
-
-async fn resolve_review(client: &ApiClient, args: &SessionArgs, resolution: &str) -> Result<()> {
-    let resolved = client.resolve_review(&args.session, resolution).await?;
-    if args.json {
-        return print_json(&resolved);
-    }
-    println!("review on {}: {resolution}", args.session);
-    Ok(())
 }
 
 /// A review as plain lines: its status, one line per role, then the verdict
@@ -2251,9 +2250,6 @@ fn review_lines(review: Option<&mj_controller::server::ViewerTurnReview>) -> Vec
     }
     if let Some(verdict) = &review.verdict {
         lines.push(format!("verdict: {}", verdict.kind));
-        if !verdict.allowed.is_empty() {
-            lines.push(format!("resolve with: {}", verdict.allowed.join(", ")));
-        }
         if !verdict.text.is_empty() {
             lines.push(String::new());
             lines.push(verdict.text.clone());
@@ -2375,6 +2371,15 @@ fn write_bytes_to(
     }
 }
 
+/// Print report lines built from daemon answers. Titles, notices and other
+/// text in them can come from an agent, so terminal controls are removed here,
+/// where that text reaches the operator's terminal.
+fn print_lines(lines: impl IntoIterator<Item = String>) {
+    for line in lines {
+        println!("{}", sanitize_terminal_text(&line));
+    }
+}
+
 fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
     println!(
         "{}",
@@ -2412,24 +2417,98 @@ pub(crate) struct SetConfigArgs {
     json: bool,
 }
 pub(crate) async fn models(args: ModelsArgs) -> Result<()> {
+    let mut daemon = crate::daemon::connect_or_start().await?;
+    let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } =
+        daemon.runtime_changes(None, false).await?
+    else {
+        bail!("daemon did not return a runtime snapshot for cached quota reports");
+    };
+    let quota = projection.metadata.quotas.reports.get(&args.profile);
+    let billing = quota
+        .map(mj_client::quota::ProfileQuota::billing_class)
+        .unwrap_or(mj_client::quota::QuotaBilling::Unknown);
     let choices = ApiClient::connect()
         .await?
         .models(&args.profile, args.model)
         .await?;
-    if args.json {
-        return print_json(&choices);
+    let rendered = render_models(&choices, billing, args.json)?;
+    println!("{rendered}");
+    Ok(())
+}
+
+fn render_models(
+    choices: &mj_core::worker_launch::ProfileConfig,
+    billing: mj_client::quota::QuotaBilling,
+    json: bool,
+) -> Result<String> {
+    let rates = |model: &str| {
+        (billing == mj_client::quota::QuotaBilling::Usage)
+            .then(|| mj_core::usage::pricing::rates(model))
+            .flatten()
+    };
+    if json {
+        let mut value = serde_json::to_value(choices).context("serialize model catalog")?;
+        value["billing"] = serde_json::Value::String(
+            match billing {
+                mj_client::quota::QuotaBilling::Usage => "usage",
+                mj_client::quota::QuotaBilling::Subscription => "subscription",
+                mj_client::quota::QuotaBilling::Unknown => "unknown",
+            }
+            .to_owned(),
+        );
+        value["models"] = serde_json::Value::Array(
+            choices
+                .models
+                .iter()
+                .map(|model| {
+                    let mut item = serde_json::to_value(model).expect("model choice serializes");
+                    item["price"] = rates(&model.value)
+                        .map(|r| {
+                            serde_json::json!({
+                                "input": r[0] as f64 / 1000.0,
+                                "output": r[1] as f64 / 1000.0,
+                                "cached_input": r[2] as f64 / 1000.0,
+                                "cache_write": r[3] as f64 / 1000.0
+                            })
+                        })
+                        .unwrap_or(serde_json::Value::Null);
+                    item
+                })
+                .collect(),
+        );
+        return serde_json::to_string_pretty(&value).context("serialize model catalog");
+    }
+    let mut lines = Vec::new();
+    if billing != mj_client::quota::QuotaBilling::Usage {
+        lines.push(format!(
+            "billing: {}",
+            match billing {
+                mj_client::quota::QuotaBilling::Subscription => "subscription",
+                _ => "unknown",
+            }
+        ));
     }
     if choices.models.is_empty() && choices.efforts.is_empty() {
-        println!("this profile's harness reports no models or efforts");
+        lines.push("this profile's harness reports no models or efforts".to_owned());
     }
     for model in &choices.models {
-        println!("{}  {}", model.value, model.name);
+        let price = rates(&model.value)
+            .map(|r| {
+                format!(
+                    "  ${:.3} in / ${:.3} cached / ${:.3} out per 1M",
+                    r[0] as f64 / 1000.0,
+                    r[2] as f64 / 1000.0,
+                    r[1] as f64 / 1000.0
+                )
+            })
+            .unwrap_or_default();
+        lines.push(format!("{}  {}{}", model.value, model.name, price));
     }
     // A harness without efforts, or one whose efforts are not known yet,
     // printed a bare "effort (default):" line, which reads as a value that
     // failed to print (F-16).
     if !choices.efforts.is_empty() {
-        println!(
+        lines.push(format!(
             "effort ({}): {}",
             choices.model.as_deref().unwrap_or("default model"),
             choices
@@ -2438,9 +2517,9 @@ pub(crate) async fn models(args: ModelsArgs) -> Result<()> {
                 .map(|c| c.value.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        ));
     }
-    Ok(())
+    Ok(lines.join("\n"))
 }
 pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
@@ -2468,9 +2547,7 @@ pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
     if session.config_options.is_empty() {
         println!("this session's agent offers no settings right now");
     }
-    for line in config_option_lines(&session.config_options) {
-        println!("{line}");
-    }
+    print_lines(config_option_lines(&session.config_options));
     Ok(())
 }
 
@@ -2607,27 +2684,14 @@ mod tests {
             let Some(Command::Review(args)) = cli.command else {
                 panic!("expected the review command");
             };
-            let (ReviewCommand::Start(session)
-            | ReviewCommand::Status(session)
-            | ReviewCommand::Forward(session)
-            | ReviewCommand::Dismiss(session)
-            | ReviewCommand::Cancel(session)) = args.command;
+            let session = match args.command {
+                ReviewCommand::Start(session) | ReviewCommand::Status(session) => session,
+            };
             assert_eq!(session.session, "s1");
             assert_eq!(session.json, json);
         }
         for verb in ["forward", "dismiss", "cancel"] {
-            let cli = Cli::try_parse_from(["mj", "review", verb, "--session", "s1"])
-                .expect("review resolutions parse");
-            let Some(Command::Review(args)) = cli.command else {
-                panic!("expected the review command");
-            };
-            let resolved = match args.command {
-                ReviewCommand::Forward(_) => "forward",
-                ReviewCommand::Dismiss(_) => "dismiss",
-                ReviewCommand::Cancel(_) => "cancel",
-                _ => panic!("{verb} parsed as another review command"),
-            };
-            assert_eq!(resolved, verb);
+            assert!(Cli::try_parse_from(["mj", "review", verb, "--session", "s1"]).is_err());
         }
         assert!(Cli::try_parse_from(["mj", "review", "start"]).is_err());
     }
@@ -3976,5 +4040,38 @@ mod tests {
             usage_tree_lines(&tree).join("\n")
         );
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-usage-tree", &output);
+    }
+
+    #[test]
+    fn api_models_matches_cli_golden() {
+        let choices = mj_core::worker_launch::ProfileConfig {
+            model: Some("deepseek-flash".to_owned()),
+            models: vec![
+                mj_core::acp::SessionConfigChoice {
+                    value: "deepseek-flash".to_owned(),
+                    name: "DeepSeek Flash".to_owned(),
+                    description: None,
+                },
+                mj_core::acp::SessionConfigChoice {
+                    value: "unknown-model".to_owned(),
+                    name: "Unknown Model".to_owned(),
+                    description: None,
+                },
+            ],
+            efforts: vec![],
+            observed_at: 1,
+        };
+        let mut output = String::from("=== mj models text and JSON output ===");
+        for (name, billing) in [
+            ("usage", mj_client::quota::QuotaBilling::Usage),
+            ("subscription", mj_client::quota::QuotaBilling::Subscription),
+            ("unknown", mj_client::quota::QuotaBilling::Unknown),
+        ] {
+            output.push_str(&format!("\n--- {name} text ---\n"));
+            output.push_str(&render_models(&choices, billing, false).unwrap());
+            output.push_str(&format!("\n--- {name} JSON ---\n"));
+            output.push_str(&render_models(&choices, billing, true).unwrap());
+        }
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-models", &output);
     }
 }

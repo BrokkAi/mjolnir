@@ -26,13 +26,6 @@ impl ChatState {
         // the prefix key. The host catches them before the composer sees
         // them, so the composer has no escape hatch of its own left.
 
-        // A reviewing harness that asked a question is blocked until it is
-        // answered, and its dialog is drawn over the split, so the dialog
-        // below takes keys before either review view does. Without this the
-        // review's own actions would swallow the answer and the harness would
-        // wait for ever.
-        let reviewing = !self.reviewer_elicitation_open();
-
         if let Some(dialog) = self.elicitation.as_mut() {
             if code == KeyCode::Char('v')
                 && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
@@ -113,7 +106,7 @@ impl ChatState {
                     self.focus_subagent_control();
                     return ChatAction::None;
                 }
-                KeyCode::Right if self.reviewer_count > 0 => {
+                KeyCode::Right if self.reviewers.total > 0 => {
                     self.focus_reviewer_control();
                     return ChatAction::None;
                 }
@@ -138,7 +131,7 @@ impl ChatState {
                     self.focus_task_control();
                     return ChatAction::None;
                 }
-                KeyCode::Right if self.reviewer_count > 0 => {
+                KeyCode::Right if self.reviewers.total > 0 => {
                     self.focus_reviewer_control();
                     return ChatAction::None;
                 }
@@ -171,23 +164,6 @@ impl ChatState {
                 _ => self.prompt_control_focus = None,
             }
         }
-        if reviewing && self.turn_review_active() && code == KeyCode::Down {
-            if self.background_task_count() > 0 {
-                self.focus_task_control();
-            } else if self.subagent_count > 0 {
-                self.focus_subagent_control();
-            } else {
-                self.focus_reviewer_control();
-            }
-            return ChatAction::None;
-        }
-        // A turn review owns the pane on the same terms. Its actions are the
-        // only input while it is unresolved, which is what holds the primary
-        // agent still until the user has answered the findings.
-        if reviewing && self.turn_review_active() {
-            return self.handle_turn_review_event(key);
-        }
-
         if code == KeyCode::Char('v')
             && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
         {
@@ -399,7 +375,7 @@ impl ChatState {
                 } else if self.cursor_is_on_last_prompt_line()
                     && (self.background_task_count() > 0
                         || self.subagent_count > 0
-                        || self.reviewer_count > 0)
+                        || self.reviewers.total > 0)
                 {
                     if self.background_task_count() > 0 {
                         self.focus_task_control();

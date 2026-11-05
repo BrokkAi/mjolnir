@@ -412,7 +412,7 @@ impl Controller {
         ensure!(parent.state.is_active(), "parent session is not active");
         ensure!(parent.target.is_some(), "parent session has no live target");
         ensure!(
-            crate::database::load_subagent(&parent.id)?.is_none(),
+            reviewer || crate::database::load_subagent(&parent.id)?.is_none(),
             "sub-agents cannot spawn other sub-agents"
         );
         let profile = self
@@ -459,8 +459,8 @@ impl Controller {
             // A child shares its parent's container, so it shares the build
             // cache that container was created with.
             build_cache: parent.build_cache.clone(),
-            // A child never receives the Mjolnir sub-agent tools, so it can
-            // never spawn a grandchild.
+            // Children keep common tools and can request reviewer sessions,
+            // but never receive ordinary delegation tools.
             subagents: Some(mj_core::subagent::SubagentPolicy::None),
             create_managed_worktree: Some(false),
             archived: false,
@@ -761,6 +761,17 @@ fn borrowed_locator(
     child_id: &str,
 ) -> Result<mj_core::state::TargetLocator> {
     use mj_core::state::TargetLocator;
+    let container_owner = match target {
+        TargetLocator::LocalPodman { borrowed_from, .. }
+        | TargetLocator::LocalDocker { borrowed_from, .. }
+        | TargetLocator::AppleContainer { borrowed_from, .. }
+        | TargetLocator::SshPodman { borrowed_from, .. }
+        | TargetLocator::SshDocker { borrowed_from, .. }
+        | TargetLocator::SshAppleContainer { borrowed_from, .. } => {
+            borrowed_from.as_deref().unwrap_or(parent_id)
+        }
+        _ => parent_id,
+    };
     Ok(match target {
         TargetLocator::LocalBare { worker_root } => TargetLocator::LocalBare {
             worker_root: sibling_path(worker_root, parent_id, child_id)?,
@@ -775,8 +786,8 @@ fn borrowed_locator(
             worker_id: Some(child_id.to_owned()),
         },
         // A container child runs its own worker inside the parent's container
-        // and records the parent as the container's owner, so cleanup and
-        // whole-target operations stay with the parent.
+        // and preserves its original owner even when the direct parent also
+        // borrows it. Cleanup and whole-target operations stay with that owner.
         TargetLocator::LocalPodman {
             container_id,
             workspace_storage,
@@ -784,15 +795,15 @@ fn borrowed_locator(
         } => TargetLocator::LocalPodman {
             container_id: container_id.clone(),
             workspace_storage: workspace_storage.clone(),
-            borrowed_from: Some(parent_id.to_owned()),
+            borrowed_from: Some(container_owner.to_owned()),
         },
         TargetLocator::LocalDocker { container_id, .. } => TargetLocator::LocalDocker {
             container_id: container_id.clone(),
-            borrowed_from: Some(parent_id.to_owned()),
+            borrowed_from: Some(container_owner.to_owned()),
         },
         TargetLocator::AppleContainer { container_id, .. } => TargetLocator::AppleContainer {
             container_id: container_id.clone(),
-            borrowed_from: Some(parent_id.to_owned()),
+            borrowed_from: Some(container_owner.to_owned()),
         },
         TargetLocator::SshPodman {
             host,
@@ -803,21 +814,21 @@ fn borrowed_locator(
             host: host.clone(),
             container_id: container_id.clone(),
             workspace_storage: workspace_storage.clone(),
-            borrowed_from: Some(parent_id.to_owned()),
+            borrowed_from: Some(container_owner.to_owned()),
         },
         TargetLocator::SshDocker {
             host, container_id, ..
         } => TargetLocator::SshDocker {
             host: host.clone(),
             container_id: container_id.clone(),
-            borrowed_from: Some(parent_id.to_owned()),
+            borrowed_from: Some(container_owner.to_owned()),
         },
         TargetLocator::SshAppleContainer {
             host, container_id, ..
         } => TargetLocator::SshAppleContainer {
             host: host.clone(),
             container_id: container_id.clone(),
-            borrowed_from: Some(parent_id.to_owned()),
+            borrowed_from: Some(container_owner.to_owned()),
         },
         // EC2 children keep the parent's locator unchanged, as they did before
         // container borrowing was recorded.
@@ -1099,6 +1110,14 @@ mod tests {
                 borrowed_from: Some(parent_id.to_owned()),
             }
         );
+        let reviewer_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        for locator in [local, remote] {
+            assert_eq!(
+                borrowed_locator(&locator, child_id, reviewer_id).unwrap(),
+                locator,
+                "a child's reviewer must retain the original container owner"
+            );
+        }
     }
 
     #[test]

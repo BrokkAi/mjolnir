@@ -91,15 +91,16 @@ pub(super) async fn prepare_scoped(
     repositories: Option<Vec<std::path::PathBuf>>,
 ) -> Result<Prepared, StartRefusal> {
     let push = scope == mj_core::relay::CaptureScope::PushableCommits;
-    // A sub-agent's changes are reviewed through its parent's turn. Asking
-    // its worker for reviewer state would also race the parent's lifecycle
-    // operations on the child and surface their internal refusals.
-    let child = {
+    // Turn reviews cover children through their parent's turn. Explicit
+    // commit reviews use the child's own durable review group instead.
+    let child = if !push {
         let environment = environment.clone();
         let session = session_id.to_owned();
         tokio::task::spawn_blocking(move || environment.is_subagent(&session))
             .await
-            .unwrap_or(false)
+            .map_err(|error| StartRefusal(format!("checking review ownership: {error}")))?
+    } else {
+        false
     };
     if child {
         return Err(StartRefusal(SUBAGENT_REFUSAL.to_owned()));
@@ -416,14 +417,20 @@ pub fn resolution_notice(
         Resolution::Forwarded => "Review findings sent to the agent".to_owned(),
         Resolution::Dismissed => match last_verdict {
             Some(ReviewVerdict::Clean) => "Review complete: no material findings".to_owned(),
-            Some(ReviewVerdict::Failed { .. }) => {
-                "Review failed; the change stays unreviewed".to_owned()
+            Some(ReviewVerdict::Failed { reason }) => {
+                format!(
+                    "Review failed: {}. The change stays unreviewed",
+                    short_failure_reason(reason)
+                )
             }
             _ => "Review dismissed".to_owned(),
         },
         Resolution::Cancelled => match last_verdict {
-            Some(ReviewVerdict::Failed { .. }) => {
-                "Review failed; the change stays unreviewed".to_owned()
+            Some(ReviewVerdict::Failed { reason }) => {
+                format!(
+                    "Review failed: {}. The change stays unreviewed",
+                    short_failure_reason(reason)
+                )
             }
             _ => "Review cancelled".to_owned(),
         },
@@ -432,6 +439,17 @@ pub fn resolution_notice(
             "Review coverage starts here; the next completed turn is reviewed".to_owned()
         }
     })
+}
+
+fn short_failure_reason(reason: &str) -> String {
+    let first_line = reason.lines().next().unwrap_or("unknown error");
+    let mut chars = first_line.chars();
+    let short: String = chars.by_ref().take(160).collect();
+    if chars.next().is_some() {
+        format!("{short}…")
+    } else {
+        short
+    }
 }
 
 /// Builds the review's seed from the session's own projection.

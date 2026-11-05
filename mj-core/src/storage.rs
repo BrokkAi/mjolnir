@@ -206,6 +206,13 @@ pub struct TranscriptRetention {
 /// what makes a cancelled review lossless -- the next one covers both turns.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnReviewState {
+    /// A prompted turn ended while a review was open. The host starts one
+    /// follow-up from the current baseline after the open review closes.
+    #[serde(default)]
+    pub pending_followup: bool,
+    /// Number of rejected corrective submissions for the current command.
+    #[serde(default)]
+    pub forward_attempts: u8,
     #[serde(default)]
     pub child_session_id: Option<String>,
     pub baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
@@ -273,6 +280,12 @@ pub struct UsageCoverage {
     /// Started turns for which no completion report has been recorded.
     #[serde(default)]
     pub unfinished_turns: u64,
+    #[serde(default)]
+    pub provider_cost_turns: u64,
+    #[serde(default)]
+    pub estimated_cost_turns: u64,
+    #[serde(default)]
+    pub missing_cost_turns: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +306,9 @@ pub struct UsagePage {
     pub coverage: UsageCoverage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_cost: Option<ProviderCost>,
+    /// Sum of priced whole turns, in 10^-10 USD. Partial when cost coverage is missing.
+    #[serde(default)]
+    pub turn_cost_usd_ticks: u64,
     #[serde(default)]
     pub turn_selections: BTreeMap<String, UsageSelection>,
     #[serde(default)]
@@ -320,6 +336,9 @@ pub struct UsageSummary {
     pub by_model: Vec<UsageModelTotal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_cost: Option<ProviderCost>,
+    /// Sum of priced whole turns, in 10^-10 USD. Partial when cost coverage is missing.
+    #[serde(default)]
+    pub turn_cost_usd_ticks: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

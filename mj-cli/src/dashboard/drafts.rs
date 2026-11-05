@@ -215,7 +215,7 @@ impl DashboardContext {
             },
             harness_kind: Some(session_record.harness_kind),
             subagent_count: self.dashboard.subagent_count_for(&session_record.id),
-            reviewer_count: self.dashboard.reviewer_count_for(&session_record.id),
+            reviewers: self.dashboard.reviewer_counts_for(&session_record.id),
         };
         let sessions = self.worker_commands_tx.clone();
         let notices = self.notices.clone();
@@ -248,8 +248,7 @@ impl DashboardContext {
                 // pressed the key, so it comes back to the chat rather than
                 // only into the log.
                 let refusal_session = match &request {
-                    mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id }
-                    | mj_chat::chat::ChatDaemonRequest::ResolveTurnReview { session_id, .. } => {
+                    mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id } => {
                         Some(session_id.clone())
                     }
                     _ => None,
@@ -269,10 +268,6 @@ impl DashboardContext {
                         mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id } => {
                             daemon.start_turn_review(session_id).await
                         }
-                        mj_chat::chat::ChatDaemonRequest::ResolveTurnReview {
-                            session_id,
-                            resolution,
-                        } => daemon.resolve_turn_review(session_id, resolution).await,
                     }
                 }
                 .await;

@@ -7,6 +7,24 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc};
 
+/// The body of a Jev classification request: the one place classifier
+/// evidence is prepared to leave the machine. The hosted proxy receives the
+/// evidence alone and adds the questions itself; TypeSafe, called directly,
+/// receives the evidence beside `direct_questions`. Either way every evidence
+/// string has its token-like runs redacted: prompts, replies, command lines
+/// and provider errors can carry API keys, and the classifier has no use for
+/// them. The questions are Mjolnir's own text and are sent as written.
+pub fn request_body(evidence: &impl Serialize, direct_questions: Option<Value>) -> Value {
+    let mut state = serde_json::to_value(evidence).expect("classifier evidence serializes");
+    crate::redact::redact_json_strings(&mut state);
+    match direct_questions {
+        Some(questions) => {
+            serde_json::json!({"model": "jev-latest", "state": state, "questions": questions})
+        }
+        None => state,
+    }
+}
+
 /// Set to `1` in a worker's launch environment when `[jev] enabled = false`.
 /// Workers re-exec with a cleared environment and may run on another
 /// machine, so the switch travels in the launch configuration.

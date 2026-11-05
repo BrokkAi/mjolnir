@@ -942,6 +942,7 @@ fn host_usage(cpu_percent: u8) -> mj_core::targets::DeploymentCapacityUsage {
 /// A profile quota with `remaining` percent of its weekly window left.
 fn weekly_quota(profile_id: &str, remaining: u8) -> ProfileQuota {
     ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Claude,
@@ -983,6 +984,7 @@ fn weekly_and_five_hour_quota(profile_id: &str, weekly: u8, five_hour: u8) -> Pr
 /// label in place of one.
 fn api_quota(profile_id: &str) -> ProfileQuota {
     ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Codex,
@@ -2409,6 +2411,7 @@ fn dashboard_with_subagents(children: &[&str]) -> (DashboardState, String) {
     (dashboard, parent)
 }
 
+// Hard-won: 298330b19: suspended reviewer history inflated the parent's reviewer badge.
 #[test]
 fn reviewer_workspace_filters_child_kinds_and_returns_through_nested_workspaces() {
     use mj_core::subagent::SubagentKind;
@@ -2416,6 +2419,7 @@ fn reviewer_workspace_filters_child_kinds_and_returns_through_nested_workspaces(
     let mut state = dashboard.state.clone();
     state.subagents.get_mut("reviewer-a").unwrap().kind = SubagentKind::Reviewer;
     dashboard.set_state(state);
+    assert_eq!(dashboard.reviewer_counts_for(&parent).open, 1);
     dashboard.open_subagent_workspace(parent.clone());
     dashboard.clear_sessions_filter();
     assert_eq!(
@@ -2459,12 +2463,44 @@ fn reviewer_workspace_filters_child_kinds_and_returns_through_nested_workspaces(
     let mut compact = loaded.clone();
     compact.sessions.remove("reviewer-a");
     dashboard.set_state(compact.clone());
+    assert_eq!(dashboard.reviewer_counts_for(&parent).open, 0);
     dashboard.open_reviewer_workspace(parent.clone());
     assert_eq!(dashboard.current_session_id(), Some("reviewer-a"));
     dashboard.set_state(compact);
     assert_eq!(dashboard.current_session_id(), Some("reviewer-a"));
     dashboard.set_state(loaded);
     assert_eq!(dashboard.selected_session_id(), Some("reviewer-a"));
+    assert_eq!(dashboard.reviewer_counts_for(&parent).open, 1);
+    dashboard.close_subagent_workspace();
+    dashboard.set_opening_session(Some(&parent));
+    let text = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(text.contains("Reviewers · 1"), "{text}");
+
+    // Lifecycle updates leave the relationship in place for history. The
+    // badge follows the session's open state even when that history is loaded.
+    let mut closing = dashboard.state.clone();
+    closing.sessions.get_mut("reviewer-a").unwrap().state = SessionState::Closing;
+    dashboard.set_state(closing);
+    assert_eq!(dashboard.reviewer_counts_for(&parent).open, 1);
+    let mut stopped = dashboard.state.clone();
+    stopped.sessions.get_mut("reviewer-a").unwrap().state = SessionState::Stopped;
+    dashboard.set_state(stopped.clone());
+    assert_eq!(dashboard.reviewer_counts_for(&parent).open, 0);
+    assert_eq!(dashboard.reviewer_counts_for(&parent).total, 1);
+    let text = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(text.contains("Reviewers · 0"), "{text}");
+    assert_eq!(
+        dashboard.managed_child_ids_of_kind(&parent, SubagentKind::Reviewer),
+        ["reviewer-a"]
+    );
+
+    // Leaving and reopening the scoped history cannot resurrect the count.
+    let mut compact = stopped.clone();
+    compact.sessions.remove("reviewer-a");
+    dashboard.set_state(compact);
+    assert_eq!(dashboard.reviewer_counts_for(&parent).open, 0);
+    dashboard.set_state(stopped);
+    assert_eq!(dashboard.reviewer_counts_for(&parent).open, 0);
 }
 
 fn set_cpu(dashboard: &mut DashboardState, entries: &[(&str, u16, u16)]) {
@@ -3278,6 +3314,7 @@ fn golden_dashboard_resource_panels() {
         BTreeMap::from([(
             "codex-1".into(),
             ProfileQuota {
+                paid_credits: None,
                 banked_resets: None,
                 profile_id: "codex-1".into(),
                 harness: HarnessKind::Codex,
@@ -3303,6 +3340,7 @@ fn golden_dashboard_resource_panels() {
         BTreeMap::from([(
             "claude-1".into(),
             ProfileQuota {
+                paid_credits: None,
                 banked_resets: None,
                 profile_id: "claude-1".into(),
                 harness: HarnessKind::Claude,
@@ -3373,6 +3411,7 @@ fn golden_dashboard_resource_panels() {
         claude_config.profiles["claude-1"].clone(),
     );
     let claude_quota = |profile_id: &str, fable: Option<u8>| ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Claude,
@@ -3452,6 +3491,7 @@ fn golden_dashboard_resource_panels() {
     );
 
     let quota = ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
@@ -3496,6 +3536,7 @@ fn golden_dashboard_resource_panels() {
     );
 
     let quota = ProfileQuota {
+        paid_credits: None,
         banked_resets: Some(1),
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,

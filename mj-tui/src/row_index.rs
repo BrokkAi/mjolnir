@@ -114,9 +114,17 @@ impl DashboardState {
             .collect()
     }
 
-    pub fn reviewer_count_for(&self, parent: &str) -> usize {
-        self.managed_child_ids_of_kind(parent, mj_core::subagent::SubagentKind::Reviewer)
-            .len()
+    pub fn reviewer_counts_for(&self, parent: &str) -> mj_chat::chat::ReviewerCounts {
+        let reviewers =
+            self.managed_child_ids_of_kind(parent, mj_core::subagent::SubagentKind::Reviewer);
+        let index = self.synchronized_row_index();
+        mj_chat::chat::ReviewerCounts {
+            total: reviewers.len(),
+            open: reviewers
+                .iter()
+                .filter(|id| index.live.contains(*id))
+                .count(),
+        }
     }
 
     pub(crate) fn managed_active_child_ids(&self, parent: &str) -> Vec<String> {

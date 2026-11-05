@@ -1,0 +1,80 @@
+=== mj models text and JSON output ===
+--- usage text ---
+deepseek-flash  DeepSeek Flash  $0.300 in / $0.006 cached / $1.200 out per 1M
+unknown-model  Unknown Model
+--- usage JSON ---
+{
+  "model": "deepseek-flash",
+  "models": [
+    {
+      "value": "deepseek-flash",
+      "name": "DeepSeek Flash",
+      "description": null,
+      "price": {
+        "input": 0.3,
+        "output": 1.2,
+        "cached_input": 0.006,
+        "cache_write": 0.3
+      }
+    },
+    {
+      "value": "unknown-model",
+      "name": "Unknown Model",
+      "description": null,
+      "price": null
+    }
+  ],
+  "efforts": [],
+  "observed_at": 1,
+  "billing": "usage"
+}
+--- subscription text ---
+billing: subscription
+deepseek-flash  DeepSeek Flash
+unknown-model  Unknown Model
+--- subscription JSON ---
+{
+  "model": "deepseek-flash",
+  "models": [
+    {
+      "value": "deepseek-flash",
+      "name": "DeepSeek Flash",
+      "description": null,
+      "price": null
+    },
+    {
+      "value": "unknown-model",
+      "name": "Unknown Model",
+      "description": null,
+      "price": null
+    }
+  ],
+  "efforts": [],
+  "observed_at": 1,
+  "billing": "subscription"
+}
+--- unknown text ---
+billing: unknown
+deepseek-flash  DeepSeek Flash
+unknown-model  Unknown Model
+--- unknown JSON ---
+{
+  "model": "deepseek-flash",
+  "models": [
+    {
+      "value": "deepseek-flash",
+      "name": "DeepSeek Flash",
+      "description": null,
+      "price": null
+    },
+    {
+      "value": "unknown-model",
+      "name": "Unknown Model",
+      "description": null,
+      "price": null
+    }
+  ],
+  "efforts": [],
+  "observed_at": 1,
+  "billing": "unknown"
+}

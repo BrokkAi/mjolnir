@@ -115,6 +115,7 @@ impl DashboardState {
                     }
                     WizardStep::ProjectDirectory
                 } else {
+                    wizard.mounts.history_selection = 0;
                     wizard.mounts.history = mount_history_host(target)
                         .and_then(|host| self.state.mount_history.get(host))
                         .cloned()

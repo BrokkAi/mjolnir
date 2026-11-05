@@ -44,11 +44,12 @@ impl DashboardState {
                     self.mode = Mode::Resume(wizard);
                     return DashboardAction::None;
                 }
+                wizard.mounts.history_selection = 0;
                 wizard.mounts.history = mount_history_host(&self.config.targets[&target_id])
                     .and_then(|host| self.state.mount_history.get(host))
                     .cloned()
                     .unwrap_or_default();
-                wizard.mounts.history_index = 0;
+                wizard.mounts.selected_mount = 0;
                 wizard.step = if wizard.skips_review() {
                     WizardStep::Launching
                 } else {
@@ -420,7 +421,7 @@ impl DashboardState {
                     .iter()
                     .position(|mount| mount.source == std::path::Path::new(source))
                 {
-                    wizard.mounts.history_index = index;
+                    wizard.mounts.selected_mount = index;
                     if prepare_selected_mount_editor(&mut wizard.mounts) {
                         wizard.step = WizardStep::Mounts;
                     }
@@ -438,7 +439,7 @@ impl DashboardState {
                     .iter()
                     .position(|mount| mount.source == std::path::Path::new(source))
                 {
-                    wizard.mounts.history_index = index;
+                    wizard.mounts.selected_mount = index;
                     if prepare_selected_mount_editor(&mut wizard.mounts) {
                         wizard.step = WizardStep::Mounts;
                     }

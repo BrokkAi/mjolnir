@@ -4412,6 +4412,8 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
     );
 
     let state = TurnReviewState {
+        pending_followup: true,
+        forward_attempts: 2,
         child_session_id: Some("reviewer-child".into()),
         baselines: std::collections::BTreeMap::from([(
             std::path::PathBuf::from("/workspace/app"),
@@ -4440,11 +4442,17 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
         active_group: None,
     };
     save_turn_review_state_in(&database, "session-1", &state).unwrap();
+    assert_eq!(
+        pending_review_followups_in(&database).unwrap(),
+        vec!["session-1"]
+    );
     assert_eq!(turn_review_state_in(&database, "session-1").unwrap(), state);
 
     // On recovery the in-flight review is dropped without advancing the
     // baseline, so the next review still covers the same changes.
     let recovered = TurnReviewState {
+        pending_followup: false,
+        forward_attempts: 2,
         active: None,
         ..state.clone()
     };
@@ -4454,6 +4462,10 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
     assert_eq!(restored.baselines, state.baselines);
     assert_eq!(restored.reviewed_through_ordinal, 42);
     assert_eq!(restored.pending_forward, state.pending_forward);
+    assert!(
+        restored.pending_followup,
+        "a stale state write cannot lose a follow-up"
+    );
 }
 
 #[test]
@@ -4506,6 +4518,8 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
         &database,
         "session-1",
         &TurnReviewState {
+            pending_followup: false,
+            forward_attempts: 0,
             child_session_id: Some("reviewer-child".into()),
             baselines: baselines.clone(),
             reviewed_through_ordinal: 42,
@@ -4528,6 +4542,8 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
         &database,
         "session-2",
         &TurnReviewState {
+            pending_followup: false,
+            forward_attempts: 0,
             child_session_id: Some("reviewer-child".into()),
             baselines: baselines.clone(),
             reviewed_through_ordinal: 7,
@@ -4593,10 +4609,21 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         ],
     };
     let state = TurnReviewState {
+        pending_followup: false,
+        forward_attempts: 0,
         active: Some("group-1".into()),
         active_group: Some(group),
         ..Default::default()
     };
+    save_turn_review_state_in(
+        &database,
+        "session-group",
+        &TurnReviewState {
+            pending_followup: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     save_turn_review_state_in(&database, "session-group", &state).unwrap();
     assert_eq!(
         active_review_groups_in(&database).unwrap(),
@@ -4610,6 +4637,51 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
     assert_eq!(
         turn_review_state_in(&database, "session-group").unwrap(),
         state
+    );
+    mark_review_followup_in(&database, "session-group").unwrap();
+    save_turn_review_state_in(&database, "session-group", &state).unwrap();
+    assert!(
+        turn_review_state_in(&database, "session-group")
+            .unwrap()
+            .pending_followup
+    );
+    let closed = TurnReviewState {
+        active: None,
+        active_group: None,
+        ..state.clone()
+    };
+    save_turn_review_state_in(&database, "session-group", &closed).unwrap();
+    assert!(
+        turn_review_state_in(&database, "session-group")
+            .unwrap()
+            .pending_followup
+    );
+    save_turn_review_state_in(&database, "session-group", &state).unwrap();
+    assert!(
+        !turn_review_state_in(&database, "session-group")
+            .unwrap()
+            .pending_followup
+    );
+}
+
+// Hard-won: ee65b804b: a follow-up for a never-reviewed session had no row to mark and was never durable.
+#[test]
+fn a_followup_for_a_never_reviewed_session_survives_a_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-new", "project-1")).unwrap();
+    mark_review_followup_in(&database, "session-new").unwrap();
+    mark_review_followup_in(&database, "session-new").unwrap();
+    assert_eq!(
+        pending_review_followups_in(&database).unwrap(),
+        vec!["session-new".to_owned()]
+    );
+    assert_eq!(
+        turn_review_state_in(&database, "session-new").unwrap(),
+        TurnReviewState {
+            pending_followup: true,
+            ..Default::default()
+        }
     );
 }
 

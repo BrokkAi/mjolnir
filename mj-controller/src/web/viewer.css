@@ -641,9 +641,7 @@ pre.entry-body {
   overscroll-behavior: contain;
 }
 
-/* A turn review under way, or waiting for the reader to answer its findings.
- * It borrows the elicitation card's shape because it asks the same kind of
- * question: something is blocked until you answer it. */
+/* Passive review progress in the conversation. */
 .turn-review {
   border-color: var(--plan);
 }

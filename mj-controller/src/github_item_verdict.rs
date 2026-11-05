@@ -13,15 +13,17 @@ pub async fn classify(evidence: &GithubItemEvidence) -> Result<GithubItemVerdict
     let key = tokio::task::spawn_blocking(mj_core::activity::verdict::api_key)
         .await
         .context("resolve Jev key")?;
-    let (endpoint, source, request_body) = if key.is_some() {
+    let (endpoint, source, direct_questions) = if key.is_some() {
         (
             DIRECT_ENDPOINT,
             "direct",
-            serde_json::to_vec(&evidence.upstream_body())?,
+            Some(mj_core::github_item::questions()),
         )
     } else {
-        (HOSTED_ENDPOINT, "hosted", serde_json::to_vec(&evidence)?)
+        (HOSTED_ENDPOINT, "hosted", None)
     };
+    let request_body =
+        serde_json::to_vec(&mj_core::jev::request_body(&evidence, direct_questions))?;
 
     let attempt = match mj_core::jev::DecisionLog::open(mj_core::jev::controller_log_dir()) {
         Ok(log) => Some(log.start(

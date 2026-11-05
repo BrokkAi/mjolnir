@@ -22,6 +22,21 @@ pub(super) fn owner_pid_to_watch() -> Result<Option<u32>> {
     Ok(Some(pid))
 }
 
+/// Where this daemon runs, from [`mj_core::placement::daemon_container`].
+pub(crate) fn placement() -> DaemonPlacement {
+    match mj_core::placement::daemon_container() {
+        Some(name) => DaemonPlacement::Container {
+            name,
+            runtime: match std::env::var(DAEMON_CONTAINER_RUNTIME_ENV).as_deref() {
+                Ok("podman") => Some(mj_core::config::DaemonRuntime::Podman),
+                Ok("docker") => Some(mj_core::config::DaemonRuntime::Docker),
+                _ => None,
+            },
+        },
+        None => DaemonPlacement::Host,
+    }
+}
+
 pub async fn run_daemon_process() -> Result<()> {
     // Checked before the store is locked so a bad value fails fast and leaves
     // no daemon state behind.
@@ -30,7 +45,7 @@ pub async fn run_daemon_process() -> Result<()> {
     // A container-native daemon runs every command beside itself, inside its
     // own container. A host daemon routes host work to the node. Tests that
     // run a daemon in-process never reach this line.
-    if mj_core::config::env_override("DAEMON_CONTAINER").is_none() {
+    if placement() == DaemonPlacement::Host {
         crate::node_registry::install_command_host(cancellation.clone())?;
         crate::node_registry::install_host_fs(cancellation.clone())?;
     }
@@ -140,20 +155,9 @@ pub(super) async fn run_daemon_runtime(
         // random value every time the process starts, so a client can tell a
         // replacement from the daemon it was talking to without a PID.
         instance_id: random_hex::<16>()?,
-        // The launcher names the container in the environment. Keeping this
-        // answer in the daemon means clients no longer read `/proc`.
-        placement: match mj_core::config::env_override("DAEMON_CONTAINER") {
-            Some(name) if !name.trim().is_empty() => DaemonPlacement::Container {
-                name,
-                runtime: match mj_core::config::env_override("DAEMON_CONTAINER_RUNTIME").as_deref()
-                {
-                    Some("podman") => Some(mj_core::config::DaemonRuntime::Podman),
-                    Some("docker") => Some(mj_core::config::DaemonRuntime::Docker),
-                    _ => None,
-                },
-            },
-            _ => DaemonPlacement::Host,
-        },
+        // Keeping this answer in the daemon means clients no longer read
+        // `/proc`.
+        placement: placement(),
     };
     // Startup recovery can run commands, and commands run on the node, so the
     // node has to be able to connect before this daemon is ready for clients.

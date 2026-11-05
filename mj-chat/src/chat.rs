@@ -432,6 +432,15 @@ impl QueuedPrompt {
     }
 }
 
+/// Reviewer history membership and the open sessions displayed on its control.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReviewerCounts {
+    /// All reviewer children, including retained history, for navigation.
+    pub total: usize,
+    /// Reviewer sessions still open, displayed on the navigation control.
+    pub open: usize,
+}
+
 /// The stable columns the conversation's title shows, snapshotted when the
 /// chat opens.
 #[derive(Debug, Clone, Default)]
@@ -450,7 +459,7 @@ pub struct SessionHeaderIdentity {
     /// Direct children owned by this parent session.
     pub subagent_count: usize,
     /// Reviewer children, kept separate from ordinary subagents.
-    pub reviewer_count: usize,
+    pub reviewers: ReviewerCounts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -632,7 +641,7 @@ pub struct ChatState {
     /// The session runs with Mjolnir sub-agents, whether or not any exist.
     subagents_enabled: bool,
     subagent_working_count: usize,
-    reviewer_count: usize,
+    reviewers: ReviewerCounts,
     reviewer_control_area: Option<Rect>,
     subagent_control_area: Option<Rect>,
     task_dialog_area: Option<Rect>,
@@ -805,7 +814,7 @@ impl ChatState {
             subagent_count: 0,
             subagents_enabled: false,
             subagent_working_count: 0,
-            reviewer_count: 0,
+            reviewers: ReviewerCounts::default(),
             reviewer_control_area: None,
             subagent_control_area: None,
             task_dialog_area: None,
@@ -885,7 +894,7 @@ impl ChatState {
         state.standby = true;
         state.bind_composer_session(Some(session_id));
         state.set_subagent_count(header.subagent_count);
-        state.set_reviewer_count(header.reviewer_count);
+        state.set_reviewer_counts(header.reviewers);
         state.set_header_summary(header.target, header.profile, header.title);
         if let Some(harness_kind) = header.harness_kind {
             state.set_harness_kind(harness_kind);

@@ -509,51 +509,6 @@ function review() {
   };
 }
 
-test('identical reviews in different sessions rebuild actions for the current session', async () => {
-  const harness = turnReviewHarness();
-  const firstSession = { id: 'session-a', turn_review: review() };
-  const secondSession = { id: 'session-b', turn_review: review() };
-
-  harness.setActive(firstSession);
-  harness.renderTurnReview(firstSession);
-  const firstCard = harness.reviewHost.children[0];
-
-  harness.setActive(secondSession);
-  harness.renderTurnReview(secondSession);
-  const secondCard = harness.reviewHost.children[0];
-  assert.notStrictEqual(secondCard, firstCard, 'the second session reused the first session card');
-
-  const cancel = descendants(secondCard, 'button').find(button => button.textContent === 'Cancel');
-  await cancel.dispatch('click');
-  assert.deepEqual(JSON.parse(JSON.stringify(harness.sent.at(-1))), {
-    action: 'resolve-review',
-    session_id: 'session-b',
-    resolution: 'cancel',
-  });
-});
-
-test('a failed review resolution restores every action allowed by the snapshot', async () => {
-  const harness = turnReviewHarness();
-  const session = { id: 'session-a', turn_review: review() };
-  harness.setActive(session);
-  harness.renderTurnReview(session);
-
-  const oldCard = harness.reviewHost.children[0];
-  const oldButtons = descendants(oldCard, 'button');
-  const forward = oldButtons.find(button => button.textContent === 'Forward findings');
-  const request = forward.dispatch('click');
-  assert.ok(oldButtons.every(button => button.disabled), 'the card accepted a second resolution');
-  await request;
-
-  const restoredCard = harness.reviewHost.children[0];
-  assert.notStrictEqual(restoredCard, oldCard, 'the failed action left the disabled card mounted');
-  assert.ok(
-    descendants(restoredCard, 'button').every(button => !button.disabled),
-    'an allowed resolution stayed disabled after failure',
-  );
-});
-
-
 test('phone review status exactly mirrors the shared status sentences', () => {
   const statusSource = sourceBetween(
     'function sessionReviewStatusConfig(snapshot, session) {',

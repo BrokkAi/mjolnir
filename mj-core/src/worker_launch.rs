@@ -49,21 +49,33 @@ pub fn installed_harness_home(launch_path: &Path) -> anyhow::Result<Option<PathB
         .map(|home| harness.home_from_environment(home)))
 }
 
-/// Who owns the ACP adapter and harness executable selected by a worker.
-/// Managed launch resolves the compiled pin; ambient launch uses the target's runtime.
+/// Where a worker's ACP adapter and harness executable come from.
+/// [`crate::harness_install::locate`] turns a policy into a launch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessRuntimePolicy {
+    /// The target's own installation, for example a container target's image,
+    /// with Mjolnir's managed installation when it is missing or incompatible.
     #[default]
     Ambient,
-    /// The worker owns the exact ACP bridge installation.
+    /// Mjolnir's managed installation of the compiled pin.
     #[serde(rename = "managed_remote", alias = "managed")]
     Managed,
+    /// Only the pinned harnesses of the image this process runs in: the
+    /// daemon container's agent-dev image. A missing or incompatible harness
+    /// is an error; nothing is installed. Only a container daemon writes it,
+    /// for workers in its own container, which run the image's own build.
+    Image,
 }
 
 impl HarnessRuntimePolicy {
     pub const fn is_ambient(&self) -> bool {
         matches!(self, Self::Ambient)
+    }
+
+    /// Whether this source may download Mjolnir's managed harness or Node.js.
+    pub const fn may_install(&self) -> bool {
+        !matches!(self, Self::Image)
     }
 }
 
@@ -436,9 +448,6 @@ impl WorkerLaunchConfig {
     /// The `mj-agents` role is derived once from the launch's ownership and
     /// policy so Codex and Claude expose the same tools.
     pub fn subagent_mcp_role(&self) -> Option<crate::subagent::SubagentMcpRole> {
-        if self.review_gate() {
-            return Some(crate::subagent::SubagentMcpRole::Parent);
-        }
         resolve_subagent_mcp_role(
             &self.subagents,
             self.is_managed_subagent(),
@@ -446,7 +455,8 @@ impl WorkerLaunchConfig {
             self.agent_mailboxes_enabled,
             self.environment
                 .get(SESSION_MESSAGE_MCP_ENV)
-                .is_some_and(|value| value == "1"),
+                .is_some_and(|value| value == "1")
+                || self.review_gate(),
         )
     }
 
@@ -580,6 +590,15 @@ pub struct ProfileProbeSpec {
     pub excluded_environment: Vec<String>,
     pub cwd: PathBuf,
     pub model: Option<String>,
+    /// Where the probe's harness comes from: the same source as a local
+    /// session ([`crate::placement::local_harness_runtime`]). Specs written by
+    /// older daemons omit it and always probed the managed installation.
+    #[serde(default = "managed_harness_runtime")]
+    pub harness_runtime: HarnessRuntimePolicy,
+}
+
+fn managed_harness_runtime() -> HarnessRuntimePolicy {
+    HarnessRuntimePolicy::Managed
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -606,8 +625,11 @@ mod tests {
         })
     }
 
+    // Hard-won: 32d96d199: push reviews exposed delegation tools with subagents=None.
     #[test]
     fn persisted_review_trigger_controls_primary_mcp_without_leaking_to_children() {
+        use crate::subagent::{SubagentMcpRole, SubagentPolicy};
+
         for harness in [
             HarnessKind::Claude,
             HarnessKind::Codex,
@@ -629,12 +651,25 @@ mod tests {
                 let expected =
                     trigger == crate::config::ReviewTrigger::Push && harness != HarnessKind::Muse;
                 assert_eq!(launch.review_gate(), expected);
-                if expected {
-                    assert_eq!(
-                        launch.subagent_mcp_role(),
-                        Some(crate::subagent::SubagentMcpRole::Parent)
-                    );
+                for policy in [
+                    SubagentPolicy::None,
+                    SubagentPolicy::Native,
+                    SubagentPolicy::Mjolnir {
+                        straightforward: None,
+                        subtle: None,
+                    },
+                ] {
+                    launch.subagents = policy.clone();
+                    let saved = serde_json::to_value(&launch).unwrap();
+                    let read: WorkerLaunchConfig = serde_json::from_value(saved).unwrap();
+                    let expected_role = match policy {
+                        SubagentPolicy::Mjolnir { .. } => Some(SubagentMcpRole::Parent),
+                        _ if expected => Some(SubagentMcpRole::MessageOnly),
+                        _ => None,
+                    };
+                    assert_eq!(read.subagent_mcp_role(), expected_role);
                 }
+                launch.subagents = SubagentPolicy::None;
                 launch
                     .environment
                     .insert(SESSION_MANAGED_SUBAGENT_ENV.into(), "1".into());

@@ -1111,174 +1111,6 @@ fn project_picker_github_result_does_not_overwrite_query_or_steal_edit_focus() {
     );
 }
 
-fn project_picker_folders_navigate_up_home_and_choose_current_repository() {
-    let mut dashboard = dashboard_at_project_picker();
-    activate_project_control(&mut dashboard, WizardControl::ProjectFolders);
-    let (home, request) = take_project_request(&mut dashboard);
-    assert_eq!(
-        request,
-        ProjectDiscoveryRequest::Directory {
-            path: String::new(),
-            filter: String::new(),
-        }
-    );
-    let home_result = ProjectDiscovery {
-        entries: vec![ProjectEntry {
-            name: "src".into(),
-            source: "/home/user/src".into(),
-            description: "Folder".into(),
-            kind: ProjectEntryKind::Directory,
-        }],
-        directory: Some("/home/user".into()),
-        parent: Some("/home".into()),
-        truncated: false,
-    };
-    dashboard.apply_project_discovery(&home, Ok(home_result.clone()));
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    let (child, request) = take_project_request(&mut dashboard);
-    assert_eq!(
-        request,
-        ProjectDiscoveryRequest::Directory {
-            path: "/home/user/src".into(),
-            filter: String::new(),
-        }
-    );
-    let repo_result = ProjectDiscovery {
-        entries: vec![ProjectEntry {
-            name: "Use src".into(),
-            source: "/home/user/src".into(),
-            description: "Use this repository".into(),
-            kind: ProjectEntryKind::Repository,
-        }],
-        directory: Some("/home/user/src".into()),
-        parent: Some("/home/user".into()),
-        truncated: false,
-    };
-    dashboard.apply_project_discovery(&child, Ok(repo_result.clone()));
-    activate_project_control(&mut dashboard, WizardControl::ProjectUp);
-    let (up, request) = take_project_request(&mut dashboard);
-    assert_eq!(
-        request,
-        ProjectDiscoveryRequest::Directory {
-            path: "/home/user".into(),
-            filter: String::new(),
-        }
-    );
-    dashboard.apply_project_discovery(&up, Ok(home_result.clone()));
-    activate_project_control(&mut dashboard, WizardControl::ProjectHome);
-    let (home, request) = take_project_request(&mut dashboard);
-    assert_eq!(
-        request,
-        ProjectDiscoveryRequest::Directory {
-            path: String::new(),
-            filter: String::new(),
-        }
-    );
-    dashboard.apply_project_discovery(&home, Ok(home_result));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let (child, _) = take_project_request(&mut dashboard);
-    dashboard.apply_project_discovery(&child, Ok(repo_result));
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-    let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
-    assert!(text.contains("/home/user/src"), "{text}");
-    assert!(text.contains("Use this repository"), "{text}");
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::CreateBundle {
-            sources: vec!["/home/user/src".into()]
-        }
-    );
-}
-
-#[test]
-fn project_picker_folder_filter_retry_and_open_repository_preserve_navigation() {
-    let mut dashboard = dashboard_at_project_picker();
-    activate_project_control(&mut dashboard, WizardControl::ProjectFolders);
-    let (initial, _) = take_project_request(&mut dashboard);
-    dashboard.apply_project_discovery(
-        &initial,
-        Ok(ProjectDiscovery {
-            entries: vec![
-                discovered_repository("/work/app"),
-                discovered_repository("/work/shared"),
-            ],
-            directory: Some("/work".into()),
-            parent: Some("/".into()),
-            truncated: false,
-        }),
-    );
-    focus_project_control(&mut dashboard, WizardControl::ProjectQuery);
-    type_source(&mut dashboard, "app");
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let (filtered, request) = take_project_request(&mut dashboard);
-    assert_eq!(
-        request,
-        ProjectDiscoveryRequest::Directory {
-            path: "/work".into(),
-            filter: "app".into()
-        }
-    );
-    dashboard.apply_project_discovery(&filtered, Err("Cannot read this folder".into()));
-    activate_project_control(&mut dashboard, WizardControl::ProjectRetry);
-    let (retry, retried_request) = take_project_request(&mut dashboard);
-    assert_eq!(retried_request, request);
-    assert_eq!(
-        project_wizard(&dashboard).project_picker.folder_filter,
-        "app"
-    );
-    dashboard.apply_project_discovery(
-        &retry,
-        Ok(ProjectDiscovery {
-            entries: vec![discovered_repository("/work/app")],
-            directory: Some("/work".into()),
-            parent: Some("/".into()),
-            truncated: false,
-        }),
-    );
-    // A repository can be browsed for nested projects without selecting it.
-    assert_eq!(
-        activate_project_control(&mut dashboard, WizardControl::ProjectOpenFolder),
-        DashboardAction::None
-    );
-    let (opened, request) = take_project_request(&mut dashboard);
-    assert_eq!(
-        request,
-        ProjectDiscoveryRequest::Directory {
-            path: "/work/app".into(),
-            filter: String::new()
-        }
-    );
-    assert!(
-        project_wizard(&dashboard)
-            .project_picker
-            .folder_filter
-            .is_empty()
-    );
-    assert!(!project_wizard(&dashboard).bundle_creation_in_flight);
-    dashboard.apply_project_discovery(
-        &opened,
-        Ok(ProjectDiscovery {
-            entries: vec![
-                discovered_repository("/work/app"),
-                discovered_repository("/work/app/nested"),
-            ],
-            directory: Some("/work/app".into()),
-            parent: Some("/work".into()),
-            truncated: false,
-        }),
-    );
-    ready_key(&mut dashboard, key(KeyCode::Down));
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::CreateBundle {
-            sources: vec!["/work/app/nested".into()]
-        }
-    );
-}
-
 fn project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary() {
     let mut dashboard = dashboard_at_project_picker();
     focus_project_control(&mut dashboard, WizardControl::ProjectMultiple);
@@ -1331,7 +1163,7 @@ fn project_picker_rejects_late_success_and_failure_after_switching_tabs() {
     let mut dashboard = dashboard_at_project_picker();
     activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
     let (github, _) = take_project_request(&mut dashboard);
-    activate_project_control(&mut dashboard, WizardControl::ProjectFolders);
+    activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
     let (folders, _) = take_project_request(&mut dashboard);
     dashboard.apply_project_discovery(
         &github,
@@ -1341,7 +1173,7 @@ fn project_picker_rejects_late_success_and_failure_after_switching_tabs() {
     );
     dashboard.apply_project_discovery(&github, Err("old GitHub error".into()));
     let picker = &project_wizard(&dashboard).project_picker;
-    assert_eq!(picker.tab, ProjectTab::Folders);
+    assert_eq!(picker.tab, ProjectTab::Github);
     assert!(picker.loading);
     assert!(picker.entries.is_empty());
     assert!(picker.error.is_none());
@@ -1473,8 +1305,7 @@ fn project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminal
         let text = lines.join("\n");
         for label in [
             "Choose a project",
-            "Folders",
-            "Paste URL",
+            "URL or Path",
             "Search",
             "owner/visible",
             "Use project",
@@ -1502,35 +1333,16 @@ fn project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminal
     }
 }
 
-fn project_picker_folder_choices_and_filter_remain_visible_on_small_terminals() {
-    for (width, height) in [(80, 24), (60, 20)] {
-        let mut dashboard = dashboard_at_project_picker();
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        click_project_text(&mut dashboard, &mut terminal, "Folders");
-        let (context, _) = take_project_request(&mut dashboard);
-        dashboard.apply_project_discovery(
-            &context,
-            Ok(ProjectDiscovery {
-                entries: vec![discovered_repository("/work/visible")],
-                directory: Some("/work".into()),
-                parent: Some("/".into()),
-                truncated: false,
-            }),
-        );
-        let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
-        for label in ["/work/visible", "Filter:", "Use project"] {
-            assert!(
-                text.contains(label),
-                "missing {label:?} at {width}x{height}:\n{text}"
-            );
+fn project_picker_url_or_path_submits_a_local_repository_path() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectUrl);
+    type_source(&mut dashboard, "/work/visible");
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["/work/visible".into()],
         }
-        assert_eq!(
-            click_project_text(&mut dashboard, &mut terminal, "Use project"),
-            DashboardAction::CreateBundle {
-                sources: vec!["/work/visible".into()],
-            }
-        );
-    }
+    );
 }
 
 fn project_picker_results_remain_visible_with_multiple_selected_repositories() {
@@ -1583,7 +1395,7 @@ fn project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions() {
     for (width, height) in [(80, 24), (60, 20)] {
         let mut dashboard = dashboard_at_project_picker();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        click_project_text(&mut dashboard, &mut terminal, "Paste URL");
+        click_project_text(&mut dashboard, &mut terminal, "URL or Path");
         click_project_text(
             &mut dashboard,
             &mut terminal,
@@ -1962,6 +1774,7 @@ fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
     dashboard.quotas = BTreeMap::from([(
         "claude-1".to_string(),
         ProfileQuota {
+            paid_credits: None,
             banked_resets: None,
             profile_id: "claude-1".into(),
             harness: HarnessKind::Claude,
@@ -2212,6 +2025,136 @@ fn a_source_that_cannot_hold_the_overlay_skips_copy_on_write() {
     assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Mounts));
     ready_key(&mut dashboard, key(KeyCode::Esc));
     assert!(dashboard.dialog_confirmation_open());
+}
+
+// Hard-won: 6c5ea1b36: default destinations were joined with `\` on Windows (`/mnt\cache`).
+#[test]
+fn recent_mount_entry_uses_add_validation_and_returns_to_review() {
+    let mut dashboard = dashboard_at_mount_editor("");
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("render empty history");
+    assert!(
+        !buffer_lines(terminal.backend().buffer())
+            .join("\n")
+            .contains("Recent on this host:")
+    );
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.mounts.history = vec!["/opt/cache".into()];
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("render");
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.form.get_mut().focus(WizardControl::MountHistory);
+    assert!(matches!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::ValidateMountSource { .. }
+    ));
+    assert_eq!(wizard_mounts(&dashboard).source, "/opt/cache");
+    assert_eq!(wizard_mounts(&dashboard).destination, "/mnt/cache");
+    dashboard.apply_mount_source_validation("/opt/cache", Ok(None));
+    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Review));
+}
+
+#[test]
+fn recent_mount_list_filters_attached_sources_and_scrolls() {
+    let mut mounts = MountWizard::new(
+        (0..8)
+            .map(|n| PathBuf::from(format!("/opt/recent-{n}")))
+            .collect(),
+    );
+    mounts.mounts.push(AdditionalMount {
+        source: "/opt/recent-0".into(),
+        destination: "/mnt/recent-0".into(),
+        access: MountAccess::Ro,
+    });
+    assert_eq!(mounts.available_history().len(), 7);
+    assert_eq!(
+        mounts.available_history()[0],
+        &PathBuf::from("/opt/recent-1")
+    );
+    mounts.editing_mount = Some(0);
+    assert_eq!(mounts.available_history().len(), 8);
+
+    let mut dashboard = dashboard_at_mount_editor("");
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.mounts.history = mounts.history;
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("render");
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.form.get_mut().focus(WizardControl::MountHistory);
+    for _ in 0..7 {
+        ready_key(&mut dashboard, key(KeyCode::Down));
+    }
+    assert_eq!(wizard_mounts(&dashboard).history_selection, 7);
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("render scrolled");
+    let lines = buffer_lines(terminal.backend().buffer());
+    capture_render(120, 30, &lines);
+    let rendered = lines.join("\n");
+    assert!(rendered.contains("/opt/recent-7"));
+    let mut small = Terminal::new(TestBackend::new(60, 22)).expect("small terminal");
+    small
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("render small dialog");
+    let small_render = buffer_lines(small.backend().buffer()).join("\n");
+    assert!(small_render.contains("/opt/recent-7"), "{small_render}");
+}
+
+#[test]
+fn recent_mount_single_click_selects_and_double_click_validates() {
+    let mut dashboard = dashboard_at_mount_editor("");
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.mounts.history = vec!["/opt/cache".into()];
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    assert_eq!(
+        click_project_text(&mut dashboard, &mut terminal, "/opt/cache"),
+        DashboardAction::None
+    );
+    assert!(wizard_mounts(&dashboard).source.is_empty());
+    assert!(matches!(
+        click_project_text(&mut dashboard, &mut terminal, "/opt/cache"),
+        DashboardAction::ValidateMountSource { .. }
+    ));
+}
+
+#[test]
+fn recent_mount_entry_works_in_move_wizard() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_resume_for("session-1");
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        panic!("resume wizard")
+    };
+    wizard.step = WizardStep::Mounts;
+    wizard.mounts.history = vec!["/opt/cache".into()];
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("render");
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        panic!("resume wizard")
+    };
+    wizard.form.get_mut().focus(WizardControl::MountHistory);
+    assert!(matches!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::ValidateMountSource { .. }
+    ));
+    dashboard.apply_mount_source_validation("/opt/cache", Ok(None));
+    assert!(matches!(&dashboard.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Review));
 }
 
 #[test]
@@ -3153,7 +3096,8 @@ fn failed_move_preparation_stays_visible_and_retry_requests_preparation() {
     terminal
         .draw(|frame| render(frame, &mut dashboard))
         .expect("draw failed move review");
-    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+    let lines = buffer_lines(terminal.backend().buffer());
+    let rendered = lines.join("\n");
     assert!(rendered.contains("Move preparation failed: destination is unavailable"));
     assert!(rendered.contains("Retry"));
 
@@ -5880,6 +5824,10 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
 fn golden_project_picker() {
     for (label, run) in [
         (
+            "recent_mount_list_filters_attached_sources_and_scrolls",
+            recent_mount_list_filters_attached_sources_and_scrolls as fn(),
+        ),
+        (
             "project_picker_skips_empty_saved_projects_and_offers_github_from_recent",
             project_picker_skips_empty_saved_projects_and_offers_github_from_recent as fn(),
         ),
@@ -5900,10 +5848,6 @@ fn golden_project_picker() {
             project_picker_github_search_chooses_the_keyboard_selected_result,
         ),
         (
-            "project_picker_folders_navigate_up_home_and_choose_current_repository",
-            project_picker_folders_navigate_up_home_and_choose_current_repository,
-        ),
-        (
             "project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary",
             project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary,
         ),
@@ -5912,8 +5856,8 @@ fn golden_project_picker() {
             project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals,
         ),
         (
-            "project_picker_folder_choices_and_filter_remain_visible_on_small_terminals",
-            project_picker_folder_choices_and_filter_remain_visible_on_small_terminals,
+            "project_picker_url_or_path_submits_a_local_repository_path",
+            project_picker_url_or_path_submits_a_local_repository_path,
         ),
         (
             "project_picker_results_remain_visible_with_multiple_selected_repositories",

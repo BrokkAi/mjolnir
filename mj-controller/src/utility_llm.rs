@@ -1049,6 +1049,7 @@ mod tests {
     #[test]
     fn zero_quota_is_excluded_and_api_ranks_last() {
         let mut report = ProfileQuota {
+            paid_credits: None,
             banked_resets: None,
             profile_id: "p".into(),
             harness: HarnessKind::Codex,

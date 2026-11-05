@@ -591,6 +591,7 @@ fn probe_profile(
         excluded_environment,
         cwd,
         model,
+        harness_runtime: mj_core::placement::local_harness_runtime(),
     };
     let path = root.path().join("probe.json");
     mj_core::config::atomic_write(&path, &serde_json::to_vec(&spec)?)?;

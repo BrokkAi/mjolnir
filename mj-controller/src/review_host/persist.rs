@@ -8,7 +8,7 @@ impl HostState {
         reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
         prepared: Result<Prepared, StartRefusal>,
     ) {
-        let cancelled = matches!(self.preparing.get(&session_id), Some(PreparingOperation::Review { cancelled }) if cancelled.load(std::sync::atomic::Ordering::Acquire));
+        let cancelled = matches!(self.preparing.get(&session_id), Some(PreparingOperation::Review { cancelled, .. }) if cancelled.load(std::sync::atomic::Ordering::Acquire));
         let prepared = if cancelled {
             Err(StartRefusal("review preparation cancelled".into()))
         } else {
@@ -18,8 +18,15 @@ impl HostState {
             Ok(prepared) => prepared,
             Err(refusal) => {
                 self.preparing.remove(&session_id);
-                release_prompts(&session_id);
-                if manual || refusal.0 != SUBAGENT_REFUSAL {
+                if !manual
+                    && matches!(
+                        refusal.0.as_str(),
+                        "prompts are queued; the review waits for them"
+                            | "a review runs between turns; this one is still working"
+                    )
+                {
+                    self.mark_followup(&session_id);
+                } else if manual || refusal.0 != SUBAGENT_REFUSAL {
                     self.record_notice(&session_id, start_refusal_notice(&refusal.0));
                 }
                 self.publish(&session_id);
@@ -29,7 +36,6 @@ impl HostState {
         };
         if self.reviews.contains_key(&session_id) {
             self.preparing.remove(&session_id);
-            release_prompts(&session_id);
             let refusal = StartRefusal("a review is already open".to_owned());
             answer(reply, Err(refusal));
             return;
@@ -37,14 +43,15 @@ impl HostState {
         self.next_epoch = self.next_epoch.saturating_add(1);
         let epoch = self.next_epoch;
         let mut prepared = prepared;
+        prepared.state.pending_followup = self.followups.contains(&session_id);
         if prepared.resume_forward.is_none() {
             prepared.state.child_session_id = None;
+            prepared.state.forward_attempts = 0;
         }
         let review_id = match new_command_id("review-group") {
             Ok(id) => id,
             Err(error) => {
                 self.preparing.remove(&session_id);
-                release_prompts(&session_id);
                 answer(
                     reply,
                     Err(StartRefusal(format!(
@@ -83,7 +90,6 @@ impl HostState {
                     Ok(key) => key,
                     Err(error) => {
                         self.preparing.remove(&session_id);
-                        release_prompts(&session_id);
                         answer(
                             reply,
                             Err(StartRefusal(format!(
@@ -131,7 +137,6 @@ impl HostState {
             if retry_recovery {
                 self.recovery_candidates.insert(session_id.clone());
             }
-            release_prompts(&session_id);
             answer(
                 pending.reply,
                 Err(StartRefusal(format!(
@@ -176,7 +181,7 @@ impl HostState {
                 let Some(pending) = self.pending_open.remove(&session_id) else {
                     return;
                 };
-                let cancelled = matches!(self.preparing.remove(&session_id), Some(PreparingOperation::Review { cancelled }) if cancelled.load(std::sync::atomic::Ordering::Acquire));
+                let cancelled = matches!(self.preparing.remove(&session_id), Some(PreparingOperation::Review { cancelled, .. }) if cancelled.load(std::sync::atomic::Ordering::Acquire));
                 if cancelled && result.is_ok() {
                     let mut state = pending.prepared.state;
                     state.active = None;
@@ -184,7 +189,6 @@ impl HostState {
                     if let Err(error) = self.persist(session_id.clone(), state, None) {
                         tracing::warn!(%session_id, %error, "could not clear cancelled review preparation");
                     }
-                    release_prompts(&session_id);
                     self.publish(&session_id);
                     answer(
                         pending.reply,
@@ -196,7 +200,6 @@ impl HostState {
                     if pending.prepared.resume_forward.is_some() {
                         self.recovery_candidates.insert(session_id.clone());
                     }
-                    release_prompts(&session_id);
                     self.publish(&session_id);
                     answer(
                         pending.reply,
@@ -240,15 +243,23 @@ impl HostState {
                     return;
                 };
                 if let Err(error) = result {
-                    if let Some(slot) = self.reviews.get_mut(&session_id) {
-                        slot.driver.forward_failed(format!(
-                            "the handoff could not be recorded durably: {error}"
-                        ));
-                    }
-                    self.publish(&session_id);
+                    self.forward_failed(
+                        &session_id,
+                        format!("the handoff could not be recorded durably: {error}"),
+                    );
                     return;
                 }
                 self.run(&session_id, requests);
+            }
+            PersistenceCompletion::ForwardRetry => {
+                if let Err(error) = result {
+                    self.stop_failed_forward(
+                        &session_id,
+                        format!("could not persist delivery retry: {error}"),
+                    );
+                    return;
+                }
+                self.schedule_forward_retry(&session_id);
             }
             PersistenceCompletion::Close => {
                 self.closing.remove(&session_id);
@@ -279,7 +290,6 @@ impl HostState {
                     })
                     .unwrap_or_default();
                 self.reviews.remove(&session_id);
-                release_prompts(&session_id);
                 if let Some(notice) = notice {
                     self.record_notice(&session_id, notice);
                 }
@@ -287,6 +297,20 @@ impl HostState {
                     self.record_notice(&session_id, warning);
                 }
                 self.publish(&session_id);
+                self.begin_followup(&session_id);
+            }
+            PersistenceCompletion::FollowUp => {
+                self.followup_saving.remove(&session_id);
+                if let Err(error) = result {
+                    tracing::warn!(%session_id, %error, "could not persist pending follow-up review");
+                    let events = self.events.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        let _ = events.send(HostEvent::RetryFollowUp { session_id });
+                    });
+                    return;
+                }
+                self.begin_followup(&session_id);
             }
         }
     }

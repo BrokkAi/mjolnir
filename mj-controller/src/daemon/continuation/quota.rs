@@ -1,6 +1,6 @@
 use super::*;
 use crate::quota::{ProfileQuota, QuotaManager, QuotaRefreshRequest};
-use crate::server::api::{CandidateQuota, SubagentBackend, SubagentCandidate};
+use crate::server::api::{SubagentBackend, SubagentCandidate};
 use mj_core::continuation::QuotaRecovery;
 use mj_core::state::{MoveSessionRequest, QuotaMoveContinuation};
 
@@ -33,7 +33,7 @@ pub(super) fn destinations(
     model: &str,
     mut candidates: Vec<SubagentCandidate>,
     now: i64,
-) -> Vec<SubagentCandidate> {
+) -> Result<Vec<SubagentCandidate>> {
     candidates.retain(|c| {
         c.profile_id != source
             && c.harness == harness
@@ -42,13 +42,10 @@ pub(super) fn destinations(
                 .unwrap_or(false)
             && c.choices.models.iter().any(|choice| choice.value == model)
             && !c.unhealthy.contains_key(model)
-            && match &c.quota {
-                CandidateQuota::Windows(w) => crate::quota::quota_score(w, model, now) != Some(0.0),
-                _ => true,
-            }
+            && !crate::profile_scheduler::exhausted(c, model, now)
     });
-    crate::server::api::rank_candidates(&mut candidates, None, model, now);
-    candidates
+    crate::profile_scheduler::draw_candidates(&mut candidates, None, model, now)?;
+    Ok(candidates)
 }
 
 fn local_reset(ms: i64) -> Option<String> {
@@ -311,7 +308,7 @@ pub(super) async fn prepare(
                 None => format!("the quota for profile {source} has no known reset time"),
             };
             for candidate in
-                destinations(&config, &source, harness, &model, candidates, now_ms / 1000)
+                destinations(&config, &source, harness, &model, candidates, now_ms / 1000)?
             {
                 match state.prepare_quota_move(id, &candidate.profile_id).await {
                     Ok(request) => {
@@ -336,7 +333,7 @@ pub(super) async fn prepare(
                 }
             }
             fallback.notice.push_str(&format!(
-                " No other enabled profile of this harness with quota left can take over this session with model {model}."
+                " No other enabled profile of this harness with quota or paid credits left can take over this session with model {model}."
             ));
         }
     }

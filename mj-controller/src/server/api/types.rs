@@ -393,28 +393,7 @@ pub struct SpawnSubagentRequest {
     pub working_directory: Option<PathBuf>,
 }
 
-/// A candidate's last quota reading, scored for the requested model when
-/// candidates are ranked.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CandidateQuota {
-    /// No report, a failed one, or one with no windows.
-    Unknown,
-    /// Billed per use, with no allowance to run out of.
-    UsagePriced,
-    Windows(Vec<crate::quota::QuotaWindow>),
-}
-
-/// A candidate profile with its discovered choices and last quota reading.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubagentCandidate {
-    pub profile_id: String,
-    pub harness: mj_core::config::HarnessKind,
-    pub choices: mj_core::worker_launch::ProfileConfig,
-    pub quota: CandidateQuota,
-    /// The models this profile should not run now, by model id, from
-    /// provider failures its sessions just had (#1361).
-    pub unhealthy: std::collections::BTreeMap<String, crate::profile_health::Unhealthy>,
-}
+pub use crate::profile_scheduler::{CandidateQuota, SubagentCandidate};
 
 /// Candidate profiles split into those whose choices are known and those
 /// whose discovery failed, with the reason.
@@ -846,14 +825,6 @@ impl From<ExportError> for ApiFailure {
 pub struct StartReviewResponse {
     pub session_id: String,
     pub started: bool,
-}
-
-/// What `POST /sessions/{id}/review/{resolution}` was accepted as.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResolveReviewResponse {
-    pub session_id: String,
-    /// `forward`, `dismiss`, or `cancel`.
-    pub resolution: String,
 }
 
 /// The turn review a session has open, as `GET /sessions/{id}/review`

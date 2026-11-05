@@ -1,7 +1,7 @@
 use super::*;
 #[cfg(test)]
 use mj_core::usage::ProviderCost;
-use mj_core::usage::{TokenUsage, UsageScope};
+use mj_core::usage::{TokenUsage, UsageScope, pricing};
 
 pub(super) fn record_child_accounting(
     connection: &Connection,
@@ -111,6 +111,7 @@ fn load_session_usage_from(
         totals: summary.totals,
         coverage: summary.coverage,
         provider_session_cost: summary.provider_session_cost,
+        turn_cost_usd_ticks: summary.turn_cost_usd_ticks,
         turn_selections,
         by_model: summary.by_model,
     }))
@@ -156,6 +157,20 @@ fn counters(usage: &TokenUsage) -> BTreeMap<String, u64> {
         }
     }
     values
+}
+
+pub(super) fn estimate_model_cost(
+    usage: &TokenUsage,
+    model: Option<&str>,
+    totals: &BTreeMap<String, UsageCounterTotal>,
+) -> Result<Option<u64>> {
+    // An unattributed cache counter is unknown, not zero.
+    if (usage.cached_read_tokens.is_some() && !totals.contains_key("cached_read_tokens"))
+        || (usage.cached_write_tokens.is_some() && !totals.contains_key("cached_write_tokens"))
+    {
+        return Ok(None);
+    }
+    pricing::estimate(model, totals)
 }
 
 fn add_counters(
@@ -261,6 +276,44 @@ fn session_summary(connection: &Connection, session: &str) -> Result<UsageSummar
             Some(usage) if usage.scope == UsageScope::Turn => {
                 summary.coverage.full_turn_reports += 1;
                 add_counters(&mut summary.totals, &counters(&usage))?;
+                let provider_cost = usage
+                    .provider_details
+                    .as_ref()
+                    .and_then(|details| details.cost.as_ref().filter(|cost| !cost.is_partial));
+                let estimated = if provider_cost.is_none() {
+                    let mut attributed = BTreeMap::new();
+                    attribute(&usage, selection.clone(), &mut attributed)?;
+                    let mut sum = 0u64;
+                    let mut known = !attributed.is_empty();
+                    for (selection, totals) in attributed {
+                        let part =
+                            estimate_model_cost(&usage, selection.model.as_deref(), &totals)?;
+                        if let Some(part) = part {
+                            sum = sum.checked_add(part).context("turn cost overflow")?;
+                        } else {
+                            known = false;
+                        }
+                    }
+                    known.then_some(sum)
+                } else {
+                    None
+                };
+                let cost = if let Some(cost) = provider_cost {
+                    summary.coverage.provider_cost_turns += 1;
+                    Some(cost.usd_ticks)
+                } else if let Some(cost) = estimated {
+                    summary.coverage.estimated_cost_turns += 1;
+                    Some(cost)
+                } else {
+                    summary.coverage.missing_cost_turns += 1;
+                    None
+                };
+                if let Some(cost) = cost {
+                    summary.turn_cost_usd_ticks = summary
+                        .turn_cost_usd_ticks
+                        .checked_add(cost)
+                        .context("turn cost overflow")?;
+                }
                 attribute(&usage, selection, &mut groups)?;
             }
             Some(usage) if usage.scope == UsageScope::LastRequest => {
@@ -366,6 +419,10 @@ pub(super) fn merge_totals(
 
 fn merge_summary(target: &mut UsageSummary, source: &UsageSummary) -> Result<()> {
     merge_totals(&mut target.totals, &source.totals)?;
+    target.turn_cost_usd_ticks = target
+        .turn_cost_usd_ticks
+        .checked_add(source.turn_cost_usd_ticks)
+        .context("usage tree cost overflow")?;
     let a = &mut target.coverage;
     let b = &source.coverage;
     for (target, value) in [
@@ -375,6 +432,9 @@ fn merge_summary(target: &mut UsageSummary, source: &UsageSummary) -> Result<()>
         (&mut a.unspecified_reports, b.unspecified_reports),
         (&mut a.missing_reports, b.missing_reports),
         (&mut a.unfinished_turns, b.unfinished_turns),
+        (&mut a.provider_cost_turns, b.provider_cost_turns),
+        (&mut a.estimated_cost_turns, b.estimated_cost_turns),
+        (&mut a.missing_cost_turns, b.missing_cost_turns),
     ] {
         *target = target
             .checked_add(value)
@@ -717,9 +777,9 @@ mod tests {
                 },
                 usage: scope.map(|scope| TokenUsage {
                     provider_details: Some(Box::new(mj_core::usage::ProviderTurnUsage {
-                        cost: Some(mj_core::usage::ProviderTurnCost::from_usd_ticks(
-                            88_767_200, false,
-                        )),
+                        cost: (i != 0).then(|| {
+                            mj_core::usage::ProviderTurnCost::from_usd_ticks(88_767_200, false)
+                        }),
                         model_calls: Some(2),
                         api_duration_ms: Some(1700),
                         elapsed_ms: Some(2377),
@@ -730,7 +790,7 @@ mod tests {
                     input_tokens: 20,
                     output_tokens: 10,
                     thought_tokens: None,
-                    cached_read_tokens: Some(0),
+                    cached_read_tokens: Some(if i == 0 { 16 } else { 0 }),
                     cached_write_tokens: None,
                 }),
             };
@@ -762,6 +822,11 @@ mod tests {
                 Ok(())
             })?;
         }
+        open(&path)?.execute(
+            "INSERT INTO session_turn_selections(session_id, command_id, model, effort, profile)
+             VALUES ('usage', 'p0', 'deepseek-flash', NULL, 'deepseek')",
+            [],
+        )?;
         let first = load_session_usage_from(&path, "usage", 0, 2)?.unwrap();
         assert_eq!(first.turns.len(), 2);
         let details = first.turns[0]
@@ -771,7 +836,7 @@ mod tests {
             .provider_details
             .as_ref()
             .unwrap();
-        assert_eq!(details.cost.as_ref().unwrap().usd, "0.0088767200");
+        assert!(details.cost.is_none());
         assert_eq!(details.elapsed_ms, Some(2377));
         assert_eq!(
             first.turns[0].diagnostic.as_ref().unwrap().http_status,
@@ -783,11 +848,16 @@ mod tests {
         assert_eq!(first.coverage.last_request_reports, 1);
         assert_eq!(first.coverage.unspecified_reports, 1);
         assert_eq!(first.coverage.missing_reports, 1);
+        assert_eq!(first.coverage.provider_cost_turns, 1);
+        assert_eq!(first.coverage.estimated_cost_turns, 1);
+        assert_eq!(first.coverage.missing_cost_turns, 0);
+        // Hard-won: #1449: a cached DeepSeek turn had tokens but no cost.
+        assert_eq!(first.turn_cost_usd_ticks, 88_767_200 + 132_960);
         // Only the two whole-turn reports are summed: the last-request and
         // unspecified turns stay out of the totals.
         assert_eq!(first.totals["total_tokens"].tokens, 60);
         assert_eq!(first.totals["total_tokens"].reported_turns, 2);
-        assert_eq!(first.totals["cached_read_tokens"].tokens, 0);
+        assert_eq!(first.totals["cached_read_tokens"].tokens, 16);
         assert!(!first.totals.contains_key("thought_tokens"));
         let next = load_session_usage_from(&path, "usage", first.next_after_seq, 2)?.unwrap();
         assert_eq!(next.turns.len(), 2);

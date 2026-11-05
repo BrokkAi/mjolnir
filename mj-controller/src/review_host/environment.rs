@@ -11,8 +11,8 @@ pub trait ReviewEnvironment: Send + Sync {
     fn check(&self, session_id: &str, profile: &str) -> Result<(), String>;
 
     /// Whether this session is a Mjolnir-managed sub-agent. Its changes are
-    /// reviewed through the parent's turn, so it is never reviewed on its
-    /// own. Blocking: it reads the controller's database.
+    /// included in the parent's automatic turn review; explicit commit reviews
+    /// are still allowed. Blocking: it reads the controller's database.
     fn is_subagent(&self, _session_id: &str) -> bool {
         false
     }
@@ -71,6 +71,16 @@ pub trait ReviewEnvironment: Send + Sync {
     /// Durable groups are resumed rather than swept as interrupted reviews.
     fn active_groups(&self) -> Result<Vec<(String, TurnReviewState)>, String> {
         Ok(Vec::new())
+    }
+
+    fn pending_followups(&self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
+    fn mark_followup(&self, session_id: &str) -> Result<(), String> {
+        let mut state = self.load_state(session_id)?;
+        state.pending_followup = true;
+        self.save_state(session_id, &state)
     }
 
     fn enqueue_verdict(
@@ -349,6 +359,14 @@ impl ReviewEnvironment for ControllerEnvironment {
 
     fn active_groups(&self) -> Result<Vec<(String, TurnReviewState)>, String> {
         crate::database::active_review_groups().map_err(|error| format!("{error:#}"))
+    }
+
+    fn pending_followups(&self) -> Result<Vec<String>, String> {
+        crate::database::pending_review_followups().map_err(|error| format!("{error:#}"))
+    }
+
+    fn mark_followup(&self, session_id: &str) -> Result<(), String> {
+        crate::database::mark_review_followup(session_id).map_err(|error| format!("{error:#}"))
     }
 
     fn hold_background_work<'a>(

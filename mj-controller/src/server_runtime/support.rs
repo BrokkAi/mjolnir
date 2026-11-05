@@ -34,8 +34,7 @@ pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<
         | ControllerAction::SetContainerSettings { session_id, .. }
         | ControllerAction::Restart { session_id, .. }
         | ControllerAction::InterruptAll { session_id }
-        | ControllerAction::StartReview { session_id }
-        | ControllerAction::ResolveReview { session_id, .. } => Some(session_id.clone()),
+        | ControllerAction::StartReview { session_id } => Some(session_id.clone()),
         ControllerAction::UpgradeContainer { request } => {
             Some(request.selection.session_id.clone())
         }

@@ -64,6 +64,9 @@ pub struct QuotaRuntimeConfig {
     pub podman_image: Option<String>,
     /// The same for Docker.
     pub docker_image: Option<String>,
+    /// Whether the daemon runs in its own container, whose image already
+    /// carries every harness: checks then run beside it, whatever `choice` says.
+    pub in_daemon_container: bool,
 }
 
 impl QuotaRuntimeConfig {
@@ -88,6 +91,7 @@ impl QuotaRuntimeConfig {
             choice: config.quota.runtime,
             podman_image: image(mj_core::targets::ImageHost::LocalPodman),
             docker_image: image(mj_core::targets::ImageHost::LocalDocker),
+            in_daemon_container: mj_core::placement::daemon_container().is_some(),
         }
     }
 
@@ -97,6 +101,7 @@ impl QuotaRuntimeConfig {
             choice: QuotaRuntimeChoice::Host,
             podman_image: None,
             docker_image: None,
+            in_daemon_container: mj_core::placement::daemon_container().is_some(),
         }
     }
 }
@@ -524,6 +529,7 @@ async fn refresh_profile_with_cache_root(
     // utility ranker treat it as healthy, which matches how it actually
     // behaves.
     let usage_priced = || ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: profile_id.clone(),
         harness,
@@ -551,6 +557,7 @@ async fn refresh_profile_with_cache_root(
                 crate::zai_usage::query(&provider.host, &provider.api_key)
                     .await
                     .map(|windows| ProfileQuota {
+                        paid_credits: None,
                         banked_resets: None,
                         profile_id: profile_id.clone(),
                         harness,
@@ -582,7 +589,12 @@ async fn refresh_profile_with_cache_root(
             CodexQuotaSource::ChatGptLogin => 'codex: {
                 let launcher = match container() {
                     Ok(Some(check)) => codex_usage::CodexLauncher::Container(check),
-                    Ok(None) => codex_usage::CodexLauncher::Managed(cache_root.clone()),
+                    Ok(None) => match mj_core::placement::local_harness_runtime() {
+                        mj_core::worker_launch::HarnessRuntimePolicy::Image => {
+                            codex_usage::CodexLauncher::Image
+                        }
+                        _ => codex_usage::CodexLauncher::Managed(cache_root.clone()),
+                    },
                     Err(error) => break 'codex Err(error),
                 };
                 // A poll starts at most one app-server. A failed rotation drops its
@@ -632,6 +644,7 @@ async fn refresh_profile_with_cache_root(
                 };
                 match status {
                     CodexUsageStatus::Available(report) => Ok(ProfileQuota {
+                        paid_credits: report.paid_credits,
                         banked_resets: report.banked_resets,
                         profile_id: profile_id.clone(),
                         harness,
@@ -669,6 +682,7 @@ async fn refresh_profile_with_cache_root(
             Ok(container) => claude_usage::query(source_home, environment, container)
                 .await
                 .map(|report| ProfileQuota {
+                    paid_credits: report.paid_credits,
                     banked_resets: report.banked_resets,
                     profile_id: profile_id.clone(),
                     harness,
@@ -750,6 +764,7 @@ async fn refresh_profile_with_cache_root(
             query_kimi(&source_home, &environment)
                 .await
                 .map(|(windows, extra)| ProfileQuota {
+                    paid_credits: None,
                     banked_resets: None,
                     profile_id: profile_id.clone(),
                     harness,
@@ -770,6 +785,7 @@ async fn refresh_profile_with_cache_root(
             grok_usage::query(source_home.clone(), cwd, environment, container)
                 .await
                 .map(|report| ProfileQuota {
+                    paid_credits: None,
                     banked_resets: None,
                     profile_id: profile_id.clone(),
                     harness,
@@ -795,6 +811,7 @@ async fn refresh_profile_with_cache_root(
         HarnessKind::Muse => crate::muse_usage::query(&source_home, &environment)
             .await
             .map(|report| ProfileQuota {
+                paid_credits: None,
                 banked_resets: None,
                 profile_id: profile_id.clone(),
                 harness,
@@ -824,6 +841,7 @@ async fn refresh_profile_with_cache_root(
         HarnessKind::Dsh => Ok(usage_priced()),
     };
     let report = result.unwrap_or_else(|error| ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id,
         harness,

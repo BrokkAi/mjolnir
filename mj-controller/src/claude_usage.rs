@@ -27,6 +27,7 @@ pub(crate) const LOGIN_EXPIRED: &str = "login expired";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeUsageReport {
+    pub paid_credits: Option<mj_client::quota::PaidCredits>,
     pub banked_resets: Option<u64>,
     pub five_hour: Option<ClaudeUsageWindow>,
     pub week: Option<ClaudeUsageWindow>,
@@ -197,21 +198,47 @@ async fn query_api(
     usage_url: &str,
     token: &str,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    let response = client
-        .get(usage_url)
-        .query(&[("cedar_ember", "1"), ("skip_spend", "1")])
+    let mut url = reqwest::Url::parse(usage_url)
+        .map_err(|error| ClaudeUsageError::Query(error.to_string()))?;
+    url.query_pairs_mut().append_pair("cedar_ember", "1");
+    let payload = query_oauth_json(client, url, token, USAGE_TIMEOUT, None).await?;
+    let mut report = parse_api_usage(&payload).ok_or(ClaudeUsageError::Parse)?;
+    if let Some(extra) = payload
+        .get("extra_usage")
+        .filter(|extra| extra.get("is_enabled").and_then(Value::as_bool) == Some(true))
+    {
+        match query_paid_credits(client, usage_url, token, extra).await {
+            Ok(credits) => report.paid_credits = Some(credits),
+            Err(error) => tracing::warn!(%error, "Claude paid-credit balance unavailable"),
+        }
+    }
+    Ok(report)
+}
+
+async fn query_oauth_json(
+    client: &reqwest::Client,
+    url: reqwest::Url,
+    token: &str,
+    timeout: Duration,
+    organization: Option<&str>,
+) -> Result<Value, ClaudeUsageError> {
+    let mut request = client
+        .get(url)
+        .timeout(timeout)
         .header(reqwest::header::USER_AGENT, USAGE_USER_AGENT)
         .bearer_auth(token)
         .header("anthropic-beta", "oauth-2025-04-20")
-        .send()
-        .await
-        .map_err(|error| {
-            if error.is_timeout() {
-                ClaudeUsageError::TimedOut
-            } else {
-                ClaudeUsageError::Query(error.to_string())
-            }
-        })?;
+        .header("anthropic-version", "2023-06-01");
+    if let Some(organization) = organization {
+        request = request.header("x-organization-uuid", organization);
+    }
+    let response = request.send().await.map_err(|error| {
+        if error.is_timeout() {
+            ClaudeUsageError::TimedOut
+        } else {
+            ClaudeUsageError::Query(error.to_string())
+        }
+    })?;
     if matches!(response.status().as_u16(), 401 | 403) {
         return Err(ClaudeUsageError::LoginExpired);
     }
@@ -226,11 +253,68 @@ async fn query_api(
             response.status()
         )));
     }
-    let payload: Value = response
+    response
         .json()
         .await
-        .map_err(|error| ClaudeUsageError::Query(error.to_string()))?;
-    parse_api_usage(&payload).ok_or(ClaudeUsageError::Parse)
+        .map_err(|error| ClaudeUsageError::Query(error.to_string()))
+}
+
+async fn query_paid_credits(
+    client: &reqwest::Client,
+    usage_url: &str,
+    token: &str,
+    extra: &Value,
+) -> Result<mj_client::quota::PaidCredits, ClaudeUsageError> {
+    let invalid = || ClaudeUsageError::Query("invalid paid-credit balance or spending cap".into());
+    let mut url = reqwest::Url::parse(usage_url).map_err(|_| invalid())?;
+    url.set_path("/api/oauth/profile");
+    url.set_query(None);
+    let profile =
+        query_oauth_json(client, url.clone(), token, Duration::from_secs(5), None).await?;
+    let organization = profile
+        .pointer("/organization/uuid")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(invalid)?;
+    url.set_path("/api/oauth/organizations/");
+    url.path_segments_mut()
+        .map_err(|_| invalid())?
+        .pop_if_empty()
+        .push(organization)
+        .push("prepaid")
+        .push("credits");
+    let wallet = query_oauth_json(
+        client,
+        url,
+        token,
+        Duration::from_secs(5),
+        Some(organization),
+    )
+    .await?;
+    let mut balance = wallet
+        .get("amount")
+        .and_then(Value::as_f64)
+        .ok_or_else(invalid)?;
+    if let Some(limit) = extra.get("monthly_limit").filter(|value| !value.is_null()) {
+        let limit = limit.as_f64().ok_or_else(invalid)?;
+        let used = extra
+            .get("used_credits")
+            .and_then(Value::as_f64)
+            .ok_or_else(invalid)?;
+        balance = balance.min(limit - used);
+    } else if extra.get("monthly_limit").is_none() {
+        return Err(invalid());
+    }
+    if let (Some(spend), Some(funds)) = (
+        extra.get("currency").and_then(Value::as_str),
+        wallet.get("currency").and_then(Value::as_str),
+    ) && !spend.eq_ignore_ascii_case(funds)
+    {
+        return Err(ClaudeUsageError::Query(
+            "paid-credit currencies disagree".into(),
+        ));
+    }
+    mj_client::quota::PaidCredits::limited(balance).ok_or_else(invalid)
 }
 
 async fn refresh_and_retry(
@@ -500,7 +584,15 @@ fn parse_api_usage(payload: &Value) -> Option<ClaudeUsageReport> {
         }
     }
 
-    (five_hour.is_some() || week.is_some() || !scoped_weeks.is_empty()).then(|| ClaudeUsageReport {
+    (five_hour.is_some()
+        || week.is_some()
+        || !scoped_weeks.is_empty()
+        || payload
+            .pointer("/extra_usage/is_enabled")
+            .and_then(Value::as_bool)
+            == Some(true))
+    .then(|| ClaudeUsageReport {
+        paid_credits: None,
         banked_resets: parse_banked_resets(payload, mj_core::clock::epoch_millis() / 1000),
         five_hour,
         week,
@@ -608,6 +700,7 @@ fn parse_cli_usage(output: &str) -> Option<ClaudeUsageReport> {
 
     (five_hour.is_some() || week.is_some() || !scoped_weeks.is_empty()).then_some(
         ClaudeUsageReport {
+            paid_credits: None,
             banked_resets: None,
             five_hour,
             week,
@@ -879,7 +972,7 @@ Last 7d · 5966 requests · 78 sessions
         headers: HeaderMap,
     ) -> (StatusCode, Json<Value>) {
         assert_eq!(query.get("cedar_ember").map(String::as_str), Some("1"));
-        assert_eq!(query.get("skip_spend").map(String::as_str), Some("1"));
+        assert!(!query.contains_key("skip_spend"));
         assert_eq!(
             headers.get(reqwest::header::USER_AGENT).unwrap(),
             USAGE_USER_AGENT
@@ -934,6 +1027,58 @@ Last 7d · 5966 requests · 78 sessions
             oauth["refreshToken"] = Value::String(refresh.to_owned());
         }
         serde_json::json!({"claudeAiOauth": oauth})
+    }
+
+    #[tokio::test]
+    async fn paid_usage_reads_wallet_and_respects_enabled_status_and_spending_cap() {
+        use mj_client::quota::PaidCredits;
+        for (funds, cap, spent, enabled, wallet_status, expected) in [
+            (1200, Some(2000), 500, true, StatusCode::OK, Some(1200.0)),
+            (5000, Some(2000), 500, true, StatusCode::OK, Some(1500.0)),
+            (5000, Some(2000), 2100, true, StatusCode::OK, Some(0.0)),
+            (5000, None, 500, true, StatusCode::OK, Some(5000.0)),
+            (0, Some(2000), 500, true, StatusCode::OK, Some(0.0)),
+            (5000, Some(2000), 500, false, StatusCode::OK, None),
+            (5000, Some(2000), 500, true, StatusCode::FORBIDDEN, None),
+        ] {
+            let wallet_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let reads = wallet_reads.clone();
+            let app = Router::new()
+                .route("/usage", get(move || async move { Json(serde_json::json!({
+                    "five_hour": {"utilization": 100},
+                    "extra_usage": {"is_enabled": enabled, "monthly_limit": cap, "used_credits": spent, "currency": "USD"}
+                })) }))
+                .route("/api/oauth/profile", get(|headers: HeaderMap| async move {
+                    assert_eq!(headers["authorization"], "Bearer test-token");
+                    Json(serde_json::json!({"organization": {"uuid": "test-org"}}))
+                }))
+                .route("/api/oauth/organizations/test-org/prepaid/credits", get(move |headers: HeaderMap| {
+                    let reads = reads.clone();
+                    async move {
+                        reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        assert_eq!(headers["authorization"], "Bearer test-token");
+                        assert_eq!(headers["x-organization-uuid"], "test-org");
+                        (wallet_status, Json(serde_json::json!({"amount": funds, "currency": "USD"})))
+                    }
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let report = query_api(
+                &reqwest::Client::new(),
+                &format!("http://{address}/usage"),
+                "test-token",
+            )
+            .await
+            .unwrap();
+            task.abort();
+            assert_eq!(report.five_hour.unwrap().remaining_percent, 0);
+            assert_eq!(report.paid_credits, expected.and_then(PaidCredits::limited));
+            assert_eq!(
+                wallet_reads.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(enabled)
+            );
+        }
     }
 
     async fn usage_status_only(

@@ -409,6 +409,7 @@ mod tests {
 
     fn quota(id: &str, remaining: Option<u8>, api: bool) -> ProfileQuota {
         ProfileQuota {
+            paid_credits: None,
             banked_resets: None,
             profile_id: id.into(),
             harness: HarnessKind::Codex,

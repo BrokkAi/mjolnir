@@ -1,9 +1,7 @@
 //! Optional, bounded TypeSafe turn classification. Failures leave activity alone.
 use anyhow::{Context, Result, ensure};
 use mj_core::activity::question_locator;
-use mj_core::activity::verdict::{
-    DirectRequest, TurnEvidence, TurnVerdict, api_key, questions, request_fits,
-};
+use mj_core::activity::verdict::{TurnEvidence, TurnVerdict, api_key, questions, request_fits};
 use std::time::Duration;
 
 /// The Unix worker is the only production caller of the classifier client;
@@ -185,7 +183,7 @@ impl VerdictClient {
             );
             attempt.update(
                 None,
-                serde_json::json!({"state":request.state,"selected_message":stable_id,"reason":"single_reply"}),
+                serde_json::json!({"state":mj_core::jev::request_body(&request.state, None),"selected_message":stable_id,"reason":"single_reply"}),
             );
             attempt.finish(
                 "applied",
@@ -199,13 +197,11 @@ impl VerdictClient {
         request: &question_locator::Request,
     ) -> Result<Option<usize>> {
         let count = request.state.replies.len();
-        let body = match &self.source {
-            VerdictSource::Direct { .. } => serde_json::json!({
-                "model":"jev-latest", "state":request.state,
-                "questions":question_locator::questions(count)
-            }),
-            VerdictSource::Hosted { .. } => serde_json::json!(request.state),
+        let direct_questions = match &self.source {
+            VerdictSource::Direct { .. } => Some(question_locator::questions(count)),
+            VerdictSource::Hosted { .. } => None,
         };
+        let body = mj_core::jev::request_body(&request.state, direct_questions);
         let diagnostic = self.log.as_ref().map(|log| {
             log.start(
                 session,
@@ -332,10 +328,11 @@ impl VerdictClient {
     }
 
     fn request_body(&self, evidence: &TurnEvidence) -> serde_json::Value {
-        match self.source {
-            VerdictSource::Direct { .. } => serde_json::json!(DirectRequest::new(evidence)),
-            VerdictSource::Hosted { .. } => serde_json::json!(evidence),
-        }
+        let direct_questions = match self.source {
+            VerdictSource::Direct { .. } => Some(questions()),
+            VerdictSource::Hosted { .. } => None,
+        };
+        mj_core::jev::request_body(evidence, direct_questions)
     }
 
     pub(crate) async fn ask_logged(
@@ -558,7 +555,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn locator_direct_transport_sends_shared_question_and_maps_answer() {
+    async fn locator_direct_transport_sends_redacted_state_and_shared_question() {
+        const TOKEN: &str = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
         let reply = serde_json::json!({"answers":{"request_reply":{
             "type":"choice", "choice":"r1", "probabilities":{"r0":0.2,"r1":0.7,"none":0.1}
         }}})
@@ -574,7 +572,7 @@ mod tests {
                 EvidenceMessage {
                     id: "agent:one".into(),
                     role: "assistant".into(),
-                    text: "Status".into(),
+                    text: format!("Pushed with GH_TOKEN={TOKEN}"),
                 },
                 EvidenceMessage {
                     id: "agent:two".into(),
@@ -590,7 +588,15 @@ mod tests {
             Some(1)
         );
         let sent = server.await.unwrap();
-        assert_eq!(sent["state"], serde_json::to_value(&request.state).unwrap());
+        assert!(!sent.to_string().contains(TOKEN), "{sent}");
+        assert_eq!(
+            sent["state"]["replies"][0]["text"],
+            "Pushed with GH_TOKEN=[redacted]"
+        );
+        assert_eq!(
+            sent["state"]["replies"][1],
+            serde_json::to_value(&request.state.replies[1]).unwrap()
+        );
         assert_eq!(sent["questions"], question_locator::questions(2));
     }
 
@@ -752,8 +758,31 @@ mod tests {
         assert_eq!(technical["reason"], "awaiting_input");
     }
 
+    /// The hosted proxy is a third party. Provider errors echo the key that
+    /// failed, and agents put tokens on command lines; neither may reach it.
     #[tokio::test]
-    async fn hosted_requests_send_only_evidence_without_authorization() {
+    async fn hosted_requests_send_only_redacted_evidence_without_authorization() {
+        const PROVIDER_KEY: &str = "sk-proj-Q2xhdWRlQ29kZVRlc3RLZXkxMjM0NTY3";
+        const INLINE_TOKEN: &str = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
+        const BACKGROUND_ID: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        let mut secret_bearing = evidence();
+        secret_bearing.phase = TurnPhase::Replied;
+        secret_bearing.completion = Some(mj_core::activity::verdict::CompletionEvidence::bounded(
+            "Refusal",
+            Some(&mj_core::diagnostic::TurnDiagnostic {
+                message: format!("401 Unauthorized: Incorrect API key provided: {PROVIDER_KEY}"),
+                code: None,
+                http_status: Some(401),
+                reset_at: None,
+            }),
+        ));
+        secret_bearing.background = vec![mj_core::activity::verdict::BackgroundEvidence {
+            id: BACKGROUND_ID.into(),
+            command: format!(
+                "curl -H 'Authorization: Bearer {INLINE_TOKEN}' https://api.example.com"
+            ),
+            started_s_ago: 30,
+        }];
         for status in [200, 429, 502] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("http://{}/v7/turn-verdict", listener.local_addr().unwrap());
@@ -774,13 +803,25 @@ mod tests {
                 }
                 let mut request = vec![0; length];
                 socket.read_exact(&mut request).await.unwrap();
-                let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
-                assert_eq!(request, serde_json::to_value(evidence()).unwrap());
+                let raw = String::from_utf8(request).unwrap();
+                assert!(!raw.contains(PROVIDER_KEY), "{raw}");
+                assert!(!raw.contains(INLINE_TOKEN), "{raw}");
+                let request: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                assert_eq!(
+                    request["completion"]["diagnostic"]["message"],
+                    "401 Unauthorized: Incorrect API key provided: [redacted]"
+                );
+                assert_eq!(
+                    request["background"][0]["command"],
+                    "curl -H 'Authorization: Bearer [redacted]' https://api.example.com"
+                );
+                assert_eq!(request["background"][0]["id"], BACKGROUND_ID);
+                assert_eq!(request["user_prompt_tail"], evidence().user_prompt_tail);
                 let body = response("background_work");
                 socket.write_all(format!("HTTP/1.1 {status} Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             });
             let client = VerdictClient::new(VerdictSource::Hosted { endpoint }).unwrap();
-            let result = client.ask(&evidence()).await;
+            let result = client.ask(&secret_bearing).await;
             assert_eq!(result.is_ok(), status == 200);
             if let Ok(verdict) = result {
                 assert_eq!(verdict.work_state, WorkState::BackgroundWork);

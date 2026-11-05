@@ -52,7 +52,7 @@ use crate::widgets::{
     truncate_to_cells,
 };
 
-use crate::{DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, move_index, nth_key};
+use crate::{DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, nth_key};
 
 /// Keep the frame and action row in place while moving between wizard steps.
 fn wizard_modal(frame: &mut Frame<'_>, surfaces: &mut FrameSurfaces, area: Rect) -> Rect {
@@ -91,20 +91,17 @@ pub(crate) enum WizardControl {
     RemoveBundle,
     ProjectRecent,
     ProjectGithub,
-    ProjectFolders,
     ProjectUrl,
     ProjectQuery,
     ProjectSearch,
     ProjectResults,
-    ProjectUp,
-    ProjectHome,
-    ProjectOpenFolder,
     ProjectRetry,
     ProjectMultiple,
     ProjectMakePrimary,
     MountSource,
     MountDestination,
     MountAccess,
+    MountHistory,
     ReviewAttachments,
     Subagents,
     CreateManagedWorktree,
@@ -239,7 +236,8 @@ pub(crate) struct MountWizard {
     pub(crate) access_combo: ComboBoxState<WizardControl>,
     pub(crate) mounts: Vec<AdditionalMount>,
     pub(crate) history: Vec<std::path::PathBuf>,
-    history_index: usize,
+    selected_mount: usize,
+    history_selection: usize,
     /// Sources the target's host reported as unable to hold Podman's overlay,
     /// keyed by the typed source and holding the `filesystem (reason)` label.
     forced_sources: BTreeMap<String, String>,
@@ -257,7 +255,8 @@ impl MountWizard {
             access_combo: ComboBoxState::default(),
             mounts: Vec::new(),
             history,
-            history_index: 0,
+            selected_mount: 0,
+            history_selection: 0,
             forced_sources: BTreeMap::new(),
             error: None,
             editing_mount: None,
@@ -288,6 +287,17 @@ impl MountWizard {
         self.access = self.access.without_overlay();
     }
 
+    pub(crate) fn available_history(&self) -> Vec<&std::path::PathBuf> {
+        self.history
+            .iter()
+            .filter(|source| {
+                !self.mounts.iter().enumerate().any(|(index, mount)| {
+                    Some(index) != self.editing_mount && &mount.source == *source
+                })
+            })
+            .collect()
+    }
+
     fn add_validated_mount(&mut self) {
         let mount = AdditionalMount {
             source: self.source.to_string().into(),
@@ -301,6 +311,7 @@ impl MountWizard {
         }
         self.source.clear();
         self.destination.clear();
+        self.history_selection = 0;
         self.access = MountAccess::Ro;
         self.source.dismiss_completion();
         self.error = None;
@@ -497,9 +508,10 @@ fn remove_selected_mount(mounts: &mut MountWizard) {
     if mounts.mounts.is_empty() {
         return;
     }
-    mounts.mounts.remove(mounts.history_index);
-    mounts.history_index = mounts
-        .history_index
+    mounts.mounts.remove(mounts.selected_mount);
+    mounts.history_selection = 0;
+    mounts.selected_mount = mounts
+        .selected_mount
         .min(mounts.mounts.len().saturating_sub(1));
 }
 
@@ -508,6 +520,7 @@ fn remove_selected_mount(mounts: &mut MountWizard) {
 fn prepare_mount_editor(mounts: &mut MountWizard) {
     mounts.source.clear();
     mounts.destination.clear();
+    mounts.history_selection = 0;
     mounts.access = MountAccess::Ro;
     mounts.error = None;
     mounts.editing_mount = None;
@@ -520,7 +533,8 @@ fn prepare_selected_mount_editor(mounts: &mut MountWizard) -> bool {
     if mounts.mounts.is_empty() {
         return false;
     }
-    let index = mounts.history_index;
+    let index = mounts.selected_mount;
+    mounts.history_selection = 0;
     let mount = mounts.mounts[index].clone();
     mounts.source = mount.source.to_string_lossy().into_owned().into();
     mounts.destination = mount.destination.to_string_lossy().into_owned().into();
@@ -765,19 +779,26 @@ fn default_resource_destination(
     let basename = default
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("resource"));
+    // EC2 paths are POSIX paths on a Windows controller too.
+    use mj_core::target_path::join;
     let home = if ssh_user == "root" {
         std::path::PathBuf::from("/root")
     } else {
-        std::path::PathBuf::from("/home").join(ssh_user)
+        join(
+            std::path::Path::new("/home"),
+            std::path::Path::new(ssh_user),
+        )
     };
-    let base = home.join("mj-resources").join(basename);
+    let resources = join(&home, std::path::Path::new("mj-resources"));
+    let base = join(&resources, std::path::Path::new(basename));
     if !existing.iter().any(|resource| resource.destination == base) {
         return base;
     }
     for number in 2.. {
-        let candidate = home
-            .join("mj-resources")
-            .join(format!("{}-{number}", basename.to_string_lossy()));
+        let candidate = join(
+            &resources,
+            std::path::Path::new(&format!("{}-{number}", basename.to_string_lossy())),
+        );
         if !existing
             .iter()
             .any(|resource| resource.destination == candidate)

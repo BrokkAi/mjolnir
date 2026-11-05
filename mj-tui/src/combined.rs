@@ -27,14 +27,11 @@ use crate::render::{
 use crate::resume::resume_sessions_pane;
 use crate::tile_layout::PaneId;
 use crate::widgets::bordered_content;
-use crate::workspaces::render_workspace_tabs;
+use crate::workspaces::{render_workspace_tabs, workspace_pane_height};
 use crate::{DashboardState, Focus, Mode, PaneSize, SupportPane};
 
 /// Rows the footer always keeps.
 const FOOTER_HEIGHT: u16 = 1;
-/// The bordered workspace list above Sessions. Its inner row is intentionally
-/// short; the border gives it a stable click and focus target.
-const WORKSPACE_PANE_HEIGHT: u16 = 3;
 /// The fewest rows the transcript is worth drawing in.
 const TRANSCRIPT_MINIMUM: u16 = 3;
 /// A bordered composer with one row of text.
@@ -127,9 +124,10 @@ enum CombinedAllocation {
 /// Divides the frame between the six bands.
 ///
 /// Every band starts at its minimum, and the surplus is then spent in a fixed
-/// order: the composer first, because it is where the user is typing; then the
-/// one maximized pane; then Standard Sessions, Targets, and Quota in screen
-/// order. The transcript takes whatever is left. Focus never participates.
+/// order: the composer first, because it is where the user is typing; then
+/// workspace growth in the stacked Sessions band; then the one maximized pane;
+/// then Standard Sessions, Targets, and Quota in screen order. The transcript
+/// takes whatever is left. Focus never participates.
 fn allocate_combined_heights(
     frame_height: u16,
     sessions: PaneBand,
@@ -169,6 +167,15 @@ fn allocate_combined_heights(
         prompt_target(desired_prompt, frame_height),
         &mut surplus,
     );
+    if sizes[0].1 == PaneSize::Minimized {
+        // Compact session rows stay fixed; only the workspace viewport can
+        // grow beyond the stacked band's minimum.
+        grow(
+            &mut heights.sessions,
+            sessions.full.min(sessions.cap),
+            &mut surplus,
+        );
+    }
     {
         let mut grow_pane = |pane: SupportPane, surplus: &mut u16| match pane {
             SupportPane::Sessions => grow(
@@ -452,6 +459,7 @@ fn render_combined_themed(
         area.height = area.height.saturating_sub(height);
     }
     if area.width < NARROW_TERMINAL_WIDTH {
+        dashboard.workspace_scrollbar.clear();
         render_terminal_too_small(
             frame,
             area,
@@ -504,19 +512,7 @@ fn render_combined_themed(
         sidebar_width,
         area.height.saturating_sub(FOOTER_HEIGHT),
     );
-    let workspace_area = Rect::new(
-        sidebar_area.x,
-        sidebar_area.y,
-        sidebar_area.width,
-        WORKSPACE_PANE_HEIGHT.min(sidebar_area.height),
-    );
-    let sidebar_top = workspace_area.height;
-    let sessions_area = Rect::new(
-        sidebar_area.x,
-        sidebar_area.y.saturating_add(sidebar_top),
-        sidebar_area.width,
-        sidebar_area.height.saturating_sub(sidebar_top),
-    );
+    let workspace_target = workspace_pane_height(dashboard, sidebar_area.width);
     let selected_transition = dashboard
         .current_session_id()
         .and_then(|id| dashboard.state.sessions.get(id))
@@ -628,7 +624,7 @@ fn render_combined_themed(
     ];
     // The Sessions pane is as wide as the sidebar; its rows are laid out
     // once, for both the sizes asked here and the draw below.
-    let sessions_layout = SessionsLayout::new(dashboard, sessions_area.width.saturating_sub(2));
+    let sessions_layout = SessionsLayout::new(dashboard, sidebar_area.width.saturating_sub(2));
     let dimensions = [
         (
             SupportPane::Sessions,
@@ -669,17 +665,15 @@ fn render_combined_themed(
             dimensions.standard_cap,
         )
     });
-    // Beside the conversation the sidebar takes no rows from it. Stacked, its
-    // compact band (tabs, actions, and rows) is a fixed-height band above.
+    // Stacked, reserve one workspace content row, then grow its viewport
+    // only after the other bands' minimums and the composer have room.
     let sessions = if narrow {
-        let band = dimensions[0]
-            .1
-            .minimized
-            .saturating_add(WORKSPACE_PANE_HEIGHT);
+        let compact = dimensions[0].1.minimized;
+        let full = compact.saturating_add(workspace_target);
         PaneBand {
-            minimum: band,
-            full: band,
-            cap: band,
+            minimum: compact.saturating_add(PANE_MINIMUM),
+            full,
+            cap: full,
         }
     } else {
         PaneBand {
@@ -706,6 +700,7 @@ fn render_combined_themed(
         CombinedAllocation::TooSmall {
             required_frame_height,
         } => {
+            dashboard.workspace_scrollbar.clear();
             render_terminal_too_small(
                 frame,
                 area,
@@ -720,20 +715,29 @@ fn render_combined_themed(
     };
 
     let upper_content_height = heights.transcript.saturating_add(heights.prompt);
-    let sessions_height = if narrow {
-        heights.sessions.saturating_sub(sidebar_top)
+    let sidebar_height = if narrow {
+        heights.sessions
     } else if supports_adjacent {
-        area.height
-            .saturating_sub(FOOTER_HEIGHT)
-            .saturating_sub(sidebar_top)
+        area.height.saturating_sub(FOOTER_HEIGHT)
     } else {
-        upper_content_height.saturating_sub(sidebar_top)
+        upper_content_height
     };
+    let workspace_height = if narrow {
+        sidebar_height.saturating_sub(dimensions[0].1.minimized)
+    } else {
+        workspace_target.min(sidebar_height.saturating_sub(PANE_MINIMUM))
+    };
+    let workspace_area = Rect::new(
+        sidebar_area.x,
+        sidebar_area.y,
+        sidebar_area.width,
+        workspace_height,
+    );
     let sessions_area = Rect::new(
-        sessions_area.x,
-        sessions_area.y,
-        sessions_area.width,
-        sessions_height,
+        sidebar_area.x,
+        sidebar_area.y.saturating_add(workspace_height),
+        sidebar_area.width,
+        sidebar_height.saturating_sub(workspace_height),
     );
     // Stacked, everything below the sidebar band moves down by its height.
     let stacked_band = if narrow { heights.sessions } else { 0 };
@@ -2479,6 +2483,46 @@ mod tests {
                     append_pane_geometry(&mut output, &dashboard);
                 }
             }
+        }
+
+        for (width, height) in [(70, 22), (80, 13), (160, 13)] {
+            let mut dashboard = dashboard_with_session(running_session());
+            dashboard.set_workspace_names(
+                (0..24)
+                    .map(|index| (format!("workspace-{index}"), format!("Project {index:02}")))
+                    .collect(),
+            );
+            dashboard.order_workspaces(
+                &(0..24)
+                    .map(|index| format!("workspace-{index}"))
+                    .collect::<Vec<_>>(),
+            );
+            dashboard.set_active_workspace(Some("workspace-0".into()));
+            let lines = render_combined_golden(&mut dashboard, width, height);
+            let workspace = dashboard.workspace_pane_area.expect("workspaces fit");
+            let [sessions, targets, _] = dashboard.pane_areas.expect("support panes fit");
+            assert!(workspace.height >= PANE_MINIMUM);
+            assert!(sessions.height >= PANE_MINIMUM);
+            assert_eq!(workspace.bottom(), sessions.y);
+            if width == MINIMUM_TERMINAL_WIDTH {
+                assert_eq!(
+                    targets.width, width,
+                    "exercise support panes below the sidebar"
+                );
+            }
+            if width >= MINIMUM_TERMINAL_WIDTH && targets.width == width {
+                assert_eq!(sessions.bottom(), targets.y);
+            }
+            assert!(dashboard.workspace_scrollbar.geometry().is_some());
+            // Hard-won: 1b13e4a69: workspace rows overflowed the allocated sidebar band on short terminals.
+            append_combined_golden(
+                &mut output,
+                "short terminal scrolls workspaces within its sidebar band",
+                width,
+                height,
+                &lines,
+            );
+            append_pane_geometry(&mut output, &dashboard);
         }
 
         let mut session = running_session();
