@@ -425,6 +425,19 @@ pub(super) enum TranscriptAnchor {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptPosition(SavedTranscriptAnchor);
 
+impl TranscriptPosition {
+    /// Start an opening view at a materialized transcript item. Resolution can
+    /// wait for the older prefix to finish loading.
+    pub fn at_stable_id(stable_id: String) -> Self {
+        Self(SavedTranscriptAnchor::Entry {
+            start_seq: 0,
+            stable_id: Some(stable_id),
+            row: 0,
+            revealed_through: None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum SavedTranscriptAnchor {
     Bottom,
