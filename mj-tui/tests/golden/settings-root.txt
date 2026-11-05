@@ -845,7 +845,7 @@ Terminal Light after save acknowledgement: rendered colors: text fg=Reset bg=Res
 
 
   ╭ ×  Set up a managed agent  ──────────────────────────────────────────────────────────────────╮
-  │ Choose an agent. Mjolnir will install its exact pinned version and open its sign-in flow.    │
+  │ Choose an agent. Mjolnir prepares its exact pinned version and opens its sign-in flow.       │
   │                                                                                              │
   │   Codex                                                                                      │
   │ ChatGPT subscription or an OpenAI-compatible provider                                        │

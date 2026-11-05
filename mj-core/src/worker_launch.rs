@@ -49,21 +49,33 @@ pub fn installed_harness_home(launch_path: &Path) -> anyhow::Result<Option<PathB
         .map(|home| harness.home_from_environment(home)))
 }
 
-/// Who owns the ACP adapter and harness executable selected by a worker.
-/// Managed launch resolves the compiled pin; ambient launch uses the target's runtime.
+/// Where a worker's ACP adapter and harness executable come from.
+/// [`crate::harness_install::locate`] turns a policy into a launch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessRuntimePolicy {
+    /// The target's own installation, for example a container target's image,
+    /// with Mjolnir's managed installation when it is missing or incompatible.
     #[default]
     Ambient,
-    /// The worker owns the exact ACP bridge installation.
+    /// Mjolnir's managed installation of the compiled pin.
     #[serde(rename = "managed_remote", alias = "managed")]
     Managed,
+    /// Only the pinned harnesses of the image this process runs in: the
+    /// daemon container's agent-dev image. A missing or incompatible harness
+    /// is an error; nothing is installed. Only a container daemon writes it,
+    /// for workers in its own container, which run the image's own build.
+    Image,
 }
 
 impl HarnessRuntimePolicy {
     pub const fn is_ambient(&self) -> bool {
         matches!(self, Self::Ambient)
+    }
+
+    /// Whether this source may download Mjolnir's managed harness or Node.js.
+    pub const fn may_install(&self) -> bool {
+        !matches!(self, Self::Image)
     }
 }
 
@@ -578,6 +590,15 @@ pub struct ProfileProbeSpec {
     pub excluded_environment: Vec<String>,
     pub cwd: PathBuf,
     pub model: Option<String>,
+    /// Where the probe's harness comes from: the same source as a local
+    /// session ([`crate::placement::local_harness_runtime`]). Specs written by
+    /// older daemons omit it and always probed the managed installation.
+    #[serde(default = "managed_harness_runtime")]
+    pub harness_runtime: HarnessRuntimePolicy,
+}
+
+fn managed_harness_runtime() -> HarnessRuntimePolicy {
+    HarnessRuntimePolicy::Managed
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

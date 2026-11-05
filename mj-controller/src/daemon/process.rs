@@ -22,20 +22,18 @@ pub(super) fn owner_pid_to_watch() -> Result<Option<u32>> {
     Ok(Some(pid))
 }
 
-/// Where this daemon runs. The launcher names the container in the
-/// environment; every daemon-side decision that depends on the placement asks
-/// here instead of reading that variable itself.
+/// Where this daemon runs, from [`mj_core::placement::daemon_container`].
 pub(crate) fn placement() -> DaemonPlacement {
-    match mj_core::config::env_override("DAEMON_CONTAINER") {
-        Some(name) if !name.trim().is_empty() => DaemonPlacement::Container {
+    match mj_core::placement::daemon_container() {
+        Some(name) => DaemonPlacement::Container {
             name,
-            runtime: match mj_core::config::env_override("DAEMON_CONTAINER_RUNTIME").as_deref() {
-                Some("podman") => Some(mj_core::config::DaemonRuntime::Podman),
-                Some("docker") => Some(mj_core::config::DaemonRuntime::Docker),
+            runtime: match std::env::var(DAEMON_CONTAINER_RUNTIME_ENV).as_deref() {
+                Ok("podman") => Some(mj_core::config::DaemonRuntime::Podman),
+                Ok("docker") => Some(mj_core::config::DaemonRuntime::Docker),
                 _ => None,
             },
         },
-        _ => DaemonPlacement::Host,
+        None => DaemonPlacement::Host,
     }
 }
 

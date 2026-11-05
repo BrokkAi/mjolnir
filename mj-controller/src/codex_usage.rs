@@ -59,8 +59,12 @@ pub(crate) enum CodexLauncher {
     /// The Mjolnir-managed installation under this cache root, or the
     /// process's default cache root.
     Managed(Option<PathBuf>),
-    /// The agent-dev image's `codex`.
+    /// The agent-dev image's `codex`, started in a new container.
     Container(crate::quota_runtime::ContainerCheck),
+    /// The `codex` of the image this daemon runs in
+    /// ([`mj_core::worker_launch::HarnessRuntimePolicy::Image`]). No managed
+    /// installation is consulted.
+    Image,
 }
 
 pub struct CodexUsageClient {
@@ -99,6 +103,11 @@ impl CodexUsageClient {
                 let (stdio, container) = spawn_codex_in_container(check, env).await?;
                 (stdio, None, Some(container))
             }
+            CodexLauncher::Image => (
+                spawn_app_server(Path::new("codex"), cwd, env).await?,
+                None,
+                None,
+            ),
         };
         let crate::streamed_child::ProxyStdio {
             child,
@@ -581,39 +590,58 @@ async fn spawn_codex(
             });
         }
 
-        let mut spec = mj_core::targets::CommandSpec::new(
-            mj_core::target_path::text(&launcher),
-            ["app-server", "--stdio"],
-        );
-        spec.cwd = Some(cwd);
-        spec.env = env.into_iter().collect();
-        // This probe reads a ChatGPT login's rate limits and refreshes that
-        // login. An API key from the profile's environment or the daemon's own
-        // would let Codex use the key instead (#1160).
-        spec.env_remove = mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect();
-        // Its stderr is kept for diagnostics. At error level app-server reports
-        // a rejected token refresh; a broader level inherited from the daemon
-        // would add HTTP request bodies that carry the refresh token.
-        spec.env.insert("RUST_LOG".to_owned(), "error".to_owned());
-        match crate::streamed_child::spawn_proxy(&spec).await {
-            Ok(stdio) => Ok((stdio, lease)),
-            Err(error) if crate::streamed_child::is_missing_program(&error) => {
-                Err(QueryError::NotInstalled {
+        let stdio = spawn_app_server(&launcher, cwd, env)
+            .await
+            .map_err(|error| match error {
+                QueryError::NotInstalled { detail, .. } => QueryError::NotInstalled {
                     expected: Some(install),
-                    detail: Some(format!(
-                        "launcher {} could not be found",
-                        launcher.display()
-                    )),
-                })
-            }
-            Err(error) => Err(QueryError::Launch(format!(
-                "could not start managed Codex launcher {}: {error:#}",
-                launcher.display()
-            ))),
+                    detail,
+                },
+                other => other,
+            })?;
+        Ok((stdio, lease))
+    }
+}
+
+/// Start `codex app-server` from `launcher`, with the environment a quota
+/// check gives it.
+async fn spawn_app_server(
+    launcher: &Path,
+    cwd: PathBuf,
+    env: HashMap<String, String>,
+) -> Result<crate::streamed_child::ProxyStdio, QueryError> {
+    let mut spec = mj_core::targets::CommandSpec::new(
+        mj_core::target_path::text(launcher),
+        ["app-server", "--stdio"],
+    );
+    spec.cwd = Some(cwd);
+    spec.env = env.into_iter().collect();
+    // This probe reads a ChatGPT login's rate limits and refreshes that
+    // login. An API key from the profile's environment or the daemon's own
+    // would let Codex use the key instead (#1160).
+    spec.env_remove = mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    // Its stderr is kept for diagnostics. At error level app-server reports
+    // a rejected token refresh; a broader level inherited from the daemon
+    // would add HTTP request bodies that carry the refresh token.
+    spec.env.insert("RUST_LOG".to_owned(), "error".to_owned());
+    match crate::streamed_child::spawn_proxy(&spec).await {
+        Ok(stdio) => Ok(stdio),
+        Err(error) if crate::streamed_child::is_missing_program(&error) => {
+            Err(QueryError::NotInstalled {
+                expected: None,
+                detail: Some(format!(
+                    "launcher {} could not be found",
+                    launcher.display()
+                )),
+            })
         }
+        Err(error) => Err(QueryError::Launch(format!(
+            "could not start Codex launcher {}: {error:#}",
+            launcher.display()
+        ))),
     }
 }
 

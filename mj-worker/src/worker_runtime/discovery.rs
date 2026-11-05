@@ -6,7 +6,8 @@ use std::time::Duration;
 use crate::acp::{self, AcceptedSessionConfig, CommandRequest, LaunchSpec, RuntimeEvent};
 use anyhow::{Context, Result, bail};
 use mj_core::config::ExecutionPolicy;
-use mj_core::worker_launch::{HarnessRuntimePolicy, ProfileConfig, ProfileProbeSpec};
+use mj_core::worker_launch::{ProfileConfig, ProfileProbeSpec};
+use std::path::Path;
 use tokio::sync::mpsc;
 
 use super::AcpSupervisorSpec;
@@ -18,44 +19,41 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     // and the cache root (`HOME` or `XDG_CACHE_HOME`) are visible to the
     // system-or-managed Node decision.
     let mut environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
-    let managed_node =
-        if super::harness_launch::needs_node_runtime(spec.harness, &environment).await? {
-            super::harness::ensure_node_runtime(&mut environment)
-                .await
-                .with_context(|| {
-                    format!(
-                        "prepare Node.js for {} discovery",
-                        spec.harness.display_name()
-                    )
-                })?
-        } else {
-            None
-        };
-    // The probe runs from a staged copy of the profile, like a session.
+    let managed_node = if spec.harness_runtime.may_install()
+        && super::harness_launch::needs_node_runtime(spec.harness, &environment).await?
+    {
+        super::harness::ensure_node_runtime(&mut environment)
+            .await
+            .with_context(|| {
+                format!(
+                    "prepare Node.js for {} discovery",
+                    spec.harness.display_name()
+                )
+            })?
+    } else {
+        None
+    };
+    // The probe runs from a staged copy of the profile, like a session, and
+    // starts the harness a local session would.
     spec.harness
         .configure_home_environment(&spec.profile_home, &mut environment);
-    let managed = super::harness::resolve(
-        HarnessRuntimePolicy::Managed,
+    let (built_in_command, built_in_args) =
+        mj_core::harness_runtime::fallback_launch(spec.harness, policy);
+    let located = super::harness::locate(
+        spec.harness_runtime,
         spec.harness,
         policy,
+        Path::new(&built_in_command),
+        &built_in_args,
         &environment,
     )
     .await?;
-    // Harnesses without a managed installation (DSH) probe through the same
-    // npm bootstrap launch a session uses; there is no install to lease.
-    let (command, args, managed_environment, lease_path) = match &managed {
-        Some(managed) => (
-            managed.command.clone(),
-            managed.args.clone(),
-            managed.environment.clone(),
-            Some(managed.lease_path.clone()),
-        ),
-        None => {
-            let (command, args) = super::harness::unmanaged_launch(spec.harness)
-                .context("managed discovery installation is missing")?;
-            (command, args, Default::default(), None)
-        }
-    };
+    let lease_path = located
+        .managed
+        .as_ref()
+        .map(|managed| managed.lease_path.clone());
+    let (command, args, managed_environment) = (located.command, located.args, located.environment);
+    let managed = located.managed;
     environment.extend(managed_environment);
     let mut session_environment = environment.clone();
     super::exclude_from_harness_environment(
@@ -119,6 +117,8 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
         stall_policy: None,
     };
     let result = probe(launch, spec.model).await;
+    // The installation leases last until the probe's harness has stopped.
+    drop(managed);
     drop(managed_node);
     result
 }

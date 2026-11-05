@@ -19,6 +19,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mj_core::config::{AuthScheme, HarnessHost, HarnessKind, HarnessProfile};
+use mj_core::harness_install::Located;
+use mj_core::worker_launch::HarnessRuntimePolicy;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -40,12 +42,12 @@ pub(crate) enum Outcome {
     NoLogin(String),
 }
 
-/// A pinned harness CLI and the environment prepared for it. The managed
+/// A pinned harness CLI and the environment prepared for it. A managed
 /// harness keeps the installation lease alive while the child command runs.
 pub(crate) struct PinnedCli {
     pub command: PathBuf,
     pub environment: BTreeMap<String, String>,
-    _managed: mj_core::harness_install::ManagedHarness,
+    _located: Located,
 }
 
 fn uses_ambient_cli(profile: &HarnessProfile) -> bool {
@@ -70,8 +72,16 @@ pub(crate) async fn login(
             profile.kind.display_name()
         )));
     }
-    let (managed, launch_environment) = match managed_login(profile).await {
-        Ok(prepared) => prepared,
+    let (located, entrypoint, launch_environment) = match located_login(profile).await {
+        Ok((located, environment)) => match located.entrypoint.clone() {
+            Some(entrypoint) => (located, entrypoint, environment),
+            None => {
+                return Ok(Outcome::Unavailable(format!(
+                    "Mjolnir does not install {}",
+                    profile.kind.display_name()
+                )));
+            }
+        },
         Err(error) => {
             return Ok(Outcome::Unavailable(format!(
                 "the pinned {} could not be prepared: {error:#}",
@@ -80,45 +90,52 @@ pub(crate) async fn login(
         }
     };
     println!(
-        "Using the pinned {} at {}.",
+        "Using {} {} at {}.",
+        source_label(),
         profile.kind.display_name(),
-        managed.entrypoint.display()
+        entrypoint.display()
     );
     sign_in(
         profile.kind,
         &profile.home,
-        &managed.command,
-        &managed.args,
-        &managed.entrypoint,
+        &located.command,
+        &located.args,
+        &entrypoint,
         &launch_environment,
         requested_method,
     )
     .await
 }
 
-/// Resolve the same managed installation used for sessions and return its CLI
-/// with the environment that makes its shebangs and child tools use the
-/// managed Node version.
+/// How a login names where its harness comes from.
+fn source_label() -> &'static str {
+    match mj_core::placement::local_harness_runtime() {
+        HarnessRuntimePolicy::Image => "the image's",
+        _ => "the pinned",
+    }
+}
+
+/// Locate the same harness a local session uses and return its CLI with the
+/// environment that makes its shebangs and child tools use the matching Node
+/// version.
 pub(crate) async fn pinned_cli(profile: &HarnessProfile) -> Result<PinnedCli> {
     anyhow::ensure!(
         !uses_ambient_cli(profile),
         "this profile uses your own {} installation; Mjolnir signs in through that harness's installed CLI",
         profile.kind.display_name()
     );
-    let (managed, environment) = managed_login(profile).await?;
+    let (located, environment) = located_login(profile).await?;
     Ok(PinnedCli {
-        command: managed.cli_entrypoint.clone(),
+        command: located
+            .cli_entrypoint
+            .clone()
+            .with_context(|| format!("Mjolnir does not install {}", profile.kind.display_name()))?,
         environment,
-        _managed: managed,
+        _located: located,
     })
 }
 
-async fn managed_login(
-    profile: &HarnessProfile,
-) -> Result<(
-    mj_core::harness_install::ManagedHarness,
-    BTreeMap<String, String>,
-)> {
+async fn located_login(profile: &HarnessProfile) -> Result<(Located, BTreeMap<String, String>)> {
     let created_home = !profile.home.exists();
     std::fs::create_dir_all(&profile.home).with_context(|| {
         format!(
@@ -160,14 +177,19 @@ async fn managed_login(
         }
     }
     launch_environment.extend(environment.clone());
-    let managed = mj_core::harness_install::resolve_with_environment(
+    let execution_policy = mj_core::config::ExecutionPolicy::ConfiguredApprovals;
+    let (command, args) = mj_core::harness_runtime::fallback_launch(profile.kind, execution_policy);
+    let located = mj_core::harness_install::locate(
+        mj_core::placement::local_harness_runtime(),
         profile.kind,
-        mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+        execution_policy,
+        Path::new(&command),
+        &args,
         &launch_environment,
     )
     .await?;
-    launch_environment.extend(managed.environment.clone());
-    Ok((managed, launch_environment))
+    launch_environment.extend(located.environment.clone());
+    Ok((located, launch_environment))
 }
 
 /// The core of ACP sign-in. Tests drive this directly with a scripted bridge.

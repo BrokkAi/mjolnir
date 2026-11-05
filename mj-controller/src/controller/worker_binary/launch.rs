@@ -1241,26 +1241,22 @@ pub(super) fn exclude_harness_environment(
     excluded
 }
 
-/// Whether the worker's own environment is a container image's: a container
-/// target, or a local session of a daemon that itself runs in a container,
-/// whose workers start beside it in the agent-dev image.
-fn worker_runs_in_image(backend: &targets::TargetLocator) -> bool {
-    backend.container_engine().is_some()
-        || matches!(backend, targets::TargetLocator::LocalBare { .. })
-            && crate::daemon::placement() != crate::daemon::DaemonPlacement::Host
-}
-
-/// An image already carries the pinned harnesses, so its workers use them and
-/// install a pinned copy only when one is missing or incompatible. A bare
-/// machine has no such guarantee.
+/// Where a worker on `backend` gets its harness. Local work follows
+/// [`mj_core::placement::local_harness_runtime`]: the image's harnesses in the
+/// daemon container, the managed installation on a host.
 pub(super) fn harness_runtime_policy(backend: &targets::TargetLocator) -> HarnessRuntimePolicy {
-    if worker_runs_in_image(backend) {
-        return HarnessRuntimePolicy::Ambient;
-    }
     match backend {
-        targets::TargetLocator::LocalBare { .. }
-        | targets::TargetLocator::AwsEc2 { .. }
-        | targets::TargetLocator::SshBare { .. } => HarnessRuntimePolicy::Managed,
+        targets::TargetLocator::LocalBare { .. } => mj_core::placement::local_harness_runtime(),
+        targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. } => {
+            HarnessRuntimePolicy::Managed
+        }
         _ => HarnessRuntimePolicy::Ambient,
     }
+}
+
+/// Whether the worker's own environment is an image's: a container target, or
+/// a local worker beside a daemon in its container.
+fn worker_runs_in_image(backend: &targets::TargetLocator) -> bool {
+    backend.container_engine().is_some()
+        || harness_runtime_policy(backend) == HarnessRuntimePolicy::Image
 }

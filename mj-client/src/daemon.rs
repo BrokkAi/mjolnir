@@ -36,10 +36,7 @@ pub fn metadata_path() -> PathBuf {
 }
 
 /// The environment variable naming the container a daemon was launched in.
-///
-/// The launcher sets it, and the daemon reads it to report its placement. A
-/// host daemon does not have it.
-pub const DAEMON_CONTAINER_ENV: &str = "MJ_DAEMON_CONTAINER";
+pub use mj_core::placement::DAEMON_CONTAINER_ENV;
 
 /// The environment variable naming the engine that owns the daemon container.
 pub const DAEMON_CONTAINER_RUNTIME_ENV: &str = "MJ_DAEMON_CONTAINER_RUNTIME";

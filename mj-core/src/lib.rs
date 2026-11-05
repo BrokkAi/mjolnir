@@ -42,6 +42,7 @@ pub mod native_agent;
 pub mod node;
 pub mod path_completion;
 pub mod path_input;
+pub mod placement;
 pub mod profile_capabilities;
 pub mod program_path;
 pub mod project_catalog;

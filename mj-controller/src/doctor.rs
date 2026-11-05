@@ -480,6 +480,23 @@ fn session_environment_check_from(
             ),
         );
     }
+    // The daemon container's sessions run the image's harnesses, which bring
+    // their own Node.js; nothing is installed there.
+    if mj_core::placement::local_harness_runtime()
+        == mj_core::worker_launch::HarnessRuntimePolicy::Image
+    {
+        return DoctorCheck::warning(
+            "session.environment",
+            "Session environment",
+            format!(
+                "The daemon's image has no {} on the sessions' PATH ({entries} entries), so its \
+                 Node-based harnesses cannot start.",
+                join_english(&missing),
+            ),
+            "Run the daemon on an agent-dev image of this release: remove [daemon] image to use \
+             the release's own image.",
+        );
+    }
     if curl.is_some() {
         return DoctorCheck::ready(
             "session.environment",
