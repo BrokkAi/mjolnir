@@ -42,6 +42,8 @@ The status says the daemon is in a container. `docker inspect` shows no host net
 
 The old container placement shared the host network and PID namespaces and bind-mounted the host home, data directory, and configuration directory. That made the container look like a host process, so `daemon.json`, worker PIDs, and the SessionWiki scan all worked by accident. The first container-native implementation exposed every one of those assumptions: the host metadata file must be written by the launcher, the daemon cannot use the host store guard, and code that reads `~` means the container's home.
 
+A local worker's `HOME` comes from the account database (`/home/hel` in the image), not from the daemon's `HOME=/var/lib/mjolnir/home`. Managed installations made by session workers therefore landed in the container's writable layer and were lost when the container was recreated. Using the image's harnesses for sessions removes that copy.
+
 Host mode still uses those assumptions deliberately. This plan changes only the container placement. The `HostFs` and `mj node` work from the superseded plan remains useful for host placement but is not part of the container path.
 
 ## Decision Log
@@ -52,6 +54,8 @@ Host mode still uses those assumptions deliberately. This plan changes only the 
 - Decision: The host launcher writes `daemon.json` with `pid: 0`. Rationale: a container PID is not a host PID. Clients already ask the daemon for `Identity`; `pid` remains only in the frozen `Status` shape. Date/Author: 2026-11-04.
 - Decision: A container daemon runs commands locally inside its container instead of installing a node. Rationale: if everything is containerized, the container is where local work belongs. Date/Author: 2026-11-04.
 - Decision: Use the agent-dev image as the daemon image rather than a small daemon-only image. Rationale: local sessions run their worker and harness in the same container, so that image must contain all three. Date/Author: 2026-11-04.
+
+- Decision: Local sessions of a container daemon use the `Ambient` harness policy and are seeded with the image's environment, the same as container targets. Rationale: the launcher only runs an image whose revision label matches the build, so the image's harnesses are the pinned versions; the `Managed` policy downloaded a second copy of Node and each harness on first use. The worker's ambient selection still installs a pinned copy when a bridge is missing or incompatible. The placement fact has one owner, `daemon::placement()`, which startup, `Identity` and the launch policy all ask. Date/Author: 2026-11-05.
 
 ## Outcomes & Retrospective
 

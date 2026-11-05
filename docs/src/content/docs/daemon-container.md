@@ -37,6 +37,13 @@ The image carries the daemon, the session worker, and every harness, so local
 sessions run their worker inside the same container. Files and harness logins
 created there persist in the volume.
 
+Everything that runs a harness in the container uses the harnesses the image
+ships, at the versions this release pins: local sessions, model discovery,
+`mj login`, and quota checks. Mjolnir never downloads its own copy of a harness
+or of Node.js there, the way it does on a host. If a custom `[daemon] image`
+lacks a harness or carries an incompatible version, that harness reports an
+error naming the image; remove `[daemon] image` to use the release's own image.
+
 ## Data and restarts
 
 The volume is the durable part. Stopping the daemon, replacing its build, or

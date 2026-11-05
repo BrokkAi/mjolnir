@@ -1,7 +1,7 @@
 //! Evidence and durable admission for bounded, already-authorized continuation.
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 pub const MAX_NUDGES: u8 = 3;
 pub const USER_BYTES: usize = 32 * 1024;
@@ -175,9 +175,6 @@ impl ContinuationEvidence {
         );
         Ok(())
     }
-    pub fn upstream_body(&self) -> Value {
-        json!({"model":"jev-latest", "state":self, "questions":serde_json::from_str::<Value>(QUESTIONS).expect("shared questions")})
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -252,6 +249,7 @@ pub fn is_generated_prompt(command_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parent_wait_notice_is_generated_prompt_text() {

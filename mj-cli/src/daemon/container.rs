@@ -218,10 +218,12 @@ pub(super) async fn log_tail(program: &str, name: &str) -> String {
 
 /// Run `mj <args>` inside the configured daemon container, with the same
 /// roots the daemon uses. Returns false when this is a host placement, so the
-/// caller runs the command locally. The container process sets
-/// `MJ_IN_CONTAINER` so the nested command cannot try to launch another one.
+/// caller runs the command locally. The nested command carries the
+/// container's name in [`mj_core::placement::DAEMON_CONTAINER_ENV`], like the
+/// daemon: it runs in the daemon container, so it uses the image's harnesses
+/// and cannot try to launch another container.
 pub(crate) async fn exec_in_container(args: &[String]) -> Result<bool> {
-    if std::env::var_os("MJ_IN_CONTAINER").is_some() {
+    if mj_core::placement::daemon_container().is_some() {
         return Ok(false);
     }
     let config = super::load_daemon_config().await.unwrap_or_default();
@@ -251,8 +253,8 @@ pub(crate) async fn exec_in_container(args: &[String]) -> Result<bool> {
         .env("HOME", format!("{VOLUME_MOUNT}/home"))
         .env("MJ_DATA_DIR", format!("{VOLUME_MOUNT}/data"))
         .env("MJ_CONFIG_DIR", format!("{VOLUME_MOUNT}/config"))
-        .env("MJ_IN_CONTAINER", "1")
-        .arg(name)
+        .env(mj_core::placement::DAEMON_CONTAINER_ENV, &name)
+        .arg(&name)
         .arg(IMAGE_EXECUTABLE)
         .args(args);
     let status = mj_core::subprocess::run_inherited(&mut command)

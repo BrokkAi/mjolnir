@@ -66,12 +66,19 @@ impl QuotaRuntime {
     /// Decide where a check runs, from the configuration and the engines on
     /// `path`.
     ///
+    /// A daemon in its own container runs every check beside itself: its
+    /// image is the agent-dev image this module would otherwise start, and
+    /// the container has no engine to start one with.
+    ///
     /// `Auto` uses a container only for an enabled local Podman or Docker
     /// runtime whose engine is installed, and runs that runtime's image,
     /// which the daemon already keeps downloaded. With no such runtime the
     /// check runs on this host, by design. A named engine that is missing is
     /// an error the check reports.
     pub(crate) fn resolve(config: &QuotaRuntimeConfig, path: Option<&OsStr>) -> Result<Self> {
+        if config.in_daemon_container {
+            return Ok(Self::Host);
+        }
         let installed =
             |engine: Engine| mj_core::program_path::find_program_on_path(engine.program(), path);
         let image = |engine: Engine| match engine {
@@ -463,6 +470,14 @@ mod tests {
     /// engines installed, as the daemon loads it: the loader adds the
     /// standard `podman` and `docker` runtimes the file does not name.
     fn auto_decision(targets: &str, engines: &[&str]) -> Option<(Engine, String)> {
+        decision(targets, engines, false)
+    }
+
+    fn decision(
+        targets: &str,
+        engines: &[&str],
+        in_daemon_container: bool,
+    ) -> Option<(Engine, String)> {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("config.toml");
         std::fs::write(
@@ -473,9 +488,13 @@ mod tests {
         let config = mj_core::config::Config::load_from(&file)
             .unwrap()
             .with_local_targets();
-        assert_eq!(config.quota.runtime, QuotaRuntimeChoice::Auto);
+        if !targets.contains("[quota]") {
+            assert_eq!(config.quota.runtime, QuotaRuntimeChoice::Auto);
+        }
         let (_bin, path) = path_with(engines);
-        match QuotaRuntime::resolve(&QuotaRuntimeConfig::of(&config), Some(&path)).unwrap() {
+        let mut runtime = QuotaRuntimeConfig::of(&config);
+        runtime.in_daemon_container = in_daemon_container;
+        match QuotaRuntime::resolve(&runtime, Some(&path)).unwrap() {
             QuotaRuntime::Host => None,
             QuotaRuntime::Container(runtime) => {
                 assert_eq!(
@@ -516,6 +535,15 @@ mod tests {
         assert_eq!(
             auto_decision(mine, &["podman"]),
             Some((Engine::Podman, "example.invalid/mine:1".to_owned()))
+        );
+        // The daemon container's image ships both engine clients and its
+        // config has the standard runtimes, but it has no engine to reach:
+        // its checks run beside the daemon on the image's harnesses, even
+        // when a named engine is chosen.
+        assert_eq!(decision("", &["podman", "docker"], true), None);
+        assert_eq!(
+            decision("[quota]\nruntime = \"podman\"\n", &["podman"], true),
+            None
         );
     }
 }

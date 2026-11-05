@@ -31,11 +31,12 @@ async fn ask_logged(
     diagnostic: Option<&mj_core::jev::Attempt>,
 ) -> Result<ContinuationVerdict> {
     evidence.validate()?;
-    let body = if key.is_some() {
-        evidence.upstream_body()
-    } else {
-        serde_json::json!(evidence)
-    };
+    let body = mj_core::jev::request_body(
+        evidence,
+        key.is_some()
+            .then(|| serde_json::from_str(mj_core::continuation::QUESTIONS))
+            .transpose()?,
+    );
     if let Some(diagnostic) = diagnostic {
         diagnostic.update(None, serde_json::json!({"request":body, "source":if key.is_some() { "direct" } else { "hosted" }, "contract":"continuation-verdict-v2", "questions":serde_json::from_str::<serde_json::Value>(mj_core::continuation::QUESTIONS)?, "model":"jev-latest", "unfinished_threshold":mj_core::continuation::CONFIDENCE, "no_input_needed_threshold":mj_core::continuation::CONFIDENCE, "maximum_continuations":mj_core::continuation::MAX_NUDGES}));
     }

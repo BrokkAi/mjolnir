@@ -79,10 +79,17 @@ pub(in crate::controller) fn preflight_harness(
     if !mj_core::harness_runtime::harness_uses_node_runtime(profile.kind) {
         return Ok(());
     }
-    if !matches!(
-        template,
-        TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
-    ) {
+    // Only a managed installation downloads Node.js. A daemon container's
+    // local sessions run the image's harnesses and never reach this check.
+    let managed = match template {
+        TargetTemplate::LocalBare => {
+            mj_core::placement::local_harness_runtime()
+                == mj_core::worker_launch::HarnessRuntimePolicy::Managed
+        }
+        TargetTemplate::SshBare { .. } => true,
+        _ => false,
+    };
+    if !managed {
         return Ok(());
     }
     // Mjolnir installs its own pinned Node.js when the target has no

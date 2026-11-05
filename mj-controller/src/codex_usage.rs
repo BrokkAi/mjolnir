@@ -31,9 +31,6 @@ const STDERR_TAIL_LINES: usize = 20;
 const STDERR_LINE_BYTES: usize = 2 * 1024;
 // How long a stopped app-server's stderr gets to reach end of stream.
 const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
-// Shorter runs of token characters are left alone so that ordinary words,
-// paths and numbers stay readable.
-const SECRET_RUN_CHARS: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexUsageStatus {
@@ -63,8 +60,12 @@ pub(crate) enum CodexLauncher {
     /// The Mjolnir-managed installation under this cache root, or the
     /// process's default cache root.
     Managed(Option<PathBuf>),
-    /// The agent-dev image's `codex`.
+    /// The agent-dev image's `codex`, started in a new container.
     Container(crate::quota_runtime::ContainerCheck),
+    /// The `codex` of the image this daemon runs in
+    /// ([`mj_core::worker_launch::HarnessRuntimePolicy::Image`]). No managed
+    /// installation is consulted.
+    Image,
 }
 
 pub struct CodexUsageClient {
@@ -103,6 +104,11 @@ impl CodexUsageClient {
                 let (stdio, container) = spawn_codex_in_container(check, env).await?;
                 (stdio, None, Some(container))
             }
+            CodexLauncher::Image => (
+                spawn_app_server(Path::new("codex"), cwd, env).await?,
+                None,
+                None,
+            ),
         };
         let crate::streamed_child::ProxyStdio {
             child,
@@ -298,7 +304,7 @@ impl StderrTail {
     }
 
     fn push(&self, line: &[u8]) {
-        let line = redact_secrets(&mj_core::transcript::sanitize_terminal_text(
+        let line = mj_core::redact::redact_secrets(&mj_core::transcript::sanitize_terminal_text(
             &String::from_utf8_lossy(line),
         ));
         let line = line.trim();
@@ -322,35 +328,6 @@ impl StderrTail {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         lines.iter().cloned().collect()
     }
-}
-
-/// Replace every long run of token characters. Access, refresh and id tokens,
-/// API keys and account ids are all long runs of base64url, hex or dotted JWT
-/// segments, and a diagnostic has no use for them.
-fn redact_secrets(text: &str) -> String {
-    fn is_token_char(ch: char) -> bool {
-        ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '+')
-    }
-    fn flush(run: &mut String, redacted: &mut String) {
-        if run.chars().count() >= SECRET_RUN_CHARS {
-            redacted.push_str("[redacted]");
-        } else {
-            redacted.push_str(run);
-        }
-        run.clear();
-    }
-    let mut redacted = String::with_capacity(text.len());
-    let mut run = String::new();
-    for ch in text.chars() {
-        if is_token_char(ch) {
-            run.push(ch);
-        } else {
-            flush(&mut run, &mut redacted);
-            redacted.push(ch);
-        }
-    }
-    flush(&mut run, &mut redacted);
-    redacted
 }
 
 async fn read_bounded_frame<R>(reader: &mut R) -> Result<Option<Vec<u8>>, QueryError>
@@ -614,39 +591,58 @@ async fn spawn_codex(
             });
         }
 
-        let mut spec = mj_core::targets::CommandSpec::new(
-            mj_core::target_path::text(&launcher),
-            ["app-server", "--stdio"],
-        );
-        spec.cwd = Some(cwd);
-        spec.env = env.into_iter().collect();
-        // This probe reads a ChatGPT login's rate limits and refreshes that
-        // login. An API key from the profile's environment or the daemon's own
-        // would let Codex use the key instead (#1160).
-        spec.env_remove = mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect();
-        // Its stderr is kept for diagnostics. At error level app-server reports
-        // a rejected token refresh; a broader level inherited from the daemon
-        // would add HTTP request bodies that carry the refresh token.
-        spec.env.insert("RUST_LOG".to_owned(), "error".to_owned());
-        match crate::streamed_child::spawn_proxy(&spec).await {
-            Ok(stdio) => Ok((stdio, lease)),
-            Err(error) if crate::streamed_child::is_missing_program(&error) => {
-                Err(QueryError::NotInstalled {
+        let stdio = spawn_app_server(&launcher, cwd, env)
+            .await
+            .map_err(|error| match error {
+                QueryError::NotInstalled { detail, .. } => QueryError::NotInstalled {
                     expected: Some(install),
-                    detail: Some(format!(
-                        "launcher {} could not be found",
-                        launcher.display()
-                    )),
-                })
-            }
-            Err(error) => Err(QueryError::Launch(format!(
-                "could not start managed Codex launcher {}: {error:#}",
-                launcher.display()
-            ))),
+                    detail,
+                },
+                other => other,
+            })?;
+        Ok((stdio, lease))
+    }
+}
+
+/// Start `codex app-server` from `launcher`, with the environment a quota
+/// check gives it.
+async fn spawn_app_server(
+    launcher: &Path,
+    cwd: PathBuf,
+    env: HashMap<String, String>,
+) -> Result<crate::streamed_child::ProxyStdio, QueryError> {
+    let mut spec = mj_core::targets::CommandSpec::new(
+        mj_core::target_path::text(launcher),
+        ["app-server", "--stdio"],
+    );
+    spec.cwd = Some(cwd);
+    spec.env = env.into_iter().collect();
+    // This probe reads a ChatGPT login's rate limits and refreshes that
+    // login. An API key from the profile's environment or the daemon's own
+    // would let Codex use the key instead (#1160).
+    spec.env_remove = mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    // Its stderr is kept for diagnostics. At error level app-server reports
+    // a rejected token refresh; a broader level inherited from the daemon
+    // would add HTTP request bodies that carry the refresh token.
+    spec.env.insert("RUST_LOG".to_owned(), "error".to_owned());
+    match crate::streamed_child::spawn_proxy(&spec).await {
+        Ok(stdio) => Ok(stdio),
+        Err(error) if crate::streamed_child::is_missing_program(&error) => {
+            Err(QueryError::NotInstalled {
+                expected: None,
+                detail: Some(format!(
+                    "launcher {} could not be found",
+                    launcher.display()
+                )),
+            })
         }
+        Err(error) => Err(QueryError::Launch(format!(
+            "could not start Codex launcher {}: {error:#}",
+            launcher.display()
+        ))),
     }
 }
 
@@ -1597,18 +1593,6 @@ IFS= read -r line
             lines.last().unwrap(),
             "ERROR failed to refresh token: refresh_token=[redacted] reused"
         );
-    }
-
-    #[test]
-    fn redaction_removes_token_runs_and_keeps_ordinary_text() {
-        assert_eq!(
-            redact_secrets(
-                "Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl, key sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX"
-            ),
-            "Bearer [redacted], key [redacted]"
-        );
-        let ordinary = "2026-10-05T12:00:00Z WARN codex_login::auth: POST https://auth.openai.com/oauth/token returned 401";
-        assert_eq!(redact_secrets(ordinary), ordinary);
     }
 
     /// A stand-in container engine: `image inspect` succeeds unless

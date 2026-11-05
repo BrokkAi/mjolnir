@@ -64,6 +64,9 @@ pub struct QuotaRuntimeConfig {
     pub podman_image: Option<String>,
     /// The same for Docker.
     pub docker_image: Option<String>,
+    /// Whether the daemon runs in its own container, whose image already
+    /// carries every harness: checks then run beside it, whatever `choice` says.
+    pub in_daemon_container: bool,
 }
 
 impl QuotaRuntimeConfig {
@@ -88,6 +91,7 @@ impl QuotaRuntimeConfig {
             choice: config.quota.runtime,
             podman_image: image(mj_core::targets::ImageHost::LocalPodman),
             docker_image: image(mj_core::targets::ImageHost::LocalDocker),
+            in_daemon_container: mj_core::placement::daemon_container().is_some(),
         }
     }
 
@@ -97,6 +101,7 @@ impl QuotaRuntimeConfig {
             choice: QuotaRuntimeChoice::Host,
             podman_image: None,
             docker_image: None,
+            in_daemon_container: mj_core::placement::daemon_container().is_some(),
         }
     }
 }
@@ -584,7 +589,12 @@ async fn refresh_profile_with_cache_root(
             CodexQuotaSource::ChatGptLogin => 'codex: {
                 let launcher = match container() {
                     Ok(Some(check)) => codex_usage::CodexLauncher::Container(check),
-                    Ok(None) => codex_usage::CodexLauncher::Managed(cache_root.clone()),
+                    Ok(None) => match mj_core::placement::local_harness_runtime() {
+                        mj_core::worker_launch::HarnessRuntimePolicy::Image => {
+                            codex_usage::CodexLauncher::Image
+                        }
+                        _ => codex_usage::CodexLauncher::Managed(cache_root.clone()),
+                    },
                     Err(error) => break 'codex Err(error),
                 };
                 // A poll starts at most one app-server. A failed rotation drops its

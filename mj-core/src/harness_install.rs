@@ -17,7 +17,7 @@ use crate::harness_runtime::{
     npm_bridge, pin,
 };
 use crate::worker_launch::HarnessRuntimePolicy;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
 const INSTALL_LOCK_FILE: &str = ".install.lock";
 const INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -116,48 +116,362 @@ pub fn spawn_gc_on(
     })
 }
 
-pub async fn resolve(
-    runtime: HarnessRuntimePolicy,
+/// The launch [`locate`] selected for one harness.
+#[derive(Debug)]
+pub struct Located {
+    pub command: PathBuf,
+    pub args: Vec<String>,
+    /// Variables the launch adds to the harness environment.
+    pub environment: BTreeMap<String, String>,
+    /// The harness or ACP executable the launch runs, when Mjolnir chose it.
+    /// `None` for a target's own launch command, whose programs Mjolnir does
+    /// not name.
+    pub entrypoint: Option<PathBuf>,
+    /// The harness command-line program beside that executable, under the
+    /// same condition.
+    pub cli_entrypoint: Option<PathBuf>,
+    /// The managed installation the launch runs, which holds its lease.
+    /// Always `None` under [`HarnessRuntimePolicy::Image`].
+    pub managed: Option<ManagedHarness>,
+}
+
+impl Located {
+    fn managed(managed: ManagedHarness) -> Self {
+        Self {
+            command: managed.command.clone(),
+            args: managed.args.clone(),
+            environment: managed.environment.clone(),
+            entrypoint: Some(managed.entrypoint.clone()),
+            cli_entrypoint: Some(managed.cli_entrypoint.clone()),
+            managed: Some(managed),
+        }
+    }
+
+    fn unchosen(command: &Path, args: &[String]) -> Self {
+        Self {
+            command: command.to_path_buf(),
+            args: args.to_vec(),
+            environment: BTreeMap::new(),
+            entrypoint: None,
+            cli_entrypoint: None,
+            managed: None,
+        }
+    }
+}
+
+/// Select the harness launch for `policy`. This is the one place that decides
+/// where a harness comes from; sessions, the model-discovery probe, `mj login`
+/// and quota checks all ask it.
+///
+/// `environment` is already resolved: the caller merged the account's login
+/// environment into it, so this never starts a login shell. `command` and
+/// `args` are the launch the controller described. A command
+/// that is not Mjolnir's built-in launch ([`crate::harness_runtime::fallback_launch`]
+/// or a bare npm bridge name) is the profile's own and is kept as given.
+///
+/// - [`HarnessRuntimePolicy::Managed`] runs the managed installation.
+/// - [`HarnessRuntimePolicy::Ambient`] runs the target's bridge when it is
+///   present and compatible, and otherwise the managed installation.
+/// - [`HarnessRuntimePolicy::Image`] runs the image's pinned programs. A
+///   missing or incompatible one is an error; nothing is installed and no
+///   managed cache is consulted.
+pub async fn locate(
+    policy: HarnessRuntimePolicy,
+    harness: HarnessKind,
+    execution_policy: ExecutionPolicy,
+    command: &Path,
+    args: &[String],
+    environment: &BTreeMap<String, String>,
+) -> Result<Located> {
+    let bridge = npm_bridge(harness).filter(|bridge| bridge.matches_launcher(command, args));
+    let built_in = bridge.is_some()
+        || crate::harness_runtime::is_fallback_launch(harness, execution_policy, command, args);
+    match policy {
+        HarnessRuntimePolicy::Image if built_in => {
+            locate_in_image(harness, execution_policy, environment).await
+        }
+        HarnessRuntimePolicy::Image => Ok(Located::unchosen(command, args)),
+        // DSH has no managed installation: its launch script resolves a
+        // compatible target `dsh-acp` or fetches the pinned package through
+        // npx.
+        _ if harness == HarnessKind::Dsh => Ok(Located::unchosen(command, args)),
+        HarnessRuntimePolicy::Managed => {
+            resolve_with_environment(harness, execution_policy, environment)
+                .await
+                .map(Located::managed)
+        }
+        HarnessRuntimePolicy::Ambient if !built_in => Ok(Located::unchosen(command, args)),
+        HarnessRuntimePolicy::Ambient => {
+            if let Some(bridge) = bridge {
+                if let Some(selected) = compatible_bridge(harness, bridge, environment).await? {
+                    return Ok(Located::unchosen(&selected, &[]));
+                }
+                tracing::info!(
+                    harness = harness.id(),
+                    "target bridge is missing or incompatible; preparing the pinned installation"
+                );
+            } else {
+                let search = environment.clone();
+                let available = tokio::task::spawn_blocking(move || {
+                    target_native_harness_is_available(harness, &search)
+                })
+                .await
+                .context("find target-native harness task failed")??;
+                if available {
+                    return Ok(Located::unchosen(command, args));
+                }
+                tracing::info!(
+                    harness = harness.id(),
+                    "installing the pinned harness in the target instead of relying on missing image-provided tools"
+                );
+            }
+            resolve_with_environment(harness, execution_policy, environment)
+                .await
+                .map(Located::managed)
+        }
+    }
+}
+
+/// The image's own programs for `harness`, by the names the agent-dev image
+/// installs on `PATH`: the ACP bridge, the native harness the launch runs, and
+/// the harness's command-line program.
+fn image_programs(harness: HarnessKind) -> (&'static str, &'static str, &'static str) {
+    match harness {
+        HarnessKind::Codex => ("codex-acp", "codex-acp", "codex"),
+        HarnessKind::Claude => ("claude-agent-acp", "claude-agent-acp", "claude"),
+        HarnessKind::Muse => ("muse-acp", "muse", "muse"),
+        HarnessKind::Kimi => ("kimi", "kimi", "kimi"),
+        HarnessKind::Grok => ("grok", "grok", "grok"),
+        HarnessKind::OpenCode => ("opencode", "opencode", "opencode"),
+        HarnessKind::Dsh => ("dsh-acp", "dsh-acp", "dsh-acp"),
+    }
+}
+
+async fn locate_in_image(
     harness: HarnessKind,
     execution_policy: ExecutionPolicy,
     environment: &BTreeMap<String, String>,
-) -> Result<Option<ManagedHarness>> {
-    if runtime == HarnessRuntimePolicy::Ambient {
-        return Ok(None);
+) -> Result<Located> {
+    let (bridge_name, entry_name, cli_name) = image_programs(harness);
+    let missing = |name: &str| {
+        anyhow!(
+            "the daemon's image does not provide {name} for {}; the daemon container runs only the image's pinned harnesses, so use an agent-dev image of this release",
+            harness.display_name()
+        )
+    };
+    let search = environment.clone();
+    let names = [bridge_name, entry_name, cli_name];
+    let found = tokio::task::spawn_blocking(move || {
+        names
+            .iter()
+            .map(|name| find_command(Path::new(name), &search))
+            .collect::<Result<Vec<_>>>()
+    })
+    .await
+    .context("find the image's harness programs task failed")??;
+    let [bridge, entrypoint, cli] =
+        <[Option<PathBuf>; 3]>::try_from(found).expect("three programs were looked up");
+    let bridge = bridge.ok_or_else(|| missing(bridge_name))?;
+    let entrypoint = entrypoint.ok_or_else(|| missing(entry_name))?;
+    let cli = cli.ok_or_else(|| missing(cli_name))?;
+    if let Some(npm) = npm_bridge(harness)
+        && compatible_bridge(harness, npm, environment)
+            .await?
+            .is_none()
+    {
+        bail!(
+            "the daemon's image carries an incompatible {} for {}; it needs {} {}",
+            npm.command,
+            harness.display_name(),
+            npm.package,
+            npm.version
+        );
     }
-    // DSH has no managed installation: the npm package bundles the same
-    // release binaries, so the launch description the controller already
-    // provides resolves a compatible target `dsh-acp` or fetches the pinned
-    // package through npx.
-    if harness == HarnessKind::Dsh {
-        return Ok(None);
-    }
-    let environment = crate::login_environment::with_overrides(environment).await?;
-    let root = managed_harness_cache_root(
-        environment.get("XDG_CACHE_HOME").map(OsStr::new),
-        environment.get("HOME").map(OsStr::new),
-    )?;
-    resolve_at_async(&root, harness, execution_policy, &environment)
-        .await
-        .map(Some)
-}
-
-/// Launch description for a harness [`resolve`] does not manage, for call
-/// sites the controller's bridge launch does not reach (the model discovery
-/// probe). Only DSH: [`crate::harness_runtime::dsh_acp_launch_script`]
-/// resolves a compatible target `dsh-acp` or the pinned npm package, so there
-/// is no install to lease and nothing to cache.
-pub fn unmanaged_launch(harness: HarnessKind) -> Option<(PathBuf, Vec<String>)> {
-    match harness {
-        HarnessKind::Dsh => Some((
+    let (command, args) = match harness {
+        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Muse => (bridge, Vec::new()),
+        // OpenCode imports the session's staged logins before its ACP server
+        // starts, as the managed launch does.
+        HarnessKind::OpenCode => (
             PathBuf::from("sh"),
             vec![
                 "-c".to_owned(),
-                crate::harness_runtime::dsh_acp_launch_script(),
+                format!(
+                    "opencode=\"$1\"; {}",
+                    crate::harness_runtime::opencode_acp_script()
+                ),
+                "mj-opencode".to_owned(),
+                bridge.to_string_lossy().into_owned(),
             ],
-        )),
-        _ => None,
+        ),
+        HarnessKind::Dsh => {
+            let mut probe = tokio::process::Command::new(&bridge);
+            probe.arg("--version").env_clear().envs(environment);
+            let output = crate::subprocess::run_bounded(&mut probe, 4096, Duration::from_secs(10))
+                .await
+                .context("check the image's dsh-acp version")?;
+            let reported = String::from_utf8_lossy(&output.stdout);
+            ensure!(
+                output.status.success()
+                    && crate::harness_runtime::dsh_acp_version_supports_native_instructions(
+                        &reported
+                    ),
+                "the daemon's image carries {}, which cannot load AGENTS.md; it needs dsh-acp {} or newer",
+                reported.trim(),
+                crate::harness_runtime::DSH_ACP_VERSION
+            );
+            (
+                PathBuf::from("sh"),
+                vec![
+                    "-c".to_owned(),
+                    crate::harness_runtime::dsh_acp_script(),
+                    "mj-dsh".to_owned(),
+                    bridge.to_string_lossy().into_owned(),
+                ],
+            )
+        }
+        HarnessKind::Kimi | HarnessKind::Grok => (
+            bridge,
+            harness
+                .bridge_args(execution_policy)
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        ),
+    };
+    Ok(Located {
+        command,
+        args,
+        environment: BTreeMap::new(),
+        entrypoint: Some(entrypoint),
+        cli_entrypoint: Some(cli),
+        managed: None,
+    })
+}
+
+/// The target's `bridge` on `PATH` when it is usable: present, and for Codex,
+/// the pinned version.
+async fn compatible_bridge(
+    harness: HarnessKind,
+    bridge: crate::harness_runtime::NpmBridge,
+    environment: &BTreeMap<String, String>,
+) -> Result<Option<PathBuf>> {
+    let search = environment.clone();
+    let selected =
+        tokio::task::spawn_blocking(move || find_command(Path::new(bridge.command), &search))
+            .await
+            .context("find target bridge task failed")??;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    if harness != HarnessKind::Codex {
+        return Ok(Some(selected));
     }
+    let mut probe = tokio::process::Command::new(&selected);
+    probe.arg("--version").env_clear().envs(environment);
+    if let Some(home) = environment.get("HOME") {
+        probe.current_dir(home);
+    }
+    let output = crate::subprocess::run_bounded(&mut probe, 64 * 1024, Duration::from_secs(10))
+        .await
+        .context("check installed Codex bridge version")?;
+    let compatible = output.status.success()
+        && String::from_utf8_lossy(&output.stdout).trim_end_matches('\n')
+            == format!("{} {}", bridge.package, bridge.version);
+    Ok(compatible.then_some(selected))
+}
+
+/// Whether the target carries the native harness its built-in launch script
+/// looks for.
+fn target_native_harness_is_available(
+    harness: HarnessKind,
+    environment: &BTreeMap<String, String>,
+) -> Result<bool> {
+    let home = environment.get("HOME").map(Path::new);
+    let command = match harness {
+        HarnessKind::Kimi => "kimi",
+        HarnessKind::Grok => "grok",
+        HarnessKind::OpenCode => "opencode",
+        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Muse | HarnessKind::Dsh => {
+            return Ok(false);
+        }
+    };
+    if !environment.contains_key("PATH") {
+        return Ok(false);
+    }
+    if find_command(Path::new(command), environment)?.is_some() {
+        return Ok(true);
+    }
+    let home_suffix = match harness {
+        HarnessKind::Kimi => Some(Path::new(".kimi-code/bin/kimi")),
+        HarnessKind::OpenCode => Some(Path::new(".opencode/bin/opencode")),
+        _ => None,
+    };
+    if let (Some(home), Some(suffix)) = (home, home_suffix)
+        && entrypoint_is_executable(&home.join(suffix))
+    {
+        return Ok(true);
+    }
+    if harness == HarnessKind::Grok {
+        for home in [
+            environment
+                .get("GROK_HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            home.map(|home| home.join(".grok")),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if entrypoint_is_executable(&home.join("bin/grok")) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// The executable `command` names on the environment's `PATH`, canonicalized.
+pub fn find_command(
+    command: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<Option<PathBuf>> {
+    let Some(selected) = find_command_path(command, environment)? else {
+        return Ok(None);
+    };
+    selected
+        .canonicalize()
+        .map(Some)
+        .context("resolve selected runtime command")
+}
+
+/// [`find_command`] without resolving symbolic links.
+pub fn find_command_path(
+    command: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<Option<PathBuf>> {
+    let selected = if command.is_absolute() {
+        command.to_path_buf()
+    } else {
+        ensure!(
+            command.components().count() == 1,
+            "relative runtime command is ambiguous"
+        );
+        let selected = std::env::split_paths(
+            environment
+                .get("PATH")
+                .context("runtime PATH is unavailable")?,
+        )
+        .map(|directory| directory.join(command))
+        .find(|path| entrypoint_is_executable(path));
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        selected
+    };
+    if !entrypoint_is_executable(&selected) {
+        return Ok(None);
+    }
+    Ok(Some(selected))
 }
 
 #[cfg(test)]
@@ -180,13 +494,9 @@ fn resolve_at(
 }
 
 /// Install or reuse the exact managed harness for `kind` from a fully
-/// resolved environment.
-///
-/// Unlike [`resolve`], this does not start the account's login shell. Callers
-/// that already hold a resolved environment (notably `mj login`, which may run
-/// before any daemon and under a shell that cannot be started non-interactively)
-/// use this directly.
-pub async fn resolve_with_environment(
+/// resolved environment. It does not start the account's login shell; the
+/// caller already merged the login environment into `environment`.
+async fn resolve_with_environment(
     harness: HarnessKind,
     execution_policy: ExecutionPolicy,
     environment: &BTreeMap<String, String>,
@@ -2078,6 +2388,157 @@ mod tests {
                 ("NODEJS_ORG_MIRROR".to_owned(), mirror),
             ]),
         )
+    }
+
+    #[test]
+    fn ambient_native_launches_use_target_tools_and_keep_custom_commands() {
+        let tools = tempfile::tempdir().unwrap();
+        for command in ["kimi", "grok", "opencode"] {
+            crate::test_hooks::install_fake_command(tools.path(), command, "#!/bin/sh\nexit 0\n");
+        }
+        let environment = BTreeMap::from([(
+            "PATH".to_owned(),
+            tools.path().to_string_lossy().into_owned(),
+        )]);
+        for harness in [HarnessKind::Kimi, HarnessKind::Grok, HarnessKind::OpenCode] {
+            assert!(
+                target_native_harness_is_available(harness, &environment).unwrap(),
+                "{} should reuse its target-provided executable",
+                harness.display_name()
+            );
+            assert!(
+                !target_native_harness_is_available(harness, &BTreeMap::new()).unwrap(),
+                "{} should fall back when its executable is absent",
+                harness.display_name()
+            );
+            let (command, args) =
+                crate::harness_runtime::fallback_launch(harness, ExecutionPolicy::Unconstrained);
+            let located = run_async(locate(
+                HarnessRuntimePolicy::Ambient,
+                harness,
+                ExecutionPolicy::Unconstrained,
+                Path::new(&command),
+                &args,
+                &environment,
+            ))
+            .unwrap();
+            assert!(located.managed.is_none());
+            assert_eq!(located.command, Path::new(&command));
+        }
+        for (harness, command, args) in [
+            (
+                HarnessKind::Kimi,
+                PathBuf::from("/opt/custom-kimi"),
+                Vec::new(),
+            ),
+            {
+                let (command, args) = crate::harness_runtime::fallback_launch(
+                    HarnessKind::Dsh,
+                    ExecutionPolicy::Unconstrained,
+                );
+                (HarnessKind::Dsh, PathBuf::from(command), args)
+            },
+        ] {
+            let located = run_async(locate(
+                HarnessRuntimePolicy::Ambient,
+                harness,
+                ExecutionPolicy::Unconstrained,
+                &command,
+                &args,
+                &BTreeMap::new(),
+            ))
+            .unwrap();
+            assert!(
+                located.managed.is_none() && located.command == command && located.args == args,
+                "{}'s launch must be kept as given",
+                harness.display_name()
+            );
+        }
+    }
+
+    /// The daemon container's only harness source is its image: a missing
+    /// program is an error naming the image, a complete image is used as is,
+    /// and neither case touches a managed cache under `HOME`.
+    #[test]
+    fn image_harnesses_never_fall_back_to_a_managed_install() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        let environment = |path: &Path| {
+            BTreeMap::from([
+                (
+                    "HOME".to_owned(),
+                    home.path().to_string_lossy().into_owned(),
+                ),
+                ("PATH".to_owned(), path.to_string_lossy().into_owned()),
+            ])
+        };
+        for harness in HarnessKind::ALL {
+            let (command, args) =
+                crate::harness_runtime::fallback_launch(harness, ExecutionPolicy::Unconstrained);
+            let error = run_async(locate(
+                HarnessRuntimePolicy::Image,
+                harness,
+                ExecutionPolicy::Unconstrained,
+                Path::new(&command),
+                &args,
+                &environment(tools.path()),
+            ))
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("the daemon's image does not provide"),
+                "{}: {error:#}",
+                harness.display_name()
+            );
+        }
+        let codex = npm_bridge(HarnessKind::Codex).unwrap();
+        let versions = [
+            ("codex-acp", format!("{} {}", codex.package, codex.version)),
+            (
+                "dsh-acp",
+                format!("dsh-acp {}", crate::harness_runtime::DSH_ACP_VERSION),
+            ),
+        ];
+        for harness in HarnessKind::ALL {
+            let (bridge, entry, cli) = image_programs(harness);
+            for name in [bridge, entry, cli] {
+                let version = versions
+                    .iter()
+                    .find(|(program, _)| *program == name)
+                    .map_or(String::new(), |(_, version)| version.clone());
+                // Real files: lookup canonicalizes, which would turn a
+                // dispatcher symlink into the dispatcher itself.
+                let program = tools.path().join(name);
+                std::fs::write(&program, format!("#!/bin/sh\necho '{version}'\n")).unwrap();
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        for harness in HarnessKind::ALL {
+            let (command, args) =
+                crate::harness_runtime::fallback_launch(harness, ExecutionPolicy::Unconstrained);
+            let located = run_async(locate(
+                HarnessRuntimePolicy::Image,
+                harness,
+                ExecutionPolicy::Unconstrained,
+                Path::new(&command),
+                &args,
+                &environment(tools.path()),
+            ))
+            .unwrap_or_else(|error| panic!("{}: {error:#}", harness.display_name()));
+            assert!(located.managed.is_none());
+            assert!(
+                located
+                    .cli_entrypoint
+                    .as_deref()
+                    .is_some_and(|cli| cli.starts_with(tools.path().canonicalize().unwrap())),
+                "{} must use the image's CLI",
+                harness.display_name()
+            );
+        }
+        assert!(
+            !home.path().join(".cache").exists(),
+            "the image source must not create a managed cache"
+        );
     }
 
     fn run_async<F: std::future::Future>(future: F) -> F::Output {

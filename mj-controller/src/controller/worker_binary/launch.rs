@@ -1168,7 +1168,7 @@ pub(super) fn worker_launch_config_with_checkout(
             reviewer_launch: None,
             goal_resume_request: None,
             target_environment,
-            seed_image_environment: backend.container_engine().is_some(),
+            seed_image_environment: worker_runs_in_image(backend),
             run_mode: Default::default(),
             session_id: session_id.to_string(),
             subagents: mj_core::subagent::SubagentPolicy::Native,
@@ -1241,11 +1241,22 @@ pub(super) fn exclude_harness_environment(
     excluded
 }
 
+/// Where a worker on `backend` gets its harness. Local work follows
+/// [`mj_core::placement::local_harness_runtime`]: the image's harnesses in the
+/// daemon container, the managed installation on a host.
 pub(super) fn harness_runtime_policy(backend: &targets::TargetLocator) -> HarnessRuntimePolicy {
     match backend {
-        targets::TargetLocator::LocalBare { .. }
-        | targets::TargetLocator::AwsEc2 { .. }
-        | targets::TargetLocator::SshBare { .. } => HarnessRuntimePolicy::Managed,
+        targets::TargetLocator::LocalBare { .. } => mj_core::placement::local_harness_runtime(),
+        targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. } => {
+            HarnessRuntimePolicy::Managed
+        }
         _ => HarnessRuntimePolicy::Ambient,
     }
+}
+
+/// Whether the worker's own environment is an image's: a container target, or
+/// a local worker beside a daemon in its container.
+fn worker_runs_in_image(backend: &targets::TargetLocator) -> bool {
+    backend.container_engine().is_some()
+        || harness_runtime_policy(backend) == HarnessRuntimePolicy::Image
 }

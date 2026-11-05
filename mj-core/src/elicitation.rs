@@ -111,11 +111,10 @@ impl ElicitationRequest {
             "elicitation has more than {MAX_FIELDS} fields"
         );
         let required = string_set(schema.get("required"), "requestedSchema.required")?;
-        let mut fields = properties
+        let fields = properties
             .iter()
             .map(|(field_id, schema)| parse_field(field_id, schema, required.contains(field_id)))
             .collect::<Result<Vec<_>>>()?;
-        title_untitled_question_from_message(&message, &mut fields);
         Ok(Self {
             id: id.into(),
             message,
@@ -599,26 +598,6 @@ pub enum ElicitationValue {
     StringArray(Vec<String>),
 }
 
-/// Muse sends one question per form, names its field `q0`, and puts the
-/// question in the message as "Header: question". Claude puts the header in
-/// the field title, so a form titled with its own id borrows the header from
-/// the message, and the form reads the same for both.
-fn title_untitled_question_from_message(message: &str, fields: &mut [ElicitationField]) {
-    let [field] = fields else {
-        return;
-    };
-    if field.title != field.id {
-        return;
-    }
-    if let Some((header, _)) = message.split_once(": ")
-        && !header.trim().is_empty()
-        && header.chars().count() <= 40
-        && !header.contains('\n')
-    {
-        field.title = header.trim().to_owned();
-    }
-}
-
 fn parse_field(field_id: &str, value: &Value, required: bool) -> Result<ElicitationField> {
     ensure_text(field_id, "elicitation field id")?;
     let schema = object(value, &format!("schema for field {field_id:?}"))?;
@@ -769,12 +748,18 @@ fn parse_options(schema: &Map<String, Value>, key: &str) -> Result<Vec<Elicitati
             let value = string(option, "const")?.to_owned();
             let title = optional_text(option, "title")?.unwrap_or_else(|| value.clone());
             let description = optional_text(option, "description")?;
-            let preview = option
-                .get("_meta")
-                .and_then(Value::as_object)
+            // claude-agent-acp puts the preview text under its
+            // AskUserQuestion key; muse-acp sends `{content, format}` under
+            // `_meta.muse.preview`, and the content is the text to show.
+            let meta = option.get("_meta").and_then(Value::as_object);
+            let preview = meta
                 .and_then(|meta| meta.get("_claude/askUserQuestionOption"))
-                .and_then(Value::as_object)
-                .and_then(|meta| meta.get("preview"))
+                .and_then(|claude| claude.get("preview"))
+                .or_else(|| {
+                    meta.and_then(|meta| meta.get("muse"))
+                        .and_then(|muse| muse.get("preview"))
+                        .and_then(|preview| preview.get("content"))
+                })
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             if let Some(preview) = &preview {
@@ -1057,37 +1042,6 @@ mod tests {
             panic!("expected multi-select field");
         };
         assert_eq!(default, &["macos"]);
-    }
-
-    // Hard-won: 86ab9abd: Muse forms showed q0 and Sessions rows showed the tool name
-    #[test]
-    fn an_untitled_single_question_takes_the_header_from_its_message() {
-        let request = |message: &str, title: Option<&str>| {
-            let mut field = json!({
-                "type": "string",
-                "oneOf": [{"const": "Red", "title": "Red"}]
-            });
-            if let Some(title) = title {
-                field["title"] = json!(title);
-            }
-            ElicitationRequest::from_acp_params(
-                "elicit-muse",
-                json!({
-                    "sessionId": "session-1",
-                    "mode": "form",
-                    "message": message,
-                    "requestedSchema": {"type": "object", "properties": {"q0": field}}
-                }),
-            )
-            .unwrap()
-        };
-        let muse = request("Color: Which colour do you prefer?", Some("q0"));
-        assert_eq!(muse.fields[0].title, "Color");
-        assert_eq!(muse.fields[0].id, "q0", "the answer is still keyed by id");
-        assert_eq!(request("Color: Which?", None).fields[0].title, "Color");
-        // A real title, or a message with no header, is left alone.
-        assert_eq!(request("Color: Which?", Some("Hue")).fields[0].title, "Hue");
-        assert_eq!(request("Which colour?", None).fields[0].title, "q0");
     }
 
     #[test]

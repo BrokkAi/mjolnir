@@ -90,7 +90,9 @@ for line in sys.stdin:
     elif after == "question":
         notify("userInput/requested", {"sessionId": SESSION, "userInputId": "question-1", "questions": [
             {"id": "choice", "header": "Choose", "question": "Which implementation?", "selection": {"mode": "single"},
-             "options": [{"label": "First"}, {"label": "Second"}]}]})
+             "options": [{"label": "First", "description": "Keep the current design",
+                          "preview": {"format": "markdown", "content": "fn first() {}"}},
+                         {"label": "Second"}]}]})
     elif after == "finish":
         finish()
     elif after == "cancel":
