@@ -113,7 +113,7 @@ impl ChatState {
                     self.focus_subagent_control();
                     return ChatAction::None;
                 }
-                KeyCode::Right if self.reviewer_count > 0 => {
+                KeyCode::Right if self.reviewers.total > 0 => {
                     self.focus_reviewer_control();
                     return ChatAction::None;
                 }
@@ -138,7 +138,7 @@ impl ChatState {
                     self.focus_task_control();
                     return ChatAction::None;
                 }
-                KeyCode::Right if self.reviewer_count > 0 => {
+                KeyCode::Right if self.reviewers.total > 0 => {
                     self.focus_reviewer_control();
                     return ChatAction::None;
                 }
@@ -399,7 +399,7 @@ impl ChatState {
                 } else if self.cursor_is_on_last_prompt_line()
                     && (self.background_task_count() > 0
                         || self.subagent_count > 0
-                        || self.reviewer_count > 0)
+                        || self.reviewers.total > 0)
                 {
                     if self.background_task_count() > 0 {
                         self.focus_task_control();

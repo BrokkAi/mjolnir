@@ -161,13 +161,17 @@ impl DashboardState {
     /// first use so every host path (seeding, keys, paste, render) shares one
     /// instance.
     pub(crate) fn standby_prompt_mut(&mut self, session_id: &str) -> &mut ChatState {
+        let reviewers = self.reviewer_counts_for(session_id);
         if !self.standby_prompts.contains_key(session_id) {
             let standby = self.build_standby_prompt(session_id);
             self.standby_prompts.insert(session_id.to_owned(), standby);
         }
-        self.standby_prompts
+        let prompt = self
+            .standby_prompts
             .get_mut(session_id)
-            .expect("standby prompt was just inserted")
+            .expect("standby prompt was just inserted");
+        prompt.set_reviewer_counts(reviewers);
+        prompt
     }
 
     pub(crate) fn build_standby_prompt(&self, session_id: &str) -> ChatState {
@@ -196,7 +200,7 @@ impl DashboardState {
             }),
             harness_kind: session.as_ref().map(|session| session.harness_kind),
             subagent_count: self.subagent_count_for(session_id),
-            reviewer_count: self.reviewer_count_for(session_id),
+            reviewers: self.reviewer_counts_for(session_id),
         }
     }
 

@@ -644,7 +644,7 @@ impl ActiveChat {
         };
         state.set_history_context(&bundle_id);
         state.set_subagent_count(header.subagent_count);
-        state.set_reviewer_count(header.reviewer_count);
+        state.set_reviewer_counts(header.reviewers);
         state.set_header_summary(header.target, header.profile, header.title);
         state.restore_draft(draft);
         state.notices = notices;

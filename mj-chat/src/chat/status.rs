@@ -299,15 +299,15 @@ impl ChatState {
         }
     }
 
-    pub fn set_reviewer_count(&mut self, count: usize) {
-        self.reviewer_count = count;
-        if count == 0 && self.prompt_control_focus == Some(PromptControl::Reviewers) {
+    pub fn set_reviewer_counts(&mut self, counts: ReviewerCounts) {
+        self.reviewers = counts;
+        if counts.total == 0 && self.prompt_control_focus == Some(PromptControl::Reviewers) {
             self.prompt_control_focus = None;
         }
     }
 
     pub(crate) fn focus_reviewer_control(&mut self) {
-        if self.reviewer_count > 0 {
+        if self.reviewers.total > 0 {
             self.prompt_control_focus = Some(PromptControl::Reviewers);
         }
     }

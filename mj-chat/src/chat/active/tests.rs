@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::chat::ReviewerCounts;
 use crate::chat::test_support::{
     agent_message_item, agent_transcript_item, ctrl, drawn_transcript, fast_mode_option, key,
     queued, snapshot,
@@ -1067,7 +1068,7 @@ async fn a_same_session_context_refresh_updates_the_visible_header_without_losin
             title: "Original session title".into(),
             harness_kind: Some(HarnessKind::Codex),
             subagent_count: 0,
-            reviewer_count: 0,
+            reviewers: ReviewerCounts::default(),
         },
         "keep this draft".into(),
         Notices::default(),
@@ -3004,7 +3005,7 @@ async fn golden_active_chat_render() {
     for ui_theme in theme::UiTheme::ALL {
         let mut controls = ChatState::new(&snapshot(), &[]);
         controls.set_subagent_count(2);
-        controls.set_reviewer_count(1);
+        controls.set_reviewer_counts(ReviewerCounts { total: 1, open: 1 });
         controls.set_session_activity(SessionActivity {
             dismiss_question_supported: false,
             pursuing_goal: Default::default(),

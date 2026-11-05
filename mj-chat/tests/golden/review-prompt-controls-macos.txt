@@ -20,6 +20,27 @@ captures pointer: true
 click: OpenReviewers
 keyboard: OpenReviewers
 
+=== completed reviewers keep history accessible with zero open (80x16) ===
+╭ Conversation · Reviewing ────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                   ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Review findings ─────────────────────────────────────────────────────────────╮
+│  Read details     Forward findings     Dismiss     Cancel                    │
+│ [P1] src/lib.rs:1 -- unbounded retry                                         │
+│                                                                              │
+╰ Reviewers · 0 › ─────────────────────────────────────────────────────────────╯
+v details · Down controls · Enter act │ ctrl+b then q detach · : / ? palette
+captures pointer: true
+click: OpenReviewers
+keyboard: OpenReviewers
+
 === running review PageUp scrolls the parent (80x16) ===
 ╭ Conversation · Reviewing · message 25 of 30 · End to follow ─────────────────╮
 │                                                                             ││

@@ -744,13 +744,14 @@ mod tests {
     fn golden_review_prompt_controls() {
         fn fresh_chat() -> super::super::ChatState {
             let mut chat = chat();
-            chat.set_reviewer_count(1);
+            chat.set_reviewer_counts(super::super::ReviewerCounts { total: 1, open: 1 });
             chat
         }
 
         let mut output = String::new();
 
         let mut running = fresh_chat();
+        running.set_reviewer_counts(super::super::ReviewerCounts { total: 8, open: 1 });
         running.set_turn_review(Some(running_view()));
         let buffer = review_golden_buffer(&mut running, 80, 16);
         let primary_width = running
@@ -778,6 +779,36 @@ mod tests {
             &buffer,
             &[
                 format!("primary width: {primary_width:?}"),
+                format!("captures pointer: {captures_pointer}"),
+                format!("click: {clicked:?}"),
+                format!("keyboard: {keyboard:?}"),
+            ],
+        );
+
+        let mut completed = fresh_chat();
+        completed.set_turn_review(Some(findings_view()));
+        completed.handle_key(key(KeyCode::Down));
+        completed.set_reviewer_counts(super::super::ReviewerCounts { total: 8, open: 0 });
+        let buffer = review_golden_buffer(&mut completed, 80, 16);
+        let reviewer = completed
+            .reviewer_control_area
+            .expect("completed reviewer history remains accessible");
+        let mouse = crossterm::event::MouseEvent {
+            column: reviewer.x,
+            row: reviewer.y,
+            ..mouse
+        };
+        let captures_pointer = completed.component_handles_mouse(mouse);
+        let clicked = completed.handle_mouse(mouse);
+        let keyboard = completed.handle_key(key(KeyCode::Enter));
+        // Hard-won: c2121c3ab: counting only open reviewers hid access to completed review history.
+        append_review_golden_state(
+            &mut output,
+            "completed reviewers keep history accessible with zero open",
+            80,
+            16,
+            &buffer,
+            &[
                 format!("captures pointer: {captures_pointer}"),
                 format!("click: {clicked:?}"),
                 format!("keyboard: {keyboard:?}"),

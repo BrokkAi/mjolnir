@@ -886,11 +886,11 @@ fn prompt_bottom_titles(
         chat.subagents_enabled
             .then(|| format!(" Subagents{}0 ", theme::footer_separator()))
     };
-    let reviewer_label = (chat.reviewer_count > 0).then(|| {
+    let reviewer_label = (chat.reviewers.total > 0).then(|| {
         format!(
             " Reviewers{}{} {} ",
             theme::footer_separator(),
-            chat.reviewer_count,
+            chat.reviewers.open,
             theme::glyphs().navigate
         )
     });
