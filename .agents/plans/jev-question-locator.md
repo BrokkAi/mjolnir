@@ -64,6 +64,10 @@ To see it working: in a session whose agent asked a question, then sent further 
   Rationale: the id already changes when the question changes; `inferred_question()` is the predicate that draws the question marker, so the target and the marker cannot disagree.
   Date/Author: 2026-11-05, coordinator.
 
+- Decision: the web viewer does not page older history to find a target.
+  Rationale: pre-push review found that the history endpoint's entries carry no stable id (`mj_client::transcript::HistoryEntry`) and that a cursorless first page duplicated the newest rows in the feed; awaiting up to 100 requests also delayed the conversation cursor and read acknowledgement. Searching only the loaded feed is synchronous and cannot disturb loading.
+  Date/Author: 2026-11-05, coordinator.
+
 - Decision: use the argmax reply regardless of its probability, unless the choice is `none`.
   Rationale: held-out correct answers had probabilities as low as 0.25; a wrong scroll target is harmless because the user is already looking at the session.
   Date/Author: 2026-11-05, coordinator.
@@ -76,7 +80,7 @@ To see it working: in a session whose agent asked a question, then sent further 
 
 The checked-in evaluation (`scripts/jev-question-locator-eval.py`, three repeats over the 30 labeled scenarios with two or more replies) chose an acceptable reply in 81 of 90 requests. Eight misses answered `none`, which leaves today's behavior (the transcript opens at the bottom); one chose a wrong reply. The verdict question itself was left unchanged because a random sample of 72 genuine automation waits produced no false alerts.
 
-Remaining limits: targets are not produced for assistant entries that have no harness message id (the `agent:<ordinal>` fallback), and the locator sees at most the newest 32 replies since the user's last message. The web viewer searches at most 100 history pages for the target.
+Remaining limits: targets are not produced for assistant entries that have no harness message id (the `agent:<ordinal>` fallback), and the locator sees at most the newest 32 replies since the user's last message. The web viewer scrolls only to a target already in its loaded feed (the live conversation window); an older target leaves the usual position. The TUI also resolves targets in older history.
 
 ## Context and Orientation
 
