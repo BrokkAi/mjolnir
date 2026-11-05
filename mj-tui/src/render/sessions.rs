@@ -1284,6 +1284,35 @@ impl SessionsLayout {
     }
 }
 
+/// The first row to draw so that the selected row, at or below `offset`, is
+/// on screen. `heights` include each row's trailing spacing; `content` is the
+/// selected row's height without it.
+///
+/// This is ratatui's `Table` rule, which the pane used while it handed the
+/// table every row: a selected row whose content fits below the rows above it
+/// stays put, and otherwise the pane scrolls only until the rows through it,
+/// spacing included, fit. One difference: when the selected row and its
+/// spacing are taller than the pane, ratatui scrolls past it and hides it,
+/// and here it stays at the top.
+fn offset_showing_selected(
+    mut offset: usize,
+    selected: usize,
+    content: usize,
+    heights: &[usize],
+    viewport: usize,
+) -> usize {
+    let above = heights[offset..selected].iter().sum::<usize>();
+    if above + content <= viewport {
+        return offset;
+    }
+    let mut occupied = above + heights[selected];
+    while offset < selected && occupied > viewport {
+        occupied -= heights[offset];
+        offset += 1;
+    }
+    offset
+}
+
 /// The pane name the title carries when there is room for it beside a label.
 const FULL_TITLE_PREFIX: &str = " Sessions · ";
 
@@ -1600,11 +1629,8 @@ pub(crate) fn render_sessions(
         } else if selected < offset {
             offset = selected;
         } else {
-            let mut occupied = row_heights[offset..=selected].iter().sum::<usize>();
-            while offset < selected && occupied >= viewport {
-                occupied -= row_heights[offset];
-                offset += 1;
-            }
+            let content = usize::from(layout.presentation(selected, minimized).height());
+            offset = offset_showing_selected(offset, selected, content, row_heights, viewport);
         }
     }
     let mut end = offset;
@@ -2057,6 +2083,79 @@ mod row_height_tests {
                         usize::from(expected),
                         "minimized={minimized}, outside_filter={outside_filter}"
                     );
+                }
+            }
+        }
+    }
+
+    /// The pane now chooses its own offset, so it must still scroll exactly
+    /// as ratatui's `Table` did when it was given every row, exact fits and
+    /// trailing spacing included.
+    #[test]
+    fn selection_scrolls_the_way_the_table_did() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        // Every row of up to three lines, with or without spacing beneath.
+        let shapes = [(1, 0), (1, 1), (2, 0), (2, 1), (3, 0), (3, 1)];
+        let mut cases = vec![vec![]];
+        for _ in 0..4 {
+            cases = cases
+                .into_iter()
+                .flat_map(|case: Vec<(u16, u16)>| {
+                    shapes.iter().map(move |shape| {
+                        let mut case = case.clone();
+                        case.push(*shape);
+                        case
+                    })
+                })
+                .collect();
+            for case in cases.clone() {
+                // The last row's spacing is not content, as in the pane.
+                let mut rows = case.clone();
+                rows.last_mut().unwrap().1 = 0;
+                let heights = rows
+                    .iter()
+                    .map(|(content, spacing)| usize::from(content + spacing))
+                    .collect::<Vec<_>>();
+                for viewport in 3..=8u16 {
+                    for start in 0..rows.len() {
+                        for selected in start..rows.len() {
+                            // Taller than the pane, the table would hide
+                            // the selection; the pane keeps it at the top.
+                            if heights[selected] > usize::from(viewport) {
+                                continue;
+                            }
+                            let table = Table::new(
+                                rows.iter().map(|(content, spacing)| {
+                                    Row::new([Cell::from("x")])
+                                        .height(*content)
+                                        .bottom_margin(*spacing)
+                                }),
+                                [Constraint::Min(1)],
+                            );
+                            let mut state = TableState::default()
+                                .with_offset(start)
+                                .with_selected(Some(selected));
+                            let mut terminal =
+                                Terminal::new(TestBackend::new(4, viewport)).unwrap();
+                            terminal
+                                .draw(|frame| {
+                                    frame.render_stateful_widget(table, frame.area(), &mut state);
+                                })
+                                .unwrap();
+                            assert_eq!(
+                                offset_showing_selected(
+                                    start,
+                                    selected,
+                                    usize::from(rows[selected].0),
+                                    &heights,
+                                    usize::from(viewport),
+                                ),
+                                state.offset(),
+                                "rows={rows:?} viewport={viewport} start={start} selected={selected}"
+                            );
+                        }
+                    }
                 }
             }
         }
