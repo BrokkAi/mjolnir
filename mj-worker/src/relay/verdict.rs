@@ -227,6 +227,37 @@ impl DurableRelay {
         Ok(())
     }
 
+    pub(crate) fn question_locator_request(
+        &self,
+        revision: u64,
+    ) -> Option<mj_core::activity::question_locator::Request> {
+        let assessment = self.snapshot.assessment.as_ref()?;
+        if assessment.revision != revision
+            || !assessment.current()
+            || assessment.action != Some(mj_core::assessment::Action::AwaitInput)
+            || !assessment.verdict.as_ref()?.requires_input()
+        {
+            return None;
+        }
+        let context = assessment.evidence.as_ref()?.authorization.as_ref()?;
+        let request = mj_core::activity::question_locator::build(context);
+        (!request.message_ids.is_empty()).then_some(request)
+    }
+
+    pub(crate) fn store_question_target(&mut self, revision: u64, stable_id: &str) -> Result<bool> {
+        let Some(mut assessment) = self.snapshot.assessment.clone().filter(|a| {
+            a.revision == revision
+                && a.current()
+                && a.action == Some(mj_core::assessment::Action::AwaitInput)
+                && a.question_message.is_none()
+        }) else {
+            return Ok(false);
+        };
+        assessment.question_message = Some(stable_id.to_owned());
+        self.store_assessment(assessment)?;
+        Ok(true)
+    }
+
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn apply_turn_assessment(
         &mut self,
@@ -473,6 +504,91 @@ mod tests {
     use super::*;
     use mj_core::activity::{ActivityState, safe_to_replace};
     use mj_core::config::HarnessKind;
+
+    #[test]
+    fn question_target_is_stored_only_for_current_input_gate_assessment() {
+        use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
+        use mj_core::assessment::{Failure, Input, Judgment, Status, Verdict, Work};
+        use mj_core::continuation::EvidenceMessage;
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), "locator-test", "test").unwrap();
+        relay.set_turn_verdict_harness(HarnessKind::Claude);
+        submit_relay(&mut relay, "question-turn", prompt("Choose."));
+        relay.claim_pending_commands(true).unwrap();
+        finish_prompt(&mut relay, "question-turn");
+        relay.prepare_pending_assessment().unwrap();
+        let (revision, _, _) = relay.pending_replied_verdict().unwrap();
+        let mut assessment = relay.snapshot.assessment.clone().unwrap();
+        let mut evidence = relay.turn_context.evidence(
+            HarnessKind::Claude,
+            TurnPhase::Replied,
+            &relay.activity_facts(),
+            0,
+        );
+        let history = mj_core::assessment::ContextHistory {
+            messages: vec![
+                EvidenceMessage {
+                    id: "user:1".into(),
+                    role: "user".into(),
+                    text: "task".into(),
+                },
+                EvidenceMessage {
+                    id: "agent:one".into(),
+                    role: "assistant".into(),
+                    text: "Choose?".into(),
+                },
+                EvidenceMessage {
+                    id: "agent:two".into(),
+                    role: "assistant".into(),
+                    text: "Waiting.".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        evidence.authorization = Some(history);
+        assessment.evidence = Some(evidence);
+        assessment.verdict = Some(Verdict {
+            failure: Judgment {
+                choice: Failure::None,
+                confidence: 1.0,
+                probabilities: Default::default(),
+            },
+            input: Judgment {
+                choice: Input::Required,
+                confidence: 1.0,
+                probabilities: [("required".into(), 1.0)].into(),
+            },
+            work: Judgment {
+                choice: Work::Waiting,
+                confidence: 1.0,
+                probabilities: Default::default(),
+            },
+            background: None,
+            reply: None,
+        });
+        assessment.action = Some(mj_core::assessment::Action::AwaitInput);
+        assessment.status = Status::Assessed;
+        relay.store_assessment(assessment).unwrap();
+        let request = relay.question_locator_request(revision).unwrap();
+        assert_eq!(request.message_ids, ["agent:one", "agent:two"]);
+        assert!(
+            !relay
+                .store_question_target(revision + 1, "agent:one")
+                .unwrap()
+        );
+        assert!(relay.store_question_target(revision, "agent:one").unwrap());
+        assert_eq!(
+            relay
+                .snapshot
+                .assessment
+                .as_ref()
+                .unwrap()
+                .question_message
+                .as_deref(),
+            Some("agent:one")
+        );
+        assert!(!relay.store_question_target(revision, "agent:two").unwrap());
+    }
 
     fn completed(root: &Path) -> DurableRelay {
         let mut relay = DurableRelay::open(root, "jev-test", "test").unwrap();

@@ -1,5 +1,6 @@
 //! Optional, bounded TypeSafe turn classification. Failures leave activity alone.
 use anyhow::{Context, Result, ensure};
+use mj_core::activity::question_locator;
 use mj_core::activity::verdict::{
     DirectRequest, TurnEvidence, TurnVerdict, api_key, questions, request_fits,
 };
@@ -169,6 +170,105 @@ impl Drop for VerdictAttempt {
 
 #[cfg_attr(not(unix), allow(dead_code))]
 impl VerdictClient {
+    pub(crate) fn log_single_question(&self, session: &str, request: &question_locator::Request) {
+        if let Some(log) = &self.log {
+            let attempt = log.start(
+                session,
+                "activity",
+                "Which reply contains the open question?",
+                "Only one assistant reply followed the latest user message.",
+            );
+            attempt.update(
+                None,
+                serde_json::json!({"state":request.state,"selected_message":request.message_ids[0],"reason":"single_reply"}),
+            );
+            attempt.finish(
+                "applied",
+                "Located the only assistant reply without a model request.",
+            );
+        }
+    }
+    pub(crate) async fn locate_question(
+        &self,
+        session: &str,
+        request: &question_locator::Request,
+    ) -> Result<Option<usize>> {
+        let count = request.state.replies.len();
+        let body = match &self.source {
+            VerdictSource::Direct { .. } => serde_json::json!({
+                "model":"jev-latest", "state":request.state,
+                "questions":question_locator::questions(count)
+            }),
+            VerdictSource::Hosted { .. } => serde_json::json!(request.state),
+        };
+        let diagnostic = self.log.as_ref().map(|log| {
+            log.start(
+                session,
+                "activity",
+                "Which reply contains the open question?",
+                "Assistant replies since the latest user message.",
+            )
+        });
+        if let Some(log) = &diagnostic {
+            log.update(
+                None,
+                serde_json::json!({"request":body,"contract":"question-locator-v1"}),
+            );
+        }
+        let result = async {
+            let http = match &self.source {
+                VerdictSource::Direct { key, endpoint } => {
+                    self.client.post(endpoint).bearer_auth(key)
+                }
+                VerdictSource::Hosted { endpoint } => {
+                    let mut url =
+                        reqwest::Url::parse(endpoint).context("parse locator proxy URL")?;
+                    url.set_path("/v1/question-locator");
+                    self.client.post(url)
+                }
+            };
+            let response = http
+                .json(&body)
+                .send()
+                .await
+                .context("request question locator")?
+                .error_for_status()
+                .context("question locator HTTP status")?;
+            let bytes = response.bytes().await.context("read question locator")?;
+            ensure!(
+                bytes.len() <= 64 * 1024,
+                "question locator response exceeds byte limit"
+            );
+            let answer: serde_json::Value =
+                serde_json::from_slice(&bytes).context("decode locator JSON")?;
+            let index = question_locator::parse(&answer, count)?;
+            if let Some(log) = &diagnostic {
+                log.update(
+                    None,
+                    serde_json::json!({"answer":answer,"selected_index":index}),
+                );
+            }
+            Ok(index)
+        }
+        .await;
+        if let Some(log) = &diagnostic {
+            match &result {
+                Ok(Some(_)) => log.finish(
+                    "located",
+                    "Jev selected a reply for the current-assessment check.",
+                ),
+                Ok(None) => log.finish("unchanged", "No open request was located."),
+                Err(error) => {
+                    log.update(None, serde_json::json!({"error":format!("{error:#}")}));
+                    log.finish(
+                        "failed",
+                        "The question locator failed; no target was stored.",
+                    );
+                }
+            }
+        }
+        result
+    }
     pub(crate) async fn resolve(source: Option<&VerdictSource>) -> Option<Self> {
         let source = source.cloned();
         match tokio::task::spawn_blocking(move || Self::resolve_blocking(source)).await {
@@ -450,6 +550,43 @@ mod tests {
             &Default::default(),
             0,
         )
+    }
+
+    #[tokio::test]
+    async fn locator_direct_transport_sends_shared_question_and_maps_answer() {
+        let reply = serde_json::json!({"answers":{"request_reply":{
+            "type":"choice", "choice":"r1", "probabilities":{"r0":0.2,"r1":0.7,"none":0.1}
+        }}})
+        .to_string();
+        let (client, server) = server(reply).await;
+        let context = ContextHistory {
+            messages: vec![
+                EvidenceMessage {
+                    id: "user:task".into(),
+                    role: "user".into(),
+                    text: "Task".into(),
+                },
+                EvidenceMessage {
+                    id: "agent:one".into(),
+                    role: "assistant".into(),
+                    text: "Status".into(),
+                },
+                EvidenceMessage {
+                    id: "agent:two".into(),
+                    role: "assistant".into(),
+                    text: "Choose?".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let request = question_locator::build(&context);
+        assert_eq!(
+            client.locate_question("session", &request).await.unwrap(),
+            Some(1)
+        );
+        let sent = server.await.unwrap();
+        assert_eq!(sent["state"], serde_json::to_value(&request.state).unwrap());
+        assert_eq!(sent["questions"], question_locator::questions(2));
     }
 
     #[tokio::test]
