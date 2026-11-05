@@ -88,6 +88,7 @@ pub fn rates(model: &str) -> Option<[u64; 4]> {
         "glm-5.3-flashx" => [370, 1250, 75, 0],
         "glm-4.7-flash" | "glm-4.5-flash" => [0, 0, 0, 0],
         // Peak rates: a stable estimate without reconstructing holidays/request times.
+        // DeepSeek pricing checked 2026-11-05: https://api-docs.deepseek.com/quick_start/pricing/
         "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => {
             [300, 1200, 6, 300]
         }

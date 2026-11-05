@@ -493,6 +493,10 @@ fn model_usage_lines(groups: &[mj_core::storage::UsageModelTotal]) -> Vec<String
     lines
 }
 
+fn turn_cost_usd(ticks: u64) -> String {
+    mj_core::usage::ProviderTurnCost::from_usd_ticks(ticks, false).usd
+}
+
 fn usage_tree_lines(tree: &mj_core::storage::UsageTree) -> Vec<String> {
     let coverage = &tree.summary.coverage;
     let mut lines = vec![
@@ -510,6 +514,13 @@ fn usage_tree_lines(tree: &mj_core::storage::UsageTree) -> Vec<String> {
     lines.push(format!(
         "not in totals: {} last-request, {} unknown-scope, {} missing reports",
         coverage.last_request_reports, coverage.unspecified_reports, coverage.missing_reports
+    ));
+    lines.push(format!(
+        "priced turn cost: {} USD ({} provider, {} estimated, {} missing costs)",
+        turn_cost_usd(tree.summary.turn_cost_usd_ticks),
+        coverage.provider_cost_turns,
+        coverage.estimated_cost_turns,
+        coverage.missing_cost_turns
     ));
     for session in &tree.sessions {
         lines.push(format!(
@@ -529,6 +540,14 @@ fn usage_tree_lines(tree: &mj_core::storage::UsageTree) -> Vec<String> {
                 cost.amount, cost.currency
             ));
         }
+        let cost_coverage = &session.summary.coverage;
+        lines.push(format!(
+            "  priced turn cost: {} USD ({} provider, {} estimated, {} missing costs)",
+            turn_cost_usd(session.summary.turn_cost_usd_ticks),
+            cost_coverage.provider_cost_turns,
+            cost_coverage.estimated_cost_turns,
+            cost_coverage.missing_cost_turns
+        ));
     }
     lines
 }
@@ -577,6 +596,13 @@ fn usage_lines(page: &mj_core::storage::UsagePage) -> Vec<String> {
             cost.amount, cost.currency
         ));
     }
+    lines.push(format!(
+        "priced turn cost: {} USD ({} provider, {} estimated, {} missing costs)",
+        turn_cost_usd(page.turn_cost_usd_ticks),
+        coverage.provider_cost_turns,
+        coverage.estimated_cost_turns,
+        coverage.missing_cost_turns
+    ));
     lines.extend(model_usage_lines(&page.by_model));
     if coverage.unfinished_turns > 0 {
         lines.push(format!(

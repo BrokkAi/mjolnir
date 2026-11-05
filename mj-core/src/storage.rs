@@ -280,6 +280,12 @@ pub struct UsageCoverage {
     /// Started turns for which no completion report has been recorded.
     #[serde(default)]
     pub unfinished_turns: u64,
+    #[serde(default)]
+    pub provider_cost_turns: u64,
+    #[serde(default)]
+    pub estimated_cost_turns: u64,
+    #[serde(default)]
+    pub missing_cost_turns: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +306,9 @@ pub struct UsagePage {
     pub coverage: UsageCoverage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_cost: Option<ProviderCost>,
+    /// Sum of priced whole turns, in 10^-10 USD. Partial when cost coverage is missing.
+    #[serde(default)]
+    pub turn_cost_usd_ticks: u64,
     #[serde(default)]
     pub turn_selections: BTreeMap<String, UsageSelection>,
     #[serde(default)]
@@ -327,6 +336,9 @@ pub struct UsageSummary {
     pub by_model: Vec<UsageModelTotal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_cost: Option<ProviderCost>,
+    /// Sum of priced whole turns, in 10^-10 USD. Partial when cost coverage is missing.
+    #[serde(default)]
+    pub turn_cost_usd_ticks: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

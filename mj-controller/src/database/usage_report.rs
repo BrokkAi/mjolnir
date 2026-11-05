@@ -5,7 +5,7 @@ use mj_core::usage::{
     UsageScope, add_cost, descending_cost,
 };
 
-use mj_core::usage::{model_catalog, pricing};
+use mj_core::usage::model_catalog;
 
 /// `models` is each profile's newest advertised model list, used to price
 /// model aliases.
@@ -122,17 +122,11 @@ fn load_with(
                             selection.model = selection
                                 .model
                                 .map(|model| catalogs.priced_model(turn_profile.as_deref(), model));
-                            // An unattributed cache counter is unknown, not zero.
-                            // Pricing the input as uncached would overstate its cost.
-                            let caches_known = (usage.cached_read_tokens.is_none()
-                                || totals.contains_key("cached_read_tokens"))
-                                && (usage.cached_write_tokens.is_none()
-                                    || totals.contains_key("cached_write_tokens"));
-                            let cost = if caches_known {
-                                pricing::estimate(selection.model.as_deref(), &totals)?
-                            } else {
-                                None
-                            };
+                            let cost = super::usage::estimate_model_cost(
+                                &usage,
+                                selection.model.as_deref(),
+                                &totals,
+                            )?;
                             let group =
                                 groups.entry(selection.model.clone()).or_insert_with(|| {
                                     ModelUsageEstimate {
