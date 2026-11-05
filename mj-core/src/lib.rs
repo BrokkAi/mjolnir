@@ -47,6 +47,7 @@ pub mod program_path;
 pub mod project_catalog;
 pub mod project_memory;
 pub mod project_picker;
+pub mod redact;
 pub mod refusal;
 pub mod relay;
 pub mod remote_git;
