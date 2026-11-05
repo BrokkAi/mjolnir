@@ -18,6 +18,7 @@ use mj_controller::server::api::{
 use mj_client::daemon::WikiSessionStatus;
 use mj_controller::server::ViewerLifecycleCategory;
 use mj_controller::sessionwiki::WikiContinuation;
+use mj_core::transcript::sanitize_terminal_text;
 
 use crate::api_client::{ApiClient, ExportResult};
 
@@ -460,9 +461,7 @@ pub(crate) async fn usage(args: UsageArgs) -> Result<()> {
         if args.json {
             return print_json(&tree);
         }
-        for line in usage_tree_lines(&tree) {
-            println!("{line}");
-        }
+        print_lines(usage_tree_lines(&tree));
     } else {
         let session = args
             .session
@@ -471,9 +470,7 @@ pub(crate) async fn usage(args: UsageArgs) -> Result<()> {
         if args.json {
             return print_json(&page);
         }
-        for line in usage_lines(&page) {
-            println!("{line}");
-        }
+        print_lines(usage_lines(&page));
     }
     Ok(())
 }
@@ -1017,7 +1014,9 @@ pub(crate) async fn workspaces_list(args: WorkspacesListArgs) -> Result<()> {
     for workspace in &list.workspaces {
         println!(
             "{:id_width$}  {:8}  {}",
-            workspace.id, workspace.session_count, workspace.name
+            workspace.id,
+            workspace.session_count,
+            sanitize_terminal_text(&workspace.name)
         );
     }
     Ok(())
@@ -1034,7 +1033,8 @@ pub(crate) async fn workspaces_create(args: WorkspaceCreateArgs) -> Result<()> {
     }
     println!(
         "workspace {}  {}",
-        created.workspace.id, created.workspace.name
+        created.workspace.id,
+        sanitize_terminal_text(&created.workspace.name)
     );
     Ok(())
 }
@@ -1213,7 +1213,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let client = ApiClient::connect().await?;
     let response = client.start(&request).await.map_err(name_launch_flags)?;
     if let Some(notice) = &response.notice {
-        eprintln!("{notice}");
+        eprintln!("{}", sanitize_terminal_text(notice));
     }
     if args.json {
         return print_json(&response);
@@ -1454,9 +1454,7 @@ fn report_wait(response: &WaitResponse, json: bool) -> Result<()> {
     if json {
         print_json(response)?;
     } else {
-        for line in wait_report_lines(response) {
-            println!("{line}");
-        }
+        print_lines(wait_report_lines(response));
         if !response.pending_elicitations.is_empty() {
             print_json(&response.pending_elicitations)?;
         }
@@ -1749,9 +1747,7 @@ pub(crate) async fn fetch(args: FetchArgs) -> Result<()> {
         if args.json {
             return print_json(&listing);
         }
-        for line in listing_lines(&listing) {
-            println!("{line}");
-        }
+        print_lines(listing_lines(&listing));
         return Ok(());
     }
     if args.stdout {
@@ -1817,9 +1813,10 @@ pub(crate) async fn sessions(
         if args.json {
             return print_json(&session);
         }
-        for line in session_report_lines(&session, mj_core::clock::epoch_millis()) {
-            println!("{line}");
-        }
+        print_lines(session_report_lines(
+            &session,
+            mj_core::clock::epoch_millis(),
+        ));
         return Ok(());
     }
     let workspace = match requested_workspace {
@@ -1850,7 +1847,7 @@ pub(crate) async fn sessions(
             "{:id_width$}  {:state_width$}  {}",
             session.id,
             listed_state(session),
-            session.title
+            sanitize_terminal_text(&session.title)
         );
         if session.has_error {
             println!(
@@ -1883,9 +1880,7 @@ async fn wiki_session(client: &ApiClient, wiki_id: &str, json: bool) -> Result<(
     if json {
         return print_json(&info);
     }
-    for line in wiki_session_lines(&info) {
-        println!("{line}");
-    }
+    print_lines(wiki_session_lines(&info));
     Ok(())
 }
 
@@ -2219,9 +2214,7 @@ pub(crate) async fn review(args: ReviewArgs) -> Result<()> {
                 return print_json(&status);
             }
             println!("Review trigger: {}", status.trigger);
-            for line in review_lines(status.review.as_ref()) {
-                println!("{line}");
-            }
+            print_lines(review_lines(status.review.as_ref()));
             Ok(())
         }
         ReviewCommand::Forward(args) => resolve_review(&client, &args, "forward").await,
@@ -2375,6 +2368,15 @@ fn write_bytes_to(
     }
 }
 
+/// Print report lines built from daemon answers. Titles, notices and other
+/// text in them can come from an agent, so terminal controls are removed here,
+/// where that text reaches the operator's terminal.
+fn print_lines(lines: impl IntoIterator<Item = String>) {
+    for line in lines {
+        println!("{}", sanitize_terminal_text(&line));
+    }
+}
+
 fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
     println!(
         "{}",
@@ -2468,9 +2470,7 @@ pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
     if session.config_options.is_empty() {
         println!("this session's agent offers no settings right now");
     }
-    for line in config_option_lines(&session.config_options) {
-        println!("{line}");
-    }
+    print_lines(config_option_lines(&session.config_options));
     Ok(())
 }
 

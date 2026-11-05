@@ -31,9 +31,6 @@ const STDERR_TAIL_LINES: usize = 20;
 const STDERR_LINE_BYTES: usize = 2 * 1024;
 // How long a stopped app-server's stderr gets to reach end of stream.
 const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
-// Shorter runs of token characters are left alone so that ordinary words,
-// paths and numbers stay readable.
-const SECRET_RUN_CHARS: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexUsageStatus {
@@ -297,7 +294,7 @@ impl StderrTail {
     }
 
     fn push(&self, line: &[u8]) {
-        let line = redact_secrets(&mj_core::transcript::sanitize_terminal_text(
+        let line = mj_core::redact::redact_secrets(&mj_core::transcript::sanitize_terminal_text(
             &String::from_utf8_lossy(line),
         ));
         let line = line.trim();
@@ -321,35 +318,6 @@ impl StderrTail {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         lines.iter().cloned().collect()
     }
-}
-
-/// Replace every long run of token characters. Access, refresh and id tokens,
-/// API keys and account ids are all long runs of base64url, hex or dotted JWT
-/// segments, and a diagnostic has no use for them.
-fn redact_secrets(text: &str) -> String {
-    fn is_token_char(ch: char) -> bool {
-        ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '+')
-    }
-    fn flush(run: &mut String, redacted: &mut String) {
-        if run.chars().count() >= SECRET_RUN_CHARS {
-            redacted.push_str("[redacted]");
-        } else {
-            redacted.push_str(run);
-        }
-        run.clear();
-    }
-    let mut redacted = String::with_capacity(text.len());
-    let mut run = String::new();
-    for ch in text.chars() {
-        if is_token_char(ch) {
-            run.push(ch);
-        } else {
-            flush(&mut run, &mut redacted);
-            redacted.push(ch);
-        }
-    }
-    flush(&mut run, &mut redacted);
-    redacted
 }
 
 async fn read_bounded_frame<R>(reader: &mut R) -> Result<Option<Vec<u8>>, QueryError>
@@ -1558,18 +1526,6 @@ IFS= read -r line
             lines.last().unwrap(),
             "ERROR failed to refresh token: refresh_token=[redacted] reused"
         );
-    }
-
-    #[test]
-    fn redaction_removes_token_runs_and_keeps_ordinary_text() {
-        assert_eq!(
-            redact_secrets(
-                "Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl, key sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX"
-            ),
-            "Bearer [redacted], key [redacted]"
-        );
-        let ordinary = "2026-10-05T12:00:00Z WARN codex_login::auth: POST https://auth.openai.com/oauth/token returned 401";
-        assert_eq!(redact_secrets(ordinary), ordinary);
     }
 
     /// A stand-in container engine: `image inspect` succeeds unless
