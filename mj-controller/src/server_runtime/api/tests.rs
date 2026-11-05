@@ -61,6 +61,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
 
 fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuota {
     ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness,
@@ -87,6 +88,7 @@ fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuo
 /// A pay-per-use profile's report: no windows, the API label instead.
 fn usage_priced(profile_id: &str) -> ProfileQuota {
     ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Codex,
@@ -300,6 +302,31 @@ async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the
     );
     assert_eq!(registered.model.as_deref(), Some("luna"));
     assert_eq!(registered.effort.as_deref(), Some("low"));
+
+    // The same MCP spawn must use published paid balances after every
+    // subscription is empty, without mistaking reset grants for paid funds.
+    {
+        let mut reports = backend.quota_reports.lock().unwrap();
+        for report in reports.values_mut() {
+            for window in &mut report.windows {
+                window.remaining_percent = Some(0);
+            }
+        }
+        reports.get_mut("parent").unwrap().banked_resets = Some(100);
+        reports.get_mut("parent").unwrap().paid_credits =
+            mj_client::quota::PaidCredits::limited(0.0);
+        reports.get_mut("codex-high").unwrap().paid_credits =
+            mj_client::quota::PaidCredits::limited(12.75);
+    }
+    let result = backend
+        .execute_subagent_tool("parent-1".into(), spawn_with())
+        .await;
+    assert!(
+        result.message.contains("registration recorded"),
+        "{}",
+        result.message
+    );
+    assert_eq!(exports.registered().profile_id, "codex-high");
 }
 
 /// Profiles offering the same models are one choice for the parent, shown as

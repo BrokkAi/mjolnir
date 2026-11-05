@@ -524,6 +524,7 @@ async fn refresh_profile_with_cache_root(
     // utility ranker treat it as healthy, which matches how it actually
     // behaves.
     let usage_priced = || ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: profile_id.clone(),
         harness,
@@ -551,6 +552,7 @@ async fn refresh_profile_with_cache_root(
                 crate::zai_usage::query(&provider.host, &provider.api_key)
                     .await
                     .map(|windows| ProfileQuota {
+                        paid_credits: None,
                         banked_resets: None,
                         profile_id: profile_id.clone(),
                         harness,
@@ -632,6 +634,7 @@ async fn refresh_profile_with_cache_root(
                 };
                 match status {
                     CodexUsageStatus::Available(report) => Ok(ProfileQuota {
+                        paid_credits: report.paid_credits,
                         banked_resets: report.banked_resets,
                         profile_id: profile_id.clone(),
                         harness,
@@ -669,6 +672,7 @@ async fn refresh_profile_with_cache_root(
             Ok(container) => claude_usage::query(source_home, environment, container)
                 .await
                 .map(|report| ProfileQuota {
+                    paid_credits: report.paid_credits,
                     banked_resets: report.banked_resets,
                     profile_id: profile_id.clone(),
                     harness,
@@ -750,6 +754,7 @@ async fn refresh_profile_with_cache_root(
             query_kimi(&source_home, &environment)
                 .await
                 .map(|(windows, extra)| ProfileQuota {
+                    paid_credits: None,
                     banked_resets: None,
                     profile_id: profile_id.clone(),
                     harness,
@@ -770,6 +775,7 @@ async fn refresh_profile_with_cache_root(
             grok_usage::query(source_home.clone(), cwd, environment, container)
                 .await
                 .map(|report| ProfileQuota {
+                    paid_credits: None,
                     banked_resets: None,
                     profile_id: profile_id.clone(),
                     harness,
@@ -795,6 +801,7 @@ async fn refresh_profile_with_cache_root(
         HarnessKind::Muse => crate::muse_usage::query(&source_home, &environment)
             .await
             .map(|report| ProfileQuota {
+                paid_credits: None,
                 banked_resets: None,
                 profile_id: profile_id.clone(),
                 harness,
@@ -824,6 +831,7 @@ async fn refresh_profile_with_cache_root(
         HarnessKind::Dsh => Ok(usage_priced()),
     };
     let report = result.unwrap_or_else(|error| ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id,
         harness,

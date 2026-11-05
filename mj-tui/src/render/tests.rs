@@ -942,6 +942,7 @@ fn host_usage(cpu_percent: u8) -> mj_core::targets::DeploymentCapacityUsage {
 /// A profile quota with `remaining` percent of its weekly window left.
 fn weekly_quota(profile_id: &str, remaining: u8) -> ProfileQuota {
     ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Claude,
@@ -983,6 +984,7 @@ fn weekly_and_five_hour_quota(profile_id: &str, weekly: u8, five_hour: u8) -> Pr
 /// label in place of one.
 fn api_quota(profile_id: &str) -> ProfileQuota {
     ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Codex,
@@ -3312,6 +3314,7 @@ fn golden_dashboard_resource_panels() {
         BTreeMap::from([(
             "codex-1".into(),
             ProfileQuota {
+                paid_credits: None,
                 banked_resets: None,
                 profile_id: "codex-1".into(),
                 harness: HarnessKind::Codex,
@@ -3337,6 +3340,7 @@ fn golden_dashboard_resource_panels() {
         BTreeMap::from([(
             "claude-1".into(),
             ProfileQuota {
+                paid_credits: None,
                 banked_resets: None,
                 profile_id: "claude-1".into(),
                 harness: HarnessKind::Claude,
@@ -3407,6 +3411,7 @@ fn golden_dashboard_resource_panels() {
         claude_config.profiles["claude-1"].clone(),
     );
     let claude_quota = |profile_id: &str, fable: Option<u8>| ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Claude,
@@ -3486,6 +3491,7 @@ fn golden_dashboard_resource_panels() {
     );
 
     let quota = ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
@@ -3530,6 +3536,7 @@ fn golden_dashboard_resource_panels() {
     );
 
     let quota = ProfileQuota {
+        paid_credits: None,
         banked_resets: Some(1),
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,

@@ -1347,6 +1347,7 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
         "api",
         "healthy",
         "unknown",
+        "paid",
         "empty",
         "unhealthy",
         "other",
@@ -1405,16 +1406,27 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
             quota: match id {
                 "api" => CandidateQuota::UsagePriced,
                 "unknown" => CandidateQuota::Unknown,
-                _ => CandidateQuota::Windows(vec![crate::quota::QuotaWindow {
-                    label: "Week".into(),
-                    remaining_percent: Some(if id == "empty" { 0 } else { 10 }),
-                    duration_seconds: None,
-                    model_scope: None,
-                    used: None,
-                    limit: None,
-                    resets: None,
-                    resets_at_epoch_seconds: None,
-                }]),
+                _ => CandidateQuota::Subscription {
+                    paid_credits: if matches!(id, "paid" | "unhealthy") {
+                        mj_client::quota::PaidCredits::limited(75.0)
+                    } else {
+                        None
+                    },
+                    windows: vec![crate::quota::QuotaWindow {
+                        label: "Week".into(),
+                        remaining_percent: Some(if matches!(id, "paid" | "empty" | "unhealthy") {
+                            0
+                        } else {
+                            10
+                        }),
+                        duration_seconds: None,
+                        model_scope: None,
+                        used: None,
+                        limit: None,
+                        resets: None,
+                        resets_at_epoch_seconds: None,
+                    }],
+                },
             },
             unhealthy,
         }
@@ -1427,13 +1439,14 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
         "model",
         candidates,
         1,
-    );
+    )
+    .unwrap();
     assert_eq!(
         ordered
             .iter()
             .map(|c| c.profile_id.as_str())
             .collect::<Vec<_>>(),
-        ["healthy", "unknown", "api"]
+        ["healthy", "unknown", "paid", "api"]
     );
 }
 

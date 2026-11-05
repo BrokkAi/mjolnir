@@ -175,6 +175,7 @@ fn golden_quota_compact_row() {
         error: Option<&str>,
     ) -> ProfileQuota {
         ProfileQuota {
+            paid_credits: None,
             banked_resets: None,
             profile_id: profile_id.into(),
             harness,
@@ -457,7 +458,7 @@ printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
 read_and_log
 printf '%s\n' '{"id":3,"result":{"account":{"type":"chatgpt"}}}'
 read_and_log
-printf '%s\n' '{"id":4,"result":{"rateLimitResetCredits":{"availableCount":1},"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
+printf '%s\n' '{"id":4,"result":{"rateLimitResetCredits":{"availableCount":1},"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300},"credits":{"hasCredits":true,"unlimited":false,"balance":"12.75"}}}}'
 "#,
     );
 
@@ -465,6 +466,10 @@ printf '%s\n' '{"id":4,"result":{"rateLimitResetCredits":{"availableCount":1},"r
 
     assert_eq!(outcome.report.error, None);
     assert_eq!(outcome.report.banked_resets, Some(1));
+    assert_eq!(
+        outcome.report.paid_credits,
+        mj_client::quota::PaidCredits::limited(12.75)
+    );
     assert_eq!(
         outcome.report.five_hour_window().unwrap().remaining_percent,
         Some(75)
@@ -1048,6 +1053,7 @@ fn retry_after_is_seconds_or_an_http_date_and_the_hold_is_bounded() {
 
 fn quota_report(refreshed_at: u64, remaining: Option<u8>) -> ProfileQuota {
     ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: "claude".into(),
         harness: HarnessKind::Claude,

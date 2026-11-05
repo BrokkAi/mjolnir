@@ -43,6 +43,7 @@ pub enum CodexUsageStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexUsageReport {
+    pub paid_credits: Option<mj_client::quota::PaidCredits>,
     pub banked_resets: Option<u64>,
     pub primary: Option<CodexUsageWindow>,
     pub secondary: Option<CodexUsageWindow>,
@@ -814,14 +815,33 @@ fn parse_report(result: &Value) -> Result<CodexUsageReport, QueryError> {
 
 fn parse_snapshot(snapshot: &Value) -> Option<CodexUsageReport> {
     let report = CodexUsageReport {
+        paid_credits: snapshot.get("credits").and_then(parse_paid_credits),
         banked_resets: None,
         primary: snapshot.get("primary").and_then(parse_window),
         secondary: snapshot.get("secondary").and_then(parse_window),
     };
-    if report.primary.is_none() && report.secondary.is_none() {
+    if report.primary.is_none() && report.secondary.is_none() && report.paid_credits.is_none() {
         None
     } else {
         Some(report)
+    }
+}
+
+fn parse_paid_credits(value: &Value) -> Option<mj_client::quota::PaidCredits> {
+    use mj_client::quota::PaidCredits;
+    if value.get("unlimited").and_then(Value::as_bool) == Some(true) {
+        return Some(PaidCredits::Unlimited);
+    }
+    if !value.get("hasCredits")?.as_bool()? {
+        return PaidCredits::limited(0.0);
+    }
+    match value.get("balance").filter(|value| !value.is_null()) {
+        None => Some(PaidCredits::Available),
+        Some(value) => value
+            .as_str()?
+            .parse::<f64>()
+            .ok()
+            .and_then(PaidCredits::limited),
     }
 }
 
@@ -1038,11 +1058,13 @@ mod tests {
     #[test]
     fn parses_codex_bucket_and_formats_remaining_windows() {
         let report = parse_report(&json!({
-            "rateLimits": { "primary": { "usedPercent": 99, "windowDurationMins": 60 } },
+            "rateLimits": { "primary": { "usedPercent": 99, "windowDurationMins": 60 },
+                "credits": {"hasCredits": true, "unlimited": true} },
             "rateLimitsByLimitId": {
                 "codex": {
                     "primary": { "usedPercent": 25, "windowDurationMins": 300 },
-                    "secondary": { "usedPercent": 18, "windowDurationMins": 10080 }
+                    "secondary": { "usedPercent": 18, "windowDurationMins": 10080 },
+                    "credits": {"hasCredits": true, "unlimited": false, "balance": "0.125"}
                 }
             }
         }))
@@ -1052,6 +1074,10 @@ mod tests {
         assert_eq!(report.primary.as_ref().unwrap().label, "5H");
         assert_eq!(report.secondary.as_ref().unwrap().remaining_percent, 82);
         assert_eq!(report.secondary.as_ref().unwrap().label, "Week");
+        assert_eq!(
+            report.paid_credits,
+            mj_client::quota::PaidCredits::limited(0.125)
+        );
     }
 
     #[test]
@@ -1239,11 +1265,11 @@ read_and_log
 read_and_log
 printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
 read_and_log
-printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
+printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300},"credits":{"hasCredits":true,"unlimited":false,"balance":"50.25"}}}}'
 read_and_log
 printf '%s\n' '{"id":4,"result":{"account":{"type":"chatgpt"}}}'
 read_and_log
-printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"windowDurationMins":300}}}}'
+printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"windowDurationMins":300},"credits":{"hasCredits":false,"unlimited":false,"balance":"50.25"}}}}'
 "#,
         );
         let mut client = None;
@@ -1252,9 +1278,20 @@ printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"wind
             refresh_in_temp(&mut client, temp.path().to_path_buf(), env.clone(), &temp).await;
         let second = refresh_in_temp(&mut client, temp.path().to_path_buf(), env, &temp).await;
 
+        for (status, balance) in [(&first, 50.25), (&second, 0.0)] {
+            let CodexUsageStatus::Available(report) = status else {
+                panic!("missing quota report")
+            };
+            assert_eq!(
+                report.paid_credits,
+                mj_client::quota::PaidCredits::limited(balance)
+            );
+        }
+
         assert!(matches!(
             first,
             CodexUsageStatus::Available(CodexUsageReport {
+                paid_credits: Some(_),
                 banked_resets: None,
                 primary: Some(CodexUsageWindow {
                     remaining_percent: 75,
@@ -1266,6 +1303,7 @@ printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"wind
         assert!(matches!(
             second,
             CodexUsageStatus::Available(CodexUsageReport {
+                paid_credits: Some(_),
                 banked_resets: None,
                 primary: Some(CodexUsageWindow {
                     remaining_percent: 50,
@@ -1364,6 +1402,7 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":10,"wind
         assert!(matches!(
             status,
             CodexUsageStatus::Available(CodexUsageReport {
+                paid_credits: None,
                 banked_resets: None,
                 primary: Some(CodexUsageWindow {
                     remaining_percent: 90,

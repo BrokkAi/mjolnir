@@ -68,6 +68,7 @@ mod tests {
         let path = dir.path().join("quota.sqlite3");
         let mut connection = open(&path).unwrap();
         let mut report = ProfileQuota {
+            paid_credits: None,
             banked_resets: None,
             profile_id: "test".into(),
             harness: mj_core::config::HarnessKind::Claude,
@@ -90,6 +91,8 @@ mod tests {
         save_report(&mut connection, "account-a", &report).unwrap();
         for banked in [Some(2), Some(0), Some(1), None] {
             report.banked_resets = banked;
+            report.paid_credits =
+                banked.and_then(|balance| mj_client::quota::PaidCredits::limited(balance as f64));
             save_report(&mut connection, "account-a", &report).unwrap();
             observed.push(report.clone());
             assert_eq!(
@@ -98,6 +101,13 @@ mod tests {
                     .unwrap()
                     .banked_resets,
                 banked
+            );
+            assert_eq!(
+                load(&connection, "account-a")
+                    .unwrap()
+                    .unwrap()
+                    .paid_credits,
+                report.paid_credits
             );
         }
         // A fresh, identical reading is evidence of no change, even within

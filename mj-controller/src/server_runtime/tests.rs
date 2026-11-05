@@ -1256,6 +1256,7 @@ fn golden_phone_session_snapshot() {
         resets_at_epoch_seconds: Some(2_000_000_000),
     };
     let quota_report = |profile_id: &str, harness: HarnessKind, windows| ProfileQuota {
+        paid_credits: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness,
@@ -2056,6 +2057,7 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
         let quotas = std::collections::BTreeMap::from([(
             "codex".to_owned(),
             ProfileQuota {
+                paid_credits: None,
                 banked_resets: Some(1),
                 profile_id: "codex".into(),
                 harness: HarnessKind::Codex,

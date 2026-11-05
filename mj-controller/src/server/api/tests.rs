@@ -2046,16 +2046,19 @@ fn model_candidate_with_efforts(
                 .collect(),
             observed_at: 1,
         },
-        quota: crate::server::api::CandidateQuota::Windows(vec![crate::quota::QuotaWindow {
-            label: "Week".into(),
-            remaining_percent: Some(remaining_percent),
-            duration_seconds: None,
-            model_scope: None,
-            used: None,
-            limit: None,
-            resets: None,
-            resets_at_epoch_seconds: None,
-        }]),
+        quota: crate::server::api::CandidateQuota::Subscription {
+            paid_credits: None,
+            windows: vec![crate::quota::QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(remaining_percent),
+                duration_seconds: None,
+                model_scope: None,
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: None,
+            }],
+        },
         unhealthy: Default::default(),
     }
 }

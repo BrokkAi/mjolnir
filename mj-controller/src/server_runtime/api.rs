@@ -507,7 +507,9 @@ impl ApiBackend {
         for ((profile_id, harness), discovery) in ids.into_iter().zip(discoveries) {
             match discovery.map(|mut choices| choices.pop()) {
                 Ok(Some(choices)) => {
-                    let quota = profile_candidate_quota(quota_reports.get(&profile_id));
+                    let quota = crate::server::api::CandidateQuota::from_report(
+                        quota_reports.get(&profile_id),
+                    );
                     let unhealthy = choices
                         .models
                         .iter()
@@ -1793,17 +1795,6 @@ impl ApiBackend {
             ));
         }
         Ok(())
-    }
-}
-
-fn profile_candidate_quota(report: Option<&ProfileQuota>) -> crate::server::api::CandidateQuota {
-    use crate::server::api::CandidateQuota;
-    match report.filter(|report| report.error.is_none()) {
-        Some(report) if report.is_usage_priced() => CandidateQuota::UsagePriced,
-        Some(report) if !report.windows.is_empty() => {
-            CandidateQuota::Windows(report.windows.clone())
-        }
-        _ => CandidateQuota::Unknown,
     }
 }
 

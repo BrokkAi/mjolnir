@@ -22,6 +22,7 @@ pub mod import;
 pub mod opencode_logins;
 pub mod profile_health;
 pub mod profile_login;
+pub(crate) mod profile_scheduler;
 pub(crate) mod project_catalog;
 pub mod project_picker;
 pub mod quota;

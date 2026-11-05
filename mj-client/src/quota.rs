@@ -63,6 +63,9 @@ pub struct QuotaSnapshot {
 /// The quota report shown for one harness profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileQuota {
+    /// Paid extra usage, independent of included quota and banked resets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paid_credits: Option<PaidCredits>,
     /// Unused provider-granted resets, absent when the provider cannot report them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub banked_resets: Option<u64>,
@@ -78,6 +81,26 @@ pub struct ProfileQuota {
     /// when it was taken.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limited_until_epoch_seconds: Option<u64>,
+}
+
+/// Provider-native paid funds usable after included subscription quota ends.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "balance", rename_all = "snake_case")]
+pub enum PaidCredits {
+    /// Remaining funds, constrained by any applicable spending cap.
+    Limited(serde_json::Number),
+    /// The provider explicitly reports unrestricted paid usage.
+    Unlimited,
+    /// The provider confirms funds but does not disclose their amount.
+    Available,
+}
+
+impl PaidCredits {
+    pub fn limited(balance: f64) -> Option<Self> {
+        serde_json::Number::from_f64(balance.max(0.0))
+            .filter(|_| balance.is_finite())
+            .map(Self::Limited)
+    }
 }
 
 impl ProfileQuota {
@@ -457,6 +480,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(quota.banked_resets, None);
+        assert_eq!(quota.paid_credits, None);
         assert_eq!(quota.windows[0].duration_seconds, None);
         assert_eq!(quota.windows[0].model_scope, None);
         assert!(

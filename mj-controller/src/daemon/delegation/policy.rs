@@ -273,6 +273,7 @@ mod tests {
     #[test]
     fn published_quota_snapshot_keeps_claude_fable_and_hides_other_scopes() {
         let report = ProfileQuota {
+            paid_credits: None,
             banked_resets: None,
             profile_id: "claude".into(),
             harness: mj_core::config::HarnessKind::Claude,
