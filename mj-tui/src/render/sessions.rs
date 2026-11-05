@@ -110,13 +110,13 @@ pub(crate) struct DrawnSessionRow {
     /// Project key of the heading this row carries, if it opens a group.
     heading: Option<String>,
     pub(super) lines: Vec<Line<'static>>,
+    height: u16,
     /// Blank rows drawn under this one, to separate groups.
     spacing: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SessionRowsRenderOptions {
-    force_expanded: bool,
     summary_only: bool,
     show_project_numbers: bool,
     show_selection: bool,
@@ -124,14 +124,12 @@ pub(crate) struct SessionRowsRenderOptions {
 
 impl SessionRowsRenderOptions {
     pub(crate) const DASHBOARD: Self = Self {
-        force_expanded: false,
         summary_only: false,
         show_project_numbers: true,
         show_selection: true,
     };
 
     pub(crate) const MINIMIZED: Self = Self {
-        force_expanded: false,
         summary_only: true,
         show_project_numbers: true,
         show_selection: true,
@@ -140,50 +138,61 @@ impl SessionRowsRenderOptions {
 
 impl DrawnSessionRow {
     pub(crate) fn content_height(&self) -> u16 {
-        u16::try_from(self.lines.len()).unwrap_or(u16::MAX)
+        self.height
     }
 }
 
 /// Lays the pane out without drawing it, so the layout can ask how tall it
 /// wants to be before it has any rows to give it.
+#[cfg(test)]
 pub(crate) fn drawn_session_rows(dashboard: &DashboardState, width: u16) -> Vec<DrawnSessionRow> {
     drawn_session_rows_with_options(dashboard, width, SessionRowsRenderOptions::DASHBOARD)
 }
 
+#[cfg(test)]
 pub(crate) fn drawn_session_rows_with_options(
     dashboard: &DashboardState,
     width: u16,
     options: SessionRowsRenderOptions,
 ) -> Vec<DrawnSessionRow> {
+    let layout = SessionsLayout::new(dashboard, width);
+    drawn_session_rows_in_range(dashboard, &layout, options, 0..usize::MAX)
+}
+
+fn drawn_session_rows_in_range(
+    dashboard: &DashboardState,
+    layout: &SessionsLayout,
+    options: SessionRowsRenderOptions,
+    range: std::ops::Range<usize>,
+) -> Vec<DrawnSessionRow> {
+    let width = layout.width;
     let now_epoch_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let animation_ms = mj_chat::spinner::elapsed_ms();
     let sessions = dashboard.ordered_sessions();
-    let targets = dashboard.session_order().targets().to_vec();
-    let flow_rows = dashboard.sessions_rows().into_iter().map(|row| match row {
-        SessionsRow::ProjectHeading { key, label, number } => SessionsRow::ProjectHeading {
-            key,
-            label,
-            number: options.show_project_numbers.then_some(number).flatten(),
-        },
-        SessionsRow::Session { index, expanded } => SessionsRow::Session {
-            index,
-            expanded: options.force_expanded || expanded,
-        },
-    });
+    let order = dashboard.session_order();
+    let targets = order.targets();
     let mut rows: Vec<DrawnSessionRow> = Vec::new();
     let mut pending_heading: Option<(String, Line<'static>)> = None;
-    for row in flow_rows {
+    let mut position = 0;
+    for row in order.rows() {
         match row {
             SessionsRow::ProjectHeading { key, label, number } => {
+                if !range.contains(&position) {
+                    continue;
+                }
+                let number = if options.show_project_numbers {
+                    *number
+                } else {
+                    None
+                };
+                let key = key.clone();
+                let label = label.clone();
                 let hotkey = number.map_or_else(String::new, |number| format!("[{number}] "));
                 // A heading is drawn inside the row beneath it, so the table's
                 // selection index keeps counting sessions and nothing else.
-                if let Some(last) = rows.last_mut() {
-                    last.spacing = 1;
-                }
                 let mut spans = vec![
                     Span::styled(hotkey, theme::key_hint()),
                     Span::styled(label, theme::actionable().add_modifier(Modifier::BOLD)),
@@ -203,18 +212,25 @@ pub(crate) fn drawn_session_rows_with_options(
                 }
                 pending_heading = Some((key, Line::from(spans)));
             }
-            SessionsRow::Session { index, expanded } => {
+            SessionsRow::Session { index, .. } => {
+                let index = *index;
+                let presentation = layout.presentation(position, options.summary_only);
+                let visible = range.contains(&position);
+                position += 1;
+                if !visible {
+                    pending_heading = None;
+                    continue;
+                }
                 let Some(session) = sessions.get(index) else {
                     continue;
                 };
-                // Supply a display-only title without changing the durable session record.
-                let named_session = dashboard.go.is_some().then(|| {
-                    let mut named = (*session).clone();
-                    named.session_title_override =
-                        Some(dashboard.go_conversation_title(&session.id));
-                    named
-                });
-                let session = named_session.as_ref().unwrap_or(session);
+                let display_name = dashboard
+                    .go
+                    .as_ref()
+                    .map(|_| dashboard.go_conversation_title(&session.id));
+                let display_name = display_name
+                    .as_deref()
+                    .unwrap_or_else(|| session_name(session));
                 let detail = dashboard.session_details.get(&session.id);
                 let review = dashboard.session_review(&session.id);
                 let unreachable = dashboard.unreachable_sessions.contains(&session.id);
@@ -238,7 +254,7 @@ pub(crate) fn drawn_session_rows_with_options(
                     mj_chat::spinner::compact_frame(dashboard.config.spinner, animation_ms)
                 });
                 let operation = dashboard.session_operations.get(&session.id);
-                let target = targets.get(index).cloned().unwrap_or_default();
+                let target = targets.get(index).map(String::as_str).unwrap_or_default();
                 let git = dashboard.git_row_text(&session.id);
                 let permission = session_permission_badge(session, operation, &dashboard.config);
                 // The selection drives which conversation is on screen, so
@@ -246,9 +262,11 @@ pub(crate) fn drawn_session_rows_with_options(
                 let selected = options.show_selection
                     && dashboard.selected_session_id() == Some(session.id.as_str());
                 let glyphs = theme::glyphs();
-                let symbol = dashboard
-                    .transition_kind(&session.id)
-                    .map(|transition| match transition {
+                let symbol = match presentation.form {
+                    SessionRowForm::Transition {
+                        kind: transition,
+                        failed: false,
+                    } => match transition {
                         SessionTransitionKind::Starting => glyphs.starting,
                         SessionTransitionKind::Resuming => glyphs.resuming,
                         SessionTransitionKind::Moving => glyphs.moving,
@@ -256,16 +274,17 @@ pub(crate) fn drawn_session_rows_with_options(
                             glyphs.stopping
                         }
                         SessionTransitionKind::Destroying => glyphs.destroying,
-                    })
-                    .unwrap_or_else(|| facts.status_symbol(operation));
-                let prefix = format!("{}{symbol} ", if selected { glyphs.selected } else { "  " });
-                let (heading_key, heading_line) = match pending_heading.take() {
-                    Some((key, line)) => (Some(key), Some(line)),
-                    None => (None, None),
+                    },
+                    _ => facts.status_symbol(operation),
                 };
+                let prefix = format!("{}{symbol} ", if selected { glyphs.selected } else { "  " });
+                let (heading_key, heading_line) =
+                    match pending_heading.take().filter(|_| presentation.heading) {
+                        Some((key, line)) => (Some(key), Some(line)),
+                        None => (None, None),
+                    };
                 let mut lines = Vec::new();
                 lines.extend(heading_line);
-                let spacing = u16::from(expanded && !options.summary_only);
                 // The minimized pane keeps one terse row per session, so it omits CPU.
                 let cpu = (!options.summary_only)
                     .then(|| dashboard.cpu_share(&session.id))
@@ -274,89 +293,105 @@ pub(crate) fn drawn_session_rows_with_options(
                     width,
                     dashboard.pin_id(&session.id),
                 );
-                if session.configuration_issue(&dashboard.config).is_some() {
-                    lines.push(Line::styled(
-                        format!("{prefix}{}", session_name(session)),
-                        Style::default().fg(theme::palette().session_error),
-                    ));
-                    lines.push(Line::styled(
-                        "  Needs config repair",
-                        Style::default().fg(theme::palette().session_error),
-                    ));
-                    if expanded && !options.summary_only {
-                        lines.push(Line::from(
-                            match dashboard.first_key_label(crate::CommandId::OpenConfig) {
-                                Some(key) => {
-                                    format!("  Enter for repair details · {key} settings")
-                                }
-                                None => "  Enter for repair details".to_owned(),
-                            },
+                match presentation.form {
+                    SessionRowForm::Repair { hint } => {
+                        lines.push(Line::styled(
+                            format!("{prefix}{display_name}"),
+                            Style::default().fg(theme::palette().session_error),
+                        ));
+                        lines.push(Line::styled(
+                            "  Needs config repair",
+                            Style::default().fg(theme::palette().session_error),
+                        ));
+                        if hint {
+                            lines.push(Line::from(
+                                match dashboard.first_key_label(crate::CommandId::OpenConfig) {
+                                    Some(key) => {
+                                        format!("  Enter for repair details · {key} settings")
+                                    }
+                                    None => "  Enter for repair details".to_owned(),
+                                },
+                            ));
+                        }
+                    }
+                    SessionRowForm::Transition {
+                        kind: transition,
+                        failed: false,
+                    } => {
+                        lines.push(session_transition_line(
+                            &prefix,
+                            session,
+                            display_name,
+                            transition,
+                            operation,
+                            now_epoch_seconds,
+                            target,
+                            width,
+                            None,
                         ));
                     }
-                } else if let Some(transition) = dashboard.transition_kind(&session.id) {
-                    lines.push(session_transition_line(
-                        &prefix,
-                        session,
-                        transition,
-                        operation,
-                        now_epoch_seconds,
-                        &target,
-                        width,
-                        None,
-                    ));
-                } else if let Some(transition) = dashboard.transition_failure_kind(&session.id) {
-                    lines.push(session_transition_line(
-                        &prefix,
-                        session,
-                        transition,
-                        None,
-                        now_epoch_seconds,
-                        &target,
-                        width,
-                        session.last_error.as_deref(),
-                    ));
-                } else if expanded && !options.summary_only {
-                    expanded_session_lines(
-                        &mut lines,
-                        session,
-                        detail,
-                        review,
-                        unreachable,
-                        disk_full,
-                        attention,
-                        operation,
-                        now_epoch_seconds,
-                        &target,
-                        cpu,
-                        permission,
-                        width,
-                        title_width,
-                        &prefix,
-                        spinner,
-                        dashboard.config.advanced.detailed_activity_clocks,
-                        git.as_deref(),
-                    );
-                } else {
-                    compact_session_lines(
-                        &mut lines,
-                        &prefix,
-                        session,
-                        detail,
-                        review,
-                        unreachable,
-                        disk_full,
-                        attention,
-                        operation,
-                        now_epoch_seconds,
-                        &target,
-                        cpu,
-                        permission,
-                        spinner,
-                        width,
-                        title_width,
-                    );
+                    SessionRowForm::Transition {
+                        kind: transition,
+                        failed: true,
+                    } => {
+                        lines.push(session_transition_line(
+                            &prefix,
+                            session,
+                            display_name,
+                            transition,
+                            None,
+                            now_epoch_seconds,
+                            target,
+                            width,
+                            session.last_error.as_deref(),
+                        ));
+                    }
+                    SessionRowForm::Expanded => {
+                        expanded_session_lines(
+                            &mut lines,
+                            session,
+                            display_name,
+                            detail,
+                            review,
+                            unreachable,
+                            disk_full,
+                            attention,
+                            operation,
+                            now_epoch_seconds,
+                            target,
+                            cpu,
+                            permission,
+                            width,
+                            title_width,
+                            &prefix,
+                            spinner,
+                            dashboard.config.advanced.detailed_activity_clocks,
+                            git.as_deref(),
+                        );
+                    }
+                    SessionRowForm::Compact => {
+                        compact_session_lines(
+                            &mut lines,
+                            &prefix,
+                            session,
+                            display_name,
+                            detail,
+                            review,
+                            unreachable,
+                            disk_full,
+                            attention,
+                            operation,
+                            now_epoch_seconds,
+                            target,
+                            cpu,
+                            permission,
+                            spinner,
+                            width,
+                            title_width,
+                        );
+                    }
                 }
-                if dashboard.session_outside_filter(session) {
+                if presentation.outside_filter {
                     lines.push(Line::styled("  Outside filter", theme::muted()));
                 }
                 if selected {
@@ -364,18 +399,16 @@ pub(crate) fn drawn_session_rows_with_options(
                         line.style = theme::selection(false).patch(line.style);
                     }
                 }
+                let height = presentation.height();
                 rows.push(DrawnSessionRow {
                     session: Some(index),
                     heading: heading_key,
                     lines,
-                    spacing,
+                    height,
+                    spacing: presentation.spacing,
                 });
             }
         }
-    }
-    // The last group never needs a trailing blank row.
-    if let Some(last) = rows.last_mut() {
-        last.spacing = 0;
     }
     rows
 }
@@ -513,6 +546,7 @@ impl OutputPreviewCache {
 pub(crate) fn expanded_session_lines(
     lines: &mut Vec<Line<'static>>,
     session: &SessionRecord,
+    display_name: &str,
     detail: Option<&SessionDetail>,
     review: Option<&RuntimeReviewView>,
     unreachable: bool,
@@ -533,7 +567,7 @@ pub(crate) fn expanded_session_lines(
     let style = Style::default()
         .fg(session_band_color(attention, detail, session.state))
         .add_modifier(Modifier::BOLD);
-    let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
+    let name = recovery_warning_name(session, display_name.to_owned(), now_epoch_seconds);
     // The pin and ellipsis actions occupy the right of the first line only.
     // Keep the activity and output lines at the full content width so a
     // running clock and queued count remain readable in a compact pane.
@@ -831,6 +865,7 @@ pub(crate) fn compact_session_lines(
     lines: &mut Vec<Line<'static>>,
     prefix: &str,
     session: &SessionRecord,
+    display_name: &str,
     detail: Option<&SessionDetail>,
     review: Option<&RuntimeReviewView>,
     unreachable: bool,
@@ -853,7 +888,7 @@ pub(crate) fn compact_session_lines(
         attention,
     };
     let style = facts.style().add_modifier(Modifier::BOLD);
-    let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
+    let name = recovery_warning_name(session, display_name.to_owned(), now_epoch_seconds);
     // The pin and ellipsis actions occupy the right of the first line only;
     // retain the full width for the status line below it.
     lines.push(Line::from(session_title_spans(
@@ -1091,54 +1126,162 @@ pub(crate) fn session_display_targets(
         .collect()
 }
 
-/// The Sessions pane laid out once for a frame, in both of its forms.
-///
-/// The frame's layout asks how tall each form wants to be before it decides
-/// the pane's size, and the pane then draws one of them. Both answers come
-/// from these rows, so a frame lays each row out once.
+/// One decision about which lines a session row contains.
+#[derive(Clone, Copy)]
+enum SessionRowForm {
+    Repair {
+        hint: bool,
+    },
+    Transition {
+        kind: SessionTransitionKind,
+        failed: bool,
+    },
+    Expanded,
+    Compact,
+}
+
+#[derive(Clone, Copy)]
+struct RowPresentation {
+    form: SessionRowForm,
+    heading: bool,
+    outside_filter: bool,
+    spacing: u16,
+}
+
+impl RowPresentation {
+    fn height(self) -> u16 {
+        let body = match self.form {
+            SessionRowForm::Repair { hint } => 2 + u16::from(hint),
+            SessionRowForm::Transition { .. } => 1,
+            SessionRowForm::Expanded => 4,
+            SessionRowForm::Compact => 2,
+        };
+        body + u16::from(self.heading) + u16::from(self.outside_filter)
+    }
+}
+
+fn row_presentation(
+    dashboard: &DashboardState,
+    session: &SessionRecord,
+    expanded: bool,
+    minimized: bool,
+    heading: bool,
+) -> RowPresentation {
+    let form = if session.configuration_issue(&dashboard.config).is_some() {
+        SessionRowForm::Repair {
+            hint: expanded && !minimized,
+        }
+    } else if let Some(kind) = dashboard.transition_kind(&session.id) {
+        SessionRowForm::Transition {
+            kind,
+            failed: false,
+        }
+    } else if let Some(kind) = dashboard.transition_failure_kind(&session.id) {
+        SessionRowForm::Transition { kind, failed: true }
+    } else if expanded && !minimized {
+        SessionRowForm::Expanded
+    } else {
+        SessionRowForm::Compact
+    };
+    RowPresentation {
+        form,
+        heading,
+        outside_filter: dashboard.session_outside_filter(session),
+        spacing: u16::from(expanded && !minimized),
+    }
+}
+
+struct RowShape {
+    full: RowPresentation,
+    minimized: RowPresentation,
+}
+
+/// The Sessions pane's row decisions for both forms in one frame.
+/// Only the form actually drawn builds text, and only for visible rows.
 pub(crate) struct SessionsLayout {
     width: u16,
-    minimized: Vec<DrawnSessionRow>,
-    full: Vec<DrawnSessionRow>,
+    shapes: Vec<RowShape>,
+    minimized_heights: Vec<usize>,
+    full_heights: Vec<usize>,
 }
 
 impl SessionsLayout {
-    /// Lays the pane out for a content area `width` cells wide.
+    /// Decide each row's form, height, and spacing before the pane size is known.
     pub(crate) fn new(dashboard: &DashboardState, width: u16) -> Self {
+        let sessions = dashboard.ordered_sessions();
+        let mut shapes: Vec<RowShape> = Vec::new();
+        let mut heading = false;
+        for row in dashboard.session_order().rows() {
+            match row {
+                SessionsRow::ProjectHeading { .. } => {
+                    if let Some(last) = shapes.last_mut() {
+                        last.full.spacing = 1;
+                        last.minimized.spacing = 1;
+                    }
+                    heading = true;
+                }
+                SessionsRow::Session { index, expanded } => {
+                    let session = sessions[*index];
+                    shapes.push(RowShape {
+                        full: row_presentation(dashboard, session, *expanded, false, heading),
+                        minimized: row_presentation(dashboard, session, *expanded, true, heading),
+                    });
+                    heading = false;
+                }
+            }
+        }
+        if let Some(last) = shapes.last_mut() {
+            last.full.spacing = 0;
+            last.minimized.spacing = 0;
+        }
+        let minimized_heights = shapes
+            .iter()
+            .map(|shape| usize::from(shape.minimized.height() + shape.minimized.spacing))
+            .collect();
+        let full_heights = shapes
+            .iter()
+            .map(|shape| usize::from(shape.full.height() + shape.full.spacing))
+            .collect();
         Self {
             width,
-            minimized: drawn_session_rows_with_options(
-                dashboard,
-                width,
-                SessionRowsRenderOptions::MINIMIZED,
-            ),
-            full: drawn_session_rows(dashboard, width),
+            shapes,
+            minimized_heights,
+            full_heights,
         }
     }
 
     /// Content rows the minimized form wants, excluding its border.
     pub(crate) fn minimized_content_height(&self) -> u16 {
-        rows_height(&self.minimized)
+        self.minimized_heights
+            .iter()
+            .fold(0u16, |sum, height| sum.saturating_add(*height as u16))
     }
 
-    /// Content rows the full form wants, excluding its border.
+    /// Content rows the full form wants, including actions and excluding its border.
     pub(crate) fn content_height(&self) -> u16 {
-        rows_height(&self.full).saturating_add(SESSION_ACTIONS_HEIGHT)
+        self.full_heights
+            .iter()
+            .fold(SESSION_ACTIONS_HEIGHT, |sum, height| {
+                sum.saturating_add(*height as u16)
+            })
     }
 
-    fn rows(&self, minimized: bool) -> &[DrawnSessionRow] {
+    fn heights(&self, minimized: bool) -> &[usize] {
         if minimized {
-            &self.minimized
+            &self.minimized_heights
         } else {
-            &self.full
+            &self.full_heights
         }
     }
-}
 
-fn rows_height(rows: &[DrawnSessionRow]) -> u16 {
-    rows.iter()
-        .map(|row| row.content_height().saturating_add(row.spacing))
-        .fold(0, u16::saturating_add)
+    fn presentation(&self, position: usize, minimized: bool) -> RowPresentation {
+        let shape = &self.shapes[position];
+        if minimized {
+            shape.minimized
+        } else {
+            shape.full
+        }
+    }
 }
 
 /// The pane name the title carries when there is room for it beside a label.
@@ -1392,7 +1535,8 @@ pub(crate) fn render_sessions(
         layout.width, content.width,
         "the Sessions layout was made for another width"
     );
-    let drawn = layout.rows(dashboard.sessions_minimized());
+    let minimized = dashboard.sessions_minimized();
+    let row_heights = layout.heights(minimized);
     let focused = dashboard.focus() == Focus::Sessions;
     let maximize_enabled = dashboard.pane_maximize_enabled(SupportPane::Sessions);
     let filter_label = dashboard.sessions_filter_label();
@@ -1441,6 +1585,40 @@ pub(crate) fn render_sessions(
         );
     }
     crate::surface_controls::render_session_buttons(frame, actions_area, dashboard);
+    let selected = dashboard
+        .selected_visible_index()
+        .filter(|index| *index < row_heights.len());
+    let viewport = usize::from(rows_area.height);
+    let mut offset = mj_chat::components::clamp_offset_to_last_page(
+        dashboard.sessions_scroll.get(),
+        row_heights,
+        viewport,
+    );
+    if let Some(selected) = selected {
+        if take_selection_recenter(dashboard, Focus::Sessions) {
+            offset = mj_chat::components::centered_offset(selected, row_heights, viewport);
+        } else if selected < offset {
+            offset = selected;
+        } else {
+            let mut occupied = row_heights[offset..=selected].iter().sum::<usize>();
+            while offset < selected && occupied >= viewport {
+                occupied -= row_heights[offset];
+                offset += 1;
+            }
+        }
+    }
+    let mut end = offset;
+    let mut used = 0usize;
+    while end < row_heights.len() && used < viewport {
+        used += row_heights[end];
+        end += 1;
+    }
+    let options = if minimized {
+        SessionRowsRenderOptions::MINIMIZED
+    } else {
+        SessionRowsRenderOptions::DASHBOARD
+    };
+    let drawn = drawn_session_rows_in_range(dashboard, layout, options, offset..end);
     let table = Table::new(
         drawn.iter().map(|row| {
             Row::new([Cell::from(Text::from(row.lines.clone()))])
@@ -1449,37 +1627,11 @@ pub(crate) fn render_sessions(
         }),
         [Constraint::Min(1)],
     );
-    let selected = dashboard
-        .selected_visible_index()
-        .filter(|index| *index < drawn.len());
-    // The last row's trailing margin is not content, so it must not keep an
-    // earlier row hidden.
-    let row_heights = drawn
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let spacing = if index + 1 == drawn.len() {
-                0
-            } else {
-                row.spacing
-            };
-            usize::from(row.content_height().saturating_add(spacing))
-        })
-        .collect::<Vec<_>>();
-    let viewport = usize::from(rows_area.height);
-    let mut offset = mj_chat::components::clamp_offset_to_last_page(
-        dashboard.sessions_scroll.get(),
-        &row_heights,
-        viewport,
+    let mut state = TableState::default().with_selected(
+        selected
+            .filter(|selected| *selected < end)
+            .and_then(|selected| selected.checked_sub(offset)),
     );
-    if let Some(selected) = selected
-        && take_selection_recenter(dashboard, Focus::Sessions)
-    {
-        offset = mj_chat::components::centered_offset(selected, &row_heights, viewport);
-    }
-    let mut state = TableState::default()
-        .with_offset(offset)
-        .with_selected(selected);
     frame.render_stateful_widget(table, rows_area, &mut state);
     if drawn.is_empty() && rows_area.height > 0 {
         let lines = if dashboard.sessions_text.is_pending() {
@@ -1501,14 +1653,13 @@ pub(crate) fn render_sessions(
     }
     // The table scrolled only as far as it had to; remember where it settled
     // so the next frame does not scroll back to the top.
-    dashboard.sessions_scroll.set(state.offset());
+    dashboard.sessions_scroll.set(offset);
 
-    let offset = state.offset();
     let mut row_y = rows_area.y;
     let mut visible = 0;
     let mut session_row_areas = Vec::new();
     let mut project_heading_areas = Vec::new();
-    for row in drawn.iter().skip(offset) {
+    for row in &drawn {
         if row_y >= rows_area.bottom() {
             break;
         }
@@ -1532,7 +1683,7 @@ pub(crate) fn render_sessions(
         }
         row_y = row_y.saturating_add(row.content_height().saturating_add(row.spacing));
     }
-    render_session_scrollbar(frame, area, drawn.len(), offset, visible);
+    render_session_scrollbar(frame, area, row_heights.len(), offset, visible);
 
     SessionRowsRendered {
         session_row_areas,
@@ -1548,6 +1699,7 @@ pub(crate) fn render_sessions(
 pub(crate) fn session_transition_line(
     prefix: &str,
     session: &SessionRecord,
+    display_name: &str,
     transition: SessionTransitionKind,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
@@ -1592,11 +1744,7 @@ pub(crate) fn session_transition_line(
     // sessions starting together on one target differ only by their names.
     // Keep the name to half the row so the stage and clock always survive.
     let content_width = usize::from(width.saturating_sub(3)).saturating_sub(prefix.chars().count());
-    let name = truncate_to_cells(
-        session_name(session),
-        (content_width / 2).max(12),
-        Truncate::PLAIN,
-    );
+    let name = truncate_to_cells(display_name, (content_width / 2).max(12), Truncate::PLAIN);
     let line = format!(
         "{prefix}{name}  {} · {stages} · {elapsed}  {target} · {profile}{}",
         transition.label(),
@@ -1861,5 +2009,56 @@ pub(crate) fn recovery_warning_name(
             checkpoint_age(now_epoch_seconds, &checkpoint.created_at)
         ),
         None => format!("{name}  {} Recovery unavailable", theme::glyphs().warning),
+    }
+}
+
+#[cfg(test)]
+mod row_height_tests {
+    use super::*;
+    use crate::test_support::{dashboard_with_session, running_session};
+
+    #[test]
+    fn each_session_form_draws_its_decided_height() {
+        let dashboard = dashboard_with_session(running_session());
+        let forms = [
+            SessionRowForm::Repair { hint: false },
+            SessionRowForm::Repair { hint: true },
+            SessionRowForm::Transition {
+                kind: SessionTransitionKind::Moving,
+                failed: false,
+            },
+            SessionRowForm::Transition {
+                kind: SessionTransitionKind::Moving,
+                failed: true,
+            },
+            SessionRowForm::Expanded,
+            SessionRowForm::Compact,
+        ];
+        for minimized in [false, true] {
+            for outside_filter in [false, true] {
+                for form in forms {
+                    let mut layout = SessionsLayout::new(&dashboard, 60);
+                    let presentation = if minimized {
+                        &mut layout.shapes[0].minimized
+                    } else {
+                        &mut layout.shapes[0].full
+                    };
+                    presentation.form = form;
+                    presentation.outside_filter = outside_filter;
+                    let expected = presentation.height();
+                    let options = if minimized {
+                        SessionRowsRenderOptions::MINIMIZED
+                    } else {
+                        SessionRowsRenderOptions::DASHBOARD
+                    };
+                    let rows = drawn_session_rows_in_range(&dashboard, &layout, options, 0..1);
+                    assert_eq!(
+                        rows[0].lines.len(),
+                        usize::from(expected),
+                        "minimized={minimized}, outside_filter={outside_filter}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -240,6 +240,7 @@ impl DashboardState {
     ///
     /// Standard and Maximized use four-line session rows; Minimized keeps only
     /// each session's top summary line. Focus never changes the representation.
+    #[cfg(test)]
     pub(crate) fn sessions_rows(&self) -> Vec<SessionsRow> {
         self.session_order().rows().to_vec()
     }
