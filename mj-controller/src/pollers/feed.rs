@@ -150,3 +150,14 @@ impl<S: FeedSource> Feed<S> {
         std::mem::take(&mut self.delivered)
     }
 }
+
+impl<T: Clone> Feed<tokio::sync::watch::Receiver<T>> {
+    /// Read the latest publication without waiting for the render loop to drain it.
+    pub fn latest(&self) -> T {
+        self.source.borrow().clone()
+    }
+
+    pub fn source_is_closed(&self) -> bool {
+        self.source.has_changed().is_err()
+    }
+}

@@ -194,12 +194,19 @@ pub(crate) const QUOTA_REFRESHED_NOTICE: &str = "Targets and quotas refreshed.";
 #[derive(Debug)]
 pub(crate) enum DashboardExit {
     Normal,
-    Detached,
+    Detached(DetachedSessions),
     Interrupted,
     Restart {
         target: crate::daemon::UpgradeTarget,
         resume: Box<UpgradeResume>,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DetachedSessions {
+    Known(usize),
+    DaemonNotRunning,
+    Unknown,
 }
 
 pub(crate) use mj_client::operations::CriticalOperationTracker;
@@ -1049,6 +1056,28 @@ pub(crate) async fn run_dashboard_for_workspace(
             break;
         }
     }
+    // Capture the feed-owned projection at the exit decision, before cleanup
+    // can close feeds or change the dashboard's state.
+    let detached_sessions = match &*context.daemon_presence.borrow() {
+        crate::daemon::DaemonPresence::Missing(_) => DetachedSessions::DaemonNotRunning,
+        crate::daemon::DaemonPresence::Attached
+            if context.runtime_state.is_open()
+                && !context.runtime_state.source_is_closed()
+                && !context.runtime_health.source_is_closed()
+                && context.runtime_health.latest().refresh_error.is_none() =>
+        {
+            let projection = context.runtime_state.latest();
+            let roots =
+                crate::session_roots_from_projection(&projection.records, &projection.subagents);
+            DetachedSessions::Known(
+                roots
+                    .values()
+                    .filter(|session| session.lifecycle.is_dashboard_visible())
+                    .count(),
+            )
+        }
+        _ => DetachedSessions::Unknown,
+    };
     context.auto_afk.shutdown().await;
     context.cancel_background_work();
     let quit_detached = context.quit_detached;
@@ -1121,7 +1150,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                 resume: Box::new(resume),
             }
         } else if quit_detached {
-            DashboardExit::Detached
+            DashboardExit::Detached(detached_sessions)
         } else if context.shutdown_requested {
             DashboardExit::Interrupted
         } else {
