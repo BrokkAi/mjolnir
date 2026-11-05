@@ -1,0 +1,453 @@
+{
+  "id": "W169",
+  "title": "waiting candidate 30 c0434e43",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "c0434e43a0575a11851961f14196ab22",
+    "session_title": "7496-conv-jvm",
+    "reply_position": 11775,
+    "captured_at": "2026-10-28T00:28:44.283Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /home/jonathan/Projects/bifrost/.mj/clones/07d292ca700ead3ba5c751211efb3228/.mj/agents/c0434e43a0575a11851961f14196ab22. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nAnalyzer implementation task (#7496, using the #2445 Milestone 4a read-attribution mechanism): convert the JVM (Java, Kotlin, Scala) memos so a policy unit's read set covers what its evaluation consulted, and bring the JVM crates into the funnel gate.\n\nWorktree (already created): /home/jonathan/Projects/bifrost/.mj/clones/07d292ca700ead3ba5c751211efb3228/.mj/lanes/7496-conv-jvm, branch 7496-conv-jvm at ca8cfc4027 (staging, with the 4a mechanism and every merged 4a lane). Work only there. Do not commit, push or open a pull request; leave changes in the working tree. GitHub may be unreachable from your sandbox; you do not need it.\n\nRead first:\n- the shared rules, which apply in full: /tmp/incr-check/m4a-conversion-rules.md;\n- the API: crates/bifrost-core/src/analyzer/memo_attribution.rs, crates/bifrost-analysis/src/analyzer/workspace_authority.rs, and /tmp/incr-check/reports/m4a-foundation/memo-api/API.md.\n\nYour crates: bifrost-jvm-analysis and bifrost-jvm. In tests/suite_cross_language/workspace_authority_gate.rs, move both from PENDING_UNDER_7496 to IN_SCOPE, then classify and convert every memo field in them per the rules, adding rows to the classification TSV.\n\nState: the Java #7496 pin, `java_warm_supertypes_unit_rejects_an_unread_base_edit`, already passes on this base. Shared tree-sitter file-state recorders now capture lib/Base.java on warm declaration reads. But the JVM per-type ancestor cache (crates/bifrost-jvm-analysis/src/analyzer/java/hierarchy.rs:53-60) still returns its cached vector without replaying its build's reads, and Kotlin and Scala have their own hierarchy and import memos. Do not rely on the shared recorder covering them by accident: each derived memo gets its own mechanism (ReplayingMemo, or caller-keyed with a hit-path check that names the recording site). Import inventories and workspace class lookups (bifrost-jvm java/graph_support.rs:482-496, java/hierarchy.rs:192-206) are authorities: whole-value Facts if they are complete generation values, otherwise per-question. Build-model inputs (Maven or Gradle files) are non-source inputs: File and PathAbsent keys, since the verifier now answers non-source paths. Answers go through the JVM languages' LanguageSupport::workspace_fact_answer hooks, and each precision family needs its three cases.\n\nIf a cache lives in a core crate that cannot name bifrost-analysis types and needs an owned capability, do not build your own: a type-erased core capability is being built by another lane. Finish everything else, then report \"ready for API merge\" with no build running.\n\nKeep the Java pin passing, and add the same kind of warm-ancestor case for Kotlin or Scala only if one of them has a separate ancestor memo the Java pin does not exercise.\n\nValidation as in the rules, plus `cargo nextest run --max-fail 100 -p brokk-bifrost-jvm-analysis -p brokk-bifrost-jvm --lib` and the gate (no JVM rows in its failure list). Report as the rules file says."
+        },
+        {
+          "id": "user:4940",
+          "role": "user",
+          "text": "I committed your work as a checkpoint (44d1841452) and merged staging into your worktree (.mj/lanes/7496-conv-jvm, merge commit 13a9f89be6). Staging now has the type-erased read capability. API notes: /tmp/incr-check/reports/m4a-foundation-listing/API.md. Summary: brokk_bifrost_core::analyzer::project_reads::ReadCapability (built only in bifrost-analysis); capability.memo_attribution() gives MemoCapability<ErasedMemoAttribution> whose Key is OpaqueReadReceipt, usable with ReplayingMemo / ReplayingMemoEntry<T, OpaqueReadReceipt> and CaptureScopedMemo in a crate that cannot see ReadKey. Factories: TreeSitterAnalyzer::read_capability() (shares that analyzer's exact query registry), workspace_authority::erased_read_capability(Arc<dyn IAnalyzer>) and workspace_read_capability(&WorkspaceAnalyzer). A kernel receives the capability as a constructor argument; no thread-local ambient capability.\nFirst run cargo check --workspace --all-targets on the merged tree (I committed the merge without compiling) and fix only merge-composition errors; report any design conflict instead. Then continue the 65-field JVM queue under the same rules (/tmp/incr-check/m4a-conversion-rules.md): Java return caches and ScanCtx, KotlinNameResolver.owners_at, Scala ProjectTypes and seed caches through the erased capability; then the reverse, dependency and descendant authorities, Scala inventories and provider caches, the Maven and Gradle File/PathAbsent inputs, and the Kotlin and Scala answer hooks. Done means no JVM row remains in the gate's failure list and the Java and Kotlin pins pass. If the queue is too large for one pass, finish whole authorities in order and report exactly which rows remain. Do not commit. Handback as before."
+        },
+        {
+          "id": "agent:5013",
+          "role": "assistant",
+          "text": "The merged workspace check is still running and has reached the JVM analyzer without an error. Java’s return caches are shared across per-file evidence captures, so they need replay entries. The two `ScanCtx` caches live within one file scan and can use capture-scoped wrappers."
+        },
+        {
+          "id": "agent:5161",
+          "role": "assistant",
+          "text": "The merged tree passed `cargo check --workspace --all-targets`; there were no composition errors to fix. I’ll now wire the erased capability through the Java cache owner and scan contexts, then convert Kotlin’s owner lookup."
+        },
+        {
+          "id": "agent:5229",
+          "role": "assistant",
+          "text": "The capability is wired through Java’s cache owners and scan contexts, and through Kotlin’s graph into its owner lookup. I’ve also added a cross-file Java return test that checks warm method and file-facts caches separately, so one recorder cannot hide a missing replay in the other. The all-target check is running."
+        },
+        {
+          "id": "agent:5317",
+          "role": "assistant",
+          "text": "The touched crates passed the all-target check after I added a missing trait import to the new test. Clippy found one type-complexity warning in a scoped memo field; I’ll factor out its storage type. I also confirmed the gate requires explicit rows for capture-scoped fields, so I’ll add those three rows before the final gate run."
+        },
+        {
+          "id": "agent:5397",
+          "role": "assistant",
+          "text": "The library tests are now compiling the JVM analyzer. I also checked the return-type API’s source: it resolves nominal classes, not primitive values. I’ll change the new fixture from `int` to a nested class so it exercises the intended path. No existing test expectation will change."
+        },
+        {
+          "id": "agent:5467",
+          "role": "assistant",
+          "text": "The library run found two failures. The new Java test returned `Unknown` for the primitive fixture, as the nominal-only API explains. The Kotlin replay test also exposed an old fixture-lifetime bug: its helper drops the temporary project before returning the analyzer. The merged file recorder correctly refuses those missing inputs. I’ll retain the project guard and keep the zero-unattributed-read assertions unchanged."
+        },
+        {
+          "id": "agent:5634",
+          "role": "assistant",
+          "text": "The first library run passed 612 of 614 tests. The only failures were the deleted-project Kotlin fixture and the new Java fixture’s primitive expectation. I’m waiting for the current gate build to finish before applying those fixes, the lint alias, and the three scoped rows; then I’ll validate the updated snapshot."
+        },
+        {
+          "id": "agent:5707",
+          "role": "assistant",
+          "text": "The global formatting check passed. The pack-authoring check still reports the known Node notice hash mismatch; this pass changed no pack files. The current gate build has reached its final dependencies. Once it finishes, I’ll apply the prepared fixes and rerun validation."
+        },
+        {
+          "id": "agent:5775",
+          "role": "assistant",
+          "text": "The gate’s capture and capability-ownership checks passed. Its classification test still lists the unconverted queue. I’ve now applied the Kotlin fixture guard, the nested-class return fixture, the lint alias, and the three scoped rows. Existing assertions are unchanged; validation will run against this snapshot."
+        },
+        {
+          "id": "agent:5842",
+          "role": "assistant",
+          "text": "The corrected library run is still compiling. I’m keeping this pass focused on the Java return caches, the two Java scan-local caches, and Kotlin’s owner lookup. After validation, I’ll report the exact remaining queue; Scala’s `ProjectTypes` and seed caches are next in the requested order."
+        },
+        {
+          "id": "agent:5911",
+          "role": "assistant",
+          "text": "Clippy passed after the alias fix. The all-target check and corrected library tests are still compiling. Once those pass, I’ll run the final gate, the RQL mutation/unit selection, and policy unit/reuse checks against the frozen source."
+        },
+        {
+          "id": "agent:5972",
+          "role": "assistant",
+          "text": "The final all-target check passed, and Clippy is clean. The corrected library tests are still building. There have been no further source edits while they run."
+        },
+        {
+          "id": "agent:6085",
+          "role": "assistant",
+          "text": "All 614 JVM library tests passed. The new cross-file return test passed, and retaining the Kotlin project guard restored zero unattributed reads in its warm-ancestor test. I’ll now run the final gate, RQL selection—including both pins—and policy unit/reuse checks."
+        },
+        {
+          "id": "agent:6236",
+          "role": "assistant",
+          "text": "The final global formatting check passed. RQL is compiling first; the gate and policy checks are waiting for the build lock. The final gate will confirm the remaining-field count after the three scoped rows were added."
+        },
+        {
+          "id": "agent:6289",
+          "role": "assistant",
+          "text": "RQL has reached the shared flow layer in its test build. Source remains frozen. The checks completed so far are clean: the merged workspace check, both crates’ all-target check, Clippy, formatting, and all 614 JVM library tests."
+        },
+        {
+          "id": "agent:6351",
+          "role": "assistant",
+          "text": "RQL has reached its final test-binary compilation. I’ll check both warm-ancestor pins when it runs, then use the gate’s output to produce the exact remaining-field list. The policy check is still queued."
+        },
+        {
+          "id": "agent:6404",
+          "role": "assistant",
+          "text": "RQL finished: 53 of 56 tests passed, including the Java and Kotlin pins. The three failures are the existing C++, C#, and Go stale-unit cases, forced by `--run-ignored all`. The final gate and policy checks remain."
+        },
+        {
+          "id": "agent:6463",
+          "role": "assistant",
+          "text": "The policy test build is underway, with the final gate queued behind it. The first gate run left 50 JVM fields, including the three scoped fields that now have explicit rows. I expect the final list to contain 47; I’ll verify that from the gate output."
+        },
+        {
+          "id": "agent:6522",
+          "role": "assistant",
+          "text": "The policy build has reached the shared analysis crate. RQL’s Java and Kotlin pins are confirmed passing. I’m keeping the known out-of-lane RQL failures separate from this pass’s corrected fixture failures in the handback logs."
+        },
+        {
+          "id": "agent:6588",
+          "role": "assistant",
+          "text": "Policy finished with 12 of 13 tests passing. The failing TypeScript-only test forbids `gitblob::dirty_worktree_paths` during host-analyzer reuse, and its trace shows those scans. I’ll rerun it alone to rule out interference. I’ll leave its assertions unchanged and report it separately from the JVM cache work."
+        },
+        {
+          "id": "agent:6664",
+          "role": "assistant",
+          "text": "The isolated policy test failed again: its assertion dump contains eight forbidden dirty-worktree scan scopes. I saved the trace and a read-only diagnosis for the foundation owner, without changing the test. The final gate is still compiling and has reported waits for matching semantic/store builds managed by mbx."
+        },
+        {
+          "id": "agent:6726",
+          "role": "assistant",
+          "text": "The gate build has moved past those waits and is through the language-analysis and flow crates. I’ve also prepared notes for the next Scala pass: its constructor-derived hierarchy maps need covering authority certificates, and its bounded source-facts cache needs to account for opaque receipt bytes."
+        },
+        {
+          "id": "agent:6789",
+          "role": "assistant",
+          "text": "The final gate completed: four checks passed, and the classification check reports 47 remaining JVM fields, down from 65. The three new scoped rows passed. This pass stops after the Java return/scan caches and Kotlin owner lookup; I’ll hand back the tested changes, exact remaining list, and the reproducible TypeScript policy timing failure."
+        },
+        {
+          "id": "agent:6872",
+          "role": "assistant",
+          "text": "This pass converted 18 gate fields covering six physical caches; 47 JVM fields remain. Both pins and all 614 JVM library tests pass. No lane build is running, and the logs, exact remaining list, Scala notes, and isolated TypeScript policy failure are in the assigned report directory. I left the changes uncommitted."
+        },
+        {
+          "id": "user:6974",
+          "role": "user",
+          "text": "Good pass. I committed it as a checkpoint: 08a6bd747d (pushed). To finish faster I split the remaining 47 fields:\n- Scala (29 fields: scala/mod.rs, scala/graph/inverted.rs, usages/get_definition/scala.rs) now belongs to a new lane in another worktree (.mj/lanes/7496-conv-scala), which uses your jvm-erased-scala-next.txt notes. Do not edit Scala files.\n- You keep the other 18 fields, listed in /tmp/incr-check/reports/7496-java-kotlin-fields.txt: kotlin/mod.rs (9), java/cache.rs (4: direct_descendant_index, referencing_files, reverse_import_index, same_package_reference_index), java/mod.rs external_index, java/regex_syntax.rs, usages/get_definition/java.rs (2), jvm/external.rs (1). Include the Maven and Gradle File/PathAbsent inputs and the Kotlin answer hook. Do all 18.\nYou own Java, Kotlin and jvm/** files. If you change a shared constructor that Scala also calls, list it in the handback. Ignore the coordinator host-policy rescan failure; it is the shared project-read issue, being fixed in another worktree. Same rules, validation and handback as before; do not commit."
+        },
+        {
+          "id": "agent:6981",
+          "role": "assistant",
+          "text": "I’ll finish the Java and Kotlin authorities, including build-file reads and the Kotlin answer hook, while leaving Scala files to the new lane. I’ll check the remaining field list against the current code first.\n"
+        },
+        {
+          "id": "agent:7131",
+          "role": "assistant",
+          "text": "The remaining fields include derived authorities and request-local bookkeeping. I’ll give each authority a read funnel that runs on warm hits, keep resolution counters classified as bookkeeping, and make the type-parameter cache capture-scoped. Kotlin’s complete declaration inventory will get a precise whole-value fact.\n"
+        },
+        {
+          "id": "agent:7407",
+          "role": "assistant",
+          "text": "I found two fields that hold no cached workspace answer: regex group-name validation state and Java resolution budget counters. I’ll classify those separately. The source authorities now have warm-hit funnels; next I’ll verify manifest edits, including a build file appearing after an earlier negative probe.\n"
+        },
+        {
+          "id": "agent:7497",
+          "role": "assistant",
+          "text": "The first check is still running. I also found a hot-path cost to avoid: external name lookups can be frequent, so I’ll cache their build-input read receipts in a bounded replaying memo. Warm lookups can then replay the inputs without rereading manifests.\n"
+        },
+        {
+          "id": "agent:7896",
+          "role": "assistant",
+          "text": "All 18 assigned fields now have a classification and recording path. The Kotlin inventory fact is connected to the verifier hook, and tests cover warm reads, declaration changes, comments, and manifest creation. The compile check will confirm the wiring before I run the suites.\n"
+        },
+        {
+          "id": "agent:8163",
+          "role": "assistant",
+          "text": "The crate check passed. I’ve tightened the tests so each warm authority read is checked in its own capture, including the separate realm descendant cache. I’m starting lint and suite validation now; Scala remains the only unfinished JVM group in this worktree.\n"
+        },
+        {
+          "id": "agent:8508",
+          "role": "assistant",
+          "text": "The final crate check passed. Lint is still checking dependencies, and the test runs are queued after it. The pack drift check reports the same unchanged Node notice mismatch as before; I’ve left its baseline untouched.\n"
+        },
+        {
+          "id": "agent:8752",
+          "role": "assistant",
+          "text": "Lint passed, and the JVM library tests are building. The external-authority tests check both present Maven/Gradle files and absent candidates, then verify that editing or creating them rejects the old read set. No shared constructor signature changed, so Scala callers need no update from this pass.\n"
+        },
+        {
+          "id": "agent:8822",
+          "role": "assistant",
+          "text": "Validation is still compiling the shared measure-profile dependencies; the test runner has not started yet. The final code passes both `cargo check` and Clippy with warnings denied.\n"
+        },
+        {
+          "id": "agent:9173",
+          "role": "assistant",
+          "text": "All 621 JVM library tests passed, including the new authority and manifest cases. RQL, policy reuse, and the funnel gate are next. I’m excluding the shared coordinator rescan test as requested.\n"
+        },
+        {
+          "id": "agent:9307",
+          "role": "assistant",
+          "text": "The JVM test result is green. RQL is compiling under its feature set; that run will check the Java and Kotlin warm-ancestor pins through the saved-unit verifier.\n"
+        },
+        {
+          "id": "agent:9435",
+          "role": "assistant",
+          "text": "The Java and Kotlin warm-ancestor pins passed. RQL finished with 53 passes and the same three out-of-lane failures for C++, C#, and Go. Policy reuse validation is now running.\n"
+        },
+        {
+          "id": "agent:9662",
+          "role": "assistant",
+          "text": "RQL’s failures are unchanged from the previous pass; no Java or Kotlin saved-unit test regressed. Policy is still compiling, and the gate is queued after it.\n"
+        },
+        {
+          "id": "agent:9704",
+          "role": "assistant",
+          "text": "The 12 policy reuse tests passed. Final review caught one more gap in the new manifest memo: it must retain input reads when first filled before any capture. I’ll remove the capture-only guard and strengthen the warm-fill test once the current gate build finishes.\n"
+        },
+        {
+          "id": "agent:9772",
+          "role": "assistant",
+          "text": "The gate is still compiling the root integration target. I’ve left the worktree unchanged while that build runs; the remaining code fix is to let the bounded manifest memo capture its first fill even when no outer read capture exists.\n"
+        },
+        {
+          "id": "agent:9931",
+          "role": "assistant",
+          "text": "The strengthened uncaptured-fill regression passed, along with all 621 JVM tests. The final check and lint runs also passed. The gate’s first run stopped on a bookkeeping allowlist issue: its global alias scan expands `HashSet` to hasher and type-parameter names. I added those names only for the regex bookkeeping field.\n"
+        },
+        {
+          "id": "agent:10006",
+          "role": "assistant",
+          "text": "The final RQL run preserved both Java and Kotlin pins, with the same 53 passes and three out-of-lane failures. Policy and gate reruns are still pending.\n"
+        },
+        {
+          "id": "agent:10052",
+          "role": "assistant",
+          "text": "The final policy rerun passed all 12 selected tests. The gate is now the only check still running; it will confirm the remaining field list after the bookkeeping fix.\n"
+        },
+        {
+          "id": "agent:10094",
+          "role": "assistant",
+          "text": "All 18 assigned fields are clear from the gate’s failure list. Its only remaining rows are the 29 Scala fields owned by the other lane. The Java and Kotlin pins, 621 JVM tests, 12 selected policy tests, check, lint, and format checks passed. I’m saving the evidence for handback; no build is running.\n"
+        },
+        {
+          "id": "user:10203",
+          "role": "user",
+          "text": "Small follow-up, in a different worktree: /home/jonathan/Projects/bifrost/.mj/clones/07d292ca700ead3ba5c751211efb3228/.mj/lanes/2445-m4a-stage (staging, where I am finishing an uncommitted merge of origin/master; the tree compiles; do not stage or commit). Master added two Java caches that the gate flags as unclassified:\n- crates/bifrost-jvm-analysis/src/analyzer/java/cache.rs::JavaMemoCaches.package_names (bounded weighted cache, weigher weight_package_name). The merge resolution records the file's source read key before the lookup (see java/mod.rs, the package-name getter).\n- crates/bifrost-jvm-analysis/src/analyzer/java/cache.rs::JavaMemoCaches.statement_facts (keyed by (blob Oid, ProjectFile)); statement_source_facts reads the source before the lookup.\nClassify both as caller-keyed in tests/suite_cross_language/workspace_authority_classification.tsv with a reason and a certificate site: an existing test, or a new small test named by behavior, that runs a warm hit inside a capture and asserts the hit records the file's source key (and, for statement_facts, that a changed blob misses). If either is not really caller-keyed (a hit can return a value whose inputs the caller does not record), wrap it per the conversion rules instead and say so. Validate: `cargo check -p brokk-bifrost-jvm-analysis --all-targets`, the new or named test, and the gate `cargo nextest run --cargo-profile measure --max-fail 100 -p brokk-bifrost --test suite_cross_language -E 'test(workspace_authority)'` (environment as before). Report the rows and the test names."
+        },
+        {
+          "id": "agent:10207",
+          "role": "assistant",
+          "text": "I’ll check both hit paths in staging, add certificate tests and classification rows, then run the requested checks. I won’t stage or commit anything.\n"
+        },
+        {
+          "id": "agent:10328",
+          "role": "assistant",
+          "text": "`package_names` records the selected file before every hit, so caller-keyed fits. `statement_facts` also calls Java’s type resolver for enum switches, which can consult other files before filtering the result to a local enum. I’ll make that cache replay its build reads and test warm hits and changed-blob misses.\n"
+        },
+        {
+          "id": "agent:10510",
+          "role": "assistant",
+          "text": "The crate check passed. The package test checks a retained value with `Arc::ptr_eq`; the statement tests compare cold and warm read sets for an imported enum switch, and deliberately share cache storage across a source edit to verify the blob-key miss.\n"
+        },
+        {
+          "id": "agent:10571",
+          "role": "assistant",
+          "text": "The focused tests are still compiling the staging tree’s measure-profile dependencies. The compile check and whitespace check passed. Statement caching keeps its existing rule: incomplete builds are returned but not retained.\n"
+        },
+        {
+          "id": "agent:10704",
+          "role": "assistant",
+          "text": "All three certificate tests passed: the warm package hit records its source, warm statement hits replay the resolver’s read set, and a changed blob misses the shared cache. The workspace authority gate is running now.\n"
+        },
+        {
+          "id": "agent:10750",
+          "role": "assistant",
+          "text": "The certificate and format checks passed. The gate is still compiling the root integration target. I’ve made no further source changes and haven’t touched the staging index.\n"
+        },
+        {
+          "id": "agent:10787",
+          "role": "assistant",
+          "text": "The gate passed all five tests, including the memo classification sweep. The compile check and all three certificate tests passed too. I’m saving the evidence now; the changes remain unstaged.\n"
+        },
+        {
+          "id": "user:10863",
+          "role": "user",
+          "text": "New assignment from the reviewer's verdict on staging a67a651769. Worktree: /home/jonathan/Projects/bifrost/.mj/clones/07d292ca700ead3ba5c751211efb3228/.mj/lanes/2445-m4a-fix-jvm (branch 2445-m4a-fix-jvm at a67a651769, includes the origin/master merge). Rules: /tmp/incr-check/m4a-review-fix-rules.md. Review text: /tmp/incr-check/reports/review-a67a651769.md. Your items: 6 and 7.\nItem 6: move Scala's external index inputs onto the shared jvm/authority.rs record_external_inputs with a Scala family label, remove scala_dependency_input_keys and the unreachable!(\"Java and Kotlin own ...\") arm, and make a failed snapshot read a refusal (no .ok()), with the inventory fact and PathAbsent for conventional manifests as Java and Kotlin do, computed from the index's build rather than current files on every hit.\nItem 7: the external-input receipt must not be evictable independently of the index it certifies: store the receipt with the index value (for example in the same OnceLock entry), or refuse when the receipt is missing; pin it with a small-budget eviction test for Java and Kotlin (and Scala once it uses the same funnel).\nAnother lane changes the receipt shape (CapturedMemoReads gains an execution-mark channel, item 2) in core and analysis at the same time; stay out of those definitions and use the existing API; I will reconcile at merge."
+        },
+        {
+          "id": "agent:10867",
+          "role": "assistant",
+          "text": "I’ll read the review and fix rules, then bind each JVM external index to its build receipt and move Scala onto the shared input recorder. I’ll leave the receipt API definitions to the other lane.\n"
+        },
+        {
+          "id": "agent:10918",
+          "role": "assistant",
+          "text": "I’m taking the reviewer’s allowed “refuse when the receipt is missing” option. I’ll capture inputs during the actual index build, never regenerate a receipt for a live index, and preserve receipts across updates that retain that index. This keeps receipt storage bounded and lets the eviction test prove the refusal path.\n"
+        },
+        {
+          "id": "agent:11005",
+          "role": "assistant",
+          "text": "Scala now uses the shared recorder with its existing `ScalaExternalIndex` label. The new tests cover inventory and absent-manifest keys, persistent refusal after a failed snapshot read, and receipt loss for each JVM language. The compile check is still working through dependencies.\n"
+        },
+        {
+          "id": "agent:11084",
+          "role": "assistant",
+          "text": "The dependency checks have reached the JVM crate. The implementation also handles concurrent initialization conservatively: a waiter uses the winning build’s receipt if it is available, and refuses if it is not. It never publishes an empty receipt for another thread’s index.\n"
+        },
+        {
+          "id": "agent:11154",
+          "role": "assistant",
+          "text": "The first check found an API type mismatch: the shared derived memo stores an `Arc`-valued receipt, and I returned a bare unit value. I’ve corrected that and the moved imports. I’m rerunning the check, lint, regressions, full JVM-analysis library tests, and gate.\n"
+        },
+        {
+          "id": "agent:11223",
+          "role": "assistant",
+          "text": "The corrected all-targets check and workspace format check passed. Clippy is running next, followed by the six focused regressions and the full JVM-analysis test suite.\n"
+        },
+        {
+          "id": "agent:11267",
+          "role": "assistant",
+          "text": "Validation is still running; no test results yet. The pack drift check reports the same unchanged `node-v22.11.0.txt` notice mismatch as before. I’ve left that file and its baseline untouched.\n"
+        },
+        {
+          "id": "agent:11320",
+          "role": "assistant",
+          "text": "Clippy is still processing shared dependencies. Source changes are complete and remain limited to the JVM fix files and Scala’s classification row; the receipt definitions in core and analysis are untouched.\n"
+        },
+        {
+          "id": "agent:11366",
+          "role": "assistant",
+          "text": "Clippy passed with warnings denied. The focused regressions are now building under the measure profile. They will check that budget pressure actually removes the receipt, the index stays live, and later hits refuse without recording the edited manifest as a new input.\n"
+        },
+        {
+          "id": "agent:11423",
+          "role": "assistant",
+          "text": "The focused test binary is still compiling shared engine crates. The code now has one JVM input recorder, and a warm lookup cannot create a replacement receipt for an already-built index.\n"
+        },
+        {
+          "id": "agent:11556",
+          "role": "assistant",
+          "text": "The tests have not started yet; measure-profile compilation is still in shared analysis. The all-targets check, format check, and Clippy have passed.\n"
+        },
+        {
+          "id": "agent:11594",
+          "role": "assistant",
+          "text": "All six focused regressions passed. Java, Kotlin, and Scala each refused after the tiny budget discarded a receipt, and the failed-snapshot refusal persisted on warm hits. Scala also recorded the inventory fact, absent manifests, and original manifest blob. The full library suite is next.\n"
+        },
+        {
+          "id": "agent:11656",
+          "role": "assistant",
+          "text": "The full JVM-analysis suite passed: 375 tests, with 12 skipped. The authority gate is the only remaining check. No existing test expectations changed.\n"
+        },
+        {
+          "id": "agent:11691",
+          "role": "assistant",
+          "text": "The gate build is waiting on mbx to finish a matching semantic-crate build from another lane. The six regressions and all 375 library tests are green; no source changes are pending.\n"
+        },
+        {
+          "id": "agent:11737",
+          "role": "assistant",
+          "text": "The gate is still compiling. No failures have been reported, and the worktree has remained unchanged since the passing check, lint, and library runs.\n"
+        },
+        {
+          "id": "agent:11775",
+          "role": "assistant",
+          "text": "The gate build has reached the final runtime and MCP crates. The earlier checks and all JVM-analysis tests remain green; I’m waiting for the integration gate result before handback.\n"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "ck/reports/review-a67a651769.md. Your items: 6 and 7.\nItem 6: move Scala's external index inputs onto the shared jvm/authority.rs record_external_inputs with a Scala family label, remove scala_dependency_input_keys and the unreachable!(\"Java and Kotlin own ...\") arm, and make a failed snapshot read a refusal (no .ok()), with the inventory fact and PathAbsent for conventional manifests as Java and Kotlin do, computed from the index's build rather than current files on every hit.\nItem 7: the external-input receipt must not be evictable independently of the index it certifies: store the receipt with the index value (for example in the same OnceLock entry), or refuse when the receipt is missing; pin it with a small-budget eviction test for Java and Kotlin (and Scala once it uses the same funnel).\nAnother lane changes the receipt shape (CapturedMemoReads gains an execution-mark channel, item 2) in core and analysis at the same time; stay out of those definitions and use the existing API; I will reconcile at merge.",
+    "assistant_text_tail": "The gate build has reached the final runtime and MCP crates. The earlier checks and all JVM-analysis tests remain green; I’m waiting for the integration gate result before handback.\n",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 0
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-28T01:08:30.084Z",
+        "kind": "system",
+        "text": "Work interrupted: relay restarted while the ACP command was in flight; it was not replayed"
+      },
+      {
+        "at": "2026-10-28T01:08:30.099Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-28T01:08:30.099Z",
+        "kind": "system",
+        "text": "Work interrupted by session restart"
+      },
+      {
+        "at": "2026-10-28T01:09:10.103Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-28T01:09:11.325Z",
+        "kind": "user",
+        "text": "The host restarted, so your gate build was killed; nothing of yours is running. Continue: rerun the workspace_authority gate (and anything else that did not finish), then send the handback."
+      },
+      {
+        "at": "2026-10-28T01:10:27.204Z",
+        "kind": "agent",
+        "text": "I’ll rerun the workspace-authority gate. The crate check, formatting, Clippy, focused regressions, and full JVM-analysis library tests had already passed."
+      }
+    ]
+  }
+}

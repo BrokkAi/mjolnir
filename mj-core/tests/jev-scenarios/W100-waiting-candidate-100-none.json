@@ -1,0 +1,237 @@
+{
+  "id": "W100",
+  "title": "Waiting candidate 100 none",
+  "category": "waiting-on-automation",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "a56c857ed0fb213ff88fca0051521b5d",
+    "session_title": "mr-boxington via claude3",
+    "reply_position": 2246,
+    "captured_at": "2026-10-18T21:41:09.311Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:15",
+          "role": "user",
+          "text": "my local mbx space used (physical=compressed) is about 50:70:4400 targets:actions:incremental, i think this is a bug? incremental is so large that it's crowding out the others which i think is not what we want"
+        },
+        {
+          "id": "user:140",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:150",
+          "role": "user",
+          "text": "bump"
+        },
+        {
+          "id": "user:617",
+          "role": "user",
+          "text": "i think it's an oversight from when max_total_size was added tbh"
+        },
+        {
+          "id": "agent:619",
+          "role": "assistant",
+          "text": "I can check that against the commit that added it."
+        },
+        {
+          "id": "agent:631",
+          "role": "assistant",
+          "text": "Partly agree, partly not. The commit message for #594 (`fa507b9`, 2026-09-28) shows the behavior was stated on purpose, so it's a deliberate policy rather than something nobody noticed:\n\n> \"an explicit combined budget replaces implicit component size caps ... The per-crate incremental limit defaults to the combined budget.\"\n> \"The initial policy favors occupied shared results and incremental state over older target directories.\"\n\nSo two things were decided explicitly: component caps go away, and the per-crate limit tracks the total. The author even flagged \"eviction-cost optimization\" as follow-up work.\n\nWhat I think *was* an oversight is the consequence of combining those two choices, which the message doesn't mention: with no component cap and per-crate cap lifted, incremental is unbounded below the total, and the store's room to grow is computed last. The message frames the policy as \"incremental vs. older targets\". It never considers \"incremental vs. the store\", which is exactly your situation. The motivating problem was the opposite failure (\"an empty store could force warm targets out\"), and the fix overcorrected: it protects targets from the store but adds no protection for the store from incremental.\n\nSo my characterisation: the dropped caps were intentional; the lack of any ceiling on incremental's share was a gap in the reasoning. Your fix proposal stands either way. Two options, roughly in order of how small the change is:\n\n1. **Keep a cap on incremental under a combined budget.** Make `incremental_budget` use the disk-scaled default (5%, 10–100 GiB) when `incremental_max_size` is unset, instead of `total − store`. And stop lifting `learned_incremental_max_size` to the total; keep 8 GiB. This is a few lines in `config.rs` and `gc.rs:1511-1522`, plus the docs regen.\n2. **Share-based allocation.** Give incremental a fixed fraction of the total (say 20%) unless overridden. More principled, but it's a new knob and a bigger discussion for a PR against jdx's repo.\n\nI'd go with option 1. It restores the pre-#594 ceiling for the one component whose bytes are worth the least, without touching the store/targets rule #594 was actually about. Want me to draft it?"
+        },
+        {
+          "id": "user:826",
+          "role": "user",
+          "text": "lims is per-worktree? not sure 8GB is agood default either. maybe 10% of incremental_budget\n\nlet's start over, how would we design this to be least-surprising based on the mbx on this machine and on morannon? i'm pushing mbx a lot harder than jdx and we can learn more from these machines than whatever his macbook was doing tbh"
+        },
+        {
+          "id": "agent:828",
+          "role": "assistant",
+          "text": "First, the scope question, then I'll gather data from both machines before proposing anything."
+        },
+        {
+          "id": "user:883",
+          "role": "user",
+          "text": "goals, descending order\n\n0. maximize usefulness of the space mbx is given\n1. least surprise\n3. minimize configuration complexity"
+        },
+        {
+          "id": "agent:885",
+          "role": "assistant",
+          "text": "Noted the goals. Spawning the same survey for morannon (cache_dir `/mnt/nvme/mbx`, `gc.max_total_size = \"8000GB\"`, `gc.min_free_size = \"100GiB\"`)."
+        },
+        {
+          "id": "agent:901",
+          "role": "assistant",
+          "text": "While the surveys run, I'll read the design rationale that already exists: discussion #593 (referenced by #594) and any docs on learned incremental."
+        },
+        {
+          "id": "agent:945",
+          "role": "assistant",
+          "text": "Three surveys are running: local cache measurements, morannon cache measurements, and a source map of what each storage class saves and what reuse evidence mbx records. I'll synthesize a design proposal against your three goals once they report."
+        },
+        {
+          "id": "user:981",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:995",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "agent:1055",
+          "role": "assistant",
+          "text": "Waiting on the local survey (du over 3.9 TB of incremental state is slow). I'll write the design proposal once it lands."
+        },
+        {
+          "id": "user:1083",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "agent:1260",
+          "role": "assistant",
+          "text": "Two investigations still running. I'll draft the proposal when they report."
+        },
+        {
+          "id": "user:1287",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "agent:1331",
+          "role": "assistant",
+          "text": "One child still running (unit-churn diagnosis). I'll write the design once it reports."
+        },
+        {
+          "id": "user:1350",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "agent:1357",
+          "role": "assistant",
+          "text": "All reports are in. One correction to my earlier claim first: the rustc-level `<crate>-<hash>` suffix is the StableCrateId, not Cargo's fingerprint hash, so my \"0 of 1,313 units live\" intersection was invalid. The child redid it with a timing heuristic on the 8 checkouts that still have a target: the dead share ranges from ~5% (`cae4…`: 41 GB live / 1.9 GB dead) to ~93% (`d994…`: 2.5 GB live / 32.8 GB dead). The mjolnir4 age histogram stands (1,000 of 1,209 units untouched for >3 days). Two finalized sessions per unit is normal rustc behaviour; trimming to one would save only ~100 GiB here, not worth pursuing.\n\n## What the two machines show\n\n| | this machine | morannon |\n|---|---|---|\n| disk | 4.5 T ZFS, 99% full, ~2.1× compression | 11 T ZFS, 16% full, 2.62× compression |\n| config | `max_total_size=10TB` | `max_total_size=8000GB`, `min_free=100GiB` |\n| store / targets / incremental (logical) | 256 GB / 89 GB / **9,644 GB** | **7,642 GB** / 44 GB / 309 GB |\n| incremental checkouts | 303; 92 touched in last 24 h; 179 ephemeral worktrees | 80; all <3 d old; 78 ephemeral |\n| units | 20,596; one crate has 165 variants in one checkout | 777 |\n| targets evicted | **596** gone, 284 of them still hold 8.0 TiB of incremental | none pending |\n\nFive mechanisms produce the surprise, in order of how much space they cost:\n\n1. **GC granularity is the checkout, but waste accumulates per unit.** A build refreshes `updated_secs` for the whole checkout (`session.rs:418`, `incremental.rs:68`), so every unit a checkout ever created is protected as long as the checkout is touched. Units multiply because the invocation key includes profile, target kind, feature set and dependency epoch (60 `Cargo.lock` commits since Oct 1 in bifrost). Old variants are unreachable (changed StableCrateId → rustc can't open the old directory; high confidence) but never collected.\n2. **Allocation order under a combined budget starves targets.** `incremental_budget` = total − store occupancy; `target_budget` = what incremental leaves; store growth = what everything leaves (`gc.rs:1495-1536`). Targets are the only class that lets Cargo-fresh units skip the shim entirely, and they hold work the store can't represent, yet they are evicted first in practice.\n3. **The \"newest checkout\" exemption is the wrong unit of protection at this scale.** With 92 checkouts active per day, exempting one changes nothing; what needs protecting is \"units used in the current/last build\".\n4. **Logical budgets on compressed disks.** Both of your configs are logical numbers chosen to approximate a physical intent. mbx never tells you the ratio; `mbx gc` reports 9.6 TiB while `df` says 3.9 T.\n5. **No GC history.** The sweep report is printed once by the next build and deleted; `sweep.log` was empty. You cannot answer \"what did gc remove yesterday\".\n\nSecondary: `mbx cache stats` takes 79 s and `cache projects` 382 s because every run re-walks ~20k units. And `checkout_is_live` treats a path whose parent is missing as live (`mbx-cache-store/src/lib.rs:2079`), which also happens to be the right answer for container paths like `/workspace/<hash>/...` on morannon.\n\n## Proposed design\n\nGoal 0 says: spend bytes where a byte saves the most compiler time. Rough value per byte, highest first: targets (skip shim and rustc, hold build-script output) > store (shared across checkouts) > incremental (one unit, one checkout path, one config epoch) > generated trees (small). Goal 2 says one number.\n\n**A. One budget, explicit shares, consistent with the pressure order.** Keep `gc.max_total_size` as the number users set; when unset, default it from the disk (e.g. 25%), and retire the four separately-scaled component defaults. Allocate in order of value: incremental gets at most a fixed share of the total (I'd start at 10%; explicit `gc.incremental_max_size` still overrides), generated gets what incremental leaves of that share, targets and store split the rest with the existing \"reserve only occupied store\" rule. On this machine that caps incremental at ~1 TB logical (≈100 active checkouts × 10 G\n[... 743 bytes omitted from the middle of this message ...]\ncheckout lease), replacing the newest-checkout exemption. This is where the 8 TiB goes.\n\n**C. Drop `learned_incremental_max_size` as a user setting.** With B, a large unit that is actually used is fine and a stale one gets evicted. Keep an internal backstop derived from the incremental share (your 10% suggestion), but change its action from \"discard before compiling again\" (which thrashes: discard → full compile → rewrite → discard) to \"stop learning this unit\". At a 50 GiB total that's 500 MiB/unit, under the p90 unit size of 775 MB, so the thrash-free behaviour matters.\n\n**D. Show physical alongside logical.** In `mbx gc` and `cache stats`, print the measured on-disk ratio (\"9.6 TiB logical, ≈3.9 TiB on disk\") using `st_blocks`, which ZFS reports compressed (btrfs: unknown, needs checking). Keep budgets logical; stop making users guess the ratio. `min_free_size` stays the physical floor.\n\n**E. Persist sweep history.** Append each sweep's report to a bounded `actions/gc/v1/history.jsonl`; expose it as `mbx gc --history` and in the TUI.\n\n**F. Keep a size ledger.** The shim already computes the unit's directory size before each compile (`rustc.rs:1383`); record it per unit so sweeps and `cache stats` stop re-walking 20k units.\n\nSequencing as PRs: A first (small, fixes the starvation immediately, no new concepts), then B+C together (the real fix), then D+E, then F.\n\nWhere I'd like pushback:\n- 10% for incremental. The data says active working sets are small (units p50 82 MB, p90 775 MB; a workspace's live set is tens of units), but a human editing one huge crate all day might prefer 20%.\n- Whether to key protection on \"last hour\" vs \"current build only\". Agents here start ~90 builds/day; \"current build\" may be enough.\n- Whether jdx will accept per-unit collection in incremental when targets already have an analogous \"unused unit\" prune (`target.rs:1348`). I think the precedent helps.\n\nI've made no code changes. Saving a short project memory so the machine profiles and this design thread survive context loss."
+        },
+        {
+          "id": "agent:1933",
+          "role": "assistant",
+          "text": "Memory saved. The proposal above is where I'd stop and take your pushback, particularly on the 10% share, the protection window, and whether to pitch per-unit collection to jdx as one PR or split it. Once you pick, I can draft PR A (small) right away."
+        },
+        {
+          "id": "user:1976",
+          "role": "user",
+          "text": "incremental: i figured 10% was already ambitious over existing hardcoded 8GB but if you think 20% is better given that the 8GB is frequently irrelevant then sure\nprotection: what are we protecting, is this even relevant\njdx: one way to find out! but he listens to data"
+        },
+        {
+          "id": "agent:1978",
+          "role": "assistant",
+          "text": "**Share.** Two different things got compared: 8 GiB is the *per-unit* backstop; 10% is the *aggregate* share. Today's aggregate default without a combined budget is 5% of the disk, floored at 10 GiB and capped at 100 GiB, so 10% of the total is already in line with existing behaviour, not ambitious. I'd keep 10% and add the existing 10 GiB floor, for one reason: at jdx-scale totals (50 GiB) 10% is 5 GiB, and a single hot unit here is 7–9 GiB (p99 7.3 GiB), so without a floor a small budget can't hold one unit and you get thrash. 20% doesn't fix that case and costs targets on big machines. Once per-unit LRU exists the share is only a ceiling, so the exact number matters less than the floor.\n\n**Protection.** Mostly not relevant any more. The only hard requirement is correctness: never delete a unit a running rustc is writing (it holds a flock on `s-*.lock`; mbx also holds the checkout lease during a build). Everything else today exists to avoid thrash, and per-unit LRU makes it moot: the current build's units are the newest, so they're evicted last by construction. The one case that remains, \"share smaller than the live working set\", can't be solved by exemptions, only reported, and that warning already exists (`incremental.rs:195`). A sweep that races a build can evict a unit the build is *about* to use; rustc then compiles that unit from scratch. That's a slow compile, not a failure, and acceptable. So: drop the newest-checkout exemption, keep the lock check, keep the warning.\n\n**jdx.** Then the PR descriptions carry the data: the two-host table, 596 evicted targets vs 8 TiB of retained incremental, mjolnir4's 1,209 units for 29 crates with 1,000 untouched for 3 days. PR A (share + floor, stop lifting the per-unit default) is small and self-evidently fixes starvation; it's the right first contact. B+C carry the per-unit argument with its own measurements. I'd also drop a short comment on #593 pointing at the data, since that's your thread.\n\nSay go and I'll start PR A in a worktree."
+        },
+        {
+          "id": "user:2158",
+          "role": "user",
+          "text": "10%/10GB wfm\nlet's take the opportunity to clean the fuck out of no-longer-relevant features like this protection\n\n3c3f7e292385dbe040e3c36857bd0a9e is working on adjacent permitting stuff, pls coordinate"
+        },
+        {
+          "id": "agent:2220",
+          "role": "assistant",
+          "text": "PR A is being implemented in the worktree. While it runs I have nothing that doesn't depend on its result (PR B stacks on A's config changes, and the PR text needs the final diff), so I'm waiting."
+        },
+        {
+          "id": "agent:2246",
+          "role": "assistant",
+          "text": "Waiting on the PR A implementer. Next step after it reports: review the diff, then spawn PR B (per-unit collection, remove the newest-checkout exemption and the `learned_incremental_max_size` setting) stacked on A."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "10%/10GB wfm\nlet's take the opportunity to clean the fuck out of no-longer-relevant features like this protection\n\n3c3f7e292385dbe040e3c36857bd0a9e is working on adjacent permitting stuff, pls coordinate",
+    "assistant_text_tail": "Waiting on the PR A implementer. Next step after it reports: review the diff, then spawn PR B (per-unit collection, remove the newest-checkout exemption and the `learned_incremental_max_size` setting) stacked on A.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 2158,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "Waiting on the PR A implementer. Next step after it reports: review the diff, then spawn PR B (per-unit collection, remove the newest-checkout exemption and the `learned_incremental_max_size` setting) stacked on A."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-18T21:42:13.206Z",
+        "kind": "system",
+        "text": "Subagent \"implement-pr-a-incremental-share\" (721bd655) finished turn 20 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-18T21:42:13.259Z",
+        "kind": "user",
+        "text": "One or more sub-agents finished. Call wait to collect their reports."
+      },
+      {
+        "at": "2026-10-18T21:42:34.853Z",
+        "kind": "user",
+        "text": "oh and we do want to fix that orphaned wt bug"
+      },
+      {
+        "at": "2026-10-18T21:42:49.219Z",
+        "kind": "system",
+        "text": "Subagent \"implement-pr-a-incremental-share\" (721bd655) finished turn 139 (failed: error)."
+      },
+      {
+        "at": "2026-10-18T21:43:01.852Z",
+        "kind": "user",
+        "text": "One or more sub-agents finished. Call wait to collect their reports."
+      },
+      {
+        "at": "2026-10-18T21:43:58.323Z",
+        "kind": "agent",
+        "text": "PR A's implementer failed on model capacity before changing anything. Closing it and respawning with the brief plus the rounding decision folded in."
+      }
+    ]
+  }
+}

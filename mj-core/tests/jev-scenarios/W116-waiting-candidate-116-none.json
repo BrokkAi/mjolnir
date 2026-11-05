@@ -1,0 +1,512 @@
+{
+  "id": "W116",
+  "title": "Waiting candidate 116 none",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "d27d345ee7ddab8ba99499d88ffed197",
+    "session_title": "g6-m1-region-first",
+    "reply_position": 9225,
+    "captured_at": "2026-11-05T11:09:11.549Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /workspace/c2a66e1cc742bba936fafd70b5ed7d03/.mj-agents/d27d345ee7ddab8ba99499d88ffed197. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nImplement G6 Milestone 1 (plus the plan amendment) in Bifrost: CodeQL-style \"first unreachable node of a region\" for Rust, in the shared statement assessment. Context (read all first): /workspace/c2a66e1cc742bba936fafd70b5ed7d03/bifrost-service/.agents/records/codeql-rust-incremental/README.md and gaps.md (G6); the plan /workspace/c2a66e1cc742bba936fafd70b5ed7d03/bifrost-dev/.claude/worktrees/g6-cfg-ssa/.agents/plans/rust-cfg-ssa-unused-entities.md (branch g6-cfg-ssa-plan, 67294d4da9); and the two approved-with-changes reviews in .../codeql-rust-incremental/plans/reviews/g6-native.md and g6-algorithm-policy.md (they override the plan where they differ).\n\nStep 1, plan amendment: in the g6-cfg-ssa worktree on branch g6-cfg-ssa-plan, record both reviews in the plan (Decision Log entries citing the reviewers 0bf0983d / c43ff075, and rewrite the affected M1-M4 text; add a revision note). Create a GitHub issue in BrokkAi/bifrost-dev titled \"Rust CFG and SSA facts for CodeQL's unused-variable, unused-value and dead-code rules\" (body: purpose, link to epic #4304, the gate scores 3/0/16, 0/0/23, 2/4/17, and the plan path), label agent-in-progress, assign @me; put the issue number in the plan. Commit.\n\nStep 2, M1: on a new branch `<issue>-rust-first-unreachable` created from the amended plan branch head (git -C .../g6-cfg-ssa checkout -b ...), implement review item 8 exactly: in the shared assessment (bifrost-analysis statement_entries.rs ~182-321), add first-in-region classification following CodeQL UnreachableCode.ql:17-75 with predecessors from the IR CFG inside the assessment, bridged over hidden nodes; visibility as a per-language hook (Rust hides isolated and macro-expansion nodes, keeps macro invocations visible); expose a new three-valued field on RQL statement-reachability rows (first / not first / open when any predecessor is open; statement_reachability.rs ~128-155). Before adding rows, do native review item 1: audit why the CodeQL dead-code qltest procedures have open control evidence and fix only proven Rust causes in file-local lowering with exact break/continue targets; unknown divergence stays open; no second CFG walker. Leave the existing unreachable-statement policy and every other language's results unchanged. Tests: a golden case under tests/fixtures/golden/ via tests/common/golden.rs rendering the new field for fixtures covering `return; let x = 1; let y = 2;` (one first site), macro invocations, nested blocks, loops with break/continue, and an open predecessor. Then score rust/dead-code on CodeQL's qltests with a scratch policy using the new field, via the gate suite (bifrost-service .agents/records/codeql-rust-incremental/gate-suite/run_suite.py --rules rust/dead-code, with a binary you build from your branch: gate-suite/build_head.sh does the build through mbx). List any macro-dependent sites separately.\n\nRules: read bifrost-dev AGENTS.md, .agents/PLANS.md and the routed guidance (testing-and-rust-validation.md, cache-identity-levers.md, architecture-and-analyzer-store.md, crate AGENTS.md files) before editing. Build/test through the normal cargo on PATH (mbx shim; never redirect target/); nextest --max-fail 100 with the targeted suites the testing guide names; clippy on edited crates. Cache identity: identify which levers your diff moves (native review item 3) and ask session 0bf0983d553751026807d97d54857ede for the actual numbers at the concrete diff (send_message with the diff summary); do not pick numbers yourself. Coordinate nothing with #9687 in M1 (it doesn't touch binding code). Commit with plain multi-line messages; keep the plan's Progress section current. When validated: merge latest origin/master, call request_review on your worktree, and after a clean verdict push and open a DRAFT PR referencing the issue (do not mark ready; the campaign owner reviews first). A separate lane implements M3 in parallel on its own branch; do not edit its files, and do not edit the plan from M3's side (send progress to me instead if needed). Handback: issue and PR numbers, the golden summary, the dead-code gate score before/after, cache levers moved and the numbers allocated, and anything blocked."
+        },
+        {
+          "id": "agent:2653",
+          "role": "assistant",
+          "text": "The policy crate is still compiling. No test verdict is available yet; I’m keeping the build serialized as the parent requested."
+        },
+        {
+          "id": "agent:2690",
+          "role": "assistant",
+          "text": "Compilation finished and the first three targeted tests passed again. The main golden test is running now."
+        },
+        {
+          "id": "agent:2743",
+          "role": "assistant",
+          "text": "The corrected golden passed: lines 14 and 42 are `not_first`, while the opaque-macro-before-return case stays Open. I’ve recorded that in the plan. Clippy is running on the three edited crates before I make the implementation checkpoint commit."
+        },
+        {
+          "id": "agent:2810",
+          "role": "assistant",
+          "text": "Clippy is still checking the edited crates and has reported no diagnostics. After it finishes I’ll commit the current source and fixture, then send the parent the exact head and identity-impact summary."
+        },
+        {
+          "id": "agent:2862",
+          "role": "assistant",
+          "text": "Clippy found one style error in the new entry-owner loop. I collapsed the nested condition and reran the same check; no other diagnostics appeared in the first pass."
+        },
+        {
+          "id": "agent:2901",
+          "role": "assistant",
+          "text": "The clippy rerun is still compiling with no diagnostics so far. Once it passes, I’ll checkpoint the implementation; the gate binary must be built from that committed head."
+        },
+        {
+          "id": "agent:2962",
+          "role": "assistant",
+          "text": "The M1 implementation is committed at `b654e2fc1f`, and I sent the parent its exact identity impact for the epoch decision. The requested `build_head.sh` run is building a binary from that commit; when it finishes, I’ll score `rust/dead-code` with the scratch policy."
+        },
+        {
+          "id": "agent:3053",
+          "role": "assistant",
+          "text": "The exact-head build has moved past worktree creation and is compiling the measure profile. The parent confirmed that the draft M1 PR should target `master` and include the plan commits, so I’ll merge the latest `origin/master` after this pre-merge gate score."
+        },
+        {
+          "id": "agent:3122",
+          "role": "assistant",
+          "text": "The measure-profile build has reached the semantic crate. I’m waiting for the built binary before running the scratch gate; no other build or test is active in this lane."
+        },
+        {
+          "id": "agent:3171",
+          "role": "assistant",
+          "text": "The exact-head build is still compiling dependencies, with no error in its log. I’ll score the pre-merge head when it finishes, then separately validate the merged head before opening the draft PR."
+        },
+        {
+          "id": "agent:3225",
+          "role": "assistant",
+          "text": "The build has reached the store crate and is still active through mbx. There’s no gate score yet; I’m waiting for the exact-head binary."
+        },
+        {
+          "id": "agent:3270",
+          "role": "assistant",
+          "text": "The reviewer allocated `-9863-rust-first-unreachable-region` as the policy substrate component. I’ll merge the current `origin/master`, add that component once to the merged epoch, and validate the resulting head. The pre-merge exact-head build is isolated in its detached worktree."
+        },
+        {
+          "id": "agent:3374",
+          "role": "assistant",
+          "text": "The merge was clean. The allocated epoch component is committed after master’s current components, and the isolated exact-head build is now compiling the analysis crate. I’ll score that binary before the merged-head validation."
+        },
+        {
+          "id": "agent:3428",
+          "role": "assistant",
+          "text": "The measure-profile build is still active in mbx and has reported no error. I’m holding merged-head tests until it finishes to respect the lane’s one-build limit."
+        },
+        {
+          "id": "agent:3474",
+          "role": "assistant",
+          "text": "The exact-head build has moved through the language analysis crates. The merged branch is committed and ready for validation once this gate build releases the lane."
+        },
+        {
+          "id": "agent:3521",
+          "role": "assistant",
+          "text": "The measure-profile build is still active, with rustc processes running for the language crates. I’ll keep the next step queued behind it so the gate uses a fully built binary from the exact pre-merge commit."
+        },
+        {
+          "id": "agent:3574",
+          "role": "assistant",
+          "text": "The build has reached tools and semantic packs. There’s no compilation error in the log. The gate policy and command are prepared for the binary path that `build_head.sh` will return."
+        },
+        {
+          "id": "agent:3620",
+          "role": "assistant",
+          "text": "RQL is compiling in the exact-head build. Once the binary is available, I’ll run the single dead-code gate and list macro-dependent sites separately from the aggregate score."
+        },
+        {
+          "id": "agent:3666",
+          "role": "assistant",
+          "text": "The exact-head build has reached the policy crate. The epoch change is already on the merged branch, but it won’t affect this pre-merge gate run, which starts with a fresh scratch state."
+        },
+        {
+          "id": "agent:3731",
+          "role": "assistant",
+          "text": "Runtime and MCP are compiling in the measure-profile build. The next visible step should be the root binary and link; I’ll report the gate score once the script returns its binary path."
+        },
+        {
+          "id": "agent:3784",
+          "role": "assistant",
+          "text": "The exact pre-merge binary built successfully from `b654e2fc1f`. The scratch `rust/dead-code` gate is running now with `region_first = first`; I’ll inspect its site-level result and macro cases before validating the merged head."
+        },
+        {
+          "id": "agent:3887",
+          "role": "assistant",
+          "text": "The dead-code gate is unchanged at 3 TP, 0 FP, 16 FN, with 16 abstentions. I recorded that in the plan and will state it in the draft PR. I’m validating the merged head now; after the PR is open, I’ll prepare the separate M1b analysis the parent requested."
+        },
+        {
+          "id": "agent:3991",
+          "role": "assistant",
+          "text": "The merged-head test build is still compiling after the large master merge. The M1b audit will need to map each missed site to its procedure and gap; I’m gathering the existing gate artifacts for that read-only analysis while keeping M1 validation first."
+        },
+        {
+          "id": "agent:4064",
+          "role": "assistant",
+          "text": "The merged-head golden build is still working through semantic and store crates; the branch remains clean. I’ll run clippy after the test completes, then request review on the exact validated head."
+        },
+        {
+          "id": "agent:4114",
+          "role": "assistant",
+          "text": "mbx is waiting to reuse a store build from another lane, which explains the pause. I’m leaving the build alone. The site-level M1b audit will come after M1’s validated draft PR, as requested."
+        },
+        {
+          "id": "agent:4178",
+          "role": "assistant",
+          "text": "The merged-head build is active again; rustc processes are running. I’m still waiting for its test verdict before starting clippy."
+        },
+        {
+          "id": "agent:4228",
+          "role": "assistant",
+          "text": "The gate’s abstention list is run-level evidence, so I’m not treating it as proof that all 16 target rows are Open. After M1 validation, I’ll query the staged qltest rows directly for the M1b proposal and separate control gaps from other missing behavior."
+        },
+        {
+          "id": "agent:4300",
+          "role": "assistant",
+          "text": "The merged-head test build is about ten minutes in and still compiling under shared mbx load; there’s no failure output. I’m leaving it intact so the review request can cite validation on the merged commit."
+        },
+        {
+          "id": "agent:4359",
+          "role": "assistant",
+          "text": "The draft PR description is prepared with the unchanged 3/0/16 gate score and the reason the field does not yet gain sites. The merged-head golden build has reached RQL and policy; I’ll fill in its validation results before opening the PR."
+        },
+        {
+          "id": "agent:4417",
+          "role": "assistant",
+          "text": "The merged-head test build is now compiling runtime and MCP. I have not started clippy or a direct qltest query alongside it."
+        },
+        {
+          "id": "agent:4460",
+          "role": "assistant",
+          "text": "The merged-head test remains active with rustc using CPU; there is no failure output. Once it completes, clippy should reuse much of the checked dependency work, and I’ll request review before pushing."
+        },
+        {
+          "id": "agent:4528",
+          "role": "assistant",
+          "text": "Merged-head golden validation passed: 4 targeted tests, including the new Rust case. Clippy is now running on the edited crates and policy epoch file. The branch is clean; I’ll request review if clippy passes."
+        },
+        {
+          "id": "agent:4578",
+          "role": "assistant",
+          "text": "Clippy is still checking the merged head and has emitted no diagnostics. The golden and scratch gate results are recorded; review is the next gate before push."
+        },
+        {
+          "id": "agent:4621",
+          "role": "assistant",
+          "text": "Clippy is active with no output in its log. I’ll wait for its exit status before submitting the head for review."
+        },
+        {
+          "id": "agent:4653",
+          "role": "assistant",
+          "text": "The merged-head clippy run is still checking dependencies under shared load, with no diagnostics. I’ve made no further branch changes since the validated test head."
+        },
+        {
+          "id": "agent:4702",
+          "role": "assistant",
+          "text": "Clippy has no diagnostics so far. I’ve started a read-only format check in parallel; it does not build or modify source."
+        },
+        {
+          "id": "agent:4733",
+          "role": "assistant",
+          "text": "The merged-head clippy and format checks are still active under shared compiler load. The source head is unchanged, so their results will apply directly to the review request."
+        },
+        {
+          "id": "agent:4784",
+          "role": "assistant",
+          "text": "Merged-head clippy passed with `-D warnings`. The read-only format check is still running; once it passes I’ll request review on this exact commit."
+        },
+        {
+          "id": "agent:4843",
+          "role": "assistant",
+          "text": "Merged-head tests, clippy, and formatting passed, and review is requested on `93120189c4`. While that review runs, I’ve started a read-only query against the staged qltest copy to map each missed dead-code site to its actual statement verdict for M1b."
+        },
+        {
+          "id": "agent:4965",
+          "role": "assistant",
+          "text": "Review found a real failure path: if predecessor traversal hits cancellation or the CFG budget, the code currently returns a complete assessment with `region_first: open`. I’ll propagate that error through the assessment’s existing incomplete path, then rerun validation and request review again."
+        },
+        {
+          "id": "agent:5044",
+          "role": "assistant",
+          "text": "The review fix is in place and the targeted golden suite is rebuilding. The change makes a traversal budget or cancellation error return an incomplete assessment through the existing execution-dependent path; it does not change the normal golden classifications."
+        },
+        {
+          "id": "agent:5101",
+          "role": "assistant",
+          "text": "The review fix and its rationale are recorded in the plan. The focused golden build is still compiling dependent crates; no test result yet."
+        },
+        {
+          "id": "agent:5140",
+          "role": "assistant",
+          "text": "The build is at semantic and store crates. The current source change is limited to propagating the traversal error, plus the plan note; I’ll keep that review fix separate in its commit."
+        },
+        {
+          "id": "agent:5192",
+          "role": "assistant",
+          "text": "The test build is waiting on shared mbx store work again, with no error output. I’m keeping the existing build running and will re-review only after its test and clippy checks finish."
+        },
+        {
+          "id": "agent:5243",
+          "role": "assistant",
+          "text": "The build has resumed in `bifrost-analysis`, which contains the review fix. No compile error has appeared."
+        },
+        {
+          "id": "agent:5280",
+          "role": "assistant",
+          "text": "The focused rebuild has passed the analysis crate and is compiling downstream consumers. The source diff contains only the error-propagation fix and its plan note; the gate result remains the measured 3/0/16 from the unchanged normal classification."
+        },
+        {
+          "id": "agent:5338",
+          "role": "assistant",
+          "text": "RQL is compiling against the fixed assessment. After the golden run passes, I’ll run clippy, commit the fix, and request a fresh review as the reviewers instructed."
+        },
+        {
+          "id": "agent:5379",
+          "role": "assistant",
+          "text": "The build has reached policy compilation. The review fix has not produced a compiler error; the targeted test still needs to run before I can mark it validated."
+        },
+        {
+          "id": "agent:5418",
+          "role": "assistant",
+          "text": "Runtime and MCP are compiling for the review fix. The test command remains the same focused cross-language golden selection; it will confirm normal row output stayed unchanged."
+        },
+        {
+          "id": "agent:5470",
+          "role": "assistant",
+          "text": "The review-fix golden run passed all 4 targeted tests. I’m running analysis-crate clippy on the changed code; the broader edited-crate clippy and format checks passed on the merged head before this two-file fix."
+        },
+        {
+          "id": "agent:5524",
+          "role": "assistant",
+          "text": "Clippy is still checking the analysis crate with no diagnostics. The fix’s test passed and the branch still has only the intended source and plan changes unstaged for the follow-up commit."
+        },
+        {
+          "id": "agent:5594",
+          "role": "assistant",
+          "text": "The review fix passed its targeted golden test and analysis-crate clippy, and is committed at `6a6545f48d`. `origin/master` is still an ancestor of this head. I requested a fresh review and will build the final head for the dead-code gate while review runs."
+        },
+        {
+          "id": "agent:5700",
+          "role": "assistant",
+          "text": "Review is clean and the branch is pushed. The final-head measure-profile build is still running; I’ll open the draft PR after the matching gate result is recorded in its description."
+        },
+        {
+          "id": "agent:5748",
+          "role": "assistant",
+          "text": "The final-head build is in the semantic and store crates, with no error in its log. I’ve kept the PR draft prepared but unopened until this binary confirms the final score."
+        },
+        {
+          "id": "agent:5796",
+          "role": "assistant",
+          "text": "The final-head build is still active through mbx. No new branch changes are planned; the remaining M1 work is the gate result and opening the draft PR."
+        },
+        {
+          "id": "agent:5839",
+          "role": "assistant",
+          "text": "The final-head build has moved into language analysis crates. It is still the only build in this lane; I’ll run the scratch gate immediately when `build_head.sh` returns."
+        },
+        {
+          "id": "agent:5885",
+          "role": "assistant",
+          "text": "The exact final-head build has reached tools. Review is clean and the branch is pushed; I’m holding the draft PR for the final gate score so its description is complete when opened."
+        },
+        {
+          "id": "agent:5933",
+          "role": "assistant",
+          "text": "RQL and semantic packs are compiling in the final-head build. The next steps remain the single-rule gate run, draft PR creation, then the separate read-only M1b site audit."
+        },
+        {
+          "id": "agent:5979",
+          "role": "assistant",
+          "text": "The final-head build is still active with no error output. I’m keeping the measured gate claim tied to the final binary rather than assuming the review fix leaves the score unchanged."
+        },
+        {
+          "id": "agent:6024",
+          "role": "assistant",
+          "text": "Policy is compiling for the final binary. The review-approved head remains `6a6545f48d`, and the branch is already pushed; I’ll open the draft PR after this gate run finishes."
+        },
+        {
+          "id": "agent:6075",
+          "role": "assistant",
+          "text": "Runtime and MCP are now compiling for the final head. Once they finish, the script will copy the binary and I can run the scratch gate."
+        },
+        {
+          "id": "agent:6138",
+          "role": "assistant",
+          "text": "Draft PR [#9917](https://github.com/BrokkAi/bifrost-dev/pull/9917) is open against `master` with the plan commits, clean review, and final-head gate score: 3 TP, 0 FP, 16 FN, inconclusive. I’ll now prepare the separate read-only M1b site audit for the parent; I won’t change the submitted PR head."
+        },
+        {
+          "id": "agent:6477",
+          "role": "assistant",
+          "text": "Draft PR [#9917](https://github.com/BrokkAi/bifrost-dev/pull/9917) is open. Golden tests, clippy, formatting, and review passed. The final dead-code gate remains **3 TP / 0 FP / 16 FN**. I sent the parent the separate M1b site audit and its evidence."
+        },
+        {
+          "id": "agent:6590",
+          "role": "assistant",
+          "text": "I’ll trace the seven sites through the pinned CodeQL Rust CFG and Bifrost’s lowering, then save a read-only note beside the M1b proposal."
+        },
+        {
+          "id": "agent:6655",
+          "role": "assistant",
+          "text": "The seven retained paths come from three constructs: literal boolean branches, `while` exits, and irrefutable wildcard patterns. CodeQL’s pinned CFG removes those paths through completion rules; I’m locating the corresponding Bifrost producer decisions now."
+        },
+        {
+          "id": "agent:6768",
+          "role": "assistant",
+          "text": "I saved the read-only [seven-site CFG note](/workspace/c2a66e1cc742bba936fafd70b5ed7d03/.mj-agents/d27d345ee7ddab8ba99499d88ffed197/m1b-reachable-sites.md) beside the [M1b proposal](/workspace/c2a66e1cc742bba936fafd70b5ed7d03/.mj-agents/d27d345ee7ddab8ba99499d88ffed197/m1b-proposal.md) and handed both paths to the parent. No code changed."
+        },
+        {
+          "id": "agent:6920",
+          "role": "assistant",
+          "text": "I’ll read the ruling and identity routing, then implement PR A first and validate its gate before starting PR B."
+        },
+        {
+          "id": "agent:7084",
+          "role": "assistant",
+          "text": "I found the existing inert-drop proof hook and will reuse it against the assessment’s validated source. The MayReach pass will use typed gap capabilities and discharges; an unproved drop remains uncertain."
+        },
+        {
+          "id": "agent:7189",
+          "role": "assistant",
+          "text": "PR A’s traversal and control projection are in place. I’m checking compilation now, then I’ll test the four key classifications and adjust the Rust continuation set where the IR evidence requires it."
+        },
+        {
+          "id": "agent:7919",
+          "role": "assistant",
+          "text": "The edited crates compile. The golden run is building its test binary. Once it finishes, I’ll inspect every changed snapshot, especially the other-language unreachable rows, before keeping any blessed output."
+        },
+        {
+          "id": "agent:8021",
+          "role": "assistant",
+          "text": "The golden binary is still compiling under the shared build load. I’ve checked that the projection keeps other languages on the conservative default and uses the existing inert-drop proof hook only when the typed obligation is present."
+        },
+        {
+          "id": "agent:8143",
+          "role": "assistant",
+          "text": "The golden passed. It shows the macro break case as Open, code after return and the drop example as Unreachable, and the Python unreachable row unchanged. Other-language changes are limited to Open → Reachable rows on certain paths. I’m scoring the CodeQL dead-code gate next."
+        },
+        {
+          "id": "agent:8260",
+          "role": "assistant",
+          "text": "The exact-head gate binary is building. The validated PR A result keeps the two macro boundary checks distinct: the macro inside a loop leaves `after()` Open because it may break; the macro after `return` stays Unreachable."
+        },
+        {
+          "id": "agent:8388",
+          "role": "assistant",
+          "text": "The reviewer allocated PR A’s policy substrate component, and I added it after merging the latest master. I’m building that exact merged head for the gate; I’ll rerun focused validation on the merged head before requesting review."
+        },
+        {
+          "id": "agent:8551",
+          "role": "assistant",
+          "text": "The merged-head golden is recompiling after the upstream merge. I also corrected the structured continuation hook for Rust’s actual labeled-block AST shape, and it now falls back conservatively if a loop lacks an IR loop site."
+        },
+        {
+          "id": "agent:8736",
+          "role": "assistant",
+          "text": "The gate IR shows a typed exceptional drop gap before the remaining loop sites. Under the approved conservative rule, it can keep those sites Open; I’ve sent the exact rows to the parent for a ruling. I’m continuing validation of the behavior the current rule permits."
+        },
+        {
+          "id": "agent:8874",
+          "role": "assistant",
+          "text": "The revised exceptional-gap rule compiles. It uses the typed discharge and point/value scope to limit Rust’s potential destinations to exits; normal continuation remains uncertain because the IR does not identify primitive built-in operations. The golden run is checking the resulting rows now."
+        },
+        {
+          "id": "agent:8948",
+          "role": "assistant",
+          "text": "The golden runner is in its long RQL case. After it finishes, I’ll inspect the drop cases, commit the reviewed exceptional rule, and run the exact-head gate."
+        },
+        {
+          "id": "agent:9036",
+          "role": "assistant",
+          "text": "PR A’s revised golden passes on the merged head, including an Unreachable statement after a drop/return route. Clippy and focused rustfmt checks pass. The exact committed head is building for the CodeQL gate; I’ll report the remaining Open sites by cause."
+        },
+        {
+          "id": "agent:9151",
+          "role": "assistant",
+          "text": "The exact-head build has reached the policy and runtime crates. Once it completes, the scratch dead-code gate will show which of the seven topologically unreachable qltest sites this PR recovers and which remain Open."
+        },
+        {
+          "id": "agent:9225",
+          "role": "assistant",
+          "text": "The gate build is still progressing through shared crates; the M3 branch is also still changing, so PR B will wait for a stable submitted head. PR A’s implementation and golden are committed and ready for scoring."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "t/); nextest --max-fail 100 with the targeted suites the testing guide names; clippy on edited crates. Cache identity: identify which levers your diff moves (native review item 3) and ask session 0bf0983d553751026807d97d54857ede for the actual numbers at the concrete diff (send_message with the diff summary); do not pick numbers yourself. Coordinate nothing with #9687 in M1 (it doesn't touch binding code). Commit with plain multi-line messages; keep the plan's Progress section current. When validated: merge latest origin/master, call request_review on your worktree, and after a clean verdict push and open a DRAFT PR referencing the issue (do not mark ready; the campaign owner reviews first). A separate lane implements M3 in parallel on its own branch; do not edit its files, and do not edit the plan from M3's side (send progress to me instead if needed). Handback: issue and PR numbers, the golden summary, the dead-code gate score before/after, cache levers moved and the numbers allocated, and anything blocked.",
+    "assistant_text_tail": "The gate build is still progressing through shared crates; the M3 branch is also still changing, so PR B will wait for a stable submitted head. PR A’s implementation and golden are committed and ready for scoring.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 6590,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "The gate build is still progressing through shared crates; the M3 branch is also still changing, so PR B will wait for a stable submitted head. PR A’s implementation and golden are committed and ready for scoring."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-05T11:18:09.047Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Review of commits 6a6545f..67b55a4 in /workspace/c2a66e1cc742bba936fafd70b5ed7d03/bifrost-dev/.claude/worktrees/g6-cfg-ssa found: Independent reviewer reports may overlap. Check ea"
+      },
+      {
+        "at": "2026-11-05T11:18:48.290Z",
+        "kind": "agent",
+        "text": "The review found two real risks: eager full-point copies for open gaps, and a missing normal continuation after unsupported Rust `try` blocks. I’m making the full-point fallback lazy within the existi"
+      },
+      {
+        "at": "2026-11-05T11:26:02.268Z",
+        "kind": "agent",
+        "text": "The review fix is compiling in the golden binary. The new traversal holds one source-ordered point list and borrows its suffix when a gap is visited, so a procedure with many open gaps no longer alloc"
+      },
+      {
+        "at": "2026-11-05T11:31:10.118Z",
+        "kind": "agent",
+        "text": "I’m finishing the M1b review fixes and validation first. Then I’ll integrate the M3 head for M1c once that lane publishes its stable branch."
+      },
+      {
+        "at": "2026-11-05T11:32:21.135Z",
+        "kind": "agent",
+        "text": "The review found two concrete risks: dense per-gap CFG copies and a missing ordinary continuation at unsupported Rust `try {}` boundaries. I’ve changed the traversal to borrow a source ordered suffix "
+      },
+      {
+        "at": "2026-11-05T11:34:27.685Z",
+        "kind": "agent",
+        "text": "The mbx build hit a transient “build-script inputs changed during compilation” failure while another lane was compiling. I retried the same focused test without changing build layout or target setting"
+      }
+    ]
+  }
+}

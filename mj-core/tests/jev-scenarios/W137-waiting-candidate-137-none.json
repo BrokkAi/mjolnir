@@ -1,0 +1,107 @@
+{
+  "id": "W137",
+  "title": "Waiting candidate 137 none",
+  "category": "waiting-on-automation",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "ab2cbea0601e683f80c2cd91c3529fcd",
+    "session_title": "eval45 3735 sonnethighdsf fork",
+    "reply_position": 1,
+    "captured_at": "2026-10-20T11:56:36.596Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:1",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout state and base commit.The checkout is clean, detached, and at the exact base. Next I'll read the routed guidance and the existing plan.Still working through the audit. Next I'm checking whether #3736 (the earlier partial work) is actually in my base and which files it touched.Now the diff-base side of the coordinator.Still auditing. I'm now checking the build environment so I can start a long compile in the background while I read the remaining code.Starting the `suite_bench_policy` build in the background so it's ready when I need to run the existing reuse tests.While that builds, let me read the base evaluation path (`evaluate_policy_diff_baseline`) and the existing unit-reuse tests.Still reading the batch tail (where units flush and the base row publishes), then I'll write down the design.Status: I've finished mapping the existing machinery; I'm now reading the existing reuse tests so my new tests use the same harness.Build is still compiling (policy/mcp crates). Meanwhile I'm checking how the CLI and MCP route the control.Build finished. Running the existing reuse tests to establish the baseline.Baseline tests pass (15/15). Next I build the unmodified release binary now, before any edits, so the before/after comparison uses the exact base.I'm waiting on the baseline release build; no source edits until it finishes so the baseline stays exact.Waiting on the release build's completion event (about to start edits right after).The baseline release binary is built. I'm saving it with its hash before I touch any source.Making the first store edits (evaluation id and unit ids on the row types).No response requested."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "I'll start by verifying the checkout state and base commit.The checkout is clean, detached, and at the exact base. Next I'll read the routed guidance and the existing plan.Still working through the audit. Next I'm checking whether #3736 (the earlier partial work) is actually in my base and which files it touched.Now the diff-base side of the coordinator.Still auditing. I'm now checking the build environment so I can start a long compile in the background while I read the remaining code.Starting the `suite_bench_policy` build in the background so it's ready when I need to run the existing reuse tests.While that builds, let me read the base evaluation path (`evaluate_policy_diff_baseline`) and the existing unit-reuse tests.Still reading the batch tail (where units flush and the base row publishes), then I'll write down the design.Status: I've finished mapping the existing machinery; I'm now reading the existing reuse tests so my new tests use the same harness.Build is still compiling (policy/mcp crates). Meanwhile I'm checking how the CLI and MCP route the control.Build finished. Running the existing reuse tests to establish the baseline.Baseline tests pass (15/15). Next I build the unmodified release binary now, before any edits, so the before/after comparison uses the exact base.I'm waiting on the baseline release build; no source edits until it finishes so the baseline stays exact.Waiting on the release build's completion event (about to start edits right after).The baseline release binary is built. I'm saving it with its hash before I touch any source.Making the first store edits (evaluation id and unit ids on the row types).No response requested.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 1,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "so the baseline stays exact.Waiting on the release build's completion event (about to start edits right after).The baseline release binary is built. I'm saving it with its hash before I touch any source.Making the first store edits (evaluation id and unit ids on the row types).No response requested."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-20T12:24:54.427Z",
+        "kind": "user",
+        "text": "<command-name>/model</command-name>             <command-message>model</command-message>             <command-args>opus</command-args>"
+      },
+      {
+        "at": "2026-10-20T12:24:54.427Z",
+        "kind": "user",
+        "text": "<local-command-stdout>Set model to `opus (claude-opus-5-5)`</local-command-stdout>"
+      },
+      {
+        "at": "2026-10-20T12:24:54.503Z",
+        "kind": "user",
+        "text": "<command-name>/model</command-name>             <command-message>model</command-message>             <command-args>sonnet</command-args>"
+      },
+      {
+        "at": "2026-10-20T12:24:54.503Z",
+        "kind": "user",
+        "text": "<local-command-stdout>Set model to `sonnet (claude-sonnet-5-5)`</local-command-stdout>"
+      },
+      {
+        "at": "2026-10-20T12:28:03.244Z",
+        "kind": "agent",
+        "text": "Budgets are fixed limits with no deadline, so the key can keep them. A retention omission marks the run incomplete, so the \"report is not unreliable\" gate covers it. Next, compile the store change.Sto"
+      },
+      {
+        "at": "2026-10-21T10:21:44.899Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

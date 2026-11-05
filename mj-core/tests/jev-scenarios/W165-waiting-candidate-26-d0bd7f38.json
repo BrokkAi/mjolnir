@@ -1,0 +1,168 @@
+{
+  "id": "W165",
+  "title": "waiting candidate 26 d0bd7f38",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "d0bd7f38f6290bb04e250749eb79ec66",
+    "session_title": "9755-m4a-covered-statements",
+    "reply_position": 1056,
+    "captured_at": "2026-11-05T18:32:48.563Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /workspace/a25345803d8f8d276ad919b0392340ed/.mj-agents/d0bd7f38f6290bb04e250749eb79ec66. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nYour brief is in /tmp/9755/m2m3/M4A-COVERED-STATEMENTS.md; read it first and follow it exactly. Work only in the lane /workspace/a25345803d8f8d276ad919b0392340ed/bifrost-dev/.mj/lanes/9755-m4a-covered-statements (branch 9755-m4a-covered-statements at origin/master c9723d338d); you are its only writer. Summary: add `DerivationKind::COVERED_STATEMENTS` (default empty), pass it to `CaptureHook::capture` (update every implementation), and make AnalyzerCapture's CaptureFrame count a listed statement as covered (separate counter, visible to tests without touching CaptureReceipt) and an unlisted one as unattributed; add the tests and the two mutation proofs in the brief; run the validation listed. Do not change CaptureReceipt. Leave changes uncommitted (you cannot write .git). Questions go in your handback; message no other session. Write report.md in your report directory."
+        },
+        {
+          "id": "agent:27",
+          "role": "assistant",
+          "text": "I’ll read the lane brief, then make the capture changes and run its required checks."
+        },
+        {
+          "id": "agent:68",
+          "role": "assistant",
+          "text": "The engine calls capture through an erased kind, so I’ll expose the static list there and pass it into each frame. I’ll keep the covered count in test-only state outside `CaptureReceipt`."
+        },
+        {
+          "id": "agent:146",
+          "role": "assistant",
+          "text": "The new tests now exercise listed, unlisted, and nested statements through the real capture hook. The first analysis test build is still running."
+        },
+        {
+          "id": "agent:228",
+          "role": "assistant",
+          "text": "The test build is still compiling analysis dependencies. I’ll wait for the result before running the two mutation checks, which need a passing baseline."
+        },
+        {
+          "id": "agent:287",
+          "role": "assistant",
+          "text": "The store crate is still compiling and there is no test result yet. The pack drift check and `git diff --check` have passed; the test, lint, and mutation results are still pending."
+        },
+        {
+          "id": "agent:355",
+          "role": "assistant",
+          "text": "All 18 selected analysis derivation tests passed, including the three new cases. I’m running the semantic derivation suite next, then I’ll check that each mutation makes its target test fail."
+        },
+        {
+          "id": "agent:420",
+          "role": "assistant",
+          "text": "The semantic derivation suite passed 28/28. The first mutation makes every statement unattributed; the targeted test is compiling now. The script will restore the source before applying the second mutation and again when it exits."
+        },
+        {
+          "id": "agent:509",
+          "role": "assistant",
+          "text": "Both mutation checks failed their intended tests, and the capture file is byte identical to the saved source after restoration. Clippy is running now; I’ll finish with the implementer check and final diff checks."
+        },
+        {
+          "id": "agent:601",
+          "role": "assistant",
+          "text": "Clippy is still working through the two crates’ dependencies and has reported no diagnostic so far. The required check will cover the separate analysis and semantic targets before I summarize the lane."
+        },
+        {
+          "id": "agent:670",
+          "role": "assistant",
+          "text": "Clippy passed with `-D warnings`. The check for all three crates that implement the affected traits is running; final formatting, pack drift, and diff checks are also underway."
+        },
+        {
+          "id": "agent:743",
+          "role": "assistant",
+          "text": "The targeted checks remain clean. `cargo check` is still processing store and analysis dependencies, while the formatter is waiting inside mbx; I’m leaving both running to get the requested validation."
+        },
+        {
+          "id": "agent:818",
+          "role": "assistant",
+          "text": "The diff review caught one boundary issue: an entry verification opens a capture too, but it is not the kind’s compute. I’ve given that verification frame an empty coverage list so only compute statements can use the kind’s declaration. I’m rerunning the affected checks."
+        },
+        {
+          "id": "user:901",
+          "role": "user",
+          "text": "Continue"
+        },
+        {
+          "id": "agent:913",
+          "role": "assistant",
+          "text": "The revised capture boundary passed all 46 selected derivation tests across semantic and analysis. Final Clippy and the three-crate check are running against that exact source."
+        },
+        {
+          "id": "agent:978",
+          "role": "assistant",
+          "text": "The final tests passed, and the mutation logs show the expected failures. The remaining Clippy and check builds are still running through mbx; the lane source has no unrelated changes."
+        },
+        {
+          "id": "agent:1056",
+          "role": "assistant",
+          "text": "Final Clippy and the three-crate check passed. I’ve written the lane report with file locations, test assertions, and mutation evidence; I’m waiting for the last formatter check before handing it back."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Continue",
+    "assistant_text_tail": "Final Clippy and the three-crate check passed. I’ve written the lane report with file locations, test assertions, and mutation evidence; I’m waiting for the last formatter check before handing it back.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 0
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-05T18:34:01.481Z",
+        "kind": "system",
+        "text": "warning: prompt failed: Selected model is at capacity. Please try a different model."
+      },
+      {
+        "at": "2026-11-05T18:36:01.761Z",
+        "kind": "user",
+        "text": "Continue"
+      },
+      {
+        "at": "2026-11-05T18:37:02.948Z",
+        "kind": "agent",
+        "text": "Completed the covered-statement capture change in the assigned lane and left it uncommitted. All 46 selected derivation tests and the required validation passed. Details and mutation evidence are in ["
+      }
+    ]
+  }
+}

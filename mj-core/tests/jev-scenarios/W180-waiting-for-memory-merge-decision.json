@@ -1,0 +1,130 @@
+{
+  "id": "W180",
+  "title": "Waiting for memory merge decision",
+  "category": "waiting-with-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "3f9fd0962609fb6f056e76f5d9e5d8e4",
+    "session_title": "mjolnir via claude",
+    "reply_position": 115,
+    "captured_at": "2026-10-05T14:43:31.596Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "when i use claude code, i see its subagents reporting intermittently what it is that they're working on. \n\n1. how is the sub prompted to do this / what tool does it call?\n2. does the primary session model see those updates or are they harness-only?\n\nhave subs investigate ~/.claude traces"
+        },
+        {
+          "id": "agent:12",
+          "role": "assistant",
+          "text": "I'll send two children in parallel: one to find how subagents produce the progress text, and one to check whether that text reaches the parent model's context."
+        },
+        {
+          "id": "user:41",
+          "role": "user",
+          "text": "2nd question. how does mj memory system resolve concurrent edits to the same project memories? how does our tool-based system sync with claude code's file-based system?"
+        },
+        {
+          "id": "agent:101",
+          "role": "assistant",
+          "text": "All three children have reported back. I'm checking the subagent summary prompt in the Claude Code binary before I answer."
+        },
+        {
+          "id": "agent:115",
+          "role": "assistant",
+          "text": "## Claude Code subagent progress updates\n\n**1. How the updates are produced.** Confirmed: the subagent does not produce them. It gets no instruction to report progress and has no tool for it. The harness creates them with a separate model call, named `AgentSummary`, that runs about every 30 seconds while a subagent is working. That call copies the subagent's transcript and adds this prompt. I found the prompt text in the binary at `~/.local/share/claude/versions/2.1.289`:\n\n> Describe your most recent action in 3-5 words using present tense (-ing). Name the file or function, not the branch. Do not use tools.\n\n- The call is limited to one turn, cannot use tools, and is not saved to any transcript (`skipTranscript:true`).\n- It is skipped when the transcript has fewer than three messages or has not changed since the last summary.\n- The answer goes into the task row's `summary` field as a `task_progress` event.\n- Likely, not confirmed: it runs on the subagent's own model. The code sets no Haiku or other model override, but the model used is not recorded anywhere.\n\n**2. Whether the main model sees the updates.** Confirmed: no, the updates appear only in the user interface. Progress records are left out of the messages sent to the main model, and none of the 734 saved transcripts contains one. The main model receives only:\n- \"Async agent launched successfully\" when the subagent starts\n- the subagent's final report\n- a `<task-notification>` with the completed status\n\nThe evidence is session `3c8fdde7…` in `~/.claude/projects/-home-jonathan-Projects-mjolnir4/`, lines 2532, 3521 and 3527. For a foreground (synchronous) subagent, the final report arrives as the tool result.\n\n`★ Insight ─────────────────────────────────────`\n- Generating the summary outside the subagent keeps its context clean and keeps the update schedule independent of the subagent's work. It costs one small extra model call about every 30 seconds per running subagent.\n- Mjolnir's `wait` works the same way: you receive only the final handback, with no progress updates in between.\n`─────────────────────────────────────────────────`\n\n## Mjolnir project memory\n\n**How concurrent edits are resolved.** There are two levels, both confirmed in the code:\n- **Within one session:** the MCP `write` tool uses compare-and-swap with SHA-256 version tokens. If the token is out of date, the tool returns an error with the current content, so the model sees the conflict immediately (`mj-core/src/project_memory.rs:305-360`).\n- **Between sessions:** each session edits its own copy of the memory files (`projects/hel-<key>-<session>/memory`). At the checkpoint, `reconcile_snapshots` (`mj-core/src/project_memory.rs:474`) merges three versions of each file: the copy the session started from, the current shared copy and the session's copy. It compares whole files, not lines:\n  - Edits to different files merge normally.\n  - When two sessions change the same file differently, the shared version stays at the original path. The session's version is saved as a separate file under `conflicts/<session>-<digest>.md`, and a warning is logged. The model is not told.\n  - A per-project lock in the controller makes sure only one merge into the shared copy runs at a time (`mj-core/src/project_memory.rs:525-626`).\n\n**How the MCP tools sync with Claude Code's files.** Both use the same files, so no conversion or separate sync step exists. The shared copy is a directory of Markdown files at `$MJ_DATA_DIR/projects/<key>/memory`. At launch it is copied into the session's memory directory, and at each checkpoint the session's files are merged back. For Claude Code, that session directory is its native memory directory, which is the one I write to. Claude Code sessions start `mj-memory` with `--native-notes`, which turns off the document tools and leaves only the history tools (`mj-worker/src/acp/launch.rs:116-149`). Other harnesses keep the `list`/`read`/`write` tools, which act on the same kind of directory.\n\n**Known gaps** (confirmed in the code):\n1. **Deletions are lost.** `install_snapshot` only creates or replaces files and never deletes them (`mj-core/src/project_memory.rs:416-443`). A memory deleted in one session can come back on a later launch. The fix is commit `6a5e162c` on the paused `mem-merge` worktree, and it is still not on any branch.\n2. **`MEMORY.md` conflicts are not merged line by line.** If two sessions each add a line, the shared `MEMORY.md` keeps one version and the other line is only in a conflict file. That conflict file is itself not listed in the index. This is the risk noted on 2026-10-03.\n3. **An edit silently wins over a delete.** If one session deletes a file and another edits it, the merge keeps the edit and writes no conflict file.\n4. **No live updates.** A running session does not see another session's changes until its next launch or checkpoint.\n\nMy recommendation: gaps 1 and 2 are the ones that could lose data. Landing `6a5e162c` and adding a line-level merge for `MEMORY.md` would cover both. Both are tied to the paused redesign, so I'll wait for your decision on that before changing anything."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "2nd question. how does mj memory system resolve concurrent edits to the same project memories? how does our tool-based system sync with claude code's file-based system?",
+    "assistant_text_tail": "st>.md`, and a warning is logged. The model is not told.\n  - A per-project lock in the controller makes sure only one merge into the shared copy runs at a time (`mj-core/src/project_memory.rs:525-626`).\n\n**How the MCP tools sync with Claude Code's files.** Both use the same files, so no conversion or separate sync step exists. The shared copy is a directory of Markdown files at `$MJ_DATA_DIR/projects/<key>/memory`. At launch it is copied into the session's memory directory, and at each checkpoint the session's files are merged back. For Claude Code, that session directory is its native memory directory, which is the one I write to. Claude Code sessions start `mj-memory` with `--native-notes`, which turns off the document tools and leaves only the history tools (`mj-worker/src/acp/launch.rs:116-149`). Other harnesses keep the `list`/`read`/`write` tools, which act on the same kind of directory.\n\n**Known gaps** (confirmed in the code):\n1. **Deletions are lost.** `install_snapshot` only creates or replaces files and never deletes them (`mj-core/src/project_memory.rs:416-443`). A memory deleted in one session can come back on a later launch. The fix is commit `6a5e162c` on the paused `mem-merge` worktree, and it is still not on any branch.\n2. **`MEMORY.md` conflicts are not merged line by line.** If two sessions each add a line, the shared `MEMORY.md` keeps one version and the other line is only in a conflict file. That conflict file is itself not listed in the index. This is the risk noted on 2026-10-03.\n3. **An edit silently wins over a delete.** If one session deletes a file and another edits it, the merge keeps the edit and writes no conflict file.\n4. **No live updates.** A running session does not see another session's changes until its next launch or checkpoint.\n\nMy recommendation: gaps 1 and 2 are the ones that could lose data. Landing `6a5e162c` and adding a line-level merge for `MEMORY.md` would cover both. Both are tied to the paused redesign, so I'll wait for your decision on that before changing anything.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "required",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null,
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      115
+    ],
+    "user_position": null,
+    "judgment": "Closing reply at transcript position 115 leaves a direct user decision unresolved: ",
+    "next": "n/a",
+    "input_rationale": "The reply explicitly requests a user decision and no later user response is present in the captured turn."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-05T14:44:30.574Z",
+        "kind": "user",
+        "text": "how does CC primary agent get information \"what is subagent X doing\" then?"
+      },
+      {
+        "at": "2026-10-05T14:45:12.173Z",
+        "kind": "agent",
+        "text": "I'm checking the Claude Code binary to see whether a running subagent can receive a message from the main agent."
+      },
+      {
+        "at": "2026-10-05T14:45:24.872Z",
+        "kind": "agent",
+        "text": "The short answer: the main agent has no live view of a subagent's progress. The 3–5 word summaries are shown only in the user interface. Confirmed for Claude Code 2.1.289. Within the binary and that s"
+      },
+      {
+        "at": "2026-10-05T14:46:15.960Z",
+        "kind": "user",
+        "text": "it sounds like the conflicts then are \"first write wins?\""
+      },
+      {
+        "at": "2026-10-05T14:46:34.077Z",
+        "kind": "agent",
+        "text": "Mostly yes. For a single file, the version from the first session to reach a checkpoint stays at the original path. Three details change what \"first write wins\" would suggest.  **1. \"First\" means the "
+      },
+      {
+        "at": "2026-10-05T14:47:40.527Z",
+        "kind": "user",
+        "text": "> After the merge  what performs merges?"
+      }
+    ]
+  }
+}
