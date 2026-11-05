@@ -15,9 +15,9 @@ To see it working: in a session whose agent asked a question, then sent further 
 - [x] (2026-11-05) Corpus: 30 decision-log fixtures and 85 random transcript fixtures (`mj-core/tests/jev-scenarios/W*`), labels reviewed by the coordinator.
 - [x] (2026-11-05) Measured the current verdict: no wording change is needed (see Surprises).
 - [x] (2026-11-05) Prototype locator question and held-out evaluation (see Surprises).
-- [ ] Milestone 1: shared contract in `mj-core` (question file, request builder, answer parser, `TurnAssessment.question_message`).
+- [x] Milestone 1: shared contract in `mj-core` (question file, request builder, answer parser, `TurnAssessment.question_message`).
 - [ ] Milestone 2: proxy route `/v1/question-locator`.
-- [ ] Milestone 3: worker calls the locator after an `AwaitInput` assessment and stores the target.
+- [x] Milestone 3: worker calls the locator after an `AwaitInput` assessment and stores the target.
 - [ ] Milestone 4: TUI dashboard scrolls to the target when a marked session is opened.
 - [ ] Milestone 5: web viewer (and desktop, which hosts it) scrolls to the target.
 - [ ] Milestone 6: locator evaluation script and fixture labels; documentation in `.agents/docs/jev.md` and `.agents/docs/jev-proxy.md`.
@@ -37,6 +37,10 @@ To see it working: in a session whose agent asked a question, then sent further 
   Evidence: dev, 16 fixtures × 3: 45/48 correct after label fixes, the remaining 3 on an ambiguous case. Frozen held-out set (13 fixtures × 3): 17/18 positive requests chose an acceptable reply; the one miss chose the adjacent reply. Prototype: `/mnt/optane/tmp/jev-waiting-automation-20261105/tools/locate_choice.py`, question `candidates/locator-final-frozen.json`.
 
 - Observation: worker evidence message ids are harness message ids such as `msg_011CgihPmwyh6hJGX2Azu5L5`, while the controller's materialized transcript stable ids look like `agent:msg_011Cfqu8fwMo43bEgWdstBgT` (and `tool:toolu_…`). The id the clients receive must be resolvable to a rendered transcript entry; Milestone 3 must establish the mapping and test it for Claude and Codex sessions.
+
+- Observation: two authorization paths supply assistant IDs. A daemon-seeded context copies each materialized `stable_id` in `mj-transcript/src/authorization.rs`. Live worker context stores the raw ACP message ID in `ContextHistory::assistant` (`mj-core/src/assessment.rs`), while `mj-transcript/src/projection/session_update.rs` prefixes it with `agent:`. Both paths use the relay event ordinal for the no-ID fallback, but projection may coalesce that chunk into an earlier transcript item, so `agent:<ordinal>` is not reliably resolvable. The locator normalizes raw IDs, preserves prefixed IDs, and leaves numeric fallback targets unset.
+
+- Observation: `TurnAssessment` has no `deny_unknown_fields`; the strict relay snapshot and observation wrappers deserialize their assessment fields through this permissive type. The new optional field is omitted from old JSON and defaults to `None` when absent. No compatibility change was needed in controller wait-policy storage.
 
 ## Decision Log
 
@@ -59,6 +63,10 @@ To see it working: in a session whose agent asked a question, then sent further 
 - Decision: use the argmax reply regardless of its probability, unless the choice is `none`.
   Rationale: held-out correct answers had probabilities as low as 0.25; a wrong scroll target is harmless because the user is already looking at the session.
   Date/Author: 2026-11-05, coordinator.
+
+- Decision: map raw ACP assistant IDs to `agent:<id>` and preserve already prefixed seeded IDs; do not store the numeric ordinal fallback without a materialized transcript lookup.
+  Rationale: live and seeded authorization paths differ, and no-ID chunks can coalesce into an earlier transcript item.
+  Date/Author: 2026-11-05, user correction and jql-worker.
 
 ## Outcomes & Retrospective
 
