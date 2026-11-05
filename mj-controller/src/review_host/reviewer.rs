@@ -417,14 +417,20 @@ pub fn resolution_notice(
         Resolution::Forwarded => "Review findings sent to the agent".to_owned(),
         Resolution::Dismissed => match last_verdict {
             Some(ReviewVerdict::Clean) => "Review complete: no material findings".to_owned(),
-            Some(ReviewVerdict::Failed { .. }) => {
-                "Review failed; the change stays unreviewed".to_owned()
+            Some(ReviewVerdict::Failed { reason }) => {
+                format!(
+                    "Review failed: {}. The change stays unreviewed",
+                    short_failure_reason(reason)
+                )
             }
             _ => "Review dismissed".to_owned(),
         },
         Resolution::Cancelled => match last_verdict {
-            Some(ReviewVerdict::Failed { .. }) => {
-                "Review failed; the change stays unreviewed".to_owned()
+            Some(ReviewVerdict::Failed { reason }) => {
+                format!(
+                    "Review failed: {}. The change stays unreviewed",
+                    short_failure_reason(reason)
+                )
             }
             _ => "Review cancelled".to_owned(),
         },
@@ -433,6 +439,17 @@ pub fn resolution_notice(
             "Review coverage starts here; the next completed turn is reviewed".to_owned()
         }
     })
+}
+
+fn short_failure_reason(reason: &str) -> String {
+    let first_line = reason.lines().next().unwrap_or("unknown error");
+    let mut chars = first_line.chars();
+    let short: String = chars.by_ref().take(160).collect();
+    if chars.next().is_some() {
+        format!("{short}…")
+    } else {
+        short
+    }
 }
 
 /// Builds the review's seed from the session's own projection.

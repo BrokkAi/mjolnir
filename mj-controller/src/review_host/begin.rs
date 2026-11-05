@@ -56,19 +56,18 @@ impl HostState {
             }
             return;
         }
-        if self.reviews.contains_key(&session_id) {
-            if self.followups.insert(session_id.clone()) {
-                self.followup_saving.insert(session_id.clone());
-                if self.persistence.as_ref().is_none_or(|lane| {
-                    lane.send(PersistenceRequest::MarkFollowUp {
-                        session_id: session_id.clone(),
-                    })
-                    .is_err()
-                }) {
-                    tracing::warn!(%session_id, "could not queue pending follow-up review: persistence lane stopped");
-                    self.followup_saving.remove(&session_id);
-                }
-            }
+        if self.reviews.contains_key(&session_id)
+            || self.preparing.contains_key(&session_id)
+            || self.pending_open.contains_key(&session_id)
+            || self.refuse_start(&session_id).is_some()
+            || self.sessions.get(&session_id).is_some_and(|watch| {
+                watch
+                    .materialized
+                    .as_ref()
+                    .is_some_and(|view| !view.queued_prompts.is_empty())
+            })
+        {
+            self.mark_followup(&session_id);
             return;
         }
         if self.followups.contains(&session_id) {
@@ -86,15 +85,39 @@ impl HostState {
         self.begin(session_id, false, None);
     }
 
+    pub(super) fn mark_followup(&mut self, session_id: &str) {
+        if self.followups.insert(session_id.to_owned()) {
+            self.followup_saving.insert(session_id.to_owned());
+            if self.persistence.as_ref().is_none_or(|lane| {
+                lane.send(PersistenceRequest::MarkFollowUp {
+                    session_id: session_id.to_owned(),
+                })
+                .is_err()
+            }) {
+                tracing::warn!(%session_id, "could not queue pending follow-up review: persistence lane stopped");
+                self.followup_saving.remove(session_id);
+            }
+        }
+    }
+
     pub(super) fn begin_followup(&mut self, session_id: &str) {
         if !self.startup_ready
             || !self.followups.contains(session_id)
             || self.followup_saving.contains(session_id)
             || self.closing.contains(session_id)
             || self.refuse_start(session_id).is_some()
+            || self.preparing.contains_key(session_id)
+            || self.pending_open.contains_key(session_id)
+            || self.sessions.get(session_id).is_some_and(|watch| {
+                watch
+                    .materialized
+                    .as_ref()
+                    .is_some_and(|view| !view.queued_prompts.is_empty())
+            })
         {
             return;
         }
+        self.followups.remove(session_id);
         self.begin(session_id.to_owned(), false, None);
     }
 

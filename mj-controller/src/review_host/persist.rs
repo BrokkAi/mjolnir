@@ -18,7 +18,15 @@ impl HostState {
             Ok(prepared) => prepared,
             Err(refusal) => {
                 self.preparing.remove(&session_id);
-                if manual || refusal.0 != SUBAGENT_REFUSAL {
+                if !manual
+                    && matches!(
+                        refusal.0.as_str(),
+                        "prompts are queued; the review waits for them"
+                            | "a review runs between turns; this one is still working"
+                    )
+                {
+                    self.mark_followup(&session_id);
+                } else if manual || refusal.0 != SUBAGENT_REFUSAL {
                     self.record_notice(&session_id, start_refusal_notice(&refusal.0));
                 }
                 self.publish(&session_id);
@@ -35,7 +43,7 @@ impl HostState {
         self.next_epoch = self.next_epoch.saturating_add(1);
         let epoch = self.next_epoch;
         let mut prepared = prepared;
-        prepared.state.pending_followup = false;
+        prepared.state.pending_followup = self.followups.contains(&session_id);
         if prepared.resume_forward.is_none() {
             prepared.state.child_session_id = None;
             prepared.state.forward_attempts = 0;
@@ -222,7 +230,6 @@ impl HostState {
                         queued_outcomes: Vec::new(),
                     },
                 );
-                self.followups.remove(&session_id);
                 if let Some(slot) = self.reviews.get_mut(&session_id)
                     && slot.push.is_some()
                     && slot.driver.last_verdict() == Some(&ReviewVerdict::Clean)

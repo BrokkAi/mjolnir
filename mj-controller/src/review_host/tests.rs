@@ -1680,6 +1680,68 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
     host.shutdown().await.unwrap();
 }
 
+// Hard-won: f47500b6c: a turn ending during preparation lost its follow-up
+#[tokio::test]
+async fn turn_finishing_during_review_preparation_starts_one_followup() {
+    let session = session_id("prepfollowup");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &host).await;
+    let (_, _, first_capture) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    finish_a_turn(&manager, &host).await;
+    finish_a_turn(&manager, &host).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !environment.state().pending_followup {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("follow-up is durable during preparation");
+    first_capture
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![mj_core::relay::RepoDelta {
+                root: PathBuf::from("/workspace/app"),
+                baseline_tree: Some("base".into()),
+                current_tree: "first".into(),
+                patch: "+first".into(),
+                changed_lines: 1,
+                diffstat: "1 file changed".into(),
+                ..Default::default()
+            }],
+        }))
+        .unwrap();
+    let child = wait_for_child(&environment, &host, &session).await;
+    finish_child(&host, &environment, &session, &child, Some("No findings.")).await;
+    let (_, _, second_capture) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    second_capture
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![mj_core::relay::RepoDelta {
+                root: PathBuf::from("/workspace/app"),
+                baseline_tree: Some("first".into()),
+                current_tree: "second".into(),
+                patch: "+second".into(),
+                changed_lines: 1,
+                diffstat: "1 file changed".into(),
+                ..Default::default()
+            }],
+        }))
+        .unwrap();
+    let child = wait_for_child(&environment, &host, &session).await;
+    finish_child(&host, &environment, &session, &child, Some("No findings.")).await;
+    assert_eq!(environment.children.lock().unwrap().len(), 2);
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: f47500b6c: the live queued-prompt snapshot refused review with a spurious notice
 #[tokio::test]
 async fn queued_prompts_do_not_hold_a_review_back() {
     let session = session_id("queued00000");
@@ -1709,11 +1771,38 @@ async fn queued_prompts_do_not_hold_a_review_back() {
             mj_core::state::MaterializedExecutionState::Running { started_at_ms: 0 },
         ),
     );
+    manager
+        .publisher
+        .publish(session.to_owned(), queued.clone())
+        .await
+        .unwrap();
     host.observe(session, &queued);
-
-    let (_, _, _reply) = manager
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !environment.state().pending_followup {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("queued turn retains durable follow-up");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), manager.requests.recv())
+            .await
+            .is_err(),
+        "queued prompts must not emit a refusal notice or start capture"
+    );
+    let idle = view(session, mj_core::state::MaterializedExecutionState::Idle);
+    manager
+        .publisher
+        .publish(session.to_owned(), idle.clone())
+        .await
+        .unwrap();
+    host.observe(session, &idle);
+    let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
         .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: Vec::new(),
+    }));
     host.shutdown().await.unwrap();
 }
 
@@ -1777,6 +1866,28 @@ async fn a_failed_review_closes_without_advancing_coverage() {
     .expect("a failed reviewer is closed, retrying a transient cleanup refusal");
     assert_eq!(environment.closed.lock().unwrap().len(), 1);
     assert!(environment.state().baselines.is_empty());
+    // Hard-won: f47500b6c: the close notice hid the reviewer launch failure reason.
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RemoteSessionRequest::Submit {
+                command: RelayCommand::RecordNotice { text },
+                reply,
+                ..
+            } = manager.next().await
+            {
+                let _ = reply.send(Ok(1));
+                if text.starts_with("Review failed:") {
+                    break text;
+                }
+            }
+        }
+    })
+    .await
+    .expect("failed review records a notice");
+    assert!(
+        notice.contains("review harness failed to launch"),
+        "{notice}"
+    );
 
     host.shutdown().await.expect("shutdown the host");
 }
