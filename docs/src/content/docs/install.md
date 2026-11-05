@@ -1,9 +1,9 @@
 ---
 title: Install Mjolnir
-description: Install the Mjolnir 2 controller and its bundled workers on Linux, macOS, or WSL2.
+description: Install the Mjolnir 2 controller and its bundled workers on Linux, macOS, WSL2, or native Windows.
 ---
 
-Mjolnir's controller runs on Linux and macOS. On Windows, use a Linux distribution under WSL2; there is no native Windows controller package.
+Mjolnir's controller runs on Linux and macOS. On Windows, use a Linux distribution under WSL2; a native Windows build is also published as a preview (see [Native Windows](#native-windows-preview)).
 
 The release installer is the simplest route. The npm package installs the same native release bundle. Cargo and source builds are useful when you want only the headless controller or are developing Mjolnir itself, but they do not automatically install the portable Linux workers required by managed and remote targets.
 
@@ -22,8 +22,7 @@ The installer selects the release for the current Linux or macOS architecture, v
 - on macOS, a native `mj-worker` for local bare sessions
 
 The Linux controller requires glibc 2.28 or newer; only the portable workers
-are static musl binaries. Alpine and native Windows are not controller release
-targets.
+are static musl binaries. Alpine is not a controller release target.
 
 Install Git 2.39.5 or later on the controller. Mjolnir uses Git on the host
 and on SSH targets; `mj doctor` checks the local Git version and configured
@@ -47,6 +46,30 @@ curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh |
 
 Re-run the installer to update or repair an installation. Its checksum cache avoids downloading an unchanged archive again.
 
+## Native Windows (preview)
+
+Every release also publishes `brokk-mjolnir-<tag>-x86_64-pc-windows-msvc.zip`,
+with `mj.exe`, `mj-desktop.exe`, and the same static x86_64 and ARM64 Linux
+session workers. The x64 build also runs on Windows on ARM through emulation.
+Install it from PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.ps1 | iex
+```
+
+The installer requires the release's SHA-256 sidecar and installs into
+`%LOCALAPPDATA%\Programs\Mjolnir\bin` for the current user, adding it to the
+user `Path` unless `MJOLNIR_NO_MODIFY_PATH` is set. `MJOLNIR_INSTALL_DIR` and
+`MJOLNIR_VERSION` work as they do for `install.sh`. Re-running it replaces the
+installed files, including a running `mj.exe`.
+
+The Windows build is a preview:
+
+- `mj` does not update itself on Windows. Re-run the installer to upgrade.
+- The bundle carries only Linux session workers, so sessions run on container
+  or SSH targets; there are no local bare sessions. Containers through Docker
+  Desktop's Linux engine have not been verified end to end yet.
+
 ## Homebrew
 
 ```sh
@@ -65,6 +88,7 @@ On every interactive startup, before starting the daemon, `mj` asks the channel 
 - npm installs: mj runs `npm install -g @brokkai/mjolnir@latest` so npm keeps ownership of `node_modules`. `npx` runs are ephemeral, so mj only prints the command.
 - Homebrew installs: mj runs `brew update` (so the local formula index learns about the release) and then `brew upgrade --formula brokkai/tap/mjolnir` (the bare name `mjolnir` is an unrelated Homebrew cask).
 - Cargo installs: mj prints `cargo install --locked brokk-mjolnir` and leaves the rebuild to you.
+- Native Windows installs: no automatic check yet; re-run `install.ps1`.
 
 When `mj` finds the daemon running a different build, it replaces the daemon only if its own build is newer: a later release or, within one release, a build from a later commit. An older `mj`, such as a stale copy earlier on `PATH`, uses the newer daemon and says so. When `mj` cannot tell which build is newer, it also keeps the running daemon and says so; `mj daemon restart` then replaces it.
 

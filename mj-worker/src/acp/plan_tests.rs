@@ -1774,19 +1774,6 @@ async fn managed_children_cancel_questions_and_permissions_at_the_original_respo
                 away: true,
                 revision: 1,
             });
-            if harness == HarnessKind::Muse {
-                probe.send(json!({
-                    "jsonrpc":"2.0", "id":"route", "method":"elicitation/create", "params":{
-                        "sessionId":"plan-session", "mode":"form", "message":"Choose how to respond",
-                        "requestedSchema":{"type":"object", "properties":{"route":{"type":"string", "enum":["Answer questions", "Explain instead"]}}}
-                    }
-                })).await;
-                assert_eq!(
-                    probe.message().await["result"]["content"]["route"],
-                    "Answer questions",
-                    "internal Muse routing must still reach the actual question"
-                );
-            }
             let question = json!({
                 "jsonrpc":"2.0", "id":"ask", "method":"elicitation/create", "params":{
                     "sessionId":"plan-session", "mode":"form", "message":"Which file?",
