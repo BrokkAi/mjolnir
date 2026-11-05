@@ -385,7 +385,10 @@
     "mjolnir": "worker Jev waiting-language classification",
     "judgment": "parent review 2026-11-05: relabeled from none",
     "next": "The named wait remains pending.",
-    "input_rationale": "A reply since the last user message says it is still waiting for the user to switch the sub-agents back to Sol."
+    "input_rationale": "A reply since the last user message says it is still waiting for the user to switch the sub-agents back to Sol.",
+    "request_message_ids": [
+      "agent:23570"
+    ]
   },
   "context": {
     "after": [

@@ -614,7 +614,10 @@
     "mjolnir": "worker Jev decision mining",
     "judgment": "parent review: an unanswered request from an earlier reply since the last user message still counts (user decision 2026-11-05)",
     "next": "The wait named in the final reply is pending.",
-    "input_rationale": "An earlier reply since the last user message says two items need the user: reopen #9840 and post the #8386 status comment."
+    "input_rationale": "An earlier reply since the last user message says two items need the user: reopen #9840 and post the #8386 status comment.",
+    "request_message_ids": [
+      "msg_011Cgk7jdutjCmL8xNK9Yo2D"
+    ]
   },
   "context": {
     "after": [

@@ -218,7 +218,16 @@
     "request_positions": [],
     "user_position": 0,
     "input_rationale": "Earlier replies ask the user (the judge) whether the agent may bypass the mbx cache; still unanswered.",
-    "judgment": "parent review 2026-11-05: relabeled from none"
+    "judgment": "parent review 2026-11-05: relabeled from none",
+    "request_message_ids": [
+      "agent:1148",
+      "agent:1238",
+      "agent:1309",
+      "agent:1439",
+      "agent:1532",
+      "agent:1828",
+      "agent:1990"
+    ]
   },
   "context": {
     "after": [

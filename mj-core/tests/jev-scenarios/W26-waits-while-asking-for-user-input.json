@@ -202,7 +202,12 @@
     "mjolnir": "worker Jev decision mining",
     "judgment": "control with unresolved user request",
     "next": "The wait named in the final reply is pending.",
-    "input_rationale": "The reply waits for control; its current text and preceding request also assign an unresolved decision or action to the user."
+    "input_rationale": "The reply waits for control; its current text and preceding request also assign an unresolved decision or action to the user.",
+    "request_message_ids": [
+      "msg_011Cgk1fEY9X6CUJ3vAEntXi",
+      "msg_011Cgk2CHY6P1LsrzHSfy3ix",
+      "msg_011Cgk2Xz1xNifzz5SVp4cBB"
+    ]
   },
   "context": {
     "after": [

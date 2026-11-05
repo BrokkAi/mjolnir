@@ -567,7 +567,13 @@
     "mjolnir": "worker Jev decision mining",
     "judgment": "parent review: true question alongside an automated wait",
     "next": "The wait named in the final reply is pending.",
-    "input_rationale": "The reply says the call-site rows question still needs the user's answer, while four children keep running."
+    "input_rationale": "The reply says the call-site rows question still needs the user's answer, while four children keep running.",
+    "request_message_ids": [
+      "msg_011Cg4YYYNUfN4tPWgsne59z",
+      "msg_011Cg4o57vnur1K4Fhqq2Sg2",
+      "msg_011Cg4yuiXuZQ1HmB34LAkji",
+      "msg_011Cg52Uid1gbqiBzv74ovom"
+    ]
   },
   "context": {
     "after": [

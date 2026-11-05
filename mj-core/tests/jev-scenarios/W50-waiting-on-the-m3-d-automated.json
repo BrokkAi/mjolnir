@@ -468,7 +468,12 @@
     "mjolnir": "waiting-language transcript mining",
     "judgment": "The assistant says M3-c still depends on three M3 decisions from the user; M3-d automation is a separate wait.",
     "next": "n/a",
-    "input_rationale": "The assistant says M3-c still depends on three M3 decisions from the user; M3-d automation is a separate wait."
+    "input_rationale": "The assistant says M3-c still depends on three M3 decisions from the user; M3-d automation is a separate wait.",
+    "request_message_ids": [
+      "agent:20782",
+      "agent:21628",
+      "agent:23156"
+    ]
   },
   "context": {
     "after": [

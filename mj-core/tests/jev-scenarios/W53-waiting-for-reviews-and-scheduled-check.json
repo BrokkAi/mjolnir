@@ -293,7 +293,14 @@
     "mjolnir": "waiting-language transcript mining",
     "judgment": "The assistant explicitly waits for the user's decisions on when to open #38's PR and whether to rebuild the soak.",
     "next": "n/a",
-    "input_rationale": "The assistant explicitly waits for the user's decisions on when to open #38's PR and whether to rebuild the soak."
+    "input_rationale": "The assistant explicitly waits for the user's decisions on when to open #38's PR and whether to rebuild the soak.",
+    "request_message_ids": [
+      "agent:11358",
+      "agent:12184",
+      "agent:12580",
+      "agent:12714",
+      "agent:12744"
+    ]
   },
   "context": {
     "after": [

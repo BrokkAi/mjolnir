@@ -284,7 +284,11 @@
       6645,
       6922
     ],
-    "user_position": 5655
+    "user_position": 5655,
+    "request_message_ids": [
+      "agent:6060",
+      "agent:6645"
+    ]
   },
   "context": {
     "after": [

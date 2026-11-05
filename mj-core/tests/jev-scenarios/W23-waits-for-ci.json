@@ -509,7 +509,10 @@
     "mjolnir": "worker Jev decision mining",
     "judgment": "parent review: true question alongside an automated wait",
     "next": "The wait named in the final reply is pending.",
-    "input_rationale": "The reply asks the user to tell session c3686325 directly to publish Attest v0.2.2; only the user can do that."
+    "input_rationale": "The reply asks the user to tell session c3686325 directly to publish Attest v0.2.2; only the user can do that.",
+    "request_message_ids": [
+      "msg_bdrk_gjrg2xfsmeepwuyiyezj6wqz3iylbz6pafm3nhnbvrdnstbfyuwa"
+    ]
   },
   "context": {
     "after": [

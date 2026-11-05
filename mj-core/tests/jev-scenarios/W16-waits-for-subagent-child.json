@@ -302,7 +302,13 @@
     "mjolnir": "worker Jev decision mining",
     "judgment": "parent review: an unanswered request from an earlier reply since the last user message still counts (user decision 2026-11-05)",
     "next": "The wait named in the final reply is pending.",
-    "input_rationale": "Earlier replies since the last user message ask whether the agent may post the #8500 outcome comment."
+    "input_rationale": "Earlier replies since the last user message ask whether the agent may post the #8500 outcome comment.",
+    "request_message_ids": [
+      "msg_011CgjjdL3dYLpzi64hVKg8r",
+      "msg_011CgjkTaD1JPimCvPWXSvKE",
+      "msg_011CgjksJtC6FajfrkBRsW3v",
+      "msg_011CgjkxHnqQaje7rMDdsgnu"
+    ]
   },
   "context": {
     "after": [

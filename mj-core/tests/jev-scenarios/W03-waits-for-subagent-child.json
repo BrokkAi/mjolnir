@@ -177,7 +177,11 @@
     "mjolnir": "worker Jev decision mining",
     "judgment": "parent review: an unanswered request from an earlier reply since the last user message still counts (user decision 2026-11-05)",
     "next": "The wait named in the final reply is pending.",
-    "input_rationale": "An earlier reply since the last user message asks whether to open the explain-fix PR with the user's stored gh login or let the user open it; unanswered."
+    "input_rationale": "An earlier reply since the last user message asks whether to open the explain-fix PR with the user's stored gh login or let the user open it; unanswered.",
+    "request_message_ids": [
+      "msg_011Cgk1fEY9X6CUJ3vAEntXi",
+      "msg_011Cgk2CHY6P1LsrzHSfy3ix"
+    ]
   },
   "context": {
     "after": [

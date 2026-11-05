@@ -357,7 +357,10 @@
     "mjolnir": "worker Jev waiting-language classification",
     "judgment": "2026-11-05 labeling brief",
     "next": "The named wait remains pending.",
-    "input_rationale": "7.md`: new prose describing the two judges and the final cards. It no longer contains the single-judge caveat, which the agreement data answers.\n- `HANDOFF.md`.\n\n`summary47.py` no longer copies the Sol card over the final card. Nothing is committed, and landings are still waiting until you're ready."
+    "input_rationale": "7.md`: new prose describing the two judges and the final cards. It no longer contains the single-judge caveat, which the agreement data answers.\n- `HANDOFF.md`.\n\n`summary47.py` no longer copies the Sol card over the final card. Nothing is committed, and landings are still waiting until you're ready.",
+    "request_message_ids": [
+      "agent:25590"
+    ]
   },
   "context": {
     "after": [

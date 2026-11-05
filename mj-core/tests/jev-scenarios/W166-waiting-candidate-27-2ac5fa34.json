@@ -433,7 +433,10 @@
     "request_positions": [],
     "user_position": 0,
     "input_rationale": "In this child session, the reply says integration is waiting on a parent decision about the reverted TypeFlow prerequisite.",
-    "judgment": "parent review 2026-11-05: relabeled from none"
+    "judgment": "parent review 2026-11-05: relabeled from none",
+    "request_message_ids": [
+      "agent:67407"
+    ]
   },
   "context": {
     "after": [

@@ -332,7 +332,12 @@
     "mjolnir": "worker Jev decision mining",
     "judgment": "parent review: an unanswered request from an earlier reply since the last user message still counts (user decision 2026-11-05)",
     "next": "The wait named in the final reply is pending.",
-    "input_rationale": "An earlier reply since the last user message lists an open decision for the user: pgvector with exact search replacing turbopuffer."
+    "input_rationale": "An earlier reply since the last user message lists an open decision for the user: pgvector with exact search replacing turbopuffer.",
+    "request_message_ids": [
+      "msg_011CgG7CmdmFagFbMwaWXUop",
+      "msg_011CgG7gT46ohNKRoxa4pqFH",
+      "msg_011CgG8oWfSvgDqmupawNRP9"
+    ]
   },
   "context": {
     "after": [

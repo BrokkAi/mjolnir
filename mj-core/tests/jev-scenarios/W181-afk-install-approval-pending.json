@@ -461,7 +461,10 @@
     "user_position": null,
     "judgment": "Closing reply at transcript position 25918 leaves a direct user decision unresolved: ",
     "next": "n/a",
-    "input_rationale": "The reply explicitly requests a user decision and no later user response is present in the captured turn."
+    "input_rationale": "The reply explicitly requests a user decision and no later user response is present in the captured turn.",
+    "request_message_ids": [
+      "agent:25918"
+    ]
   },
   "context": {
     "after": [

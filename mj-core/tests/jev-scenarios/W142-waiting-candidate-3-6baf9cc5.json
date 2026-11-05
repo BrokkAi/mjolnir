@@ -299,7 +299,11 @@
       13446,
       13723
     ],
-    "user_position": 13433
+    "user_position": 13433,
+    "request_message_ids": [
+      "agent:13446",
+      "agent:13723"
+    ]
   },
   "context": {
     "after": [

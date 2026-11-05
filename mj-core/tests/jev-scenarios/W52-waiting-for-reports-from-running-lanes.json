@@ -1348,7 +1348,10 @@
     "mjolnir": "waiting-language transcript mining",
     "judgment": "The assistant will not tag rules/v0.5.2 until the user confirms the tag; the running review lanes are independent automated work.",
     "next": "n/a",
-    "input_rationale": "The assistant will not tag rules/v0.5.2 until the user confirms the tag; the running review lanes are independent automated work."
+    "input_rationale": "The assistant will not tag rules/v0.5.2 until the user confirms the tag; the running review lanes are independent automated work.",
+    "request_message_ids": [
+      "agent:331189"
+    ]
   },
   "context": {
     "after": [

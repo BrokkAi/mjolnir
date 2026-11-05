@@ -327,7 +327,10 @@
     "mjolnir": "worker Jev waiting-language classification",
     "judgment": "2026-11-05 labeling brief",
     "next": "The named wait remains pending.",
-    "input_rationale": "investigate the abandoned event, and report to you when they're ready to move out of draft. Your earlier rule, as relayed, made those readiness decisions part of their workflow, so I'd want your go-ahead.\n3. **Leave them parked.** The 2-hour check keeps collecting evidence until the session returns."
+    "input_rationale": "investigate the abandoned event, and report to you when they're ready to move out of draft. Your earlier rule, as relayed, made those readiness decisions part of their workflow, so I'd want your go-ahead.\n3. **Leave them parked.** The 2-hour check keeps collecting evidence until the session returns.",
+    "request_message_ids": [
+      "agent:11338"
+    ]
   },
   "context": {
     "after": [

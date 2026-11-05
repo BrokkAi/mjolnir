@@ -449,7 +449,13 @@
     "mjolnir": "worker Jev decision mining",
     "judgment": "parent review: an unanswered request from an earlier reply since the last user message still counts (user decision 2026-11-05)",
     "next": "The wait named in the final reply is pending.",
-    "input_rationale": "Earlier replies since the last user message wait on the user's choice among parallel items 1 through 5."
+    "input_rationale": "Earlier replies since the last user message wait on the user's choice among parallel items 1 through 5.",
+    "request_message_ids": [
+      "msg_bdrk_g6hngyh4zbxv55nqtn42afxws62hdajmvxjbt63alhrj32a5cagq",
+      "msg_bdrk_vnqr2zdmtmat6u3swiat5x5obnf5o7wwavivse3en6gccz65ouga",
+      "msg_bdrk_4hfeh24p6pwja3pklxlnc7ue4bmswzc3vmc6qbriy3hkxd6bcl3q",
+      "msg_bdrk_4uilohh5by5mf7px6awdo3qn45lvbb3uc4inmvehclzbo2w6zspa"
+    ]
   },
   "context": {
     "after": [
