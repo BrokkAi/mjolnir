@@ -1,5 +1,6 @@
 use super::*;
 use agent_client_protocol::v1::schema::{ImageContent, TextContent};
+use mj_core::elicitation::ElicitationFieldKind;
 use std::path::Path;
 
 /// Exercise the actual client and native host without printing credentials or
@@ -307,7 +308,7 @@ async fn a_muse_host_that_could_not_start_reports_its_own_diagnostic() {
 }
 
 #[tokio::test]
-#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.19.0"]
+#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.21.0"]
 async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resume() {
     let adapter =
         PathBuf::from(std::env::var_os("MJ_MUSE_ACP_TEST_BINARY").expect("set adapter path"));
@@ -433,7 +434,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
                 .await
                 .unwrap();
         }
-        let mut answered = false;
+        let mut forms = 0;
         let mut replied = false;
         loop {
             match next(&mut events).await {
@@ -444,7 +445,27 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
                 RuntimeEvent::ElicitationRequested { request } => {
                     // Guardian answers Muse permissions with auto-review.
                     assert_eq!(scenario, "question", "{request:?}");
-                    let field = &request.fields[0];
+                    // One form per question, titled by its header, with
+                    // "Explain instead" offered inside it: no route form
+                    // first, and no field shown by its id.
+                    assert_eq!(request.message, "Which implementation?", "{request:?}");
+                    let field = request
+                        .fields
+                        .iter()
+                        .find(|field| {
+                            matches!(field.kind, ElicitationFieldKind::SingleSelect { .. })
+                        })
+                        .expect("the question is a single select");
+                    assert_eq!(field.title, "Choose", "{request:?}");
+                    let ElicitationFieldKind::SingleSelect { options, .. } = &field.kind else {
+                        unreachable!()
+                    };
+                    assert!(
+                        options
+                            .iter()
+                            .any(|option| option.title == "Explain instead"),
+                        "{request:?}"
+                    );
                     let response = if choice == "accept" {
                         ElicitationResponse::Accept {
                             content: BTreeMap::from([(
@@ -465,7 +486,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
                         .await
                         .unwrap();
                     assert_eq!(result.await.unwrap(), Ok(()));
-                    answered = true;
+                    forms += 1;
                 }
                 RuntimeEvent::PromptFinished { stop_reason, .. } => {
                     assert_ne!(stop_reason, "error", "scenario {scenario}");
@@ -481,7 +502,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             assert!(replied);
         }
         if scenario == "question" {
-            assert!(answered, "scenario {scenario} did not request user input");
+            assert_eq!(forms, 1, "scenario {scenario} must show exactly one form");
         }
         commands
             .send(CommandRequest::Close {
