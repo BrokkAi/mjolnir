@@ -1261,6 +1261,20 @@ function historyEntryRow(item) {
   return row;
 }
 
+const appliedQuestionTargets = new Map();
+
+// Open a session whose agent is waiting for the user at the reply that asks
+// the question. Only entries in the loaded feed are searched; an older target
+// leaves the usual position. Each target is applied once per session.
+function scrollToQuestionTarget(session) {
+  const target = session?.question_message;
+  if (!target || appliedQuestionTargets.get(session.id) === target) return;
+  const node = [...feed.querySelectorAll('[data-entry-id]')].find(item => item.dataset.entryId === target);
+  if (!node) return;
+  node.scrollIntoView({ block: 'start' });
+  appliedQuestionTargets.set(session.id, target);
+}
+
 async function openNativeHistory(owner, agent) {
   const modal = el('dialog', 'native-agent-history');
   const title = el('h2', '', agent.name);
@@ -8161,6 +8175,7 @@ async function loadConversation(delta = false) {
       || isTransitioningSession(latest)
     ) return;
     renderEntries(result.entries, !delta || result.reset);
+    if (!delta) scrollToQuestionTarget(latest);
     presentationKey = typeof result.presentation_key === 'string'
       ? result.presentation_key
       : null;

@@ -49,6 +49,7 @@ pub(crate) struct SessionDetail {
     pub(crate) materialized_applied_event_ordinal: Option<u64>,
     pub(crate) current_turn_started_at: Option<u64>,
     pub(crate) awaiting_input: bool,
+    pub(crate) question_message: Option<String>,
     pub(crate) dismissible_question: Option<mj_core::assessment::InferredQuestion>,
     pub(crate) question_dismissal: Option<QuestionDismissal>,
     pub(crate) last_activity_at_ms: Option<u64>,
@@ -1368,6 +1369,20 @@ impl DashboardState {
                 .expect("session detail was just inserted")
                 .activity = activity;
         }
+    }
+
+    /// The current open question target, if the worker located one.
+    pub fn set_question_message(&mut self, session_id: &str, target: Option<String>) {
+        self.session_details
+            .entry(session_id.to_owned())
+            .or_default()
+            .question_message = target;
+    }
+
+    pub fn question_message(&self, session_id: &str) -> Option<&str> {
+        self.session_details
+            .get(session_id)
+            .and_then(|detail| detail.question_message.as_deref())
     }
 
     /// Record whether the controller can currently reach a session's relay

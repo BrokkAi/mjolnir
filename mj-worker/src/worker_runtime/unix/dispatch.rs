@@ -43,6 +43,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
     // Owned by this coordinator: dropping it cancels HTTP requests on every
     // exit path, and joining reports panics instead of losing background errors.
     let mut verdict_tasks = tokio::task::JoinSet::new();
+    let mut locator_tasks = tokio::task::JoinSet::new();
     let mut verdict_generation = None;
     let mut verdict_poll = tokio::time::interval(std::time::Duration::from_secs(1));
     verdict_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -293,6 +294,24 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                             Ok(answer) => {
                                 let reason = relay.apply_turn_assessment(generation, answer.assessment.expect("client validated unified verdict"))?;
                                 attempt.finish("applied", reason);
+                                if reason == "user_input_required"
+                                    && let Some(request) = relay.question_locator_request(generation)
+                                {
+                                    if request.message_ids.len() == 1 {
+                                        if let Some(id) = mj_core::activity::question_locator::transcript_stable_id(&request.message_ids[0]) {
+                                            relay.store_question_target(generation, &id)?;
+                                            if let Some(client) = &verdict {
+                                                client.log_single_question(&relay.turn_context().session_id(), &request, &id);
+                                            }
+                                        }
+                                    } else if let Some(client) = verdict.clone() {
+                                        let session = relay.turn_context().session_id();
+                                        locator_tasks.spawn(async move {
+                                            let result = client.locate_question(&session, &request).await;
+                                            (generation, request.message_ids, result)
+                                        }.with_current_subscriber());
+                                    }
+                                }
                             }
                             Err(_) => {
                                 relay.fail_turn_assessment(generation, "request_failed")?;
@@ -306,6 +325,26 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                             let mut relay = relay.lock().expect("relay state lock poisoned");
                             relay.fail_turn_assessment(generation, "classifier_task_failed")?;
                         }
+                    }
+                    _ => {}
+                }
+            }
+            result = locator_tasks.join_next(), if !locator_tasks.is_empty() && !held => {
+                match result {
+                    Some(Ok((revision, ids, Ok(Some(index))))) => {
+                        if let Some(id) = ids.get(index).and_then(|id| mj_core::activity::question_locator::transcript_stable_id(id)) {
+                            let stored = relay.lock().expect("relay state lock poisoned")
+                                .store_question_target(revision, &id)?;
+                            tracing::info!(target: "mj_jev", revision, stable_id = %id,
+                                outcome = if stored { "stored" } else { "stale" },
+                                "question locator target resolved");
+                        }
+                    }
+                    Some(Ok((_, _, Err(error)))) => {
+                        tracing::warn!(target: "mj_jev", %error, "question locator failed");
+                    }
+                    Some(Err(error)) if !error.is_cancelled() => {
+                        tracing::warn!(target: "mj_jev", %error, "question locator task failed");
                     }
                     _ => {}
                 }

@@ -1978,6 +1978,28 @@ fn a_reopened_tail_does_not_repeat_the_opening_reveal() {
     }
 }
 
+#[test]
+fn question_target_resolves_after_older_history_load_and_missing_target_falls_back() {
+    let session = long_materialized_session(TAIL_SEED_ITEMS as u64 + 120);
+    let mut full = ChatState::from_materialized(&session, &[], &[]);
+    full.restore_transcript_position(TranscriptPosition::at_stable_id("user:2".into()));
+    let expected = drawn_transcript(&mut full, 60, 24);
+
+    let mut reopened = ChatState::from_materialized_tail(&session, &[], &[]);
+    let prefix = converted_prefix(&session, &reopened);
+    reopened.restore_transcript_position(TranscriptPosition::at_stable_id("user:2".into()));
+    assert!(shows(&drawn_transcript(&mut reopened, 60, 24), "Loading"));
+    assert!(reopened.splice_transcript_prefix(prefix));
+    assert_eq!(drawn_transcript(&mut reopened, 60, 24), expected);
+
+    let mut missing = ChatState::from_materialized_tail(&session, &[], &[]);
+    let prefix = converted_prefix(&session, &missing);
+    missing.restore_transcript_position(TranscriptPosition::at_stable_id("missing".into()));
+    assert!(missing.splice_transcript_prefix(prefix));
+    drawn_transcript(&mut missing, 60, 24);
+    assert!(matches!(missing.anchor, TranscriptAnchor::Bottom));
+}
+
 // Hard-won: 2b229f70: a saved full-history index was restored against the tail.
 #[test]
 fn a_reopened_scroll_survives_tail_first_history_loading_in_either_order() {

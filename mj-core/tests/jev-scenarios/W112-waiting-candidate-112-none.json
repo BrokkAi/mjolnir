@@ -1,0 +1,187 @@
+{
+  "id": "W112",
+  "title": "Waiting candidate 112 none",
+  "category": "waiting-on-automation",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "3c1ef831899321b37231df7919da334d",
+    "session_title": "lane-py08",
+    "reply_position": 2639,
+    "captured_at": "2026-10-03T12:22:08.889Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:27",
+          "role": "user",
+          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /workspace/31e44e629cb2bbaa225a83cd820af443/.mj-agents/3c1ef831899321b37231df7919da334d. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Write anything longer (logs, tables, full findings) to files in your report directory and list their paths in the report; never put it in the report itself. Fix mechanical errors yourself (compile errors, lint and format findings, test failures your own change caused) and list each fix in one line of your report. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When a parent decision blocks further progress, hand back the question with the evidence needed to decide. The parent owns consequential design decisions and final acceptance.\n\nLane `py08`. Follow the lane brief /workspace/31e44e629cb2bbaa225a83cd820af443/bifrost/.agents/docs/codeql-python-rules-2026-10/execution/lane-brief.md, EXCEPT that its Validation and Finishing sections are replaced by /workspace/31e44e629cb2bbaa225a83cd820af443/bifrost/.buildq/LANES2.md (build only through cargo-slot; land via the merge train; include the vocabulary registry tests). Worktree: /workspace/31e44e629cb2bbaa225a83cd820af443/bifrost/.worktrees/py08 (detached at master e0e572d7ec). Ticket #4329 (PY08 string-format parsing and argument binding). Triage report: /workspace/31e44e629cb2bbaa225a83cd820af443/bifrost/.agents/docs/codeql-python-rules-2026-10/execution/triage/py08-4329.md.\n\nParent decisions:\n- Master now has py13's binary_expression kind with left/right/operator roles covering `%` (see .agents/plans/issue-4334-python-comparison-binary-facts.md) and py02's binding-uses/BindingOf relations (.agents/plans/issue-4323-python-binding-scope-exports.md). Build on them; no second binding layer.\n- Slice A: brace-format (`str.format`) parser over the decoded literal value plus argument binding: py/str-format/missing-argument, py/str-format/missing-named-argument, and the three #3543-covered rows (py/str-format/mixed-fields, surplus-argument, surplus-named-argument): #3543 has no parser, so prove all five here. The campaign recorded a near-miss false positive for surplus-argument; include it.\n- Slice B: percent-format (`%`) parser plus RHS semantics: py/percent-format/wrong-arguments, py/percent-format/unsupported-character, py/percent-format/not-mapping. RHS tuple arity and mapping-ness come from structure (tuple/dict literal, or a binding whose single reaching value is one); anything else is typed-incomplete.\n- Parsing a format string's decoded VALUE is value analysis and is allowed. Receiver-variable-to-literal resolution uses py02 binding facts. f-strings are out of scope.\n- Unsupported shapes (starred args, **kwargs, dynamic format strings) stay typed-incomplete."
+        },
+        {
+          "id": "agent:35",
+          "role": "assistant",
+          "text": "I’m checking the lane brief, the replacement build and handback instructions, and the current `py08` worktree before changing anything. I’ll keep the implementation within the agreed two slices and report the evidence through the required handback."
+        },
+        {
+          "id": "agent:100",
+          "role": "assistant",
+          "text": "The replacement procedure means I’ll build only through `cargo-slot`, keep all edits in `.worktrees/py08`, and avoid GitHub issue writes. The agreed design requires relational, SQL-readable format facts; I’m checking the architecture and existing structural/query persistence paths now to confirm what the two slices can add without duplicating the new binary or binding facts."
+        },
+        {
+          "id": "agent:508",
+          "role": "assistant",
+          "text": "The existing format fixtures confirm the key false-positive case: `{0} {1}` with two arguments must stay clean while `{0}` with two arguments is surplus. Python’s normalizer already has `binary_expression` and call argument roles. The remaining integration question is where to combine a receiver’s literal initializer with py02’s lexical `BindingOf` result; I’m tracing that query boundary while setting down the required living plan."
+        },
+        {
+          "id": "agent:794",
+          "role": "assistant",
+          "text": "I found a safe independent milestone: the decoded-value parsers can be built and tested without deciding how assignment origins join `BindingOf`. I’m implementing that parser layer first; the execution-plan record now captures the unresolved boundary so I can either integrate it through the existing binding facts or return a precise question if the query API cannot support it cleanly."
+        },
+        {
+          "id": "agent:894",
+          "role": "assistant",
+          "text": "The parser milestone is in place with cases for escaped braces/percents, explicit and automatic fields, named fields, nested width fields, conversion slots, unsupported conversions, and malformed input. The focused Python-crate run is waiting for one of the three shared build slots; while it waits, I’m checking the smallest viable RQL integration points and whether they can invoke `BindingOf` without recursive structural fact loading."
+        },
+        {
+          "id": "agent:1060",
+          "role": "assistant",
+          "text": "The first parser run reached compilation but caught two test-only type mismatches in the unsupported-conversion expectations; I corrected those. The rerun is compiling through the shared slot now. The important design boundary remains: py02’s binding rows establish lexical identity, while the literal value requires a structured assignment join; I’m checking whether the existing structural query pipeline can supply that join without duplicating binding resolution."
+        },
+        {
+          "id": "agent:1230",
+          "role": "assistant",
+          "text": "The six focused parser tests now pass, and the repository-wide `cargo fmt --all --check` is clean. I’m keeping this checkpoint parser-only until the parent chooses the public operation/value-origin query boundary; that boundary determines how policy results and typed incompleteness are surfaced."
+        },
+        {
+          "id": "agent:1318",
+          "role": "assistant",
+          "text": "Checkpoint committed at `4482e2d223af28f37e652210451b9f235440281f`. Six parser tests and formatting checks pass. The eight rule integrations remain unfinished pending the parent’s choice of public query contract; the handback report includes the evidence and recommendation."
+        },
+        {
+          "id": "user:1406",
+          "role": "user",
+          "text": "Parent decision: take your recommendation. Query-time, not persisted. Add format-issue rows to the existing typed `python_rule_fact` surface (the py04-09 lane's PythonRuleFact rows on master, already a Match-policy terminal; the py07 lane is adding exception rows to the same surface concurrently, so keep your additions grouped). Compute them per query over existing call nodes (`str.format` on a string receiver) and py13's binary_expression `%` nodes: the format string comes from the literal operand directly, or from a receiver/left name whose BindingOf binding has exactly one reaching initializer found through the existing structural Assignment left/right roles in the same scope; zero or several initializers, augmented assignments, globals written elsewhere, or unresolved names make the row typed-incomplete. Do not call environment_for_file from structural extraction. Then prove all eight rules with policy fixtures (positives plus the campaign near misses, including the surplus-argument near miss) and land per LANES2 with the vocabulary registry tests."
+        },
+        {
+          "id": "agent:1420",
+          "role": "assistant",
+          "text": "I’m resuming `py08` with the parent’s query-time design. I’ll inspect the current master-side `python_rule_fact` surface and py07’s concurrent exception-row edits first, then implement the format checks as grouped additions that reuse structural call/assignment facts and existing `BindingOf`."
+        },
+        {
+          "id": "agent:1494",
+          "role": "assistant",
+          "text": "I’m continuing from the parser checkpoint and integrating the findings into the existing typed Python rule-fact query path, following the parent’s query-time design. I’ll first refresh the relevant lane/worktree state, then implement the rows and policy fixtures before running the lane gate."
+        },
+        {
+          "id": "agent:2021",
+          "role": "assistant",
+          "text": "The current tree already has the PythonRuleFact terminal and both prerequisites. I’m adding one query step over selected structural calls and `%` binary nodes; each matching operation will emit a typed row per applicable rule, including explicit `no_issue` and `unknown` outcomes so unsupported shapes cannot look clean. The campaign’s not-mapping fixture uses a list RHS, so I’ve asked whether that shape should be classified as a known non-mapping while I proceed with the rest."
+        },
+        {
+          "id": "user:2307",
+          "role": "user",
+          "text": "Parent: yes. For py/percent-format/not-mapping, an RHS that is structurally a list, tuple, set, string or numeric literal (or a binding whose single reaching initializer is one) is a known non-mapping: those builtin types are not Mappings. Dict literals and dict(...) calls with builtin identity are mappings; everything else (names with unknown values, calls, attributes, comprehensions other than dict comprehensions) is typed-incomplete. Continue the implementation, fixtures and landing per LANES2."
+        },
+        {
+          "id": "agent:2321",
+          "role": "assistant",
+          "text": "Thanks, that resolves the list case and tightens the mapping boundary. I’ll classify only the named built-in literal/container shapes as mapping or non-mapping, resolve `dict(...)` only when its builtin identity is structurally unshadowed, and leave every other dynamic RHS typed-incomplete."
+        },
+        {
+          "id": "agent:2481",
+          "role": "assistant",
+          "text": "The format parsers and row vocabulary are in place. I’m wiring the query step into the structural pipeline now, then I’ll add policy fixtures for the eight rules and the typed-incomplete cases before running the lane gate."
+        },
+        {
+          "id": "agent:2639",
+          "role": "assistant",
+          "text": "The query vocabulary is wired and both call and binary-expression inputs now reach the same query-local projection. The focused RQL test is waiting for the build slot; while it runs I’m keeping the lane changes isolated and will address any compile feedback before adding the policy cases."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Parent: yes. For py/percent-format/not-mapping, an RHS that is structurally a list, tuple, set, string or numeric literal (or a binding whose single reaching initializer is one) is a known non-mapping: those builtin types are not Mappings. Dict literals and dict(...) calls with builtin identity are mappings; everything else (names with unknown values, calls, attributes, comprehensions other than dict comprehensions) is typed-incomplete. Continue the implementation, fixtures and landing per LANES2.",
+    "assistant_text_tail": "The query vocabulary is wired and both call and binary-expression inputs now reach the same query-local projection. The focused RQL test is waiting for the build slot; while it runs I’m keeping the lane changes isolated and will address any compile feedback before adding the policy cases.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 2307,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "2026-11-05 labeling brief",
+    "next": "The named wait remains pending.",
+    "input_rationale": "The query vocabulary is wired and both call and binary-expression inputs now reach the same query-local projection. The focused RQL test is waiting for the build slot; while it runs I’m keeping the lane changes isolated and will address any compile feedback before adding the policy cases."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-03T12:28:27.644Z",
+        "kind": "agent",
+        "text": "The first gate stopped at formatting, before compilation, because the new RQL module needed rustfmt adjustments. I’ve applied the formatter; the shared host is busy with other lane builds, so validati"
+      },
+      {
+        "at": "2026-10-03T12:32:47.515Z",
+        "kind": "agent",
+        "text": "The shared build queue is still occupied, and even the repository-wide formatter is running slowly under the concurrent lane load. The implementation now treats `%` RHS literals according to the agree"
+      },
+      {
+        "at": "2026-10-03T12:40:47.704Z",
+        "kind": "agent",
+        "text": "The query-time branch is now bounded to one parsed file at a time, and the policy fixtures exercise both RQL input kinds separately. The first `cargo-slot` build has started after waiting for another "
+      },
+      {
+        "at": "2026-10-03T12:41:52.599Z",
+        "kind": "agent",
+        "text": "The first compile reached the new module and found one iterator mismatch: tree-sitter’s named-child iterator cannot be reversed directly. I’m fixing that by collecting the children before pushing them"
+      },
+      {
+        "at": "2026-10-03T12:44:17.106Z",
+        "kind": "agent",
+        "text": "The focused RQL frontend test now passes, and the new query step compiles. I also expanded the policy fixture to cover RHS aliases for both tuples and mappings, alongside direct literal cases; next I’"
+      },
+      {
+        "at": "2026-10-03T12:48:11.918Z",
+        "kind": "agent",
+        "text": "The query frontend test passed. The local `master` ref has since advanced beyond this worktree to the PY04–09 merge, so I’ll do the required merge only after the current-tree policy and crate gates ar"
+      }
+    ]
+  }
+}

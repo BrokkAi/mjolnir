@@ -71,6 +71,7 @@ test('conversation deltas carry the last presentation key and accept older respo
       return responses.shift();
     },
     renderEntries: (entries, replace) => renders.push({ entries, replace }),
+    scrollToQuestionTarget: () => {},
     isTransitioningSession: () => false,
     isLoadingConversationSession: () => false,
     renderConversationTransition: () => assert.fail('conversation unexpectedly transitioned'),
@@ -94,6 +95,26 @@ test('conversation deltas carry the last presentation key and accept older respo
   );
   assert.equal(context.presentationKey, null, 'missing keys remain compatible with an older server');
   assert.deepEqual(renders[1], { entries: [{ id: 2 }], replace: false });
+});
+
+test('question target scrolls a loaded entry once and ignores targets outside the feed', () => {
+  const scrolled = [];
+  const row = id => ({ dataset: { entryId: id }, scrollIntoView(options) { scrolled.push([id, options.block]); } });
+  const rows = [row('agent:older'), row('agent:question'), row('agent:latest')];
+  const context = vm.createContext({ feed: { querySelectorAll: () => rows } });
+  vm.runInContext(
+    sourceBetween('const appliedQuestionTargets = new Map();', '\nasync function openNativeHistory('),
+    context,
+  );
+
+  vm.runInContext("scrollToQuestionTarget({ id: 'session/1', question_message: 'agent:question' })", context);
+  assert.deepEqual(scrolled, [['agent:question', 'start']]);
+  vm.runInContext("scrollToQuestionTarget({ id: 'session/1', question_message: 'agent:question' })", context);
+  assert.equal(scrolled.length, 1, 'a target is applied once');
+  vm.runInContext("scrollToQuestionTarget({ id: 'session/1', question_message: 'agent:absent' })", context);
+  assert.equal(scrolled.length, 1, 'a target outside the feed leaves the position alone');
+  vm.runInContext("scrollToQuestionTarget({ id: 'session/2' })", context);
+  assert.equal(scrolled.length, 1);
 });
 
 test('runtime rows resolve interned values, merge metadata and reject gaps without partial updates', () => {

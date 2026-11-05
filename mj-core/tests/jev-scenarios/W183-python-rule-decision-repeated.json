@@ -1,0 +1,358 @@
+{
+  "id": "W183",
+  "title": "Python rule decision repeated",
+  "category": "waiting-with-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "31e44e629cb2bbaa225a83cd820af443",
+    "session_title": "bifrost via claude3",
+    "reply_position": 25193,
+    "captured_at": "2026-10-17T00:52:02.898Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "/goal close the gaps to enable effective python rules in #4321. if you disagree with a ticket's premise, or if it turns out to be based on incorrect or obsolete assumptions, comment, mark escalated, and move on. use concurrent subagents where that is useful."
+        },
+        {
+          "id": "user:458",
+          "role": "user",
+          "text": "We can just let the agents have a free for all, but if we find the agents mostly waiting for cargo, let's experiment with tasking one agent to own the build/test queue while you supervise and merge"
+        },
+        {
+          "id": "user:1212",
+          "role": "user",
+          "text": "you can bypass the queue with MBX_SCHEDULER=0 if you think you're being unnecessarily throttled"
+        },
+        {
+          "id": "user:5465",
+          "role": "user",
+          "text": "Yes"
+        },
+        {
+          "id": "user:8996",
+          "role": "user",
+          "text": "did you pull the #4438 directives yet?"
+        },
+        {
+          "id": "user:12084",
+          "role": "user",
+          "text": "master breakage you noticed is repaired (there are others but that's the big\none)"
+        },
+        {
+          "id": "user:13105",
+          "role": "user",
+          "text": "great. how about the actual policy work?"
+        },
+        {
+          "id": "user:13353",
+          "role": "user",
+          "text": "172 draft .rqlp files from the campaign under .agents/records/codeql-parity-2026-10/python/verification/\n\nthe fuck, we did a big campaign and then didn't generate actual rules?"
+        },
+        {
+          "id": "user:13496",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:13506",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:13551",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:13745",
+          "role": "user",
+          "text": "the PRs are merged I think. yes, start the authoring. follow the pack authoring guidelines on public/premium pls"
+        },
+        {
+          "id": "user:16509",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:16982",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:17805",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:17820",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:18494",
+          "role": "user",
+          "text": "mj is fixed"
+        },
+        {
+          "id": "user:18710",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:18715",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:19326",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:19841",
+          "role": "user",
+          "text": "2. what are the pros and cons of each?\n\n1. yes but check to see if anyone else has done this already\n\n0a. also land 4766\n0b. mj is fixed"
+        },
+        {
+          "id": "user:20920",
+          "role": "user",
+          "text": "fable, i'd like a second opinion on question 2"
+        },
+        {
+          "id": "user:21319",
+          "role": "user",
+          "text": "ok, let's do it, but if things get messier than expected let's re-evaluate"
+        },
+        {
+          "id": "user:21797",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:22187",
+          "role": "user",
+          "text": "Recs accepted "
+        },
+        {
+          "id": "user:22606",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:22645",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:22882",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:23582",
+          "role": "user",
+          "text": "Yes, but create a comment on a ticket for later"
+        },
+        {
+          "id": "agent:23585",
+          "role": "assistant",
+          "text": "Agreed. I'll put the deferred NoSQL plan on #4652, the issue that owns the NoSQL rule, and start diagnosing the call-bindings gap."
+        },
+        {
+          "id": "user:23621",
+          "role": "user",
+          "text": "Create or comment*"
+        },
+        {
+          "id": "agent:23848",
+          "role": "assistant",
+          "text": "The call-bindings gap is fixed: #5421 is in the merge queue. That was the last engine blocker for the NoSQL rule I know of.\n\n**The fix:** three places in `python/type_flow.rs` answered \"which exact result does this receiver come from?\", each with its own rule:\n- the dispatch identities, which #5394 had already updated;\n- the adapter's receiver proof, which call-bindings uses;\n- the member-coverage check.\n\nAll three now use one shared helper. The child also audited every other local-variable-only receiver check, and kept the ones that answer different questions, such as `self` and `super` ownership.\n\n**Result:** an inline `client.get_database(\"db\").get_collection(\"c\").find(x)` is now an exact sink on both dispatch-targets and call-bindings, the same as the local-variable form. The external method bodies stay partial. No existing expectations changed, and 2,974 tests passed after merging current master. I added a note on #4652 saying the deferred NoSQL content now has no engine blockers left.\n\n**Where #4321 stands:**\n- **Shipped:** two batches of Python rules (bifrost-packs #71 and #98, including `iter-returns-non-iterator`), plus the engine work behind them.\n- **Open:** bifrost-packs #97 (uninitialized-local), waiting for review; bifrost-dev #5421, in the merge queue.\n- **Deferred:** the NoSQL content, until v0.13.1 (#4709). The plan is on #4652.\n\n`★ Insight ─────────────────────────────────────`\n- The same defect showed up three times in this campaign: one question answered separately in several places, with only one updated. First the diagnostics recording in #5359, then the result-class sites in #5394, now the receiver origins in #5421. Each time, the lasting fix was to write the rule once, rather than patch the copy that happened to fail.\n- The child's search for a third copy before editing was what made this fix complete. Changing only the two copies the diagnosis named would have left the inline chain failing, for a reason that was harder to see.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "user:24011",
+          "role": "user",
+          "text": "What's next? "
+        },
+        {
+          "id": "agent:24014",
+          "role": "assistant",
+          "text": "I'll check what's still open under #4321 before answering."
+        },
+        {
+          "id": "agent:24025",
+          "role": "assistant",
+          "text": "Next, I recommend two cheap checks before any new engine work, because this round changed behavior that every Python rule depends on.\n\n**1. Re-check every shipped Python rule against current master.** This round changed shared engine behavior:\n- partial rows now always produce diagnostics (#5359);\n- the whitespace validator (#5364);\n- dict-literal stores and keyed reads (#5401);\n- exact receivers (#5394, #5421).\n\nThe pack repo's CI doesn't run the engine, so nothing would catch a shipped rule that now reports an extra finding or loses one. That covers about 75 public rules from #71, #98 and #97. The check reruns each rule's fixture and its CodeQL upstream tests on one master binary, compared with the results we recorded. This is one child, mostly run time.\n\n**2. Re-test the rules we held back.** The same changes may already unblock some of them:\n- the call-argument rules from #4648, such as call-wrong-arguments, which was missing a few rows and inconclusive;\n- bad-tag-filter, which missed 3 of 17 rows;\n- the remaining class-member rule from #4645;\n- explicit-return-in-init and procedure-return-value-used, which had extra findings.\n\nAny that now pass the gate ship in the next pack batch without new engine work. This is also one child.\n\n**3. Then the remaining engine gaps, ordered by how many public rules each unblocks:**\n- **#4649, return-value facts:** explicit-return-in-init, procedure-return-value-used and mismatched-multiple-assignment, if step 2 doesn't fix them.\n- **#4647, import relations:**\n  - cyclic-import, which needs package identity (#3673);\n  - unused-import, which needs doctest references and has 10 extra findings to explain;\n  - import-failure.\n- **Regex recall:** bad-tag-filter and redos, which found 83 of 98 rows.\n\n**Waiting on v0.13.1 (#4709):**\n- the premium security work: #4651 request sources, #4652 NoSQL and LDAP, and premium PR #42;\n- also pack PR #97, which only needs a reviewer.\n\n**Small, any time:** #5403, the policy reference that documents transform ports the compiler refuses.\n\nShould I start steps 1 and 2 in parallel?"
+        },
+        {
+          "id": "user:24174",
+          "role": "user",
+          "text": "k"
+        },
+        {
+          "id": "agent:24176",
+          "role": "assistant",
+          "text": "Both checks run in parallel. They build the same master binary through the build queue, so the second build finds the first one's output already fresh. Both are read-only and only report back. I'll decide any fixes."
+        },
+        {
+          "id": "agent:24213",
+          "role": "assistant",
+          "text": "Both checks are running against master 28189a3fef. Both are read-only, so nothing in the pack repos changes until I review the results.\n\n- **Sweep of shipped rules:** about 76 shipped public Python rules, plus the uninitialized-local rule from #97. Each runs over its fixture and its CodeQL upstream tests and is compared with the recorded results. Each rule is marked unchanged, improved or regressed, and every regression comes with the exact rows that differ.\n- **Re-test of held-back rules:** every unshipped public candidate that has a policy file. That includes the call-argument rules, bad-tag-filter, redos, the three return-value rules, the import rules, and anything else in the original triage. Each one gets the shipping gate and is reported as pass, or fail with a one-line blocker.\n\nThe pass list becomes the next pack batch. Any regression comes back to me before anything is changed."
+        },
+        {
+          "id": "user:24283",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "agent:24449",
+          "role": "assistant",
+          "text": "Both checks are back. Nothing shipped has broken, and seven more rules are ready.\n\n**Sweep of shipped rules** (84 rules, on master 28189a3fef):\n- **81 unchanged.**\n- **2 improved.** `unnecessary-lambda` now finds all 6 of 6 rows on a complete run (it was 3 of 6, inconclusive). `comparison-using-is` also changed for the better.\n- **1 location change.** `unexpected-raise-in-special-method` now reports its fixture finding on the `def __getitem__` line instead of the `raise` line. The upstream result is still 6 of 6. The method is where CodeQL anchors this query, so the new location is closer to CodeQL. A read-only check is finding which change caused it and whether it was deliberate, using the binaries we already have. If it was, I'll update that fixture's README.\n- `iter-returns-non-self` went from complete to inconclusive, but kept both expected rows. The new diagnostics are on three methods CodeQL considers clean.\n\n**Re-test of held-back rules:** 7 lexical-variable rules pass the gate cleanly:\n- `local-shadows-builtin` and `local-shadows-global`;\n- `nested-loops-with-same-variable` and `nested-loops-with-same-variable-reused`;\n- `unused-local-variable`, `unused-loop-variable` and `unused-parameter`.\n\nTheir engine work (#4691) landed early in the campaign, and I left them out of the earlier pack batches. A child is now adding them as pack batch 4, re-running the gate itself first.\n\n**Still failing, each with a specific engine blocker:**\n- **Call-argument rules:** calls at module level have no enclosing procedure, and class-call bindings are incomplete.\n- **bad-tag-filter:** misses 6 rows.\n- **redos:** misses 32 rows and has 10 extra findings.\n- **Return-value rules:** extra findings for explicit-return-in-init and procedure-return-value-used, and an incomplete tuple-return group for mismatched-multiple-assignment.\n\nThese are the candidates for the next round of engine work."
+        },
+        {
+          "id": "user:24575",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "agent:24645",
+          "role": "assistant",
+          "text": "Pack PR #99 is open. It adds the 7 variable-usage rules, all complete on CodeQL's tests with no extra findings and no misses. It also corrects the stale `unexpected-raise-in-special-method` README.\n\nThe anchor change behind that README was deliberate, from our own #4732. That rule's findings now match all six of CodeQL's method locations, so the sweep's one regression was really an improvement with an outdated README.\n\n**Waiting for review:** pack PRs #97 (uninitialized-local) and #99.\n\n**Next, if you want to keep going: three engine gaps, each blocking specific rules:**\n1. **Call-argument rules** (call-wrong-arguments, call-wrong-named-argument and two class-call variants). Calls at module level have no enclosing procedure, and class-call bindings are incomplete. This is probably the most generic of the three, because module-level code is common.\n2. **Regex recall:** bad-tag-filter misses 6 rows, and redos misses 32 rows with 10 extra findings.\n3. **Return-value rules (#4649):** explicit-return-in-init and procedure-return-value-used report extra findings, and mismatched-multiple-assignment has an incomplete tuple-return group.\n\nI'd start with item 1, using a read-only diagnosis first, as with the other gaps. Should I go ahead?"
+        },
+        {
+          "id": "user:24734",
+          "role": "user",
+          "text": "Yes"
+        },
+        {
+          "id": "agent:24736",
+          "role": "assistant",
+          "text": "Starting the read-only diagnosis of the four call-argument rule failures."
+        },
+        {
+          "id": "agent:24756",
+          "role": "assistant",
+          "text": "The diagnosis found four separate causes. Two have clear fixes; two need your input.\n\n**Clear fixes:**\n1. **Unexpanded argument packs (6 of the 8 misses), confirmed.** Calls like `f6(*(1, 2, 3))`, `f6(*t3)` and `f6(**{\"x\": 1, ...})` are marked `spread_not_expanded` by the shared call-binding producer (`analysis/usages/call_binding.rs:550-565`), even when the pack is a literal whose shape is known exactly. This happens inside functions too. The fix is to expand a pack whose operand is a tuple or list literal, or a dict literal with only string keys. I'm starting it now.\n2. **A policy omission (2 extras), confirmed.** CodeQL skips calls in files that use `mox`, a mocking library (`CallArgs.qll:157-172`), and our policy doesn't. That's a small pack-side fix, which I'll make when this batch ships.\n\n**Need your decision:**\n3. **Python has no module initializer procedure, confirmed.** Calls at module level have no enclosing procedure, so receiver checks can't run on them (`no_enclosing_procedure`). JavaScript, TypeScript and Ruby already lower top-level code as an initializer procedure (`js_ts/semantic/syntax.rs:145-163`, `ruby/semantic.rs:1360-1380`), so there is a precedent. Python and PHP lack it. Adding one for Python would change the analysis of every Python file: module-level taint and flows would start being analyzed. It's the most valuable fix here and also the riskiest: many expected results would change, and analysis cost goes up. I'd write an ExecPlan for it first, following the JavaScript and Ruby design. One remaining miss (`e.spam(0)`, where the receiver is either `Eggs1()` or `Eggs2()`) also needs bindings per possible target. Moving that call into a function removes the missing-procedure error, but the call still doesn't resolve, so this part needs its own design.\n4. **A real defect that CodeQL misses (1-2 extras).** For `def f4(x, **y)`, the call `f4(q=4)` is missing `x`. Bifrost reports it, but CodeQL counts `q` toward the minimum and stays silent. Our gate counts anything CodeQL doesn't report as a false positive. I'd treat a confirmed defect like this as a true positive and document it in the fixture as a deliberate difference from CodeQL. That changes the gate's definition, so it's your call.\n\n**Which rules this unblocks:**\n\n| Rule | After fix 1 | Also needs |\n| --- | --- | --- |\n| call-wrong-named-argument | passes | nothing else |\n| call-wrong-named-class-argument | passes | nothing else |\n| call-wrong-number-class-arguments | blocked | decision 4 |\n| call-wrong-arguments | blocked | fix 2, decisions 3 and 4, and per-target bindings |"
+        },
+        {
+          "id": "agent:24984",
+          "role": "assistant",
+          "text": "The literal-pack fix is now being implemented. It expands `*(...)`, `*[...]` and string-keyed `**{...}` where the Python call shape is built, so the shared binder doesn't change. A name operand like `t3` expands only if an existing helper proves it has a single literal assignment. It re-runs all four call-argument rules against CodeQL's tests and should unblock call-wrong-named-argument and call-wrong-named-class-argument.\n\nTwo decisions from my previous message are still yours:\n- **3. A Python module initializer procedure.** I recommend an ExecPlan first, following the JavaScript and Ruby design, because it changes how every Python file is analyzed.\n- **4. The real defect CodeQL misses** (`f4(q=4)` where `f4(x, **y)` is missing `x`). I recommend counting it as a true positive and documenting the difference in the fixture."
+        },
+        {
+          "id": "user:25044",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "agent:25086",
+          "role": "assistant",
+          "text": "The literal-pack lane is implementing again, with my three decisions:\n1. **Literal packs only.** Named operands like `*t3` stay unexpanded until someone writes a proof that their contents don't change.\n2. **No new provenance field.**\n3. **Keyword names from the decoded string value.**\n\nThat should be enough for `call-wrong-named-argument` and `call-wrong-named-class-argument` to pass.\n\nThe two decisions from earlier are still yours: the Python module initializer procedure, where I recommend an ExecPlan first, and counting the `f4(q=4)` defect that CodeQL misses as a true positive."
+        },
+        {
+          "id": "user:25141",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "agent:25193",
+          "role": "assistant",
+          "text": "PR #5512 is in the merge queue. It expands literal argument packs (`*(...)`, `*[...]` and string-keyed `**{...}`) for Python call binding.\n\n**Gate before and after:**\n\n| Rule | Before | After |\n| --- | --- | --- |\n| call-wrong-named-argument | 1 miss | exact |\n| call-wrong-named-class-argument | 1 miss | exact |\n| call-wrong-number-class-arguments | 2 misses, 1 extra | 1 miss (`*t3`), 1 extra (the `f4(q=4)`-style defect) |\n| call-wrong-arguments | 4 misses, 3 extras | 3 misses (`*t3` and the joined-receiver `e.spam(0)`), 3 extras (mox and `**y`) |\n\nThe two named-argument rules match exactly, but their runs end inconclusive, the standard we've accepted for shipping. Both go into pack batch 5 once #5512 lands. Named operands like `*t3` stay unexpanded, and the PR records that as a follow-up.\n\n**Five Rust macro test failures, likely unrelated.** They showed up on the branch, but the PR's only shared change is a new method that only Python calls. I expect they already fail on master, but I haven't confirmed it; the merge queue will show it.\n\n**Waiting on review:** pack PRs #97 (uninitialized-local) and #99 (7 variable rules).\n\n**Still yours to decide:**\n- whether to start a Python module initializer procedure, with an ExecPlan first;\n- whether to count the `f4(q=4)` defect, a real bug CodeQL misses, as a true positive.\n\nThose two decisions are what stand between the remaining call-argument rules and shipping."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "assistant_text_tail": "PR #5512 is in the merge queue. It expands literal argument packs (`*(...)`, `*[...]` and string-keyed `**{...}`) for Python call binding.\n\n**Gate before and after:**\n\n| Rule | Before | After |\n| --- | --- | --- |\n| call-wrong-named-argument | 1 miss | exact |\n| call-wrong-named-class-argument | 1 miss | exact |\n| call-wrong-number-class-arguments | 2 misses, 1 extra | 1 miss (`*t3`), 1 extra (the `f4(q=4)`-style defect) |\n| call-wrong-arguments | 4 misses, 3 extras | 3 misses (`*t3` and the joined-receiver `e.spam(0)`), 3 extras (mox and `**y`) |\n\nThe two named-argument rules match exactly, but their runs end inconclusive, the standard we've accepted for shipping. Both go into pack batch 5 once #5512 lands. Named operands like `*t3` stay unexpanded, and the PR records that as a follow-up.\n\n**Five Rust macro test failures, likely unrelated.** They showed up on the branch, but the PR's only shared change is a new method that only Python calls. I expect they already fail on master, but I haven't confirmed it; the merge queue will show it.\n\n**Waiting on review:** pack PRs #97 (uninitialized-local) and #99 (7 variable rules).\n\n**Still yours to decide:**\n- whether to start a Python module initializer procedure, with an ExecPlan first;\n- whether to count the `f4(q=4)` defect, a real bug CodeQL misses, as a true positive.\n\nThose two decisions are what stand between the remaining call-argument rules and shipping.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "required",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null,
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      25193
+    ],
+    "user_position": null,
+    "judgment": "Closing reply at transcript position 25193 leaves a direct user decision unresolved: ",
+    "next": "n/a",
+    "input_rationale": "The reply explicitly requests a user decision and no later user response is present in the captured turn.",
+    "request_message_ids": [
+      "agent:25193"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-17T11:31:02.892Z",
+        "kind": "user",
+        "text": "1. Yes. 2. It's a true positive. We shouldn't match CodeQL bug-for-bug"
+      },
+      {
+        "at": "2026-10-17T11:31:47.577Z",
+        "kind": "agent",
+        "text": "Both decisions recorded. \"Don't match CodeQL bug-for-bug\" changes the gate for every rule, not just this one, so I'll save it as a standing rule."
+      },
+      {
+        "at": "2026-10-17T11:33:32.213Z",
+        "kind": "agent",
+        "text": "Both decisions are recorded.  **Decision 2: true positives.** I saved it as a standing rule for every CodeQL-parity gate and added it to the shared gate brief. Extra findings are now classified one by"
+      },
+      {
+        "at": "2026-10-17T11:39:01.735Z",
+        "kind": "system",
+        "text": "Subagent \"map-module-initializer\" (92bd1cfb) finished turn 20 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-17T11:39:01.800Z",
+        "kind": "user",
+        "text": "One or more sub-agents finished. Call wait to collect their reports."
+      },
+      {
+        "at": "2026-10-17T11:39:17.337Z",
+        "kind": "agent",
+        "text": "The map is in. I'll write the ExecPlan myself, so first I'll read the repo's plan standard and the full map."
+      }
+    ]
+  }
+}

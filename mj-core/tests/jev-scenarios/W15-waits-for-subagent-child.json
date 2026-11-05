@@ -1,0 +1,195 @@
+{
+  "id": "W15",
+  "title": "Waits for subagent child",
+  "category": "waiting-on-automation",
+  "harness": "claude",
+  "source": {
+    "kind": "worker-decision",
+    "session": "5992a2122571ac7c7e303ec069a19314",
+    "session_title": "mjolnir via claude2",
+    "decision": "assessment-5992a2122571ac7c7e303ec069a19314-3065",
+    "contract": "turn-verdict-v7",
+    "captured_at": "2026-11-05T16:10:42.004Z",
+    "assessed_at": "2026-11-05T16:15:41.281Z",
+    "recorded_action": "uncertain",
+    "recorded_status": "consumed",
+    "recorded_reason": "automatic_action_admitted"
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "msg_011Cgk3k1o4Q9oniDXwhfmgy",
+          "role": "assistant",
+          "text": "I approved the #10021 plan with four changes and assigned its version numbers.\n\n**Why the design is sound:** the code builds the created object's type only from the class name. The constructor is used only to check that it belongs to that class, so its incomplete status says nothing about the type. After the change, `new File(\"\").exists()` behaves the same as `File g = new File(\"\"); g.exists()`, which master already handles correctly.\n\n**The plan's open question:** the audit found no code that needs the constructor's incomplete status to be copied onto the created object's type. It did not prove that every downstream check is safe. Constructor results themselves still report their three incompleteness reasons.\n\n**What the audit confirmed:**\n- Only Java and Scala produce this kind of data. Python and the usages code read it but never produce it.\n- No stored data depends on this change apart from the caches the plan already bumps.\n\n**Changes I required:**\n- One test checks both that the constructor call stays incomplete and that the object's type becomes complete.\n- One Scala test case, if a suitable test already exists; no new round of test runs.\n- Existing or minimal test cases for three situations:\n  - an anonymous class;\n  - a class name that is itself incomplete or ambiguous;\n  - a constructor whose owning class doesn't match the class name.\n- Decoding the three incompleteness reasons is not required.\n\n**Version numbers:**\n- ICFG pair v710/v709. I checked master's current pair (v709/v708) and every open pull request just now.\n- Policy cache token `-10021-creation-type-from-qualifier`. The issue that makes tokens required (#7262) is still open.\n\nI closed the audit and recorded the assignment in memory.\n\nWaiting for bifrost3's final commit."
+        },
+        {
+          "id": "msg_011Cgk41iYS2erG5TRjeMtG5",
+          "role": "assistant",
+          "text": "Two more reviews are in progress, each with a read-only code audit running:\n\n**#9918 (session d9d993b5): Rust unit-summary fix**\n- **The fix:** two SQL joins matched an import's written path against a module's own path. Those mean different things, so some local imports were wrongly marked unresolved. After the fix, some Rust summaries become complete for unchanged code.\n- **The author's question:** they bumped the summary version. Does this also need the ICFG pair bump and a policy cache token, as the cache rules suggest for any change to resolution results?\n- **What the audit checks:**\n  - whether the summary version already feeds the Rust language version, which would cover policy results;\n  - whether any stored result keyed by the ICFG versions holds Rust answers at all, since Rust has no type flow;\n  - how past bumps of this version were handled.\n\n**#9855 M3 (session c2a66e1c): importing CodeQL's Rust models for third-party crates**\n- **Its questions:**\n  - whether rustdoc JSON fed into the existing dependency reader is the right entry point, and which cache versions it affects;\n  - whether the Rust resolver can follow `sqlx::query` back to where it is defined, in `sqlx_core`;\n  - whether rustdoc JSON published by docs.rs is acceptable.\n- **The audit is reading the code for all three.**\n- **Early warning sent on docs.rs:** that session has already told its worker to use docs.rs files. I warned it before the worker builds on them:\n  - docs.rs builds docs with a special `docsrs` setting, often with every feature turned on, for one target platform. That file can list public items that don't exist in the configuration CodeQL's tests use.\n  - Treating those items as real would produce false results, not just less precise ones.\n  - My provisional position: accept a docs.rs file only when its feature set exactly matches the tests' features; otherwise treat it as a mismatch. The docs.rs setting, target platform and rustdoc format version must also be recorded.\n  - I asked it to hold that approach until I rule.\n\nWaiting for the two audits and bifrost3's final commit."
+        },
+        {
+          "id": "msg_011Cgk4DJGWTeWFchAb2ov25",
+          "role": "assistant",
+          "text": "Both audits have reported, and I sent rulings on both requests.\n\n**#9918 (session d9d993b5): add a policy token, no ICFG pair**\n- The author's summary version bump to v24 covers the Rust summaries themselves.\n- Policy results need a new token, `-9918-rust-local-import-routes`. Policy cache keys don't include that version, and issue #7262 is still open, so a reused policy result can skip the read that would catch the change.\n- The ICFG pair bump is not needed. No stored result keyed by the ICFG versions holds Rust answers: Rust has no type flow, and the other affected caches live only in memory, so they start empty in a new build. This matches the earlier E1 ruling for Rust. The last two bumps of this version also moved neither.\n- The audit couldn't see the branch itself, so this rests on the author's description of the change.\n\n**#9855 M3 (session c2a66e1c): first step approved with changes; SQLx support needs its own plan**\n- **Entry point:** the dependency reader is the right place, and the code already accepts externally supplied rustdoc files. The first step (M3a) should fill in that existing input, not add a second one.\n- **Cache versions:** new artifact content needs no manual version bump. The file's hash and details (features, compiler version, format version, target) already feed the model fingerprint, which feeds both ICFG versions and policy keys.\n- **SQLx:** the resolver cannot follow `sqlx::query` back to `sqlx_core` today. The code joins definitions across crates only within one set of rustdoc files, and a dependency is read from a single file. No existing issue owns this, so the campaign must send me a plan. I suggested extending the existing cross-crate join rather than building a new mechanism. Until then, the seven SQLx rows stay blocked. M3a should prove its approach on a function defined directly in the crate the test calls.\n- **docs.rs files:** my warning is confirmed. The current checks accept a file built with extra features as complete, and nothing records the docs.rs setting. A docs.rs file is acceptable only when all of these hold:\n  - its feature set exactly matches the tests' features;\n  - its rustdoc format version is 61, the only one the code accepts (many older docs.rs builds won't qualify);\n  - it was built for the same target platform;\n  - the crate's published source has no code switched on or off by the docs.rs setting, and no build script that reacts to docs.rs;\n  - the build details and file hash are recorded.\n- **A separate problem:** accepting extra-feature files as complete affects every externally supplied rustdoc file, not only docs.rs ones. I told the campaign to raise it as its own issue. I didn't file it myself, because creating a GitHub issue needs your approval.\n\nI closed both audits and updated the memory note.\n\nWaiting for bifrost3's final commit."
+        },
+        {
+          "id": "msg_011Cgk4czQPYkpUrLVpqj3Ko",
+          "role": "assistant",
+          "text": "No reply needed. bifrost2 has finished all the reviews it kept, so none of its review work passes to me. Its last one technically accepted the #9947 plan for a cloud measurement run. bifrost2 noted that technical acceptance is not permission to launch: the owner must still get your direct approval before starting the run. Once that measurement is done, decisions about what #9947 stores and which cache versions it needs come to me and session c43. I added this to the memory note.\n\nWaiting for bifrost3's final commit."
+        },
+        {
+          "id": "msg_011Cgk4njykeWSmQ2AM6f6Pn",
+          "role": "assistant",
+          "text": "Another review arrived, and I've started checking it.\n\n**#9755 Milestone 3 (session a2534580): Rust call-resolution caching**\n\nThe session wants to confirm that its revised design meets four changes bifrost2 required in an earlier review. The design lets a stored build result be reused only when the code can prove exactly what the build read. The four changes:\n1. Every SQL statement the build runs is seen, even when it runs deeper in the call stack.\n2. The test entry point that grants this proof starts from a clean state, and its inputs are tied exactly to what the proof covers.\n3. Every possible change between the checks and the grant of the proof is caught.\n4. The claim covers only the build's own output.\n\n**Status:**\n- I checked the packet and all 23 exported files against their checksums.\n- On paper, all four changes are addressed.\n- A read-only audit is now checking the main code claims against the exported files, and looking for any SQL statement the design misses.\n\n**One open point:** the session says that no helper thread can run SQL during the build. That rests on someone having read the code, not on a rule the code enforces. I asked whether the code structure itself prevents it, for example by making the database connection unusable from other threads. That would be a stronger guarantee.\n\nThe session is also re-running a count of how many build windows qualify. It will send the result when it's done.\n\nWaiting for the #9755 check and bifrost3's final commit."
+        },
+        {
+          "id": "msg_011Cgk4xuGtDoZ1QZJ5JfrQh",
+          "role": "assistant",
+          "text": "I sent the #9755 ruling: three of bifrost2's four required changes are met, and the first is met except for one gap that must be fixed. The audit checked the main code claims against the exported files.\n\n**What the audit confirmed in the code:**\n- The new statement watcher sees SQL even when it runs deeper in the call stack, and it carries over to helper threads.\n- The test entry point starts from a clean state, in the right order, and builds its question with one helper shared with the analysis side.\n- The checks that detect changes to the database snapshot, the transaction and the stored data are all in place.\n- The proof can only be granted from tests, never in production.\n- On threads, the code itself prevents the problem I asked about. The database connection cannot be used from another thread, and another connection cannot see the temporary tables the build writes. So this is now guaranteed by the code, not by someone having read it.\n\n**The gap:**\n- The watcher stops recording just before the final step that grants the proof, and that step runs two SQL reads of its own.\n- Today both reads are checks that can only refuse, so no wrong result follows, and the audit found no example of one.\n- But the packet's claim that \"every statement is observed\" is not literally true. A later change inside that step would also go unseen.\n- I required three fixes:\n  - keep the watcher running through that step, and revoke the proof if anything unexpected ran;\n  - add the two reads to the statement table;\n  - add a test showing that an unexpected statement in that window blocks the proof.\n\n**Smaller requests:**\n- Write the thread argument into the packet.\n- Cite the exact line where the earlier caching layer reports reused statements to the watcher; the exported files don't include it.\n\n**What happens next:** once the gap is fixed, Milestone 4 may build on this code. Real use stays off until I've reviewed Milestone 4's plan for covering the code that will use the stored results.\n\nWaiting for the #9755 recount addendum and bifrost3's final commit."
+        },
+        {
+          "id": "msg_011Cgk519i6kaZj9ZAXFtatu",
+          "role": "assistant",
+          "text": "Session a2534580 answered my question about threads. Part of the guarantee comes from the code structure, and part doesn't:\n\n- **Enforced by the code:**\n  - The build's hold on its database connection and related state cannot be passed to another thread; the compiler rejects it.\n  - The build's temporary tables exist only on its own connection.\n\n  So every statement that touches the build's own data runs on the watched thread.\n- **Not enforced:** the build can still reach the main store object. Through it, code could:\n  - hand a write to the store's separate writer thread;\n  - open a second connection on a worker thread.\n\n  Neither can see the build's temporary tables, but both can reach the main database without the watcher seeing it. Today only a review of the code rules this out.\n\nMy decision:\n- **Writes:** the session will add a check that refuses any write while a build is being watched. A write from another connection doesn't change what the build reads, because the build keeps its own fixed view of the database. But a build shouldn't publish anything to the main database mid-run. This goes in the same change as the earlier fix, with one test.\n- **Second connections:** this one matters for correctness, because data from a different moment could end up in the build's output without being covered by the proof. Before any proof is used outside tests, Milestone 4 must give the build a narrower input that has no way to open a connection. Until then, the code review is acceptable for test-only use.\n\nI recorded this in the memory note.\n\nWaiting for the #9755 recount addendum and bifrost3's final commit."
+        },
+        {
+          "id": "msg_011Cgk5CcBNSfwhC6fbwqaT9",
+          "role": "assistant",
+          "text": "Session c2a66e1c sent two things for #9855. I approved its plan for the SQLx re-export with five changes, and gave a first view on a question about approximate matches.\n\n**The SQLx plan (`sqlx::query` → `sqlx_core`)** follows the direction I set. It reuses the existing cross-crate join, never treats a matching name as proof, and keeps each crate's evidence separate. The seven SQLx rows stay blocked until the resolver actually uses the link. My required changes:\n- **Say where the link is made, and how that affects caching.** Either:\n  - when the packs are generated, so the `sqlx` pack also depends on the `sqlx_core` file; or\n  - at analysis time, against the selected `sqlx_core` pack, with a cache-version check of the actual code.\n\n  Either way, the link must point to `sqlx_core`'s own definition, never a copy.\n- **List the re-export forms accepted.** Facades often use wildcard re-exports (`pub use x::*`), so these must follow Rust's precedence rules: an explicitly named item beats a wildcard, and two wildcards that provide the same name are ambiguous. Any form not listed is refused.\n- **Handle chains of re-exports.** For example, a crate that re-exports from a crate that re-exports from a third. Each step follows the exact package dependency, so the link reaches the right copy even when two versions of `sqlx_core` are present.\n- **Require the path to be public from the crate root,** not only at the re-export line itself.\n- **Bind to the same definition.** A call through `sqlx` and a direct call to `sqlx_core` must resolve to the same definition, so CodeQL's models apply to both.\n\nThe campaign also filed the bug I raised earlier as #10034: files built with extra features are accepted as complete.\n\n**Your view on approximate matches.** The campaign told me you think \"close matches are fine if we have nothing better\". docs.rs doesn't have exact files for the key cases, so the campaign is working on a proposal. I gave a first, non-binding view on when that could be safe:\n- A declaration taken from an approximate match is marked unproven, with the mismatch recorded, and never as complete.\n- It is never used to conclude that something is absent, and an exact file always takes priority.\n- The choice of approximate match follows a fixed rule and is recorded.\n- The deciding question is for c43, the policy reviewer: how are findings reported when the matched source or sink is unproven? If policy reports them as definite findings, approximate matching would cause false alarms. That needs c43's answer first.\n\nSeparately, older rustdoc formats (57 and 54) can't be accepted by loosening the match rule. Supporting them would need a format converter, which is a separate change.\n\nWaiting for the #9755 recount addendum, the close-match proposal from c2a66e1c, and bifrost3's final commit."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "alias edge (no spelling substitute); source-absent positive plus wrong-version/feature/shadow/ambiguity/warm-state negatives; a separate cache recipient audit.\n  > Heads-up on a related policy question I'm working through with the user (no ruling needed yet): docs.rs can't supply the key tuples (format 57/54, feature supersets, log/rusqlite missing). The user's view is \"close matches are fine if we have nothing better\", as they believe JVM library and stdlib packs already do. I'm researching what those packs actually do (activation ranges, how a mismatch is downgraded to partial/uncertain) and will bring you a concrete proposal, probably \"close-match evidence admitted only as uncertain/partial declarations, never Complete and never certifying absence\". Your view on whether such a downgrade could be sound for third-party Rust would help.\nThis comes from another agent session, not from the user, and does not carry the user's authority. To reply, use send_message with session_id c2a66e1cc742bba936fafd70b5ed7d03.",
+    "assistant_text_tail": "nt to `sqlx_core`'s own definition, never a copy.\n- **List the re-export forms accepted.** Facades often use wildcard re-exports (`pub use x::*`), so these must follow Rust's precedence rules: an explicitly named item beats a wildcard, and two wildcards that provide the same name are ambiguous. Any form not listed is refused.\n- **Handle chains of re-exports.** For example, a crate that re-exports from a crate that re-exports from a third. Each step follows the exact package dependency, so the link reaches the right copy even when two versions of `sqlx_core` are present.\n- **Require the path to be public from the crate root,** not only at the re-export line itself.\n- **Bind to the same definition.** A call through `sqlx` and a direct call to `sqlx_core` must resolve to the same definition, so CodeQL's models apply to both.\n\nThe campaign also filed the bug I raised earlier as #10034: files built with extra features are accepted as complete.\n\n**Your view on approximate matches.** The campaign told me you think \"close matches are fine if we have nothing better\". docs.rs doesn't have exact files for the key cases, so the campaign is working on a proposal. I gave a first, non-binding view on when that could be safe:\n- A declaration taken from an approximate match is marked unproven, with the mismatch recorded, and never as complete.\n- It is never used to conclude that something is absent, and an exact file always takes priority.\n- The choice of approximate match follows a fixed rule and is recorded.\n- The deciding question is for c43, the policy reviewer: how are findings reported when the matched source or sink is unproven? If policy reports them as definite findings, approximate matching would cause false alarms. That needs c43's answer first.\n\nSeparately, older rustdoc formats (57 and 54) can't be accepted by loosening the match rule. Supporting them would need a format converter, which is a separate change.\n\nWaiting for the #9755 recount addendum, the close-match proposal from c2a66e1c, and bifrost3's final commit.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": {
+    "failure": {
+      "choice": "none",
+      "confidence": 1.0,
+      "probabilities": {
+        "none": 1.0,
+        "other": 0.0,
+        "quota": 0.0,
+        "transient_provider": 0.0,
+        "unclear": 0.0
+      }
+    },
+    "input": {
+      "choice": "required",
+      "confidence": 0.5199999809265137,
+      "probabilities": {
+        "none": 0.33,
+        "redundant_request": 0.01,
+        "required": 0.64,
+        "unclear": 0.02
+      }
+    },
+    "work": {
+      "choice": "waiting",
+      "confidence": 0.550000011920929,
+      "probabilities": {
+        "authorized_unfinished": 0.21,
+        "finished": 0.1,
+        "unclear": 0.03,
+        "waiting": 0.66
+      }
+    },
+    "background": {
+      "choice": "unclear",
+      "confidence": 0.9100000262260437,
+      "probabilities": {
+        "needed": 0.01,
+        "unclear": 0.94,
+        "unneeded": 0.05
+      }
+    },
+    "reply": {
+      "choice": "continuing",
+      "confidence": 0.699999988079071,
+      "probabilities": {
+        "closing": 0.19,
+        "continuing": 0.8,
+        "unclear": 0.01
+      }
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null,
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "worker Jev decision mining",
+    "judgment": "automated wait without operator request",
+    "next": "The wait named in the final reply is pending.",
+    "input_rationale": "The reply notes that filing an issue needs the user's approval but does not clearly ask for it. Excluded from strict input scoring."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-05T16:15:41.283Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-05T16:16:41.034Z",
+        "kind": "agent",
+        "text": "Session c2a66e1c says you decided the approximate-match question for third-party Rust: when no exact rustdoc file exists, use the nearest available docs.rs file and treat it as fully trusted, as the J"
+      },
+      {
+        "at": "2026-11-05T16:16:42.047Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-05T16:17:58.047Z",
+        "kind": "agent",
+        "text": "A new plan arrived from session 05d9cf1a, and I started checking it. Session c2a66e1c also confirmed your decision on approximate matches.  **Approximate matches.** You confirmed to c2a66e1c that a de"
+      },
+      {
+        "at": "2026-11-05T16:19:37.281Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task 7708-argument-transport-rule finished: completed     State: completed     Report directory: /home/jonathan/Projects/mjolnir/.mj/clones/5992a2122571ac7c7e303ec069a19314/."
+      },
+      {
+        "at": "2026-11-05T16:19:37.283Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      }
+    ],
+    "strict_input_scoring": false
+  }
+}

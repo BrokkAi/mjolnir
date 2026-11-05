@@ -1,0 +1,427 @@
+{
+  "id": "W117",
+  "title": "Waiting candidate 117 none",
+  "category": "waiting-with-earlier-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "222bad3e2b4d9384aade684e3190de8c",
+    "session_title": "brokkbench26 via bedrock-claude",
+    "reply_position": 23570,
+    "captured_at": "2026-10-29T22:26:30.018Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:15",
+          "role": "user",
+          "text": "plan a new series featuring midweight models, we don't need to select tasks for max difficulty, but there should be several that can separate the best from the merely good"
+        },
+        {
+          "id": "user:157",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nLanes: GPT-6.1 Terra max (Recommended), Kimi K3.1 Pro max (Recommended)\nOther: I'll decide this later with Opus, I just want you to do the ticket-side work\nOpus hub: No Opus lane (Recommended)"
+        },
+        {
+          "id": "user:1163",
+          "role": "user",
+          "text": "great. you can draft contracts serially"
+        },
+        {
+          "id": "user:2054",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nSwap #7602: #7330 C# value receiver (Recommended)\nSwap #7377: #7391 Go type assertions (Recommended)"
+        },
+        {
+          "id": "user:2666",
+          "role": "user",
+          "text": "Hi Opus, I want to run this with\n\n- terra 6.1 at max, xhigh, high [all on `codex` profile]\n- sol 6.1 at xhigh, high, medium [on codex{2,3,4} respectively]\n- sonnet high and medium [on `claude2`, wait to start these until quota refreshes in 10h]\n- grok 4.7 at xhigh, if we still have quota, also at high\n- deepseek flash (dsf) at max and high\n- k3.1 at max and high\n\nlet's kick off all 20 dsf first since they are slowest, and start kimi running at concurrency 2 each\nonce 5 of the dsf finish, start the others at 2 per configuration\nwhen you start sonnet in 10h run it at 5 per config\n\nPS subagents work again"
+        },
+        {
+          "id": "user:3048",
+          "role": "user",
+          "text": "The Codex-harness `deepseek` profile (used for every DeepSeek Flash lane since Series 14, including dsfoct) is no longer in ~/.config/mjolnir/config.toml (changed today 13:24Z); only `dsh` (DeepSeek's DSH harness) remains. How should the dsf lanes run?\n\nDSF harness: Use dsh (DSH harness)"
+        },
+        {
+          "id": "user:3688",
+          "role": "user",
+          "text": "How tf is MJ turning 1.2TB into 0?"
+        },
+        {
+          "id": "user:4273",
+          "role": "user",
+          "text": "grokhigh very likely runs at xhigh: Grok's requests carry `reasoning_effort`, mj can only set `effort`, and grokhigh sessions list reasoning_effort=xhigh. I've held new grokhigh launches; two are running. What now?\n\ngrokhigh: Stop grokhigh (Recommended)"
+        },
+        {
+          "id": "user:4316",
+          "role": "user",
+          "text": "reparent them as xhigh rather than dropping so we don't do extra work\n\nand report the bug to brokkai/mjolnir pls"
+        },
+        {
+          "id": "user:4342",
+          "role": "user",
+          "text": "grokxhigh already finished #7505 and #6234, the only two tickets grokhigh started. Reparenting them as xhigh would give duplicate xhigh runs on those two tickets and saves no grokxhigh work. What do you want?\n\ngrokhigh lanes: Stop them now (Recommended)"
+        },
+        {
+          "id": "user:4413",
+          "role": "user",
+          "text": "grokhigh really ran at high (native logs: reasoning_effort=high on all 65 requests). I interrupted its #7505 and #6234 turns about 10 minutes ago. How should I restore it?\n\nRestore: Resume both, release hold (Recommended)"
+        },
+        {
+          "id": "user:4801",
+          "role": "user",
+          "text": "looks like it's wrapping up. time to start judging?"
+        },
+        {
+          "id": "user:5153",
+          "role": "user",
+          "text": "recs accepted. gate concurrency 12. use subtle subagents to judge but you need to sanity check the results"
+        },
+        {
+          "id": "user:5227",
+          "role": "user",
+          "text": "Subtle sub-agents run GPT-6.1 Sol at medium, which is exactly the solmedium contestant (and the same model as solxhigh/solhigh, same family as the three Terra lanes). Series 46 judged with Claude Fable. Which judge model?\n\nJudge model: Keep Sol medium"
+        },
+        {
+          "id": "user:11395",
+          "role": "user",
+          "text": "fit BT, add the prices, how does DSF+DSH look on BT vs the old codex based DSF"
+        },
+        {
+          "id": "user:11987",
+          "role": "user",
+          "text": "bah\n\ni guess add back \"deepseek\" to mj profiles running codex and let's get a direct h2h against these tickets\n\nmeanwhile did you perform lands yet? if not let's wait until after the late lanes"
+        },
+        {
+          "id": "user:12044",
+          "role": "user",
+          "text": "the main thing to remember is to give it a 800k compaction ceiling"
+        },
+        {
+          "id": "user:12492",
+          "role": "user",
+          "text": "stop dsfcxhigh pls, i just want max for the comparision"
+        },
+        {
+          "id": "user:12648",
+          "role": "user",
+          "text": "you have standard claude code subagents now, pls have parallel sonnet judge the original solutions that sol judged\n\ndon't judge the new dsfcxmax yet, let's see how close the sol/sonnet agreement is first"
+        },
+        {
+          "id": "user:17533",
+          "role": "user",
+          "text": "give me rank agreement by ticket pls"
+        },
+        {
+          "id": "user:17647",
+          "role": "user",
+          "text": "and for BT do we use the raw scores (where scale matters not just a > b) or do we do pairwise based on scores or pairwise based on something else"
+        },
+        {
+          "id": "user:17821",
+          "role": "user",
+          "text": "is this reasonable?\n\n- you judge the bottom two tickets-by-spearman personally\n- everything else we use the mean of sol and sonnet for\n\nthe late dsf lane makes things awkward but you can get the sonnet numbers for it now (don't bother on the tickets that you're doing personally) and i can switch back to sol subagents after that's done so we have the same average approch there"
+        },
+        {
+          "id": "user:18063",
+          "role": "user",
+          "text": "k"
+        },
+        {
+          "id": "user:18494",
+          "role": "user",
+          "text": "A\n1. agreed\n2. clarify\n3. why no charge?\n4. agreed\n\nB\n1,2,3. agreed\n\nC\nwfm"
+        },
+        {
+          "id": "user:18671",
+          "role": "user",
+          "text": "agreed w your recs"
+        },
+        {
+          "id": "agent:18674",
+          "role": "assistant",
+          "text": "I'll apply all the agreed rulings to both cards in one pass. First I'm collecting the exact per-lane amounts each ruling changes."
+        },
+        {
+          "id": "agent:18728",
+          "role": "assistant",
+          "text": "I'm collecting the per-lane amounts. Only Sonnet #6234 has the floor problem (A2). Next I'm checking the #7153 undef probes and the #7240 Sol deductions."
+        },
+        {
+          "id": "agent:18759",
+          "role": "assistant",
+          "text": "#7153 and #7240 amounts are settled. Now the #7505 unit-test charge in each card:"
+        },
+        {
+          "id": "agent:18781",
+          "role": "assistant",
+          "text": "#7505 amounts are settled. Now B1: checking whether #7391 sonnethigh and dsfmax wrote a comment line with their policy token. Without one, they score 0.9."
+        },
+        {
+          "id": "agent:18798",
+          "role": "assistant",
+          "text": "Both lanes have the comment line, so they score 1.0. I now have every amount. Checking the card format before writing the script that applies the rulings:"
+        },
+        {
+          "id": "agent:18821",
+          "role": "assistant",
+          "text": "Before running it, I'm saving the original agreement results, so the raw comparison stays on record."
+        },
+        {
+          "id": "agent:18837",
+          "role": "assistant",
+          "text": "The rulings are applied. One winner changed: on #7577 the Sonnet card now has terramax and grokhigh tied at 4.1, and terramax is cheaper. Re-measuring agreement on the corrected cards:"
+        },
+        {
+          "id": "agent:18880",
+          "role": "assistant",
+          "text": "Adding a short note to each affected verdict file, so the text does not contradict the corrected scores:"
+        },
+        {
+          "id": "agent:18897",
+          "role": "assistant",
+          "text": "Step 3 next: the Sonnet judges score dsfcxmax on the 8 tickets. First I'm checking the format `bt.py` expects for a late-lane card and whether an earlier late-lane brief exists to follow."
+        },
+        {
+          "id": "agent:18933",
+          "role": "assistant",
+          "text": "For dsfcxmax the judges need its metrics, gate results, probe results and lane tree. Checking which of those exist:"
+        },
+        {
+          "id": "agent:18949",
+          "role": "assistant",
+          "text": "dsfcxmax still needs its judging packet (metrics, native logs, lane refs), gate summary rows and probe runs. Checking how `packet47.py` and `probe47.sh` are run:"
+        },
+        {
+          "id": "agent:18985",
+          "role": "assistant",
+          "text": "`eval47-refs.sh` is idempotent and covers every lane, so I'll run it, then the packet for dsfcxmax on all ten tickets, then the gate summary."
+        },
+        {
+          "id": "agent:19002",
+          "role": "assistant",
+          "text": "All 10 dsfcxmax refs are in, and the #7505 head matches the gate head. Now the packets:"
+        },
+        {
+          "id": "agent:19018",
+          "role": "assistant",
+          "text": "Packets are built. Each ticket cost $0.24 to $0.96 and took 47 to 94 minutes of working time. Now the gate summary rows:"
+        },
+        {
+          "id": "agent:19069",
+          "role": "assistant",
+          "text": "The probe logs record the exact append and `nextest` lines, so I can rebuild each command from the dsfmax logs:"
+        },
+        {
+          "id": "agent:19106",
+          "role": "assistant",
+          "text": "The probes run on morannon through `probe47.sh`, and the gate feeder copies their logs back. Checking morannon's state before launching anything:"
+        },
+        {
+          "id": "agent:19146",
+          "role": "assistant",
+          "text": "The script matches and `mbx` is on the path. I'm launching the 11 dsfcxmax probe runs on morannon, at most 4 at a time because of the load:"
+        },
+        {
+          "id": "agent:19261",
+          "role": "assistant",
+          "text": "Checking probe progress before starting the judges:"
+        },
+        {
+          "id": "agent:19272",
+          "role": "assistant",
+          "text": "Six of the 11 probe runs have finished, and their tests ran normally. #7347, #7424 and #7577 are still running. Checking that the gate feeder has copied the finished logs back here:"
+        },
+        {
+          "id": "agent:19329",
+          "role": "assistant",
+          "text": "Five Sonnet late-lane judges are running. I'll set a watch that reports when each remaining probe log reaches this machine."
+        },
+        {
+          "id": "agent:19411",
+          "role": "assistant",
+          "text": "While the probes finish, I'll start settling #7153: listing every lane and item where the two adjusted cards still differ."
+        },
+        {
+          "id": "agent:19459",
+          "role": "assistant",
+          "text": "The #7391 probe log has arrived, so I'm starting that judge now."
+        },
+        {
+          "id": "agent:19756",
+          "role": "assistant",
+          "text": "The Sonnet card is corrected: grokxhigh is back to 3.5. The note I appended to that card's verdict still lists the double charge, so I'm rewriting it:"
+        },
+        {
+          "id": "agent:20299",
+          "role": "assistant",
+          "text": "The #7424 probe logs are in, so I'm starting that judge. #7347 is waiting on one more log."
+        },
+        {
+          "id": "agent:20318",
+          "role": "assistant",
+          "text": "Back to the #7153 adapter question. The changed function feeds `cpp_identifier_value_type`. Checking whether call resolution uses it:"
+        },
+        {
+          "id": "agent:20565",
+          "role": "assistant",
+          "text": "The settled #7153 card is close to the Sol card: winner terramax, with dsfcxmax at 3.4. Writing the record of decisions:"
+        },
+        {
+          "id": "agent:20645",
+          "role": "assistant",
+          "text": "I wrote \"contamination clean\" for dsfcxmax before checking it. Checking its native logs on both of my tickets now:"
+        },
+        {
+          "id": "agent:20672",
+          "role": "assistant",
+          "text": "The lane read git history several times. With trimmed history only the base's ancestors exist, but I'll confirm the two commits it opened are ancestors of the base:"
+        },
+        {
+          "id": "agent:21082",
+          "role": "assistant",
+          "text": "Regenerating the adjustment notes on all affected verdicts, so each one matches its card:"
+        },
+        {
+          "id": "agent:21515",
+          "role": "assistant",
+          "text": "The settled #7577 card: terramax wins at 4.2, grokhigh is second at 4.0, and dsfcxmax scores 3.3. Writing the record:"
+        },
+        {
+          "id": "agent:21569",
+          "role": "assistant",
+          "text": "Status: the rulings are applied, both of my tickets are settled, and 7 of the 8 Sonnet late-lane judgings of dsfcxmax are finished. Only #7347 is still running. #7424's card is written, but its report has not come in yet.\n\n**What changed in the cards**\n- The rulings you approved are applied to both judges' cards by `runbooks/judge/apply-rulings47.py`. The original cards are kept as `scorecard47.pre-rulings.json`. The rulings are also recorded in `lead-rulings.md`, which binds the late-lane judges.\n- I caught and fixed two mistakes of my own while doing this:\n  - **#7153:** I had charged Sonnet's grokxhigh twice for the same fault. Fixed.\n  - **#7577:** the Sol card had put sonnetmedium's `fmt` deduction on the tests item, which was already at 0, so it removed nothing. I moved it to scope; the total is unchanged.\n- After the rulings, the two judges agree slightly more:\n  - same winner on 7 of 10 tickets;\n  - configuration order agreement +0.97;\n  - overall bias −0.01.\n\n  The raw measurement is kept as `judge-agreement47.pre-rulings.md`.\n\n**dsfcxmax so far** (dsfmax is the same model and effort, run in DSH)\n\n| Ticket | Judge | dsfcxmax | minus dsfmax |\n|---|---|---:|---:|\n| #7505 | Sonnet | 3.3 | −0.3 |\n| #6234 | Sonnet | 2.6 | −1.0 |\n| #7330 | Sonnet | 3.5 | +0.05 |\n| #7424 | Sonnet | 2.9 | +0.3 |\n| #7240 | Sonnet | 2.6 | −0.8 |\n| #6945 | Sonnet | 3.4 | +0.25 |\n| #7391 | Sonnet | 3.8 | −0.2 |\n| #7153 | me | 3.4 | −0.1 |\n| #7577 | me | 3.3 | −0.2 |\n| #7347 | Sonnet | still running | |\n\nOver the 9 finished tickets, dsfcxmax averages about 0.2 below dsfmax.\n\n- **Where the gap comes from:** the Codex lane twice skipped the required policy epoch rotation (#7505 and #6234). On #6234 it also broke an existing store test that it never ran. It usually took about half the working time of the DSH lane, at a similar list cost.\n- **Caution:** this is one run per harness on each ticket, so a gap of this size may not reflect the harness itself.\n\n**My two settled tickets**\n- **#7153:** the winner is terramax at 3.9, unchanged.\n- **#7577:** terramax wins at 4.2, with grokhigh second at 4.0.\n\nThe records are in `7153/lead-judge/` and `7577/lead-judge/`. Two notes on method:\n- I applied one cause standard to both tickets. The Sonnet card had used a stricter one on #7577 than on #7153.\n- On #7577, where the two cards differed only in how much to charge for a fault (scope and tests), I used the midpoint of the two cards and recorded that.\n\n**Other notes from the late judges**\n- The #6234 judge saw that dsfcxmax's own test runs never captured nextest's per-test lines. Its \"passed\" claims rest on exit codes only. The cause is unknown.\n- The gate runner's hash differs for the dsfcxmax runs. That is expected: I added the dsfcx lanes to the gate script. The suites and the validation script are unchanged.\n\n**Next:** when #7347 is done, step 3 is complete. Please switch the subtle sub-agents back to Sol, so the Sol judges can score dsfcxmax on the same 8 tickets. They will use the same brief, `runbooks/judge/subjudge-s47-late-dsfcxmax.md`, told they are the Sol judge."
+        },
+        {
+          "id": "agent:21825",
+          "role": "assistant",
+          "text": "The #7424 report agrees with the card I already listed: dsfcxmax scores 2.9, which is +0.3 against dsfmax. The judge's main point is that both lanes fail the same 5 of 8 probes. The gap comes from what the reports disclosed and from one fixture file, not from a difference in capability.\n\nThe judge asked whether the \"probes the base passes\" ruling (A1) should also apply to T2 and T6 on this ticket. I don't think it needs a new ruling, and nothing changes:\n\n- **T2** (a `String` switch with a constant label) is the same fault as T1: a `String` switch reported as incomplete. Both cards already charge T1 and T2 together as one fault, and A1 charges each fault once.\n- **T6** (a nested switch): both judges found that the contract does not say which switch an inner diagnostic belongs to. So the lane's answer is also acceptable, and A1 says not to charge it.\n\nOnly the #7347 Sonnet judge is still running."
+        },
+        {
+          "id": "agent:21935",
+          "role": "assistant",
+          "text": "Step 3 is done. All 10 dsfcxmax cards are finished, every gate and probe log is complete, and every late card's anchors match its main card.\n\n| Ticket | Judge | dsfcxmax (Codex) | dsfmax (DSH) | Difference |\n|---|---|---:|---:|---:|\n| #7505 | Sonnet | 3.3 | 3.6 | −0.3 |\n| #6234 | Sonnet | 2.6 | 3.6 | −1.0 |\n| #7330 | Sonnet | 3.5 | 3.5 | 0.0 |\n| #7424 | Sonnet | 2.9 | 2.6 | +0.3 |\n| #7153 | me | 3.4 | 3.5 | −0.1 |\n| #7240 | Sonnet | 2.6 | 3.4 | −0.8 |\n| #6945 | Sonnet | 3.4 | 3.1 | +0.3 |\n| #7391 | Sonnet | 3.8 | 4.0 | −0.2 |\n| #7577 | me | 3.3 | 3.5 | −0.2 |\n| #7347 | Sonnet | 3.7 | 3.9 | −0.2 |\n| **Mean** | | **3.25** | **3.47** | **−0.22** |\n\nThese are interim numbers. The 8 Sonnet-judged tickets still need their Sol scores before averaging.\n\n**What decides the gap**\n- **Missed policy epoch rotations.** The Codex lane skipped the required `POLICY_SUBSTRATE_EPOCH` rotation on 4 tickets where dsfmax made it: #7505, #6234, #7240 and #6945. Each miss costs 0.6, which explains most of the −0.22 average.\n- **One broken store test.** On #6234, the Codex lane broke an existing store test in a suite it never ran.\n- **Elsewhere the two lanes are close.** On several tickets the Codex lane's code was as good as or better than the DSH lane's: it fixed a mechanism dsfmax left on #7330, and it had cleaner open-core rows on #7347.\n\n**Time and cost**\n- The Codex lane took 40 to 60 percent less working time on most tickets.\n- List cost is similar. It was higher on #6945, at about $0.67 against $0.34.\n\nThere is one run per harness on each ticket. A gap this small, driven mostly by a convention miss, is weak evidence that one harness does better work than the other.\n\n**Your turn:** please switch the subtle sub-agents back to Sol. Then I'll run the Sol judges on dsfcxmax for the same 8 tickets: #7505, #6234, #7330, #7424, #7240, #6945, #7391 and #7347. Each judge gets `runbooks/judge/subjudge-s47-late-dsfcxmax.md` and is told it is the Sol judge, scoring against its own adjusted Sol card.\n\nAfter that, step 5:\n1. Average the two cards for each of those 8 tickets.\n2. Change `bt.py` to accept the averaged cards as anchors.\n3. Refit Bradley–Terry.\n\nNothing is committed yet. I've recorded the current state in `HANDOFF.md`."
+        },
+        {
+          "id": "user:23296",
+          "role": "user",
+          "text": "how could codex be 2x faster if cost (and presumably tokens) didn't move?"
+        },
+        {
+          "id": "agent:23300",
+          "role": "assistant",
+          "text": "I'll check the metrics before answering, starting with tokens, requests and time for both lanes on every ticket."
+        },
+        {
+          "id": "agent:23339",
+          "role": "assistant",
+          "text": "The DSH log has no per-message timestamps. Checking whether mj's own transcript records timing for each tool call:"
+        },
+        {
+          "id": "agent:23367",
+          "role": "assistant",
+          "text": "mj's records don't time individual requests either. mj does keep a session event stream, though (62,464 events for this turn). Checking whether the CLI can export it:"
+        },
+        {
+          "id": "agent:23419",
+          "role": "assistant",
+          "text": "mj's transcript has timestamps. I'll page through the whole transcript for both lanes on a few tickets and see whether tool calls carry start and end times:"
+        },
+        {
+          "id": "agent:23570",
+          "role": "assistant",
+          "text": "Wall time is not billed. Cost follows the tokens sent to the model, and both lanes sent about the same number of requests with about the same context. Most of each lane's wall time went to waiting for cargo to compile and run tests, which costs nothing. The DSH lane waited about twice as long. The main reason is **likely** that it ran on a much busier machine, not anything in the harness.\n\n**Evidence**\n\n1. **Requests and tokens are similar; time per request is not.** On most tickets both lanes made 180–330 requests with 40–75M cached tokens. dsfmax took about 35–40 s per request and dsfcxmax about 19 s.\n2. **The DSH time is spent waiting on builds (confirmed).** On #7505, the DSH lane's model output streamed for only about 10 of its 133 minutes. Twenty pauses of 2 to 17 minutes account for about 112 minutes. Its own notes at those points say \"the build is running in the background … let me poll the log\", \"that crate is huge\", and \"let's keep polling\". The Codex lane also spent most of its time in tools (39 of 55 minutes on #7505), but it never paused for more than a minute.\n3. **Same machine, very different load (confirmed).** Both lanes ran on `morannon-podman`. I counted how many other lanes were running at the same time:\n   - **dsfmax:** 21 others on average. They started together with the other 19 DSF lanes and the Kimi lanes, at the start of the series.\n   - **dsfcxmax:** about 7 others.\n4. **The same tests ran slower during the dsfmax runs (confirmed).** nextest measures its own runtime, so the harness does not affect it:\n\n   | Test set | dsfmax (DSH) | dsfcxmax (Codex) |\n   |---|---:|---:|\n   | 780 tests (analysis lib) | 20–48 s | 16–28 s |\n   | 582 tests | 62 s | 41–52 s |\n   | 131 tests | 184 s | 115 s |\n   | 1568 tests | 427 s | 191–314 s |\n\n   Compiling under the same load was probably slowed down by a similar amount, but nothing in the logs times it.\n5. **The DSH waiting method may add some time (possible, not measured).** DSH's command tool times out on long builds. The lane then runs the build in the background and polls it with `sleep` commands: 38 times on #7505 and 84 times on #6234. A fixed sleep can run past the end of the build. Codex's command tool returns when output arrives. The DSH log has no per-command timestamps, so I can't measure how much this adds. On #7347 the DSH lane used no sleeps at all and still took 205 minutes.\n\n**What this means**\n\nThe 2x time difference does not show that Codex is a faster harness for DeepSeek. Most of it is **likely** caused by machine load. The same applies to my earlier BT note that DSH used about 150 adjusted minutes per task against 80–90 for the Codex rows. That comparison is affected by load too, and I should not have presented it as a harness difference.\n\nTo measure the harness effect on time, run both harnesses on the same tickets at the same time, so they share the same load. The quality comparison is not affected, because the judges score the work, not the time.\n\n`★ Insight ─────────────────────────────────────`\n- For these agents, cost tracks model traffic, and wall time tracks tool execution (here mostly cargo). Two lanes can match on cost and differ 2x on time if their builds run under different load.\n- The staged start (all 20 DSF lanes first, \"since they are slowest\") gave the DSH lanes the busiest part of the run. Comparing time between lanes is only fair when the lanes ran under similar load.\n`─────────────────────────────────────────────────`\n\nThe scratch files from this check are in `/tmp/s47-lead-timing/`. Nothing else changed. I'm still waiting for you to switch the sub-agents back to Sol for the dsfcxmax Sol judging."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "how could codex be 2x faster if cost (and presumably tokens) didn't move?",
+    "assistant_text_tail": "ling under the same load was probably slowed down by a similar amount, but nothing in the logs times it.\n5. **The DSH waiting method may add some time (possible, not measured).** DSH's command tool times out on long builds. The lane then runs the build in the background and polls it with `sleep` commands: 38 times on #7505 and 84 times on #6234. A fixed sleep can run past the end of the build. Codex's command tool returns when output arrives. The DSH log has no per-command timestamps, so I can't measure how much this adds. On #7347 the DSH lane used no sleeps at all and still took 205 minutes.\n\n**What this means**\n\nThe 2x time difference does not show that Codex is a faster harness for DeepSeek. Most of it is **likely** caused by machine load. The same applies to my earlier BT note that DSH used about 150 adjusted minutes per task against 80–90 for the Codex rows. That comparison is affected by load too, and I should not have presented it as a harness difference.\n\nTo measure the harness effect on time, run both harnesses on the same tickets at the same time, so they share the same load. The quality comparison is not affected, because the judges score the work, not the time.\n\n`★ Insight ─────────────────────────────────────`\n- For these agents, cost tracks model traffic, and wall time tracks tool execution (here mostly cargo). Two lanes can match on cost and differ 2x on time if their builds run under different load.\n- The staged start (all 20 DSF lanes first, \"since they are slowest\") gave the DSH lanes the busiest part of the run. Comparing time between lanes is only fair when the lanes ran under similar load.\n`─────────────────────────────────────────────────`\n\nThe scratch files from this check are in `/tmp/s47-lead-timing/`. Nothing else changed. I'm still waiting for you to switch the sub-agents back to Sol for the dsfcxmax Sol judging.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 23296,
+    "mjolnir": "worker Jev waiting-language classification",
+    "judgment": "parent review 2026-11-05: relabeled from none",
+    "next": "The named wait remains pending.",
+    "input_rationale": "A reply since the last user message says it is still waiting for the user to switch the sub-agents back to Sol.",
+    "request_message_ids": [
+      "agent:23570"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-29T22:34:12.130Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-29T22:34:14.170Z",
+        "kind": "system",
+        "text": "Switched from claude3 / localhost to claude3 / localhost in place; the workspace and environment were kept. Queued work was discarded; ready and idle. The interrupted prompt was not replayed."
+      },
+      {
+        "at": "2026-10-29T22:34:14.441Z",
+        "kind": "user",
+        "text": "switched"
+      },
+      {
+        "at": "2026-10-29T22:34:24.887Z",
+        "kind": "agent",
+        "text": "I'm starting the 8 Sol late-lane judges now."
+      },
+      {
+        "at": "2026-10-29T22:36:43.426Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task sol-late-dsfcxmax-6234 finished: completed     State: completed     Report directory: /home/jonathan/Projects/brokkbench26/.mj/agents/06fef2dec1408b4c9b5804e3cc528c37   "
+      },
+      {
+        "at": "2026-10-29T22:36:58.745Z",
+        "kind": "agent",
+        "text": "Three Sol late cards are in: #6234, #6945 and #7505. The #7505 judge found a real inconsistency in its own anchor card, so I'm checking that claim:"
+      }
+    ]
+  }
+}

@@ -31,6 +31,7 @@ use crate::config::HarnessKind;
 use crate::relay::RelayExecutionState;
 use crate::state::MaterializedExecutionState;
 
+pub mod question_locator;
 mod tools;
 pub mod verdict;
 pub use tools::{InFlightToolCall, ToolsInFlight};

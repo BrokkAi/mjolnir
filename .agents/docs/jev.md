@@ -82,6 +82,7 @@ For a running turn, the worker asks after 60 s of silence (doubling to 5 min) wi
 - `RelayOperationalState.assessment` (a `Summary`: turn id, revision, status, action, reason, retry time) and `turn_completion` (command id, ordinal, decision), published to the daemon.
 - `ActivityFacts.inferred_idle_since_ms` and `expected_continuation`, folded into `ActivityState` by `mj_core::activity::classify`.
 - The decision logs above, with `mj_jev=info` tracing in `worker.log`.
+- `TurnAssessment.question_message`: after an `AwaitInput` assessment, the worker locates the assistant reply that holds the open request (the question locator, `mj_core::activity::question_locator`, question `mj-core/src/activity/question_locator.json`, proxy route `/v1/question-locator`). With one reply since the user's last message it is that reply; with more, one Jev `choice` request picks it. The value is the transcript stable id. The TUI dashboard and the web viewer open such a session scrolled to that reply, once per target, while the question marker is shown. Failures and `none` answers leave no target. Design and evaluation: `.agents/plans/jev-question-locator.md`; live replay: `scripts/jev-question-locator-eval.py`.
 
 ## Stakeholders: who consumes a Jev answer today
 
