@@ -347,7 +347,7 @@ fn bootstrap_login_environment(
         // controls across; ordinary launcher variables must stay excluded.
         #[cfg(feature = "test-hooks")]
         for name in ["MJ_CHAOS_ISOLATED", "MJ_TEST_HOOK", "MJ_TEST_HOOK_DIR"] {
-            if let Some(value) = std::env::var(name).ok() {
+            if let Ok(value) = std::env::var(name) {
                 environment.insert(name.to_owned(), value);
             }
         }
