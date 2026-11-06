@@ -95,6 +95,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
             HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
@@ -2979,6 +2980,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,

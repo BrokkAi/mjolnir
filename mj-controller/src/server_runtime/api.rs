@@ -2793,8 +2793,29 @@ impl SubagentBackend for ApiBackend {
                     .capabilities(&[profile])
                     .await?
                     .remove(0)),
-                model => crate::controller::profile_config::discover(profile, model, refresh).await,
+                model => {
+                    // A forced refresh bypasses the catalogue's cache, not its
+                    // allow-list: an explicit request cannot select a model the
+                    // picker hides.
+                    let allowed = self.profile_catalog.allowed_models(&profile);
+                    Ok(
+                        crate::controller::profile_config::discover(profile, model, refresh)
+                            .await?
+                            .restricted_to(&allowed),
+                    )
+                }
             }
+        })
+    }
+
+    fn unrestricted_profile_config(
+        &self,
+        profile: String,
+    ) -> BoxFuture<'_, Result<mj_core::worker_launch::ProfileConfig>> {
+        Box::pin(async move {
+            self.profile_catalog
+                .unrestricted_capabilities(&profile)
+                .await
         })
     }
 

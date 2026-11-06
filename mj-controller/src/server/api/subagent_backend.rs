@@ -84,6 +84,15 @@ pub trait SubagentBackend: Send + Sync {
             profile, model, refresh,
         ))
     }
+    /// What `profile`'s harness advertises before the profile's `models`
+    /// allow-list, for `mj doctor`. Backends without the daemon's catalogue
+    /// answer with the ordinary choices.
+    fn unrestricted_profile_config(
+        &self,
+        profile: String,
+    ) -> BoxFuture<'_, AnyResult<mj_core::worker_launch::ProfileConfig>> {
+        self.profile_config(profile, None, false)
+    }
     /// Start discovering what `config` selects, such as a Settings draft's
     /// sub-agent models. Results arrive through the capability publication.
     fn warm_profile_capabilities(&self, _config: &mj_core::config::Config) {}

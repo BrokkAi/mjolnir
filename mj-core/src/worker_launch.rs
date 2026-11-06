@@ -609,6 +609,22 @@ pub struct ProfileConfig {
     pub observed_at: i64,
 }
 
+impl ProfileConfig {
+    /// The catalogue as Mjolnir offers it under a profile's `models`
+    /// allow-list: the listed models plus the profile's current model, which
+    /// stays so a session never runs a model its picker hides. An empty list
+    /// offers everything.
+    pub fn restricted_to(mut self, allowed: &[String]) -> Self {
+        if !allowed.is_empty() {
+            let current = self.model.clone();
+            self.models.retain(|choice| {
+                allowed.contains(&choice.value) || current.as_ref() == Some(&choice.value)
+            });
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

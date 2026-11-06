@@ -2855,6 +2855,8 @@ impl State {
                 if let Some(updated) = after.profiles.get(&session.last_profile) {
                     comparable.enabled = updated.enabled;
                     comparable.legacy_subagents = updated.legacy_subagents.clone();
+                    // Which models are offered does not change a running session.
+                    comparable.models = updated.models.clone();
                 }
                 // A mismatched harness is already broken; allow repairing it.
                 profile.kind == session.harness_kind

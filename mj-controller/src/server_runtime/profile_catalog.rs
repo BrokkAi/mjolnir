@@ -114,6 +114,31 @@ struct Inner {
     refreshing: BTreeMap<CacheKey, Attempt>,
 }
 
+impl Inner {
+    /// The `models` allow-list of the profile `identity` names: the live
+    /// configuration's when it has that profile, else the latest draft's.
+    /// Read at publication, so an edit applies without rediscovery.
+    fn allowed_models(&self, identity: &str) -> Vec<String> {
+        self.live
+            .iter()
+            .flat_map(Config::enabled_profiles)
+            .find(|(id, profile)| profile.capabilities_key(id) == identity)
+            .map(|(_, profile)| profile.models.clone())
+            .or_else(|| {
+                let definition = self.definitions.get(identity)?;
+                Some(
+                    definition
+                        .config
+                        .profiles
+                        .get(&definition.id)?
+                        .models
+                        .clone(),
+                )
+            })
+            .unwrap_or_default()
+    }
+}
+
 pub(crate) struct ProfileCatalog {
     cancellation: CancellationToken,
     inner: Mutex<Inner>,
@@ -217,10 +242,17 @@ impl ProfileCatalog {
                 .definitions
                 .keys()
                 .map(|identity| {
-                    let choices = inner
+                    let allowed = inner.allowed_models(identity);
+                    let choices = match inner
                         .entries
                         .get(&(identity.clone(), None))
-                        .map_or(CapabilityState::Pending, Entry::state);
+                        .map_or(CapabilityState::Pending, Entry::state)
+                    {
+                        CapabilityState::Ready(choices) => {
+                            CapabilityState::Ready(choices.restricted_to(&allowed))
+                        }
+                        other => other,
+                    };
                     // Only models whose efforts were claimed are listed.
                     let efforts = match &choices {
                         CapabilityState::Ready(choices) => choices
@@ -258,6 +290,18 @@ impl ProfileCatalog {
             let mut inner = self.lock();
             let first = inner.live.is_none();
             let changed = inner.live.as_ref() != Some(config);
+            // The allow-list is applied when the snapshot is built, so a
+            // cached snapshot would keep serving the old one.
+            let models = |config: &Config| {
+                config
+                    .profiles
+                    .iter()
+                    .map(|(id, profile)| (id.clone(), profile.models.clone()))
+                    .collect::<BTreeMap<_, _>>()
+            };
+            if inner.live.as_ref().map(models) != Some(models(config)) {
+                inner.publication = None;
+            }
             if let Some(old) = &inner.live {
                 for (id, profile) in old.enabled_profiles() {
                     let identity = profile.capabilities_key(id);
@@ -520,8 +564,17 @@ impl ProfileCatalog {
                     if !live && !definition.cancellation.is_cancelled() {
                         // Keep successful entries and the in-flight attempt.
                         // A failed owner's next retry uses refreshed credentials.
+                        let models_changed = definition
+                            .config
+                            .profiles
+                            .get(&definition.id)
+                            .map(|old| &old.models)
+                            != Some(&profile.models);
                         definition.config = config.clone();
                         let definition = definition.clone();
+                        if models_changed {
+                            inner.publication = None;
+                        }
                         if let Some(Entry::Ready(choices)) =
                             inner.entries.get(&(identity.clone(), None)).cloned()
                         {
@@ -905,7 +958,28 @@ impl ProfileCatalog {
         })
     }
 
+    /// What `id` offers under its `models` allow-list. Every reader of a
+    /// profile's choices comes through here or through [`Self::snapshot`].
     async fn fetch(
+        self: &Arc<Self>,
+        config: &Config,
+        id: &str,
+        model: Option<String>,
+    ) -> Result<ProfileConfig> {
+        let allowed = config
+            .enabled_profile(id)
+            .context("profile unavailable")?
+            .models
+            .clone();
+        Ok(self
+            .fetch_unrestricted(config, id, model)
+            .await?
+            .restricted_to(&allowed))
+    }
+
+    /// What `id`'s harness advertises, before the allow-list. Only `mj doctor`
+    /// asks for this, to compare the allow-list with the catalogue.
+    async fn fetch_unrestricted(
         self: &Arc<Self>,
         config: &Config,
         id: &str,
@@ -1030,6 +1104,16 @@ impl ProfileCatalog {
             .context("the profile catalogue has not adopted a configuration")
     }
 
+    /// The live `models` allow-list of profile `id`; empty offers everything.
+    pub(crate) fn allowed_models(&self, id: &str) -> Vec<String> {
+        self.lock()
+            .live
+            .as_ref()
+            .and_then(|config| config.enabled_profile(id))
+            .map(|profile| profile.models.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn candidates(&self) -> Result<Vec<(String, HarnessKind)>> {
         let config = self.live()?;
         Ok(config
@@ -1072,10 +1156,28 @@ impl ProfileCatalog {
         self.live_capabilities(&profile, Some(model)).await
     }
 
+    /// The catalogue `id`'s harness advertises, ignoring its `models`
+    /// allow-list. See [`Self::fetch_unrestricted`].
+    pub(crate) async fn unrestricted_capabilities(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> Result<ProfileConfig> {
+        self.read_live(id, None, true).await
+    }
+
     async fn live_capabilities(
         self: &Arc<Self>,
         id: &str,
         model: Option<String>,
+    ) -> Result<ProfileConfig> {
+        self.read_live(id, model, false).await
+    }
+
+    async fn read_live(
+        self: &Arc<Self>,
+        id: &str,
+        model: Option<String>,
+        unrestricted: bool,
     ) -> Result<ProfileConfig> {
         loop {
             let config = self.live()?;
@@ -1083,7 +1185,11 @@ impl ProfileCatalog {
                 .enabled_profile(id)
                 .context("profile unavailable")?
                 .capabilities_key(id);
-            let result = self.fetch(&config, id, model.clone()).await;
+            let result = if unrestricted {
+                self.fetch_unrestricted(&config, id, model.clone()).await
+            } else {
+                self.fetch(&config, id, model.clone()).await
+            };
             let current = self.live()?;
             if current
                 .enabled_profile(id)
@@ -1182,6 +1288,7 @@ pub(crate) fn test_config(profiles: &[(&str, HarnessKind)]) -> Config {
                         home: std::path::PathBuf::from("/home/agent").join(id),
                         environment: Default::default(),
                         context_window_bytes: None,
+                        models: Default::default(),
                         legacy_subagents: Default::default(),
                         guardian_review_model: None,
                         codex_profile: None,
@@ -2202,5 +2309,73 @@ mod tests {
                 .unwrap()
                 .contains("reviewers = []")
         );
+    }
+
+    /// The `models` allow-list reaches every reader through the two exits of
+    /// the catalogue, and an edit applies without a new probe.
+    #[tokio::test]
+    async fn a_models_allow_list_filters_the_snapshot_and_reads_until_the_config_changes() {
+        let probes = calls();
+        let counted = probes.clone();
+        let catalog = ProfileCatalog::with_probe(Arc::new(move |profile| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let mut choices = test_choices(&profile);
+                choices
+                    .models
+                    .extend((1..4).map(|index| mj_core::acp::SessionConfigChoice {
+                        value: format!("m{index}"),
+                        name: format!("m{index}"),
+                        description: None,
+                    }));
+                Ok(choices)
+            })
+        }));
+        let values = |choices: &ProfileConfig| {
+            choices
+                .models
+                .iter()
+                .map(|choice| choice.value.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut config = test_config(&[("p", HarnessKind::Codex)]);
+        let key = config.profiles["p"].capabilities_key("p");
+        let snapshot_models =
+            |catalog: &Arc<ProfileCatalog>| match &catalog.snapshot().profiles[&key].choices {
+                CapabilityState::Ready(choices) => values(choices),
+                other => panic!("not ready: {other:?}"),
+            };
+        catalog.sync_now(&config).await;
+        assert_eq!(snapshot_models(&catalog), ["p-model", "m1", "m2", "m3"]);
+
+        // The current model stays offered although the list omits it.
+        config.profiles.get_mut("p").unwrap().models = vec!["m2".into(), "unadvertised".into()];
+        assert_eq!(
+            config.profiles["p"].capabilities_key("p"),
+            key,
+            "the allow-list is not part of the cache key"
+        );
+        let probed = probes.load(Ordering::SeqCst);
+        catalog.sync_now(&config).await;
+        assert_eq!(snapshot_models(&catalog), ["p-model", "m2"]);
+        let read = catalog.capabilities(&["p".into()]).await.unwrap();
+        assert_eq!(values(&read[0]), ["p-model", "m2"]);
+        let model_read = catalog
+            .model_capabilities("p".into(), "m2".into())
+            .await
+            .unwrap();
+        assert_eq!(values(&model_read), ["p-model", "m2"]);
+        let unrestricted = catalog.unrestricted_capabilities("p").await.unwrap();
+        assert_eq!(values(&unrestricted), ["p-model", "m1", "m2", "m3"]);
+        assert_eq!(catalog.allowed_models("p"), ["m2", "unadvertised"]);
+        assert_eq!(
+            probes.load(Ordering::SeqCst),
+            probed,
+            "editing the allow-list does not rediscover"
+        );
+
+        config.profiles.get_mut("p").unwrap().models.clear();
+        catalog.sync_now(&config).await;
+        assert_eq!(snapshot_models(&catalog), ["p-model", "m1", "m2", "m3"]);
     }
 }

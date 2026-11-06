@@ -319,7 +319,7 @@ mj usage --session <id> [--after-seq <seq>] [--limit <count>] [--json]
 mj put-file --session <id> --path <workspace-relative path> [--overwrite] [--json] <source>|-
 mj elicitations --session <id> [--json]
 mj respond --session <id> --elicitation <id> [<response JSON>|-] [--response-file <path>]
-mj models --profile <id> [--model <name>] [--json]
+mj models --profile <id> [--model <name> | --unrestricted] [--json]
 mj set-config --session <id> [--key <key> --value <value>] [--json]
 mj ui pane (sessions | targets | profiles) (minimized | standard | maximized) [--json]
 mj ui show <session-id> [--right | --below] [--json]
@@ -423,7 +423,9 @@ mj new --workspace eval --bundle product --target builder \
   `--overwrite`.
 - `mj fetch` copies a file, or a directory as a zip archive, from a session's
   target to this machine and prints where it landed. See below.
-- `mj models` lists the models and efforts a profile offers. Usage-priced profiles
+- `mj models` lists the models and efforts a profile offers, after the profile's
+  `models` allow-list; `--unrestricted` lists everything the harness advertises.
+  Usage-priced profiles
   include known per-million-token rates; subscription and unknown billing modes
   are labeled without per-token prices. JSON includes a `billing` field and a
   `price` object or `null` for each model.

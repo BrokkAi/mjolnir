@@ -177,6 +177,10 @@ impl Default for SessionListQuery {
 #[serde(deny_unknown_fields)]
 pub(super) struct ProfileConfigQuery {
     pub(super) model: Option<String>,
+    /// Return the catalogue the harness advertises, before the profile's
+    /// `models` allow-list. `mj doctor` compares the two.
+    #[serde(default)]
+    pub(super) unrestricted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -701,6 +701,7 @@ mod tests {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            models: Default::default(),
             legacy_subagents: None,
         };
         let choices = probe_profile(
@@ -767,6 +768,7 @@ mod tests {
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                models: Default::default(),
                 legacy_subagents: None,
             };
             let choices = probe_profile(
@@ -818,6 +820,7 @@ mod tests {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            models: Default::default(),
             legacy_subagents: None,
         };
         let key = fingerprint(&profile);
@@ -930,6 +933,7 @@ mod tests {
             home: home.path().into(),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
@@ -975,6 +979,7 @@ mod tests {
             home: home.path().into(),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
@@ -1003,6 +1008,7 @@ mod tests {
             home: root.path().into(),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
@@ -1328,6 +1334,7 @@ mod tests {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            models: Default::default(),
             legacy_subagents: None,
         };
         let mut config = Config::default();
@@ -1482,6 +1489,7 @@ mod tests {
                     guardian_review_model: None,
                     codex_profile: None,
                     muse_auto_review: None,
+                    models: Default::default(),
                     legacy_subagents: None,
                 },
             );

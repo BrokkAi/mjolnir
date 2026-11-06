@@ -397,6 +397,38 @@ The setting applies only to a Codex profile with a custom provider, because
 Mjolnir generates a catalog only for those. Setting it on any other profile is a
 configuration error.
 
+## Limit the models a profile offers
+
+Some harnesses advertise very large catalogues. OpenCode with an OpenRouter key
+lists several hundred models, and they all appear in session model pickers,
+sub-agent choices, review slots and Autoconfigure. OpenCode ignores its own
+provider `whitelist` and `blacklist`, so Mjolnir has its own list. Set `models`
+on the profile to the exact model values you want offered:
+
+```toml
+[profiles.ds8bit]
+kind = "opencode"
+home = "/home/me/.opencode-ds8bit"
+models = ["openrouter/deepseek/deepseek-v4.1-flash-1017"]
+```
+
+`mj models --profile ds8bit --unrestricted` prints every value the profile
+advertises, ignoring `models`. Without `--unrestricted`, `mj models` prints what
+Mjolnir offers. A profile without `models`, or with an empty list, offers
+everything it advertises. You can also edit the list in Settings, under the
+profile's **Offered models**.
+
+The profile's current model stays offered even when `models` omits it, so a
+session never runs a model its picker hides. Edits to `models` take effect
+without rediscovering the profile's catalogue. A Settings draft that changes
+only `models` shows the saved list in its pickers until you save.
+
+`mj doctor` warns when an enabled profile advertises more than 50 models and has
+no `models` list, and gives the line to add. It also warns about entries the
+profile does not advertise and about a current model outside the list. The check
+reads the catalogue from a running daemon; without one, or while discovery is
+still running, it reports "Not checked" and does not fail.
+
 ## Codex profile files
 
 Codex reads profile files beside its `config.toml`: `codex -p ds` layers

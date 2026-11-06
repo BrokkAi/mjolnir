@@ -1043,6 +1043,13 @@ pub struct HarnessProfile {
     /// changes nothing there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub muse_auto_review: Option<bool>,
+    /// The models Mjolnir offers from this profile, as exact values from the
+    /// profile's advertised catalogue (`openrouter/deepseek/deepseek-v4.1-flash-1017`).
+    /// Empty offers everything the harness advertises. Some harnesses, such as
+    /// OpenCode on OpenRouter, advertise hundreds of models and ignore their
+    /// own allow-lists. The profile's current model is always offered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
     /// Consume legacy per-profile choices without migrating them to global settings.
     #[serde(default, rename = "subagents", skip_serializing)]
     pub legacy_subagents: Option<serde_json::Value>,
@@ -1980,6 +1987,7 @@ mod tests {
             guardian_review_model: None,
             muse_auto_review: None,
             codex_profile: None,
+            models: Default::default(),
             legacy_subagents: None,
         };
         let inputs = profile.discovery_inputs();

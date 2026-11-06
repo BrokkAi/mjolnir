@@ -165,6 +165,7 @@ mod tests {
             guardian_review_model: None,
             muse_auto_review: None,
             codex_profile: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
         };
         let choice = |value: &str| SessionConfigChoice {

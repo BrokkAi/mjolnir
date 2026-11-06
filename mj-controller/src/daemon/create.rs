@@ -568,6 +568,7 @@ mod delegation_replay_tests {
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                models: Default::default(),
                 legacy_subagents: None,
             },
         );
@@ -706,6 +707,7 @@ mod delegation_replay_tests {
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                models: Default::default(),
                 legacy_subagents: None,
             },
         );

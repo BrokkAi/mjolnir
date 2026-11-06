@@ -2396,6 +2396,10 @@ pub(crate) struct ModelsArgs {
     /// List the efforts this model offers instead of the default model's.
     #[arg(long)]
     model: Option<String>,
+    /// List every model the harness advertises, ignoring the profile's
+    /// `models` allow-list. Use it to find the exact values to put there.
+    #[arg(long, conflicts_with = "model")]
+    unrestricted: bool,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -2429,7 +2433,7 @@ pub(crate) async fn models(args: ModelsArgs) -> Result<()> {
         .unwrap_or(mj_client::quota::QuotaBilling::Unknown);
     let choices = ApiClient::connect()
         .await?
-        .models(&args.profile, args.model)
+        .models(&args.profile, args.model, args.unrestricted)
         .await?;
     let rendered = render_models(&choices, billing, args.json)?;
     println!("{rendered}");

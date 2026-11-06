@@ -427,6 +427,7 @@ fn sample_config() -> Config {
                 kind: HarnessKind::Codex,
                 home: PathBuf::from("/home/test/.codex"),
                 environment: Default::default(),
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 muse_auto_review: None,
