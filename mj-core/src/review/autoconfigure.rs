@@ -207,8 +207,9 @@ pub fn autoconfigure(
         ]
     } else if selected[2].is_some() {
         vec![
-            choice(2, "xhigh", &mut adjusted),
-            choice(2, "xhigh", &mut adjusted),
+            choice(2, "high", &mut adjusted),
+            choice(2, "high", &mut adjusted),
+            choice(2, "high", &mut adjusted),
         ]
     } else if selected[3].is_some() {
         vec![
@@ -260,7 +261,7 @@ mod tests {
             unknown
                 .reviewers
                 .iter()
-                .all(|choice| choice.effort.as_deref() == Some("xhigh"))
+                .all(|choice| choice.effort.as_deref() == Some("high"))
         );
     }
 
@@ -311,7 +312,11 @@ mod tests {
             ),
             (
                 &["claude-haiku-4.5", "deepseek-v3-flash"],
-                &[("claude-haiku-4.5", "xhigh"), ("claude-haiku-4.5", "xhigh")],
+                &[
+                    ("claude-haiku-4.5", "high"),
+                    ("claude-haiku-4.5", "high"),
+                    ("claude-haiku-4.5", "high"),
+                ],
             ),
             (
                 &["deepseek-v3-flash", "deepseek-v4-flash-max"],
