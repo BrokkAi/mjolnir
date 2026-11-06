@@ -917,6 +917,20 @@ pub(super) async fn serve_session(
                 if first_use {
                     emit_runtime_event(events, RuntimeEvent::NativeSessionUsed).await?;
                 }
+                // Admission: settled after every await that prepares the
+                // prompt, and nothing below awaits before `session/prompt`.
+                apply_pending_policy_updates(
+                    None,
+                    policy_updates,
+                    connection,
+                    &session_id,
+                    spec.harness,
+                    enforcement,
+                    &mut config_options,
+                    &mut modes,
+                    events,
+                )
+                .await?;
                 let prompt_text = prompt
                     .iter()
                     .filter_map(|block| match block {
