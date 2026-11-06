@@ -159,6 +159,21 @@ impl StagedSetting {
 }
 
 impl ExecutionEnforcement {
+    /// ACP selectors reserved for the target's execution policy: the option
+    /// the worker selects the policy mode on, and the policy setting.
+    pub fn owned_config_keys(
+        self,
+        options: &[agent_client_protocol::v1::schema::SessionConfigOption],
+    ) -> Vec<String> {
+        let mode = self.acp_mode.and_then(|desired| {
+            crate::acp::execution_mode_option(options, self.acp_mode_selector, desired)
+                .map(|option| option.id.to_string())
+        });
+        mode.into_iter()
+            .chain(self.acp_setting.map(|(key, _)| key.to_owned()))
+            .collect()
+    }
+
     /// Name reported to the UI for the mode this session runs in.
     pub const fn label(self) -> &'static str {
         self.label

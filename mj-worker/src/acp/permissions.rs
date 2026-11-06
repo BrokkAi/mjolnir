@@ -17,44 +17,22 @@ pub(super) struct RestoredPlanMode {
     pub(super) config_options: Vec<SessionConfigOption>,
     pub(super) modes: Option<SessionModeState>,
     pub(super) plan: String,
-    pub(super) transition: PlanModeTransition,
-}
-
-/// Tracks the mode Claude had before Plan, including an explicit mode change
-/// made while planning so plan completion cannot overwrite the user's choice.
-#[derive(Debug, Clone, Default)]
-pub(super) enum PlanModeTransition {
-    #[default]
-    Inactive,
-    Planning {
-        restore_mode: Option<String>,
-    },
-    ExplicitModeChange,
-}
-
-impl PlanModeTransition {
-    pub(super) fn mode_applied(&mut self, mode: &str, previous: Option<String>) {
-        if mode == "plan" {
-            if previous.as_deref() != Some("plan") {
-                *self = Self::Planning {
-                    restore_mode: previous,
-                };
-            }
-        } else if matches!(self, Self::Planning { .. }) {
-            *self = Self::ExplicitModeChange;
-        }
-    }
 }
 
 pub(super) fn current_session_mode(
     config_options: &[SessionConfigOption],
     modes: &Option<SessionModeState>,
 ) -> Option<String> {
-    surface::config_current_value(config_options, "mode").or_else(|| {
-        modes
-            .as_ref()
-            .map(|state| state.current_mode_id.to_string())
-    })
+    config_options
+        .iter()
+        .find(|option| option.category == Some(SessionConfigOptionCategory::Mode))
+        .and_then(|option| surface::config_current_value(config_options, &option.id.to_string()))
+        .or_else(|| surface::config_current_value(config_options, "mode"))
+        .or_else(|| {
+            modes
+                .as_ref()
+                .map(|state| state.current_mode_id.to_string())
+        })
 }
 
 pub(super) type PlanModeRestoration<'a> =
@@ -65,36 +43,22 @@ pub(super) async fn restore_plan_execution_mode(
     session_id: SessionId,
     mut state: RestoredPlanMode,
     permission_sent: oneshot::Receiver<bool>,
+    enforcement: Option<ExecutionEnforcement>,
 ) -> Result<RestoredPlanMode> {
     ensure!(
         permission_sent.await.unwrap_or(false),
         "Claude's plan permission response could not be delivered"
     );
-    let transition = state.transition.clone();
-    let desired = match transition {
-        PlanModeTransition::Planning {
-            restore_mode: Some(mode),
-        } => mode,
-        PlanModeTransition::Planning { restore_mode: None } => {
-            bail!("Claude's mode before Plan was not reported")
-        }
-        PlanModeTransition::ExplicitModeChange => {
-            state.transition = PlanModeTransition::default();
-            return Ok(state);
-        }
-        PlanModeTransition::Inactive => "bypassPermissions".to_owned(),
-    };
-    enforce_execution_mode(
+    reassert_execution_policy(
         connection,
         &session_id,
         HarnessKind::Claude,
-        None,
-        &desired,
+        enforcement,
         &mut state.config_options,
         &mut state.modes,
+        PolicySync::Always,
     )
     .await?;
-    state.transition = PlanModeTransition::default();
     Ok(state)
 }
 

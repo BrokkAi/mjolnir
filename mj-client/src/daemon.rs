@@ -389,6 +389,9 @@ pub struct WorkspaceSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSessionView {
+    /// Config selectors owned by the target permission policy.
+    #[serde(default)]
+    pub policy_config_keys: Vec<String>,
     pub session_id: String,
     pub projection_ordinal: u64,
     pub projection_digest: String,
@@ -412,6 +415,7 @@ impl RuntimeSessionView {
                 });
         Self {
             session_id,
+            policy_config_keys: Vec::new(),
             projection_ordinal,
             projection_digest,
             operational,
@@ -2993,7 +2997,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // clients reading its PID and `/proc`, and it serves the configuration that
 // owns the store instead of clients opening `config.toml`.
 // SessionReview::Inherit adds a value older API clients cannot deserialize.
-pub const PROTOCOL_VERSION: u32 = 82;
+// RuntimeSessionView carries policy-owned config keys; older strict readers reject them.
+pub const PROTOCOL_VERSION: u32 = 83;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

@@ -1391,12 +1391,17 @@ async fn an_unlisted_value_is_refused_with_the_accepted_values() {
 /// change away from Auto mode does the same mapping (`reconcileForModel`).
 /// With `refuse_auto` set, every request for Auto is refused.
 fn claude_auto_mode_harness(root: &std::path::Path, refuse_auto: bool) -> PathBuf {
+    claude_mode_harness(root, refuse_auto, false)
+}
+
+fn claude_mode_harness(root: &std::path::Path, refuse_auto: bool, resume_plan: bool) -> PathBuf {
     let script = root.join("claude_auto_mode.py");
     std::fs::write(
         &script,
         r#"
 import json, sys
 REFUSE_AUTO = __REFUSE_AUTO__
+RESUME_PLAN = __RESUME_PLAN__
 NO_AUTO = ['haiku']
 session, running, model, mode = 'replacement', 'default', 'default', 'default'
 NOTICE = '**Auto mode unavailable:** the selected model does not support Auto mode; using Accept edits instead.'
@@ -1425,8 +1430,13 @@ for line in sys.stdin:
     if method == 'initialize':
         result = {'protocolVersion':1,'agentCapabilities':{'loadSession':True}}
     elif method == 'session/load':
-        error = {'code':-32002,'message':'Resource not found: ' + params['sessionId'],
-                 'data':{'uri':params['sessionId']}}
+        if RESUME_PLAN:
+            model = running = 'sonnet'
+            mode = 'plan'
+            result = {'configOptions':options(),'modes':modes()}
+        else:
+            error = {'code':-32002,'message':'Resource not found: ' + params['sessionId'],
+                     'data':{'uri':params['sessionId']}}
     elif method == 'session/new':
         running = params.get('_meta',{}).get('claudeCode',{}).get('options',{}).get('model') or 'default'
         model, mode = 'default', 'default'
@@ -1460,7 +1470,7 @@ for line in sys.stdin:
         .replace(
             "__REFUSE_AUTO__",
             if refuse_auto { "True" } else { "False" },
-        ),
+        ).replace("__RESUME_PLAN__", if resume_plan { "True" } else { "False" }),
     )
     .unwrap();
     script
@@ -1476,6 +1486,10 @@ struct HaikuFallbackResume {
 }
 
 async fn resume_a_missing_haiku_session(refuse_auto: bool) -> HaikuFallbackResume {
+    resume_haiku_then_switch(refuse_auto, false).await
+}
+
+async fn resume_haiku_then_switch(refuse_auto: bool, switch_model: bool) -> HaikuFallbackResume {
     let root = tempfile::tempdir().unwrap();
     let mut spec = launch(
         root.path(),
@@ -1511,9 +1525,41 @@ async fn resume_a_missing_haiku_session(refuse_auto: bool) -> HaikuFallbackResum
             _ => {}
         }
     }
+    if switch_model {
+        assert_eq!(resumed.mode.as_deref(), Some("acceptEdits"));
+        commands
+            .send(CommandRequest::SetConfig {
+                request_id: "switch-to-sonnet".into(),
+                key: "model".into(),
+                value: "sonnet".into(),
+            })
+            .await
+            .unwrap();
+        loop {
+            match next(&mut events).await {
+                RuntimeEvent::ConfigApplied { config_options, .. } => {
+                    resumed.mode = surface::config_current_value(&config_options, "mode");
+                    break;
+                }
+                RuntimeEvent::CommandRejected { message, .. } => panic!("{message}"),
+                _ => {}
+            }
+        }
+    }
     drop(commands);
-    let _ = tokio::time::timeout(Duration::from_secs(10), runtime).await;
+    tokio::time::timeout(Duration::from_secs(10), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     resumed
+}
+
+// Hard-won: aaa4c484: a model switch left the Auto fallback (acceptEdits) in place
+#[tokio::test]
+async fn switching_from_haiku_to_sonnet_reasserts_guardian_auto_mode() {
+    let resumed = resume_haiku_then_switch(false, true).await;
+    assert_eq!(resumed.mode.as_deref(), Some("auto"));
 }
 
 /// R8-2: a never-prompted Claude session on haiku could not be resumed. Its
@@ -1566,4 +1612,52 @@ async fn a_mode_the_harness_refuses_for_a_new_session_leaves_its_default_mode_an
         "{}",
         refusals[0]
     );
+}
+
+#[tokio::test]
+async fn resume_and_context_restore_preserve_only_active_plan_under_guardian() {
+    for (resume_plan, saved_mode, expected) in [
+        (true, None, "plan"),
+        (false, Some("plan"), "plan"),
+        (false, Some("acceptEdits"), "auto"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut spec = launch(
+            root.path(),
+            claude_mode_harness(root.path(), false, resume_plan),
+            AcceptedSessionConfig {
+                model: Some("sonnet".into()),
+                effort: None,
+            },
+        );
+        spec.harness = HarnessKind::Claude;
+        if resume_plan {
+            spec.resume_session = Some("native-plan".into());
+        }
+        if let Some(mode) = saved_mode {
+            spec.context_restore = Some(ContextReset {
+                request_id: "restore".into(),
+                selectors: vec![],
+                mode: Some(mode.into()),
+            });
+        }
+        let (commands, requests) = mpsc::channel(8);
+        let (events_tx, mut events) = mpsc::channel(64);
+        let runtime = tokio::spawn(run(spec, requests, events_tx));
+        loop {
+            if let RuntimeEvent::SessionConfigured { config_options } = next(&mut events).await {
+                assert_eq!(
+                    surface::config_current_value(&config_options, "mode").as_deref(),
+                    Some(expected)
+                );
+                break;
+            }
+        }
+        drop(commands);
+        tokio::time::timeout(Duration::from_secs(10), runtime)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
 }

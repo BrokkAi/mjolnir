@@ -322,15 +322,28 @@ pub(super) async fn live_session_config_options(
     state: &ServerState,
     session_id: &str,
     harness: mj_core::config::HarnessKind,
-) -> Option<Vec<ViewerConfigOption>> {
+) -> Option<(Vec<ViewerConfigOption>, Vec<String>)> {
     let backend = state.subagent.as_ref()?;
     let handle = backend.session_handle(session_id.to_owned()).await.ok()??;
     let snapshot = handle.view().snapshot?;
     let options = session_config_view(harness, &snapshot.operational);
     // An empty list is the absence of an answer, not an agent that offers
     // nothing, so it must not become the authority the request is refused by.
-    (!options.is_empty()).then_some(options)
+    let owned = state
+        .snapshot_rx
+        .borrow()
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.execution_enforcement)
+        .map(|enforcement| enforcement.owned_config_keys(&snapshot.operational.config_options))
+        .unwrap_or_default();
+    (!options.is_empty()).then_some((options, owned))
 }
+
+/// Refusal for a setting the target's permission policy owns.
+const POLICY_OWNED_SETTING: &str =
+    "The target's permission policy sets this setting. Use plan mode to enter or leave Plan.";
 
 /// Validate an action against the live session where that matters.
 ///
@@ -363,7 +376,16 @@ pub(super) async fn validate_action_live(
         }
         _ => None,
     };
-    validate_action_against(action, &state.snapshot_rx.borrow(), live.as_deref())?;
+    if let (ControllerAction::SetConfig { key, .. }, Some((_, owned))) = (action, &live)
+        && owned.contains(key)
+    {
+        return Err(ApiError::bad_request(POLICY_OWNED_SETTING));
+    }
+    validate_action_against(
+        action,
+        &state.snapshot_rx.borrow(),
+        live.as_ref().map(|(options, _)| options.as_slice()),
+    )?;
     require_worker_source(state, action).await
 }
 
@@ -638,6 +660,9 @@ fn validate_action_against(
         } => {
             validate_public_id(session_id)?;
             let session = require_session_record(snapshot, session_id)?;
+            if session.policy_config_keys.contains(key) {
+                return Err(ApiError::bad_request(POLICY_OWNED_SETTING));
+            }
             if !session.capabilities.set_config {
                 return Err(ApiError::bad_request(
                     "this session cannot change configuration now",

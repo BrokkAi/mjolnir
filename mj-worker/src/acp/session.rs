@@ -25,6 +25,7 @@ pub(super) async fn serve_session(
     native_session_used: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
     grok_usage: &grok_usage::Collector,
+    policy_updates: &mut mpsc::UnboundedReceiver<SessionUpdate>,
 ) -> Result<Option<SessionRestart>> {
     let mut meta = serde_json::Map::new();
     meta.insert("terminal_output".into(), serde_json::Value::Bool(true));
@@ -388,7 +389,6 @@ pub(super) async fn serve_session(
     let enforcement = session_enforcement(spec);
     let mut config_options = config_options.unwrap_or_default();
     let mut modes = modes;
-    let mut plan_mode_transition = PlanModeTransition::default();
     // Grok Build publishes model selection through its legacy catalogue. Keep
     // any standard selectors it also returns while projecting model/effort
     // into the shape the rest of Hel reads.
@@ -501,16 +501,55 @@ pub(super) async fn serve_session(
             }
         }
     }
-    if let Some(desired_mode) = enforcement.and_then(ExecutionEnforcement::acp_mode) {
-        let selector = enforcement.and_then(ExecutionEnforcement::acp_mode_selector);
-        let enforced = enforce_execution_mode(
+    if let Some(mode) = spec
+        .clear_context_request
+        .as_ref()
+        .or(spec.context_restore.as_ref())
+        .and_then(|reset| reset.mode.as_ref())
+        // A saved mode counts only as evidence that Plan was on when policy owns it.
+        .filter(|mode| {
+            mode.as_str() == "plan"
+                || enforcement
+                    .and_then(ExecutionEnforcement::acp_mode)
+                    .is_none()
+        })
+    {
+        enforce_execution_mode(
             connection,
             &session_id,
             spec.harness,
-            selector,
-            desired_mode,
+            None,
+            mode,
             &mut config_options,
             &mut modes,
+        )
+        .await?;
+    }
+    if let Some(desired_mode) = enforcement.and_then(ExecutionEnforcement::acp_mode) {
+        let selector = enforcement.and_then(ExecutionEnforcement::acp_mode_selector);
+        // Every open selects the policy, so a loaded session cannot keep an
+        // earlier one. Only Plan carried over from a resumed session or a
+        // saved context stays on.
+        let sync = if (resumed
+            || spec
+                .clear_context_request
+                .as_ref()
+                .or(spec.context_restore.as_ref())
+                .is_some_and(|reset| reset.mode.as_deref() == Some("plan")))
+            && current_session_mode(&config_options, &modes).as_deref() == Some("plan")
+        {
+            PolicySync::IfDrifted
+        } else {
+            PolicySync::Always
+        };
+        let enforced = reassert_execution_policy(
+            connection,
+            &session_id,
+            spec.harness,
+            enforcement,
+            &mut config_options,
+            &mut modes,
+            sync,
         )
         .await;
         if let Err(error) = enforced {
@@ -545,7 +584,11 @@ pub(super) async fn serve_session(
     }
     // Muse's auto-review is off in every session muse-acp opens, so it is
     // selected on every open, resumed or not.
-    if let Some(setting) = enforcement.and_then(ExecutionEnforcement::acp_setting) {
+    if enforcement
+        .and_then(ExecutionEnforcement::acp_mode)
+        .is_none()
+        && let Some(setting) = enforcement.and_then(ExecutionEnforcement::acp_setting)
+    {
         enforce_policy_setting(
             connection,
             &session_id,
@@ -555,23 +598,8 @@ pub(super) async fn serve_session(
         )
         .await?;
     }
-    if let Some(mode) = spec
-        .clear_context_request
-        .as_ref()
-        .or(spec.context_restore.as_ref())
-        .and_then(|reset| reset.mode.as_ref())
-    {
-        enforce_execution_mode(
-            connection,
-            &session_id,
-            spec.harness,
-            None,
-            mode,
-            &mut config_options,
-            &mut modes,
-        )
-        .await?;
-    }
+    // Startup responses supersede the notifications emitted while opening.
+    while policy_updates.try_recv().is_ok() {}
     let memory = if spec.clear_context_request.is_some() && spec.harness != HarnessKind::Claude {
         if let Some(memory) = spec.project_memory.clone() {
             Some(
@@ -728,6 +756,40 @@ pub(super) async fn serve_session(
             && config_recovery.is_none()
             && goal_question.is_none();
         let request = tokio::select! {
+            Some(update) = policy_updates.recv() => {
+                let previous = policy_configuration(&config_options, &modes, enforcement);
+                apply_policy_update(update, &mut config_options, &mut modes);
+                while let Ok(update) = policy_updates.try_recv() {
+                    apply_policy_update(update, &mut config_options, &mut modes);
+                }
+                if previous != policy_configuration(&config_options, &modes, enforcement) {
+                    reassert_execution_policy(
+                        connection,
+                        &session_id,
+                        spec.harness,
+                        enforcement,
+                        &mut config_options,
+                        &mut modes,
+                        PolicySync::IfDrifted,
+                    )
+                    .await?;
+                    emit_runtime_event(
+                        events,
+                        RuntimeEvent::SessionConfigured {
+                            config_options: config_options.clone(),
+                        },
+                    )
+                    .await?;
+                    emit_runtime_event(
+                        events,
+                        RuntimeEvent::SessionModesConfigured {
+                            modes: modes.clone(),
+                        },
+                    )
+                    .await?;
+                }
+                continue;
+            }
             event = goal_controls.next(), if !goal_controls.is_empty() => {
                 emit_runtime_event(events, event).await?;
                 continue;
@@ -925,7 +987,7 @@ pub(super) async fn serve_session(
                             approved_plan = Some(plan);
                             implementation_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                             emit_runtime_event(events, RuntimeEvent::Warning {
-                                message: "Plan approved; waiting for Claude to finish planning before restoring the pre-Plan mode.".into(),
+                                message: "Plan approved; waiting for Claude to finish planning before restoring the policy mode.".into(),
                             }).await?;
                         }
                         response = &mut prompt, if prompt_running => {
@@ -937,8 +999,7 @@ pub(super) async fn serve_session(
                                     let implementation = approved_plan.take().expect("approved plan is present");
                                     mode_restoration = Some(Box::pin(restore_plan_execution_mode(connection, session_id.clone(), RestoredPlanMode {
                                         config_options: config_options.clone(), modes: modes.clone(), plan: implementation.plan,
-                                        transition: plan_mode_transition.clone(),
-                                    }, implementation.permission_sent)));
+                                    }, implementation.permission_sent, enforcement)));
                                     continue;
                                 }
                                 emit_runtime_event(events, RuntimeEvent::Warning {
@@ -1141,7 +1202,7 @@ pub(super) async fn serve_session(
                         _ = async {
                             tokio::time::sleep_until(implementation_deadline.expect("implementation deadline branch is guarded")).await;
                         }, if implementation_deadline.is_some() => {
-                            let message = "Plan implementation timed out while finishing planning or restoring the pre-Plan mode; restarting the harness without submitting the continuation.";
+                            let message = "Plan implementation timed out while finishing planning or restoring the policy mode; restarting the harness without submitting the continuation.";
                             emit_runtime_event(events, RuntimeEvent::Warning { message: message.into() }).await?;
                             emit_runtime_event(events, RuntimeEvent::CommandInterrupted { request_id, message: message.into() , reason: mj_core::event_outcome::OutcomeReason::TimedOut }).await?;
                             return Ok(Some(SessionRestart::Resume(session_id.to_string())));
@@ -1399,7 +1460,6 @@ pub(super) async fn serve_session(
                             implementation_deadline = None;
                             match restored {
                                 Ok(state) => {
-                                    plan_mode_transition = state.transition.clone();
                                     config_options = state.config_options;
                                     modes = state.modes;
                                     emit_runtime_event(events, RuntimeEvent::SessionConfigured { config_options: config_options.clone() }).await?;
@@ -1414,7 +1474,7 @@ pub(super) async fn serve_session(
                                     prompt_running = true;
                                 }
                                 Err(error) => {
-                                    emit_runtime_event(events, RuntimeEvent::Warning { message: format!("Plan implementation stopped: could not restore the pre-Plan mode: {error:#}") }).await?;
+                                    emit_runtime_event(events, RuntimeEvent::Warning { message: format!("Plan implementation stopped: could not restore the policy mode: {error:#}") }).await?;
                                     emit_runtime_event(events, RuntimeEvent::PromptFinished { request_id, stop_reason: PROMPT_ERROR_STOP_REASON.into(), usage: None, diagnostic: None }).await?;
                                     break;
                                 }
@@ -1443,9 +1503,7 @@ pub(super) async fn serve_session(
                 key,
                 value,
             } => {
-                let previous_mode = (spec.harness == HarnessKind::Claude && key == "mode")
-                    .then(|| current_session_mode(&config_options, &modes))
-                    .flatten();
+                let previous_policy = policy_configuration(&config_options, &modes, enforcement);
                 let grok_model_change = grok_models.is_some() && grok::handles_config_key(&key);
                 let applied = apply_session_selector(
                     connection,
@@ -1459,9 +1517,22 @@ pub(super) async fn serve_session(
                 .await;
                 match applied {
                     Ok(value) => {
-                        if spec.harness == HarnessKind::Claude && key == "mode" {
-                            plan_mode_transition.mode_applied(&value, previous_mode);
+                        if previous_policy
+                            != policy_configuration(&config_options, &modes, enforcement)
+                        {
+                            reassert_execution_policy(
+                                connection,
+                                &session_id,
+                                spec.harness,
+                                enforcement,
+                                &mut config_options,
+                                &mut modes,
+                                PolicySync::IfDrifted,
+                            )
+                            .await?;
                         }
+                        let value =
+                            surface::config_current_value(&config_options, &key).unwrap_or(value);
                         spec.accepted_config
                             .lock()
                             .map_err(|_| {
@@ -1499,38 +1570,22 @@ pub(super) async fn serve_session(
             }
             CommandRequest::RestoreExecutionMode { request_id } => {
                 let applied = async {
-                    let desired = match &plan_mode_transition {
-                        PlanModeTransition::Planning {
-                            restore_mode: Some(mode),
-                        } => Some(mode.clone()),
-                        PlanModeTransition::Planning { restore_mode: None } => {
-                            bail!("Claude's mode before Plan was not reported")
-                        }
-                        PlanModeTransition::ExplicitModeChange => None,
-                        PlanModeTransition::Inactive => {
-                            bail!("no pre-Plan mode was recorded for this session")
-                        }
-                    };
-                    if let Some(desired) = desired {
-                        enforce_execution_mode(
-                            connection,
-                            &session_id,
-                            spec.harness,
-                            None,
-                            &desired,
-                            &mut config_options,
-                            &mut modes,
-                        )
-                        .await
-                    } else {
-                        current_session_mode(&config_options, &modes)
-                            .context("the explicitly selected Claude mode was not reported")
-                    }
+                    reassert_execution_policy(
+                        connection,
+                        &session_id,
+                        spec.harness,
+                        enforcement,
+                        &mut config_options,
+                        &mut modes,
+                        PolicySync::Always,
+                    )
+                    .await?;
+                    current_session_mode(&config_options, &modes)
+                        .context("the policy mode was not reported")
                 }
                 .await;
                 match applied {
                     Ok(value) => {
-                        plan_mode_transition = PlanModeTransition::default();
                         emit_runtime_event(
                             events,
                             RuntimeEvent::SessionModesConfigured {
@@ -1566,9 +1621,6 @@ pub(super) async fn serve_session(
                 request_id,
                 mode_id,
             } => {
-                let previous_mode = (spec.harness == HarnessKind::Claude)
-                    .then(|| current_session_mode(&config_options, &modes))
-                    .flatten();
                 let advertised = modes.as_ref().is_some_and(|state| {
                     state
                         .available_modes
@@ -1592,12 +1644,27 @@ pub(super) async fn serve_session(
                 };
                 match applied {
                     Ok(()) => {
-                        if let Some(state) = modes.as_mut() {
-                            state.current_mode_id = mode_id.clone().into();
-                        }
-                        if spec.harness == HarnessKind::Claude {
-                            plan_mode_transition.mode_applied(&mode_id, previous_mode);
-                        }
+                        apply_policy_update(
+                            SessionUpdate::CurrentModeUpdate(
+                                agent_client_protocol::v1::schema::CurrentModeUpdate::new(
+                                    mode_id.clone(),
+                                ),
+                            ),
+                            &mut config_options,
+                            &mut modes,
+                        );
+                        reassert_execution_policy(
+                            connection,
+                            &session_id,
+                            spec.harness,
+                            enforcement,
+                            &mut config_options,
+                            &mut modes,
+                            PolicySync::IfDrifted,
+                        )
+                        .await?;
+                        let mode_id =
+                            current_session_mode(&config_options, &modes).unwrap_or(mode_id);
                         emit_runtime_event(
                             events,
                             RuntimeEvent::SessionModeApplied {

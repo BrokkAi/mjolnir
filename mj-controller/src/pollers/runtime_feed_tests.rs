@@ -136,6 +136,7 @@ fn runtime_view(
     projection_digest: &str,
 ) -> daemon::RuntimeSessionView {
     daemon::RuntimeSessionView {
+        policy_config_keys: Vec::new(),
         session_id: session_id.into(),
         projection_ordinal,
         projection_digest: projection_digest.into(),

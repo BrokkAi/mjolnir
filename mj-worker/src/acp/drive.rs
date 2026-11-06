@@ -29,6 +29,7 @@ where
     // How many updates the agent produced by working, over the whole
     // connection. A turn reads it before and after to learn whether the
     // harness answered the prompt at all (#970).
+    let (policy_updates_tx, policy_updates) = mpsc::unbounded_channel();
     let agent_output_count = AgentOutputCount::default();
     let last_agent_message = LastAgentMessage::default();
     let notification_last_agent_message = last_agent_message.clone();
@@ -227,6 +228,9 @@ where
                         }
                     },
                 };
+                if matches!(update, SessionUpdate::ConfigOptionUpdate(_) | SessionUpdate::CurrentModeUpdate(_)) {
+                    policy_updates_tx.send(update.clone()).map_err(|_| relay_event_channel_error())?;
+                }
                 if !notification_live_history_enabled.load(Ordering::Acquire) {
                     if !session_update_is_session_state(&update) {
                         return Ok(());
@@ -991,6 +995,7 @@ where
                 native_session_used,
                 replacing_previous_bridge,
                 grok_usage,
+                policy_updates,
             )
             .await
             {
@@ -1584,6 +1589,7 @@ pub(super) async fn drive_connection(
     native_session_used: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
     grok_usage: grok_usage::Collector,
+    mut policy_updates: mpsc::UnboundedReceiver<SessionUpdate>,
 ) -> Result<Option<SessionRestart>> {
     // Terminals belong to the connection. However the session ends — closed,
     // failed, or with its command channel dropped — their process groups must
@@ -1604,6 +1610,7 @@ pub(super) async fn drive_connection(
         native_session_used,
         replacing_previous_bridge,
         &grok_usage,
+        &mut policy_updates,
     )
     .await;
     pending_elicitations.close();

@@ -576,6 +576,8 @@ pub struct ChatState {
     command_choices: Vec<CommandChoice>,
     model_values: Vec<SessionConfigChoice>,
     effort_values: Vec<SessionConfigChoice>,
+    /// Config keys owned by this session's execution policy.
+    policy_config_keys: Vec<String>,
     autocomplete: Option<Autocomplete>,
     /// The `/model` / `/effort` value selector, when one is open. It owns the
     /// keyboard while it is up, though an arriving elicitation still wins.
@@ -769,6 +771,7 @@ impl ChatState {
             command_choices: builtin_command_choices(),
             model_values: Vec::new(),
             effort_values: Vec::new(),
+            policy_config_keys: Vec::new(),
             autocomplete: None,
             config_picker: None,
             anchor: TranscriptAnchor::Bottom,

@@ -699,6 +699,11 @@ impl ChatState {
                     let (key, value) = args
                         .split_once(char::is_whitespace)
                         .map_or((args, None), |(key, value)| (key, Some(value.trim())));
+                    if !self.config_key_user_settable(key) {
+                        self.clear_input();
+                        self.set_notice(self.policy_config_notice());
+                        return ChatAction::None;
+                    }
                     let values = self.config_values(key);
                     if values.is_empty() {
                         self.clear_input();

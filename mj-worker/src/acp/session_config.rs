@@ -476,29 +476,6 @@ fn announced_mode_substitute(harness: HarnessKind, desired: &str) -> Option<&'st
     }
 }
 
-/// The config option that offers `desired`: `selector` when the bridge lists
-/// it there, otherwise the bridge's Mode selector.
-fn execution_mode_option<'a>(
-    config_options: &'a [SessionConfigOption],
-    selector: Option<&str>,
-    desired: &str,
-) -> Option<&'a SessionConfigOption> {
-    let offers = |option: &&SessionConfigOption| select_contains(&option.kind, desired);
-    selector
-        .and_then(|id| {
-            config_options
-                .iter()
-                .filter(|option| option.id.to_string() == id)
-                .find(offers)
-        })
-        .or_else(|| {
-            config_options
-                .iter()
-                .filter(|option| option.category == Some(SessionConfigOptionCategory::Mode))
-                .find(offers)
-        })
-}
-
 pub(super) async fn enforce_execution_mode(
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
@@ -508,7 +485,7 @@ pub(super) async fn enforce_execution_mode(
     config_options: &mut Vec<SessionConfigOption>,
     legacy_modes: &mut Option<agent_client_protocol::v1::schema::SessionModeState>,
 ) -> Result<String> {
-    if let Some(option) = execution_mode_option(config_options, selector, desired) {
+    if let Some(option) = mj_core::acp::execution_mode_option(config_options, selector, desired) {
         let option_id = option.id.clone();
         // Legacy session modes mirror only the Mode selector.
         let mirrors_legacy_modes = option.category == Some(SessionConfigOptionCategory::Mode);
@@ -697,4 +674,111 @@ pub(super) fn refused_mode_warning(
         "{harness_name} refused execution mode {desired} for this session ({refusal}), so the \
          session continues in {kept}."
     )
+}
+
+/// How `reassert_execution_policy` treats the cached mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PolicySync {
+    /// Request the policy values even when the cache already shows them: the
+    /// cache can predate a permission response's mode change.
+    Always,
+    /// Request them only when the cache shows another value, leaving Plan on.
+    IfDrifted,
+}
+
+/// Reconcile the bridge with the launch policy at a command boundary. Plan
+/// controls may temporarily select Plan; leaving it always returns to policy.
+pub(super) async fn reassert_execution_policy(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    harness: HarnessKind,
+    enforcement: Option<ExecutionEnforcement>,
+    config_options: &mut Vec<SessionConfigOption>,
+    modes: &mut Option<SessionModeState>,
+    sync: PolicySync,
+) -> Result<()> {
+    let Some(enforcement) = enforcement else {
+        return Ok(());
+    };
+    if let Some(desired) = enforcement.acp_mode() {
+        let current = mj_core::acp::execution_mode_option(
+            config_options,
+            enforcement.acp_mode_selector(),
+            desired,
+        )
+        .and_then(|option| surface::config_current_value(config_options, &option.id.to_string()))
+        .or_else(|| current_session_mode(config_options, modes));
+        if sync == PolicySync::Always
+            || (current.as_deref() != Some(desired) && current.as_deref() != Some("plan"))
+        {
+            enforce_execution_mode(
+                connection,
+                session_id,
+                harness,
+                enforcement.acp_mode_selector(),
+                desired,
+                config_options,
+                modes,
+            )
+            .await?;
+        }
+    }
+    if let Some((key, value)) = enforcement.acp_setting()
+        && (sync == PolicySync::Always
+            || surface::config_current_value(config_options, key).as_deref() != Some(value))
+    {
+        enforce_policy_setting(
+            connection,
+            session_id,
+            harness,
+            (key, value),
+            config_options,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub(super) fn policy_configuration(
+    options: &[SessionConfigOption],
+    modes: &Option<SessionModeState>,
+    enforcement: Option<ExecutionEnforcement>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let mode = enforcement
+        .and_then(|policy| policy.acp_mode_selector())
+        .and_then(|key| surface::config_current_value(options, key))
+        .or_else(|| current_session_mode(options, modes));
+    let setting = enforcement
+        .and_then(ExecutionEnforcement::acp_setting)
+        .and_then(|(key, _)| surface::config_current_value(options, key));
+    let model = options
+        .iter()
+        .find(|option| option.category == Some(SessionConfigOptionCategory::Model))
+        .and_then(|option| surface::config_current_value(options, &option.id.to_string()))
+        .or_else(|| surface::config_current_value(options, "model"));
+    (mode, setting, model)
+}
+
+pub(super) fn apply_policy_update(
+    update: SessionUpdate,
+    options: &mut Vec<SessionConfigOption>,
+    modes: &mut Option<SessionModeState>,
+) {
+    match update {
+        SessionUpdate::ConfigOptionUpdate(update) => *options = update.config_options,
+        SessionUpdate::CurrentModeUpdate(update) => {
+            if let Some(modes) = modes.as_mut() {
+                modes.current_mode_id = update.current_mode_id.clone();
+            }
+            for option in options {
+                if (option.category == Some(SessionConfigOptionCategory::Mode)
+                    || option.id.to_string() == "mode")
+                    && let SessionConfigKind::Select(select) = &mut option.kind
+                {
+                    select.current_value = update.current_mode_id.to_string().into();
+                }
+            }
+        }
+        _ => {}
+    }
 }

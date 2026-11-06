@@ -451,8 +451,9 @@ mj new --workspace eval --bundle product --target builder \
   include known per-million-token rates; subscription and unknown billing modes
   are labeled without per-token prices. JSON includes a `billing` field and a
   `price` object or `null` for each model.
-- `mj set-config` applies any selectable session setting the harness advertises,
-  such as the model, effort, approval mode, or collaboration mode.
+- `mj set-config` applies user-settable session settings the harness advertises,
+  such as the model or effort. The target permission policy owns permission
+  settings; use plan mode to enter or leave Plan.
   Without `--key` and `--value` it lists the settings the session's agent
   offers, with their choices.
 - `mj ui` changes what an open dashboard shows, as if you had pressed the keys,

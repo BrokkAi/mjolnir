@@ -204,6 +204,9 @@ impl ChatState {
         let mut keys = Vec::new();
         for option in self.acp_surface.config_options() {
             let key = config_option_key(option);
+            if !self.config_key_user_settable(&key) {
+                continue;
+            }
             if keys.iter().any(|(existing, _)| existing == &key) {
                 continue;
             }

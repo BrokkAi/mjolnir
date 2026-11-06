@@ -42,8 +42,8 @@ To rerun automatic agent and repository discovery, use `mj setup`. For host prer
 `mj setup instructions --platform linux` or `--platform macos` prints an
 agent preparation guide. `mj set-config` changes one live session's harness
 settings (model, effort, etc.); it does not edit the user's mj defaults. In an
-interactive conversation, `/config` lists every setting the harness advertises,
-`/config <key>` opens its values, and `/config <key> <value>` applies one.
+interactive conversation, `/config` lists user-settable settings the harness advertises,
+`/config <key>` opens its values, and `/config <key> <value>` applies one. The target permission policy owns permission settings; use plan mode to enter or leave Plan.
 
 ## Change the user's dashboard for them
 
