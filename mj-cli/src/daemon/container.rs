@@ -176,6 +176,34 @@ pub(super) async fn is_running(runtime: DaemonRuntime, name: &str) -> Result<boo
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
 }
 
+/// Whether `runtime` reports a running daemon container of this instance.
+///
+/// The question needs no image: every container this instance's daemons ever
+/// ran in carries [`INSTANCE_LABEL`], while the container's name digests the
+/// image id, which only resolving (and possibly pulling) images could tell.
+/// `Err` means the engine did not answer, which is not "no container".
+pub(super) async fn instance_container_is_running(runtime: DaemonRuntime) -> Result<bool> {
+    let program = runtime
+        .engine()
+        .context("the daemon container has no engine")?;
+    let listed = engine(
+        program,
+        [
+            "ps",
+            "--format={{.Names}}",
+            &format!("--filter=label={INSTANCE_LABEL}={}", instance_id()),
+        ],
+        QUERY_TIMEOUT,
+    )
+    .await?;
+    if !listed.status.success() {
+        return Err(failure(program, "list daemon containers", &listed));
+    }
+    Ok(String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .any(|name| !name.trim().is_empty()))
+}
+
 /// Stop the daemon's container when it does not answer the protocol stop.
 /// This is the forced path; it stops the workers in the container too.
 pub(super) async fn stop(runtime: DaemonRuntime, name: &str) -> Result<()> {
@@ -401,8 +429,7 @@ impl ContainerSpec {
     }
 
     fn for_this_host(engine: DaemonRuntime, config: &DaemonConfig, image: String) -> Result<Self> {
-        let data = data_dir();
-        let instance = short_digest(data.as_os_str().as_encoded_bytes());
+        let instance = instance_id();
         let volume = format!("mj-{instance}-data");
         let mut mounts = Vec::new();
         for mount in &config.mounts {
@@ -493,6 +520,11 @@ async fn published_port(program: &str, name: &str) -> Result<u16> {
         .find_map(|line| line.trim().rsplit(':').next()?.parse::<u16>().ok())
         .with_context(|| format!("{program} reported no loopback port for {name}: {text:?}"))?;
     Ok(port)
+}
+
+/// The identity every container of this instance's daemons carries.
+fn instance_id() -> String {
+    short_digest(data_dir().as_os_str().as_encoded_bytes())
 }
 
 fn short_digest(bytes: &[u8]) -> String {
