@@ -12,10 +12,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, watch};
 
-use crate::targets::{
-    CommandSpec, SSH_MASTER_OPEN_TIMEOUT, SSH_RETRY_ATTEMPTS, SshRefusal, SshSessionLease,
-    ssh_refusal,
-};
+use crate::targets::{CommandSpec, SSH_MASTER_OPEN_TIMEOUT, SshSessionLease, ssh_refusal};
 use mj_core::config::harness_authentication_marker;
 use mj_core::credentials::{
     CredentialSnapshot, CredentialSyncAction, CredentialSyncHandle, CredentialSyncOutcome,

@@ -330,12 +330,11 @@ pub(crate) async fn collect_local_capacity_with(
 /// it is retried with the same backoff the executor and the relay use (launch
 /// finding R3-5); any other failure is reported at once.
 pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<CommandOutput> {
-    use crate::targets::{SSH_RETRY_ATTEMPTS, SshRefusal, ssh_refusal, ssh_retry_delay};
-    let attempts = match command.ssh_destination {
-        Some(_) => SSH_RETRY_ATTEMPTS,
-        None => 1,
-    };
-    for attempt in 1..=attempts {
+    use crate::targets::{SshRefusalRetry, ssh_refusal};
+    // The poller bounds the whole probe, retries included, with
+    // `RESOURCE_POLL_TIMEOUT`, so the retries need no budget of their own.
+    let mut retry = SshRefusalRetry::new(true);
+    loop {
         let (output, ssh_session) = run_resource_command(command).await?;
         if output.status == 0 {
             return Ok(output);
@@ -344,23 +343,19 @@ pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<Co
         if let Some(destination) = command.ssh_destination.as_deref()
             && let Some(refusal) = ssh_refusal(output.status, &stderr)
         {
-            // A refused session found its master alive; a connection closed
-            // before authentication may mean the master is gone.
-            if refusal == SshRefusal::BeforeAuthentication
-                && let Some(lease) = &ssh_session
-            {
-                lease.invalidate();
-            }
-            // Only Unix leases own a shared session slot; free it before backoff.
+            // The lease learns what the refusal means while it is still held.
+            let learned = ssh_session
+                .as_ref()
+                .is_some_and(|lease| lease.note_refusal(refusal));
+            // Only Unix leases own a shared session slot; free it before the wait.
             #[cfg(unix)]
             drop(ssh_session);
-            if attempt < attempts {
-                let delay = ssh_retry_delay(attempt);
-                refusal.log_retry(destination, &command.purpose, attempt, delay, stderr.trim());
+            if let Some(delay) =
+                retry.next(refusal, learned, destination, &command.purpose, &stderr)
+            {
                 tokio::time::sleep(delay).await;
                 continue;
             }
-            refusal.log_exhausted(destination, &command.purpose, stderr.trim());
         }
         bail!(
             "{} failed with status {}: {}",
@@ -369,7 +364,6 @@ pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<Co
             stderr.trim()
         );
     }
-    unreachable!("the last attempt always returns")
 }
 
 /// Spawn one probe and collect its output, with the SSH session lease it ran

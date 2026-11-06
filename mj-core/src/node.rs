@@ -29,7 +29,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// The relay proxy to a worker runs this way.
 pub const EXEC_PATH: &str = "/exec";
 /// A command run to completion exactly as the daemon's own executors run one
-/// locally (SSH admission, process groups, the output drain after the leader
+/// locally (SSH session leases, process groups, the output drain after the leader
 /// exits), with its output sent once it finishes.
 pub const RUN_PATH: &str = "/run";
 /// The daemon is stopping for good, not handing off: the node has nothing
@@ -803,16 +803,16 @@ async fn run_child(
             return Err(error);
         }
     };
-    // A session the transport turned away usually means its shared master
-    // died; the next lease must check and reopen it.
+    // A session the server turned away tells the ledger what it learned: a
+    // dead master is rechecked, and a full one is not leased again. The
+    // daemon sees the exit status and decides about a retry; the next lease
+    // here then lands on another master.
     if let (Some(lease), Some(code)) = (&lease, status.code()) {
         let tail = stderr_tail
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if crate::targets::ssh_refusal(code, &String::from_utf8_lossy(&tail))
-            == Some(crate::targets::SshRefusal::BeforeAuthentication)
-        {
-            lease.invalidate();
+        if let Some(refusal) = crate::targets::ssh_refusal(code, &String::from_utf8_lossy(&tail)) {
+            lease.note_refusal(refusal);
         }
     }
     let exit = NodeExit {

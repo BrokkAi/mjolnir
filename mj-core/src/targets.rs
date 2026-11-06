@@ -262,7 +262,8 @@ impl CommandSpec {
 
     /// Record that this command is an `ssh` or `scp` invocation that runs as
     /// one session on `ssh`'s shared connection. It also opens a connection
-    /// to that destination, for admission, when sharing is off.
+    /// to that destination when sharing is off, so a server's refusal of it
+    /// is retried the same way.
     pub fn ssh_session(mut self, ssh: &SshTarget) -> Self {
         self.ssh_destination = Some(ssh.destination.clone());
         self.ssh_session = Some(ssh.clone());
@@ -821,52 +822,65 @@ impl<E: CommandExecutor + ?Sized> Drop for ProvisionStageGuard<'_, E> {
 pub struct ProcessExecutor;
 
 /// Run one `ssh` invocation, retrying it
-/// when the server turned the connection away before authentication.
+/// when the server turned it away before the remote command started.
 ///
-/// A transport rejection means the remote command never started, so re-running
-/// the whole invocation cannot repeat a side effect.
+/// A refusal means the remote command never started, so re-running the whole
+/// invocation cannot repeat a side effect. [`SshRefusalRetry`] decides each
+/// wait and when to stop: with `is_cancelled`, a connection closed before
+/// authentication is retried until the command succeeds or the caller's
+/// cancellation or deadline ends it; without one, nothing outside could stop
+/// the loop, so the retries are bounded.
 ///
 /// A command that asks for a shared-connection session leases it on each
-/// attempt. A session turned away by the transport usually means its master
-/// died, so the lease is invalidated and the retry checks and reopens the master.
+/// attempt, and the lease tells the ledger what the refusal means
+/// ([`SshSessionLease::note_refusal`]). A session turned away by the transport
+/// usually means its master died, so the retry checks and reopens the master.
+/// A session refused for `MaxSessions` records the master's capacity, and the
+/// retry lands on another master at once: the recorded capacity is the state
+/// change that ends that loop, so it needs no wait and uses no attempt.
 ///
 /// Commands that are not tagged with a destination run untouched.
 fn with_ssh_refusal_retry(
     command: &CommandSpec,
     executor: &dyn CommandExecutor,
-    is_cancelled: &dyn Fn() -> bool,
+    is_cancelled: Option<&dyn Fn() -> bool>,
     mut run: impl FnMut(&CommandSpec) -> Result<CommandOutput>,
 ) -> Result<CommandOutput> {
     let Some(destination) = command.ssh_destination.as_deref() else {
         return run(command);
     };
-    for attempt in 1..=SSH_RETRY_ATTEMPTS {
+    let mut retry = SshRefusalRetry::new(is_cancelled.is_some());
+    loop {
         let session = command.open_ssh_session(executor)?;
         let output = run(session.command())?;
-        let refusal = ssh_refusal(output.status, &String::from_utf8_lossy(&output.stderr));
-        // A refused session found its master alive; any other refusal may
-        // mean the master is gone.
-        if refusal == Some(SshRefusal::BeforeAuthentication)
-            && let Some(lease) = session.lease()
-        {
-            lease.invalidate();
-        }
+        let refusal = note_session_refusal(&session, &output);
         drop(session);
-        let Some(refusal) = refusal else {
+        let Some((refusal, learned)) = refusal else {
             return Ok(output);
         };
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if attempt == SSH_RETRY_ATTEMPTS {
-            refusal.log_exhausted(destination, &command.purpose, stderr.trim());
+        let Some(delay) = retry.next(refusal, learned, destination, &command.purpose, &stderr)
+        else {
             return Ok(output);
-        }
-        let delay = ssh_retry_delay(attempt);
-        refusal.log_retry(destination, &command.purpose, attempt, delay, stderr.trim());
-        if !sleep_unless_cancelled(delay, is_cancelled) {
+        };
+        if !sleep_unless_cancelled(delay, is_cancelled.unwrap_or(&|| false)) {
             bail!("operation cancelled while {}", command.purpose);
         }
     }
-    unreachable!("the final attempt always returns");
+}
+
+/// Classify a finished command's refusal by the server and tell the session's
+/// lease what it means. Returns the refusal and whether the ledger learned a
+/// new capacity from it (see [`SshSessionLease::note_refusal`]).
+fn note_session_refusal(
+    session: &SessionCommand<'_>,
+    output: &CommandOutput,
+) -> Option<(SshRefusal, bool)> {
+    let refusal = ssh_refusal(output.status, &String::from_utf8_lossy(&output.stderr))?;
+    let learned = session
+        .lease()
+        .is_some_and(|lease| lease.note_refusal(refusal));
+    Some((refusal, learned))
 }
 
 /// Wait out `delay`, giving up early if the supervising operation is
@@ -914,7 +928,7 @@ fn finished_command(
 }
 
 impl ProcessExecutor {
-    /// One attempt, with no admission or retry of its own.
+    /// One attempt, with no retry of its own.
     fn run_once(&self, command: &CommandSpec) -> Result<CommandOutput> {
         if let Some(input) = &command.sensitive_stdin {
             let mut input = std::io::Cursor::new(input.0.as_slice());
@@ -942,8 +956,8 @@ impl ProcessExecutor {
     }
 }
 
-// Both process executors wait for their child, and for SSH admission before
-// it, through `off_async_worker`: a caller several calls below an `async fn`
+// Both process executors wait for their child, and for the SSH session lease
+// before it, through `off_async_worker`: a caller several calls below an `async fn`
 // must not hold one of the runtime's async worker threads for the length of a
 // target command.
 impl CommandExecutor for ProcessExecutor {
@@ -953,7 +967,7 @@ impl CommandExecutor for ProcessExecutor {
             if let Some(host) = command_host(command) {
                 return host.run(command, None, &|| false);
             }
-            with_ssh_refusal_retry(command, self, &|| false, |command| self.run_once(command))
+            with_ssh_refusal_retry(command, self, None, |command| self.run_once(command))
         })
     }
 
@@ -968,13 +982,16 @@ impl CommandExecutor for ProcessExecutor {
                 return host.run(command, Some(input), &|| false);
             }
             // A caller's stream cannot be replayed, so this path takes a
-            // session but never retries.
+            // session but never retries. A refused session still tells the
+            // ledger, so the next lease goes to another master.
             let session = command.open_ssh_session(self)?;
             let command = session.command();
             let process = cancellable_command(command);
             // Plain process execution is not cancellable, so the transfer only
             // ends when the child does.
-            stream_command_with_stdin(process, command, input, &|| false)
+            let output = stream_command_with_stdin(process, command, input, &|| false)?;
+            note_session_refusal(&session, &output);
+            Ok(output)
         })
     }
 }
@@ -1377,7 +1394,7 @@ fn terminate_cancellable_child(child: &mut std::process::Child, preserve_childre
 }
 
 impl CancellableProcessExecutor {
-    /// One attempt, with no admission or retry of its own.
+    /// One attempt, with no retry of its own.
     fn run_once(&self, command: &CommandSpec) -> Result<CommandOutput> {
         if let Some(input) = &command.sensitive_stdin {
             let mut input = std::io::Cursor::new(input.0.as_slice());
@@ -1472,7 +1489,7 @@ impl CommandExecutor for CancellableProcessExecutor {
             }
             self.describe_cancellation(
                 command,
-                with_ssh_refusal_retry(command, self, &|| self.is_cancelled(), |command| {
+                with_ssh_refusal_retry(command, self, Some(&|| self.is_cancelled()), |command| {
                     self.run_once(command)
                 }),
             )
@@ -1492,15 +1509,21 @@ impl CommandExecutor for CancellableProcessExecutor {
                     return host.run(command, Some(input), &|| self.is_cancelled());
                 }
                 // A caller's stream cannot be replayed, so this path takes a
-                // session but never retries.
+                // session but never retries. A refused session still tells the
+                // ledger, so the next lease goes to another master.
                 let session = command.open_ssh_session(self)?;
                 let command = session.command();
                 // The child runs in its own process group so cancellation can kill
                 // the whole group, which is what releases a writer blocked on a
                 // full pipe.
-                stream_command_with_stdin(cancellable_command(command), command, input, &|| {
-                    self.is_cancelled()
-                })
+                let output = stream_command_with_stdin(
+                    cancellable_command(command),
+                    command,
+                    input,
+                    &|| self.is_cancelled(),
+                )?;
+                note_session_refusal(&session, &output);
+                Ok(output)
             }),
         )
     }
@@ -2598,6 +2621,29 @@ mod executor_tests {
 
     use super::*;
 
+    /// The retry backoff override is process-wide, so tests that shorten it
+    /// take turns: one test restoring the real delay mid-run would stretch
+    /// another's retries past its deadline.
+    static FAST_RETRIES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct FastRetries(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl FastRetries {
+        fn new() -> Self {
+            let guard = FAST_RETRIES_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+            Self(guard)
+        }
+    }
+
+    impl Drop for FastRetries {
+        fn drop(&mut self) {
+            set_ssh_retry_backoff_for_test(None);
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn successful_commands_stop_descendants_that_closed_their_pipes() {
@@ -2786,17 +2832,18 @@ mod executor_tests {
     /// A stand-in for `ssh` that is refused by the server on its first call and
     /// connects on the next, the way a host at its `MaxStartups` ceiling
     /// behaves once the daemon's burst drains.
-    fn flaky_ssh_script(directory: &Path) -> CommandSpec {
+    fn flaky_ssh_script(directory: &Path, refusals: u32) -> CommandSpec {
         let counter = directory.join("attempts");
         let script = format!(
             "count=$(cat {counter} 2>/dev/null || echo 0)\n\
              echo $((count + 1)) > {counter}\n\
-             if [ \"$count\" -eq 0 ]; then\n\
+             if [ \"$count\" -lt {refusals} ]; then\n\
              echo 'kex_exchange_identification: Connection closed by 10.0.0.1 port 22' >&2\n\
              exit 255\n\
              fi\n\
              echo connected\n",
-            counter = counter.display()
+            counter = counter.display(),
+            refusals = refusals
         );
         CommandSpec::new("sh", ["-c".to_owned(), script])
             .ssh_destination("build@10.0.0.1")
@@ -2831,7 +2878,7 @@ mod executor_tests {
             };
             if command.ssh_session.is_some() {
                 // A session. The first one arrives just after its master died.
-                return with_ssh_refusal_retry(command, self, &|| false, |spawned| {
+                return with_ssh_refusal_retry(command, self, None, |spawned| {
                     self.sessions.borrow_mut().push(spawned.args.clone());
                     if self.sessions.borrow().len() == 1 {
                         self.running.borrow_mut().clear();
@@ -2868,7 +2915,7 @@ mod executor_tests {
         let _guard = ssh::SHARING_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+        let _fast_retries = FastRetries::new();
         let socket_dir = tempfile::tempdir_in("/tmp").expect("short socket directory");
         set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
             socket_dir.path().to_path_buf(),
@@ -2880,7 +2927,6 @@ mod executor_tests {
         let executor = MasterKilledOnce::default();
         let output = executor.execute(&ssh_command(&ssh, ["true"]));
         set_ssh_connection_sharing_for_test(None);
-        set_ssh_retry_backoff_for_test(None);
 
         assert_eq!(output.expect("the retry succeeds").status, 0);
         let sessions = executor.sessions.borrow();
@@ -2898,9 +2944,9 @@ mod executor_tests {
     // Hard-won: e6ed54ed: sshd MaxStartups rejected concurrent session handshakes and users saw dead workers and failed closes.
     #[test]
     fn a_transport_rejected_ssh_command_is_retried_once_and_then_succeeds() {
-        set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+        let _fast_retries = FastRetries::new();
         let directory = tempfile::tempdir().expect("temp dir");
-        let command = flaky_ssh_script(directory.path());
+        let command = flaky_ssh_script(directory.path(), 1);
 
         let output = ProcessExecutor
             .execute(&command)
@@ -2909,15 +2955,14 @@ mod executor_tests {
         assert_eq!(output.status, 0);
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "connected");
         assert_eq!(attempts(directory.path()), 2);
-        set_ssh_retry_backoff_for_test(None);
     }
 
     // Hard-won: e6ed54ed: sshd MaxStartups rejected remote operations during daemon startup and they were falsely reported as failed.
     #[test]
     fn the_cancellable_executor_also_retries_a_transport_rejection() {
-        set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+        let _fast_retries = FastRetries::new();
         let directory = tempfile::tempdir().expect("temp dir");
-        let command = flaky_ssh_script(directory.path());
+        let command = flaky_ssh_script(directory.path(), 1);
 
         let output = CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
             .execute(&command)
@@ -2925,6 +2970,48 @@ mod executor_tests {
 
         assert_eq!(output.status, 0);
         assert_eq!(attempts(directory.path()), 2);
-        set_ssh_retry_backoff_for_test(None);
+    }
+
+    /// A host at its `MaxStartups` ceiling can keep dropping connections for
+    /// longer than any fixed budget. The command never ran, so a caller that
+    /// can be cancelled keeps coming back until it gets in.
+    #[test]
+    fn a_cancellable_caller_retries_pre_authentication_refusals_until_it_gets_in() {
+        let _fast_retries = FastRetries::new();
+        let directory = tempfile::tempdir().expect("temp dir");
+        let command = flaky_ssh_script(directory.path(), 7);
+
+        let output = CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
+            .execute(&command)
+            .expect("the seventh attempt gets in");
+
+        assert_eq!(output.status, 0);
+        assert_eq!(attempts(directory.path()), 8);
+    }
+
+    /// Unbounded retry must still end: at the caller's deadline when it has
+    /// one, and after a fixed number of attempts when nothing outside can stop
+    /// the loop.
+    #[test]
+    fn pre_authentication_retries_end_at_the_deadline_or_the_bounded_budget() {
+        let _fast_retries = FastRetries::new();
+        let directory = tempfile::tempdir().expect("temp dir");
+        let command = flaky_ssh_script(directory.path(), u32::MAX);
+        let error = CancellableProcessExecutor::with_timeout(Duration::from_secs(2))
+            .execute(&command)
+            .expect_err("a server that never lets the command in ends at the deadline");
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+        assert!(attempts(directory.path()) > SSH_BOUNDED_RETRY_ATTEMPTS as u32);
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let command = flaky_ssh_script(directory.path(), u32::MAX);
+        let output = ProcessExecutor
+            .execute(&command)
+            .expect("the refusal is reported, not raised");
+        assert_eq!(output.status, 255);
+        assert_eq!(
+            attempts(directory.path()),
+            SSH_BOUNDED_RETRY_ATTEMPTS as u32
+        );
     }
 }

@@ -38,7 +38,7 @@ impl RelayClient {
         handshake_timeout: Duration,
     ) -> Result<Self> {
         let purpose = format!("{} for session {expected_session_id}", spec.purpose);
-        let mut refusals = 0;
+        let mut refusals = mj_core::targets::SshRefusalRetry::new(true);
         let mut socket_waits = 0;
         loop {
             let outcome = Self::connect_attempt(
@@ -57,20 +57,23 @@ impl RelayClient {
                 }) => (error, retry),
             };
             let delay = match retry {
-                // Logged by the routine every other refused ssh command uses:
-                // a MaxSessions refusal is routine while sessions start and
-                // goes to debug, one before authentication stays a warning
-                // (R7-1).
-                ConnectRetry::Refused(refusal, stderr) => {
-                    refusals += 1;
+                // The shared routine every refused ssh command uses decides
+                // the wait and the logging: a MaxSessions refusal is routine
+                // while sessions start and goes to debug, one before
+                // authentication stays a warning (R7-1). Nothing here bounds
+                // the retries of a connection dropped before authentication;
+                // the caller that no longer wants the worker drops this
+                // future.
+                ConnectRetry::Refused {
+                    refusal,
+                    stderr,
+                    learned,
+                } => {
                     let destination = spec.ssh_destination.as_deref().unwrap_or_default();
-                    if refusals == SSH_RETRY_ATTEMPTS {
-                        refusal.log_exhausted(destination, &purpose, &stderr);
-                        return Err(error);
+                    match refusals.next(refusal, learned, destination, &purpose, &stderr) {
+                        Some(delay) => delay,
+                        None => return Err(error),
                     }
-                    let delay = mj_core::targets::ssh_retry_delay(refusals);
-                    refusal.log_retry(destination, &purpose, refusals, delay, &stderr);
-                    delay
                 }
                 ConnectRetry::SocketMissing => {
                     let Some(&delay) = WORKER_SOCKET_RETRY_DELAYS.get(socket_waits) else {
@@ -263,16 +266,19 @@ impl RelayClient {
                     .as_ref()
                     .and(status)
                     .and_then(|status| ssh_refusal(status, &stderr));
-                // A session turned away by the transport usually means its
-                // master died; make the retry check and reopen it.
-                if refusal == Some(SshRefusal::BeforeAuthentication)
-                    && let Some(lease) = &client.ssh_session
-                {
-                    lease.invalidate();
-                }
+                // The lease tells the ledger what the refusal means: a dead
+                // master is rechecked, a full one is not leased again.
+                let learned = match (refusal, &client.ssh_session) {
+                    (Some(refusal), Some(lease)) => lease.note_refusal(refusal),
+                    _ => false,
+                };
                 let error = Self::attach_proxy_stderr(error, tail);
                 let retry = match refusal {
-                    Some(refusal) => Some(ConnectRetry::Refused(refusal, stderr)),
+                    Some(refusal) => Some(ConnectRetry::Refused {
+                        refusal,
+                        stderr,
+                        learned,
+                    }),
                     None if status.is_some() && worker_socket_missing(&stderr) => {
                         Some(ConnectRetry::SocketMissing)
                     }

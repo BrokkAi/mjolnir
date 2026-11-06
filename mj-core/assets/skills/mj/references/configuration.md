@@ -1247,8 +1247,7 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_CONTROLLER_BINARY` | Path to `mj` when `mj-desktop` cannot find its sibling controller. |
 | `MJ_VOICE_WORKER` | Path to the local dictation helper. |
 | `MJ_INSTANCE` | Instance name; same effect as `--instance`. |
-| `MJ_SSH_SESSIONS_PER_CONNECTION` | Sessions per shared OpenSSH connection; defaults to `8`. See the [SSH guide](/ssh/#sharing-connections-per-host). |
-| `MJ_SSH_CONTROL_MASTER` | Set to `0` to disable SSH connection sharing (ControlMaster) for diagnosis. |
+| `MJ_SSH_CONTROL_MASTER` | Set to `0` to disable SSH connection sharing (ControlMaster) for diagnosis. Mjolnir learns how many sessions each shared connection carries from the server's refusal and has no setting for it; see the [SSH guide](/ssh/#sharing-connections-per-host). |
 | `MJ_DEV_RESTART_STALE_DAEMON` | When set to any value, a client restarts a running daemon whose executable was replaced, or whose development workers changed, since it started, unless the daemon's build is newer than the client's. For development checkouts. |
 | `MJ_TURN_STALL_TIMEOUT_MS` | Milliseconds of harness silence, with no tool call open, after which the worker ends the turn with the reason `harness_inactive`. Off unless set to a positive value. |
 | `MJ_TURN_TOOL_STALL_TIMEOUT_MS` | Milliseconds one tool call may run before the worker ends the turn the same way. Off unless set to a positive value. |

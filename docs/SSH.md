@@ -24,13 +24,20 @@ relay. On unix, Mjolnir runs these as sessions on a small number of shared,
 already authenticated connections ("masters") instead of letting each command
 pay for its own handshake.
 
-A stock `sshd` allows at most 10 sessions on one connection (`MaxSessions
-10`). Mjolnir therefore places at most **8 sessions on each master** and opens
-another master for the same host when all of its masters are full. Set
-`MJ_SSH_SESSIONS_PER_CONNECTION` in the daemon's environment to change the
-number; an unset or invalid value falls back to 8. The two spare sessions are
-for `mj doctor` and Tab completion, which can join a master from another
-process without being counted.
+An `sshd` limits the sessions on one connection with `MaxSessions` (stock
+value 10; some hosts raise it to 64 or 200). Mjolnir does not guess that
+number. It learns it from the server: a new session goes on the
+lowest-numbered master for the host that is not known to be full, and a host
+starts with one master. When `sshd` refuses a session on a master, Mjolnir
+records that master's capacity as the number of sessions it was carrying at
+that moment, and runs the refused command again on the next master that is not
+known to be full, opening one if needed. The refused command never started, so
+running it again is safe, and the recorded capacity ends the retry without a
+delay. Mjolnir logs each learned capacity once, at info level, with the host,
+the master number, and the capacity. A master keeps its learned capacity only
+while it runs: a new master, opened after the old one exited, starts with an
+unknown capacity, so a changed `MaxSessions` is learned again.
+The old `MJ_SSH_SESSIONS_PER_CONNECTION` setting is ignored.
 
 Mjolnir opens each master explicitly with `ssh -f -N -o ControlMaster=yes
 -o BatchMode=yes -o ControlPersist=60` and confirms it with `ssh -O check`.
@@ -70,19 +77,35 @@ keepalive so they fail fast instead of hanging the interface, and a master
 holding those settings would drop every later session on it after a stall of
 a couple of seconds. They carry `ControlMaster=no` and the path of a master,
 so they join it when it is up and otherwise open their own direct
-connection. In the daemon, a validation probe counts as one of the 8 sessions
-on the master it joins, so probes for new sessions cannot push a master past
-`MaxSessions`. `mj doctor` and Tab completion run in other processes and use
-the two spare sessions.
+connection. In the daemon, a validation probe counts as a session on the
+master it joins, so the capacity Mjolnir learns includes the probes. `mj doctor`
+and Tab completion run in other processes and are not counted, so the server
+can refuse them when a master is full.
 
-If the server refuses a session anyway, the command never started, so Mjolnir
-retries it, up to three attempts with a growing delay. The dashboard's own
-Git reads for the conversation header, the capacity probe, and the relay
-connection to each session's worker retry the same way. A refused session that gets in on a retry is logged only at debug level;
-one still refused on its last attempt is logged as a warning that names
-"refused another session on a shared connection (MaxSessions)". A
-connection closed before authentication (`MaxStartups`) is always a
-warning.
+Every refusal happens before the remote command starts, so Mjolnir runs the
+command again. The rules depend on what the refusal says:
+
+- A refusal that teaches Mjolnir a new capacity is retried at once on another
+  master. It is logged only at debug level.
+- A connection closed before authentication (`MaxStartups`) means `sshd` is up
+  and asking the client to come back later. Mjolnir waits and tries again,
+  with a growing, randomized delay of up to a few seconds, until the command
+  gets in or the operation is cancelled or reaches its own deadline. Each
+  retry is logged as a warning, and once a command has been refused for over a
+  minute, Mjolnir logs one more warning saying so. A few internal paths cannot
+  be cancelled (for example some cleanup after a session is destroyed); they
+  stop after three attempts.
+- A session refused by a master whose capacity is already known has nothing
+  new to learn. Mjolnir tries up to three times with a growing delay, then
+  logs a warning that names "refused another session on a shared connection
+  (MaxSessions)".
+
+The dashboard's own Git reads for the conversation header, the capacity probe,
+and the relay connection to each session's worker retry the same way. A command
+that streams input from the caller (an upload through standard input) cannot
+be run again because the input has been consumed, so it fails with `ssh`'s
+message; the refusal is still recorded, and the next command goes to another
+master.
 
 If the target's `extra_args` already set `ControlMaster`, `ControlPath`, or
 `-S`, Mjolnir adds no sharing options at all for that target and leaves
@@ -98,8 +121,8 @@ Mjolnir does not impose a client-side cap on concurrent SSH commands or
 connections. On Unix, commands normally use channels over a shared OpenSSH
 connection; only opening a connection authenticates and counts against the
 remote `sshd`'s `MaxStartups`. When a server refuses a connection before
-authentication, Mjolnir recognizes the refusal and retries the invocation,
-because the remote command never ran. Commands on platforms without connection
+authentication, Mjolnir recognizes the refusal and retries the invocation until
+it gets in or the operation is cancelled, because the remote command never ran. Commands on platforms without connection
 sharing open their own connection and use the same refusal retry.
 
 ## Prerequisites you set up by hand
