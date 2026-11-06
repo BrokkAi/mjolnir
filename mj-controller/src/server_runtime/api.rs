@@ -1643,6 +1643,7 @@ impl ApiBackend {
                     finished,
                     inputs.last_failed_delivery(&id),
                     &progress,
+                    relation.reported_finish.as_ref(),
                 );
                 NotificationChildSnapshot {
                     relation,
@@ -1915,30 +1916,41 @@ impl ApiBackend {
 /// state (#1381); the parent still hears of it, once per failed request, in
 /// a report that carries the state and the `Message <id> failed` line. A
 /// finish that is still unreported travels in the same report.
+///
+/// Whether a failed delivery is news is decided against what the parent was
+/// last told (`reported`). A finished child's identity carries its state, so
+/// every finish after the failure reaches the parent, including one that
+/// settles without a new turn. A child that is not finished has news only if
+/// this failure was never reported: a message queued after it turns a
+/// finished child "running" with nothing new to say.
 fn report_identity(
     state: &str,
     output: Option<&str>,
     finished: bool,
     failed_delivery: Option<(&str, &str)>,
     progress: &ChildProgress,
+    reported: Option<&mj_core::subagent::SubagentFinishIdentity>,
 ) -> Option<mj_core::subagent::SubagentFinishIdentity> {
-    match failed_delivery {
-        // The identity names the failure, the child's last turn, and the
-        // child's state only once its record has ended. Any other state
-        // follows its turns, which the ordinal already tracks, or a message
-        // queued after the failure, which turns a finished child "running"
-        // with nothing new to say about the failure.
-        Some((request_id, error)) => Some(mj_core::subagent::SubagentFinishIdentity::Terminal {
-            state: match state {
-                "error" | "lost" | "stopped" => state,
-                _ => "message-failed",
-            }
-            .to_owned(),
-            detail: Some(format!("Message {request_id}: {error}")),
-            last_completed_ordinal: progress.last_completed_ordinal,
-        }),
-        None => finished.then(|| finish_identity(state, output, progress)),
+    let Some((request_id, error)) = failed_delivery else {
+        return finished.then(|| finish_identity(state, output, progress));
+    };
+    let detail = format!("Message {request_id}: {error}");
+    if !finished
+        && let Some(
+            reported @ mj_core::subagent::SubagentFinishIdentity::Terminal {
+                detail: Some(reported_detail),
+                ..
+            },
+        ) = reported
+        && *reported_detail == detail
+    {
+        return Some(reported.clone());
     }
+    Some(mj_core::subagent::SubagentFinishIdentity::Terminal {
+        state: if finished { state } else { "message-failed" }.to_owned(),
+        detail: Some(detail),
+        last_completed_ordinal: progress.last_completed_ordinal,
+    })
 }
 
 fn finish_identity(
