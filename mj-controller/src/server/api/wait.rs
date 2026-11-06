@@ -419,6 +419,7 @@ pub(super) fn build_observation(
 // Older v1 clients reject unknown fields inside this shared turn type. Usage
 // travels in the new top-level wait field and the dedicated usage endpoint.
 pub(super) fn api_turn_outcome(mut turn: MaterializedTurnOutcome) -> MaterializedTurnOutcome {
+    turn.answered_through = None;
     turn.usage = None;
     turn.diagnostic = None;
     turn

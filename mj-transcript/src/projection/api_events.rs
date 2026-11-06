@@ -173,6 +173,7 @@ mod tests {
         };
         let mutation = MaterializedSessionMutation {
             last_turn_outcome: Some(MaterializedTurnOutcome {
+                answered_through: None,
                 diagnostic: None,
                 usage: None,
                 command_id: "prompt".into(),
@@ -217,6 +218,7 @@ mod tests {
         };
         let mutation = MaterializedSessionMutation {
             last_turn_outcome: Some(MaterializedTurnOutcome {
+                answered_through: None,
                 diagnostic: None,
                 usage: None,
                 command_id: "prompt".into(),

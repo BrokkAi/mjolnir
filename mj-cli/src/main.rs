@@ -547,8 +547,14 @@ fn main() -> Result<()> {
     result
 }
 
+/// Tokio starts one worker per CPU by default. The daemon mostly waits on I/O,
+/// and on a 120-CPU host the idle workers' wakeups cost more than they add.
+const MAX_RUNTIME_THREADS: usize = 16;
+
 fn run(cli: Cli) -> Result<()> {
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(cores.min(MAX_RUNTIME_THREADS))
         .enable_all()
         .build()
         .context("build Tokio runtime")?;

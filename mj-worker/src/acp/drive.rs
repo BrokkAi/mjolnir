@@ -1182,7 +1182,7 @@ pub(super) fn protocol_failure(
 }
 
 /// Stop reason reported for a turn the bridge rejected instead of finishing.
-pub(super) const PROMPT_ERROR_STOP_REASON: &str = "error";
+pub(crate) const PROMPT_ERROR_STOP_REASON: &str = "error";
 
 /// The tool-call statuses ACP v1 defines. An adapter that sends anything else
 /// (a Muse `cancelled`, say) makes the whole `session/update` unparseable.

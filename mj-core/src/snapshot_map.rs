@@ -201,6 +201,29 @@ impl<K: Ord + Clone, V: Clone> SnapshotMap<K, V> {
         }
     }
 
+    /// Make `key` hold `source`'s entry when `keep` is true and remove it
+    /// otherwise. An entry that already shares `source`'s value is left alone,
+    /// so the tree path stays shared with earlier versions of this map.
+    pub fn copy_entry<Q: Ord + ?Sized + ToOwned<Owned = K>>(
+        &mut self,
+        source: &Self,
+        key: &Q,
+        keep: bool,
+    ) where
+        K: Borrow<Q>,
+    {
+        match source.0.get(key).filter(|_| keep) {
+            Some(value) => {
+                if !self.0.get(key).is_some_and(|held| Arc::ptr_eq(held, value)) {
+                    self.0.insert(key.to_owned(), Arc::clone(value));
+                }
+            }
+            None => {
+                self.0.remove(key);
+            }
+        }
+    }
+
     /// Select a smaller view while sharing the retained records' contents.
     pub fn filtered(&self, mut keep: impl FnMut(&K, &V) -> bool) -> Self {
         Self(
@@ -210,6 +233,16 @@ impl<K: Ord + Clone, V: Clone> SnapshotMap<K, V> {
                 .map(|(key, value)| (key.clone(), Arc::clone(value)))
                 .collect(),
         )
+    }
+}
+
+impl<V: Clone> SnapshotMap<String, V> {
+    /// Keys that begin with `prefix`, without visiting the others.
+    pub fn keys_with_prefix<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = &'a String> {
+        self.0
+            .range(prefix.to_owned()..)
+            .map(|(key, _)| key)
+            .take_while(move |key| key.starts_with(prefix))
     }
 }
 

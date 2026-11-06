@@ -1105,7 +1105,10 @@ pub enum DaemonReply {
     DashboardStartup(Box<DashboardStartup>),
     WorkspaceLayouts(WorkspaceLayouts),
     StoredSessionMetadata(StoredSessionMetadata),
-    StoredProjectionTail(Option<Box<MaterializedSession>>),
+    StoredProjectionTail(
+        #[serde(serialize_with = "crate::runtime_feed::serialize_client_projection")]
+        Option<Box<MaterializedSession>>,
+    ),
     StoredSessionSummary(Option<Box<MaterializedSessionSummary>>),
     SavedSetup(Box<Config>),
     ArchiveSpacePreview(ArchiveSpacePreview),
