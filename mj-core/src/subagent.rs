@@ -934,10 +934,18 @@ impl SubagentRecord {
 /// harness, so its tools reach the model as `mcp__mj-agents__<tool>`.
 pub const SUBAGENT_MCP_SERVER: &str = "mj-agents";
 
+/// The name of the separate MCP server that offers the before-push review
+/// tools, so they reach the model as `mcp__mj-review__<tool>`. Claude loads
+/// its tools on demand because they are needed only when a push is near.
+pub const REVIEW_MCP_SERVER: &str = "mj-review";
+
+/// The tools the review server lists, in the order it lists them.
+pub const REVIEW_MCP_TOOLS: &[&str] = &["request_review", "override_review", "set_review_baseline"];
+
 /// Which tools a worker's `mj-agents` MCP server offers. A parent may delegate,
 /// a top-level session without Mjolnir delegation can message sessions, and a
-/// child also hands its report back. Messaging, fetch, and explicit reviews
-/// are common to every role.
+/// child also hands its report back. Messaging and fetch are common to every
+/// role. The review tools belong to the separate `mj-review` server.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentMcpRole {
@@ -957,6 +965,13 @@ impl SubagentMcpRole {
         matches!(self, Self::Parent | Self::MessageOnly)
     }
 
+    /// Whether a session in this role is offered the `mj-review` server: the
+    /// role enforces the push gate and the launch turned the gate on.
+    #[must_use]
+    pub fn offers_review_server(self, review_gate: bool) -> bool {
+        review_gate && self.supports_push_gate()
+    }
+
     #[must_use]
     pub fn id(self) -> &'static str {
         match self {
@@ -972,17 +987,10 @@ impl SubagentMcpRole {
     #[must_use]
     pub fn tool_names(self) -> &'static [&'static str] {
         match self {
-            Self::Parent => &[
-                "spawn",
-                "list_agents",
-                "send_message",
-                "close",
-                "fetch",
-                "request_review",
-            ],
-            Self::MessageOnly => &["send_message", "fetch", "request_review"],
-            Self::FetchOnly => &["fetch", "send_message", "request_review"],
-            Self::Child => &["handback", "fetch", "send_message", "request_review"],
+            Self::Parent => &["spawn", "list_agents", "send_message", "close", "fetch"],
+            Self::MessageOnly => &["send_message", "fetch"],
+            Self::FetchOnly => &["fetch", "send_message"],
+            Self::Child => &["handback", "fetch", "send_message"],
         }
     }
 }
@@ -2190,6 +2198,30 @@ mod tests {
         assert_ne!(before, after);
         let encoded = serde_json::to_value(&old).unwrap();
         assert!(encoded.get("updated_at").is_none());
+    }
+
+    #[test]
+    fn review_tools_belong_to_the_review_server_for_gated_top_level_roles() {
+        assert_eq!(REVIEW_MCP_SERVER, "mj-review");
+        assert_eq!(
+            REVIEW_MCP_TOOLS,
+            ["request_review", "override_review", "set_review_baseline"]
+        );
+        for role in [
+            SubagentMcpRole::Parent,
+            SubagentMcpRole::MessageOnly,
+            SubagentMcpRole::FetchOnly,
+            SubagentMcpRole::Child,
+        ] {
+            for tool in REVIEW_MCP_TOOLS {
+                assert!(!role.tool_names().contains(tool), "{role} lists {tool}");
+            }
+            assert!(!role.offers_review_server(false));
+            assert_eq!(
+                role.offers_review_server(true),
+                matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly)
+            );
+        }
     }
 
     #[test]

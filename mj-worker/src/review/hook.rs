@@ -25,7 +25,7 @@ if [ "${MJ_REVIEW_GATE:-}" = "1" ]; then
     tree=$(git rev-parse --verify "$local_sha^{tree}") || exit 1
     if ! git show-ref --verify --quiet "refs/mj/reviewed/$tree"; then
       echo "mj: $local_ref (tree $tree) has not been reviewed." >&2
-      echo "mj: call the mj-agents request_review tool with path \"$(git rev-parse --show-toplevel)\", wait for the verdict message, then push again." >&2
+      echo "mj: call the mj-review request_review tool with path \"$(git rev-parse --show-toplevel)\", wait for the verdict message, then push again." >&2
       exit 1
     fi
   done < "$tmp"
@@ -214,7 +214,7 @@ mod tests {
         let stderr = String::from_utf8_lossy(&rejected.stderr);
         assert!(stderr.contains("mj: HEAD (tree "), "{stderr}");
         assert!(stderr.contains("has not been reviewed."), "{stderr}");
-        assert!(stderr.contains(&format!("call the mj-agents request_review tool with path \"{}\", wait for the verdict message, then push again.", root.display())), "{stderr}");
+        assert!(stderr.contains(&format!("call the mj-review request_review tool with path \"{}\", wait for the verdict message, then push again.", root.display())), "{stderr}");
         reviewed(&root);
         assert_eq!(push(&root, true, &["HEAD:refs/heads/feature"]).status, 0);
         commit(&root, "gate off");

@@ -1664,8 +1664,8 @@ async fn prepare_and_start_harness(
                         crate::subagent_mcp::ParentTools {
                             agent_mailboxes_enabled: mailboxes_enabled,
                             subtle_subagents,
-                            review_gate,
                         },
+                        review_gate,
                     )?;
                     Ok((registered, environment))
                 })
