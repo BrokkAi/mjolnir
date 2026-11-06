@@ -1618,11 +1618,14 @@ pub(crate) fn render_sessions(
         .selected_visible_index()
         .filter(|index| *index < row_heights.len());
     let viewport = usize::from(rows_area.height);
+    // When the last row is taller than the pane, no page fits it and the
+    // clamp allows an offset past it. The list always keeps its last row.
     let mut offset = mj_chat::components::clamp_offset_to_last_page(
         dashboard.sessions_scroll.get(),
         row_heights,
         viewport,
-    );
+    )
+    .min(row_heights.len().saturating_sub(1));
     // A moved selection, or none at all, ends the wheel's hold on the offset.
     let wheel_scrolled = {
         let mut held = dashboard.sessions_wheel_scrolled_from.borrow_mut();

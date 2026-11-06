@@ -2953,6 +2953,31 @@ fn sessions_wheel_scroll_keeps_click_areas_on_the_rows_drawn() {
     }
 }
 
+// Hard-won: review of the wheel change: with a pane shorter than the last
+// session row the wheel scrolled past every session and drew an empty list.
+#[test]
+fn sessions_wheel_stops_at_the_last_session_in_a_short_pane() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["worker-a", "worker-b"]);
+    dashboard.open_subagent_workspace(parent);
+    dashboard.clear_sessions_filter();
+    dashboard.select_active_session("worker-a");
+    dashboard.focus = Focus::Sessions;
+    // Room for the borders, the action row and one line of a session.
+    let mut terminal = Terminal::new(TestBackend::new(60, 4)).unwrap();
+    for _ in 0..10 {
+        dashboard.scroll_sessions_view(1);
+        terminal
+            .draw(|frame| {
+                let layout = crate::render::SessionsLayout::new(&dashboard, frame.area().width - 2);
+                crate::render::render_sessions(frame, frame.area(), &dashboard, &layout);
+            })
+            .unwrap();
+    }
+    let rows = terminal.backend().to_string();
+    assert!(rows.contains("worker-b"), "{rows}");
+    assert!(!rows.contains("No sessions"), "{rows}");
+}
+
 #[test]
 fn golden_dashboard_session_render() {
     let mut output = String::new();
