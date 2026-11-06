@@ -142,16 +142,21 @@ where
                 // Both probes apply the profile's `models` list, so a hidden
                 // model is never offered or accepted for delegation. The
                 // model-specific probe runs only for a model the list allows.
-                let mut choices = probe(id.clone(), None)
-                    .await?
-                    .restricted_to(&config.profiles[&id].models);
+                let allowed = &config.profiles[&id].models;
+                let mut choices = probe(id.clone(), None).await?.restricted_to(allowed);
                 if let Some(model) = model
                     .as_ref()
                     .filter(|model| choices.models.iter().any(|choice| &choice.value == *model))
                 {
-                    choices = probe(id.clone(), Some(model.clone()))
-                        .await?
-                        .restricted_to(&config.profiles[&id].models);
+                    // That probe switches to the requested model, so restrict
+                    // its list with the default as the kept model, as the
+                    // default probe did.
+                    let default = choices.model.clone();
+                    let mut specific = probe(id.clone(), Some(model.clone())).await?;
+                    let selected = std::mem::replace(&mut specific.model, default);
+                    specific = specific.restricted_to(allowed);
+                    specific.model = selected;
+                    choices = specific;
                 }
                 Ok::<_, anyhow::Error>(choices)
             }
@@ -724,7 +729,7 @@ mod tests {
         let allowed = subagent_options_with(&config, "gateway", Some("allowed".into()), probe)
             .await
             .unwrap();
-        assert_eq!(values(&allowed), ["allowed"]);
+        assert_eq!(values(&allowed), ["default", "allowed"]);
         assert_eq!(allowed.efforts.len(), 1);
     }
 
