@@ -4,6 +4,17 @@ use mj_core::usage::{TokenUsage, UsageScope};
 
 const USAGE_SCOPE_KEY: &str = "mjolnir.dev/usage-scope";
 
+/// The OpenCode version whose prompt response was checked live to report the
+/// whole turn (every model step of the prompt). Another version, for example
+/// one found on PATH, may report only the last step, so its report keeps the
+/// adapter's undeclared scope.
+const WHOLE_TURN_VERSION: &str = "2.2.1";
+
+/// Whether this OpenCode, as it named itself in `initialize`, reports whole turns.
+pub fn reports_whole_turns(agent_version: Option<&str>) -> bool {
+    agent_version == Some(WHOLE_TURN_VERSION)
+}
+
 /// OpenCode 2.2.1 sums its model steps into one per-prompt figure but does not
 /// declare a scope, and it counts differently from the rest of mj: `input`
 /// excludes cache reads and writes, and `output` excludes reasoning. Fold both
@@ -66,6 +77,19 @@ mod tests {
         let usage: Usage = serde_json::from_str(report).expect("ACP usage");
         let meta = usage.meta.clone();
         (TokenUsage::from_acp(HarnessKind::OpenCode, usage), meta)
+    }
+
+    // Moving the pin must come with a fresh live check of the prompt
+    // response's usage scope; then update `WHOLE_TURN_VERSION`.
+    #[test]
+    fn the_whole_turn_version_is_the_pinned_opencode() {
+        assert_eq!(
+            WHOLE_TURN_VERSION,
+            mj_core::harness_runtime::OPENCODE_VERSION
+        );
+        assert!(reports_whole_turns(Some(WHOLE_TURN_VERSION)));
+        assert!(!reports_whole_turns(Some("1.14.0")));
+        assert!(!reports_whole_turns(None));
     }
 
     #[test]

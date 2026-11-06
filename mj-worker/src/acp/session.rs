@@ -104,6 +104,14 @@ pub(super) async fn serve_session(
         .and_then(serde_json::Value::as_bool)
         == Some(true);
 
+    let opencode_whole_turns = spec.harness == HarnessKind::OpenCode
+        && opencode_usage::reports_whole_turns(
+            initialized
+                .agent_info
+                .as_ref()
+                .map(|info| info.version.as_str()),
+        );
+
     // Grok Build publishes its catalogue here rather than as `configOptions`.
     let mut grok_models = (spec.harness == HarnessKind::Grok)
         .then(|| grok::model_state(initialized.meta.as_ref()))
@@ -969,7 +977,7 @@ pub(super) async fn serve_session(
                                     if spec.harness == HarnessKind::Muse {
                                         usage = usage.map(|usage| muse_usage::attach_provider_details(usage, usage_meta.as_ref()));
                                     }
-                                    if spec.harness == HarnessKind::OpenCode
+                                    if opencode_whole_turns
                                         && let Some(usage) = usage.as_mut()
                                         && let Err(error) = opencode_usage::normalize(usage, usage_meta.as_ref())
                                     {
