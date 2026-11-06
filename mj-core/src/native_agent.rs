@@ -139,7 +139,12 @@ const VIEW_ID_PREFIX: &str = "native:";
 
 pub fn view_id(owner: &str, child: &str) -> String {
     // Length-prefixing keeps opaque provider IDs collision-free.
-    format!("{VIEW_ID_PREFIX}{}:{owner}{child}", owner.len())
+    format!("{}{child}", owner_view_id_prefix(owner))
+}
+
+/// The start of every [`view_id`] that `owner` owns.
+pub fn owner_view_id_prefix(owner: &str) -> String {
+    format!("{VIEW_ID_PREFIX}{}:{owner}", owner.len())
 }
 
 /// Whether `id` is a native child's presentation id from [`view_id`].

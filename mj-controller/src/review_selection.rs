@@ -615,7 +615,7 @@ mod tests {
                 .iter()
                 .all(|choice| choice.effort.is_none())
         );
-        assert_eq!(configured.adjusted.len(), 2);
+        assert_eq!(configured.adjusted.len(), 3);
     }
 
     fn catalog_profile(models: &[&str]) -> ProfileConfig {
@@ -789,7 +789,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(choices.reviewers.len(), 2);
+        assert_eq!(choices.reviewers.len(), 3);
         assert_eq!(known.get("claude-haiku-4.5"), Some(&false));
         assert_eq!(
             tokio::time::Instant::now().duration_since(start),
