@@ -7199,3 +7199,56 @@ fn rebinding_to_an_aliased_bundle_reports_the_canonical_project() {
         .unwrap();
     assert_eq!(context, "project-2");
 }
+
+#[test]
+fn obsolete_turn_review_rows_are_retired_before_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    for id in ["turn", "forward", "push"] {
+        save_session_to(&database, &session(id, "project-1")).unwrap();
+    }
+    let connection = open(&database).unwrap();
+    for (id, group, forward) in [
+        (
+            "turn",
+            r#"{"scope":"turn_delta","driver":{"obsolete":"shape"}}"#,
+            None,
+        ),
+        (
+            "forward",
+            r#"{"scope":"pushable_commits"}"#,
+            Some("obsolete handoff"),
+        ),
+        ("push", r#"{"scope":"pushable_commits"}"#, None),
+    ] {
+        connection.execute(
+            "INSERT INTO turn_review_state(session_id, baselines, reviewed_through_ordinal, active_group, pending_forward, pending_followup) VALUES (?1, '{}', 0, ?2, ?3, 1)",
+            params![id, group, forward],
+        ).unwrap();
+    }
+    connection
+        .execute_batch(
+            "DELETE FROM schema_migrations WHERE version = 112; PRAGMA user_version = 111;",
+        )
+        .unwrap();
+    drop(connection);
+    schema::forget_verified_schema(&database);
+    let connection = open(&database).unwrap();
+    let groups: Vec<(String, bool, bool, bool)> = connection.prepare(
+        "SELECT session_id, active_group IS NOT NULL, pending_forward IS NOT NULL, pending_followup FROM turn_review_state ORDER BY session_id"
+    ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(
+        groups,
+        vec![
+            ("forward".into(), false, false, false),
+            ("push".into(), true, false, false),
+            ("turn".into(), false, false, false)
+        ]
+    );
+    assert_eq!(
+        turn_review_state_in(&database, "turn")
+            .unwrap()
+            .active_group,
+        None
+    );
+}

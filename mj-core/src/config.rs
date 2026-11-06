@@ -486,8 +486,7 @@ impl ReviewConfig {
     }
 
     /// This configuration as it applies to a session with `session`'s choice.
-    /// `Off` and `Push` decide whether review runs; a session that names
-    /// neither follows `self`, whatever reviewers it lists.
+    /// The effective reviewer list enables review unless the session chose Off.
     #[must_use]
     pub fn for_session(&self, session: Option<&SessionReview>) -> Self {
         let mut config = self.clone();
@@ -495,7 +494,7 @@ impl ReviewConfig {
             None => {}
             Some(SessionReview::Off) => config.disabled = true,
             Some(choice) => {
-                config.disabled = choice.trigger().is_none() && !self.is_push();
+                config.disabled = false;
                 if let SessionReview::Legacy {
                     count,
                     model,
