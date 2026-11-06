@@ -1096,14 +1096,14 @@ mod tests {
     fn an_import_reads_the_configured_profiles_home_not_the_stock_one() {
         let profile = |kind: HarnessKind, home: &str| mj_core::config::HarnessProfile {
             enabled: true,
-            kind,
-            home: PathBuf::from(home),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             muse_auto_review: None,
             codex_profile: None,
+            ..mj_core::config::HarnessProfile::new(kind, PathBuf::from(home))
         };
         let mut config = Config::default();
         config
@@ -1312,15 +1312,15 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                kind: HarnessKind::Codex,
-                home,
                 enabled: true,
                 environment: Default::default(),
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 muse_auto_review: None,
                 codex_profile: None,
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, home)
             },
         );
         let controller = Controller {

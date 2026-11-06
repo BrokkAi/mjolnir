@@ -154,12 +154,15 @@ test('golden_viewer_settings', async ({ page }) => {
   await capture('a refused edit keeps what was typed beside the reason');
 
   const subtleModel = page.getByRole('combobox', { name: 'Subtle model', exact: true });
+  const oracleModel = page.getByRole('combobox', { name: 'Oracle model', exact: true });
   const straightforwardModel = page.getByRole('combobox', { name: 'Straightforward model', exact: true });
   const straightforwardEffort = page.getByRole('combobox', { name: 'Straightforward effort', exact: true });
   await expect(page.locator('#settings-heading')).toHaveText('Sub-agents');
   await expect(subtleModel.locator('option:checked')).toHaveText('None');
+  await expect(oracleModel.locator('option:checked')).toHaveText('None');
   await expect(straightforwardModel.locator('option:checked')).toHaveText('None');
   await expect(page.getByRole('combobox', { name: 'Subtle effort', exact: true })).toBeHidden();
+  await expect(page.getByRole('combobox', { name: 'Oracle effort', exact: true })).toBeHidden();
   await expect(subtleModel.locator('option').first()).toHaveText('None');
   await expect(straightforwardModel.locator('option').first()).toHaveText('None');
   await expect(straightforwardEffort).toBeHidden();

@@ -844,21 +844,16 @@ fn prompt_bottom_titles(
             theme::glyphs().navigate
         )
     });
-    // A session created with sub-agents shows the entry, dimmed and not
-    // clickable, before its first child exists, so the user can find where
-    // they will appear. The Sub-agents chord is greyed on the same condition.
+    // Sub-agents appear once the session has at least one child.
     let subagents_ready = chat.subagent_count() > 0;
-    let subagent_label = if subagents_ready {
-        Some(format!(
+    let subagent_label = subagents_ready.then(|| {
+        format!(
             " Subagents{}{} {} ",
             theme::footer_separator(),
             chat.subagent_working_count,
             theme::glyphs().navigate
-        ))
-    } else {
-        chat.subagents_enabled
-            .then(|| format!(" Subagents{}0 ", theme::footer_separator()))
-    };
+        )
+    });
     let reviewer_label = (chat.reviewers.total > 0).then(|| {
         format!(
             " Reviewers{}{} {} ",
@@ -972,9 +967,7 @@ fn prompt_bottom_titles(
         });
         bottom_spans.push(Span::styled(
             label,
-            if !subagents_ready {
-                theme::hint_description()
-            } else if chat.subagent_control_focused() {
+            if chat.subagent_control_focused() {
                 theme::focus_control()
             } else {
                 // The surface and navigation glyph advertise the action.

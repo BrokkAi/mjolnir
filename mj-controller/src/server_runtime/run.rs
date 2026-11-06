@@ -573,25 +573,6 @@ pub(crate) async fn run_server(
                     publication.dirty.insert(update.session_id.clone());
                     apply_worker_record_update(&mut controller, &update);
                     if let Some(snapshot) = update.view.snapshot {
-                        if snapshot.operational.native_session_is_ready()
-                            && operational.get(&update.session_id).is_none_or(|old: &mj_core::relay::RelayOperationalState| old.config_options != snapshot.operational.config_options)
-                            && let Some(session) = controller.state.sessions.get(&update.session_id)
-                            && let Some(check) = session.target.as_ref().and_then(crate::controller::profile_config::observation_check)
-                            && let Some(build) = snapshot.worker_build.clone()
-                        {
-                            let profile = session.last_profile.clone();
-                            let state = snapshot.operational.clone();
-                            let catalog = api_backend.profile_catalog().clone();
-                            let Ok(upgrade_task) = crate::upgrade::activity("profile choice cache") else { continue };
-                            tokio::spawn(async move {
-                                let _upgrade_task = upgrade_task;
-                                match crate::controller::profile_config::observe(profile.clone(), build, state, check).await {
-                                    Ok(true) => catalog.reread_failed(&profile),
-                                    Ok(false) => {}
-                                    Err(error) => tracing::warn!(%error, "could not cache observed profile choices"),
-                                }
-                            });
-                        }
                         let materialized = snapshot.materialized;
                         let operational_state = snapshot.operational;
                         materialized_activity.insert(
@@ -1432,7 +1413,7 @@ pub(crate) async fn run_server(
                     if publication.is_err()
                         && let Some(control) = action_cancellations.get(&started.action_id)
                     {
-                        control.request_cancel();
+                        control.request_cancel("phone action publication failed");
                     }
                     // The phone asked for a session, and now there is one to
                     // point at: that is what its request was waiting for.
@@ -1584,7 +1565,7 @@ pub(crate) async fn run_server(
         // Every exit stops in-flight work, whether it was asked for or forced.
         crate::controller::profile_config::cancel_all();
         for control in action_cancellations.values() {
-            control.request_cancel();
+            control.request_cancel("server shutdown");
         }
         match failure {
             Some(failure) => Err(failure),

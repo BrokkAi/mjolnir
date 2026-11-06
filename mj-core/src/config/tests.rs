@@ -99,6 +99,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
         home: home.to_path_buf(),
         environment: environment.into(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
@@ -126,14 +127,14 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
     };
     let profile = |kind: HarnessKind, home: &Path| HarnessProfile {
         enabled: true,
-        kind,
-        home: home.to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
         codex_profile: None,
+        ..HarnessProfile::new(kind, home.to_path_buf())
     };
     let every_name = CODEX_CREDENTIAL_ENVIRONMENT.map(str::to_owned).to_vec();
 
@@ -252,15 +253,8 @@ fn a_bedrock_codex_profile_uses_the_aws_chain_without_an_api_key_or_login_file()
     )
     .expect("write Codex configuration");
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
         environment: BTreeMap::new().into(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        muse_auto_review: None,
-        codex_profile: None,
+        ..HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
 
     profile
@@ -297,15 +291,8 @@ fn an_inline_token_codex_profile_is_authenticated_without_a_login_file() {
     )
     .expect("write Codex configuration");
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
         environment: BTreeMap::new().into(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        muse_auto_review: None,
-        codex_profile: None,
+        ..HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
 
     profile
@@ -849,15 +836,8 @@ fn sample_config() -> Config {
         profiles: BTreeMap::from([(
             "codex-1".into(),
             HarnessProfile {
-                enabled: true,
-                context_window_bytes: None,
-                kind: HarnessKind::Codex,
-                home: PathBuf::from("/home/test/.codex-one"),
                 environment: BTreeMap::from([("RUST_LOG".into(), "info".into())]).into(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
+                ..HarnessProfile::new(HarnessKind::Codex, PathBuf::from("/home/test/.codex-one"))
             },
         )]),
         bundles: BTreeMap::from([(
@@ -3147,6 +3127,29 @@ fn subtle_subagents_are_optional_but_never_configured_alone() {
     );
 }
 
+#[test]
+fn oracle_configuration_is_independent_and_rejects_adaptive_effort() {
+    let mut config = Config::default();
+    config.subagents.oracle = Some(SubagentChoice {
+        model: "advisor".into(),
+        effort: Some("high".into()),
+    });
+    config.validate().unwrap();
+    assert!(config.subagents.oracle_configured());
+    let encoded = serde_json::to_value(&config).unwrap();
+    assert_eq!(encoded["subagents"]["oracle"]["model"], "advisor");
+    let decoded: Config = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded.subagents.oracle, config.subagents.oracle);
+    config.subagents.oracle.as_mut().unwrap().effort = Some("adaptive".into());
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("[subagents.oracle]")
+    );
+}
+
 /// Codex profiles can point at different providers, so a native Codex thread
 /// continues only on a profile that sends requests to the same service. Each
 /// profile's provider comes from its own Codex files, overlay included, and a
@@ -3183,14 +3186,14 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
     .expect("write Codex configuration");
     let profile = |kind: HarnessKind, home: &Path, codex_profile: Option<&str>| HarnessProfile {
         enabled: true,
-        kind,
-        home: home.to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
         codex_profile: codex_profile.map(str::to_owned),
+        ..HarnessProfile::new(kind, home.to_path_buf())
     };
     let mut config = Config::default();
     for (id, profile) in [
@@ -3416,14 +3419,14 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
     {
         let profile = |home: PathBuf| HarnessProfile {
             enabled: true,
-            kind: HarnessKind::Claude,
-            home,
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             muse_auto_review: None,
             codex_profile: None,
+            ..HarnessProfile::new(HarnessKind::Claude, home)
         };
         let mut configured = Config::default();
         configured
@@ -3445,4 +3448,36 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
         );
         assert_eq!(configured.profiles["claude"].home, configured_home);
     }
+}
+
+/// `models` is optional: a profile without it loads unchanged and saves
+/// without the key, and a list survives a save and reload.
+#[test]
+fn a_profile_models_allow_list_round_trips_and_is_omitted_when_empty() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("opencode");
+    fs::create_dir(&home).unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n[profiles.ds8bit]\nkind = \"open-code\"\nhome = {:?}\n",
+            home.display().to_string()
+        ),
+    )
+    .unwrap();
+
+    let mut config = Config::load_from(&path).unwrap();
+    assert!(config.profiles["ds8bit"].models.is_empty());
+    config.save_to(&path).unwrap();
+    assert!(!fs::read_to_string(&path).unwrap().contains("models"));
+
+    let listed = "openrouter/deepseek/deepseek-v4.1-flash-1017".to_owned();
+    config.profiles.get_mut("ds8bit").unwrap().models = vec![listed.clone()];
+    config.save_to(&path).unwrap();
+    assert!(fs::read_to_string(&path).unwrap().contains(&listed));
+    assert_eq!(
+        Config::load_from(&path).unwrap().profiles["ds8bit"].models,
+        [listed]
+    );
 }

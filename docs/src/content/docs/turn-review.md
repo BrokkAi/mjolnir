@@ -41,3 +41,21 @@ The `override_review` tool takes pairs of findings and reasons for findings the 
 `set_review_baseline(commit, path?)` moves the review base through a commit whose tree was reviewed or overridden. Later reviews start after that commit. Moving the base clears the declined list. The tools `request_review`, `override_review`, and `set_review_baseline` are provided by `mj-review`.
 
 The pre-push hook accepts trees recorded under either `refs/mj/reviewed/` or `refs/mj/overridden/`. A merge of the default branch does not require reviewing changes already covered by the prior review base.
+
+## Follow a review
+
+The parent conversation and its prompt remain available while reviewers work. A short status appears above the prompt. Open **Reviewers** to inspect reviewer sessions in the virtual workspace; close the workspace or press Escape in the Sessions list to return. The web viewer works the same way: **Reviewers · n**, with the number of reviewers still open, sits beside **Subagents · n** once a session has any reviewer, and opens the same list filtered to reviewers. **Subagents** lists only the other children.
+
+A clean review advances the reviewed boundary automatically. Findings arrive as a message to the primary agent, and a failed review reports its reason. `mj review status` shows the current state and verdict.
+
+## Lifecycle behavior
+
+New eligible primary sessions capture a review baseline even when automatic review is off. A session is eligible when an enabled profile can serve review choices. A session started without a baseline must be resumed or restarted after configuring an eligible reviewer. Child sessions do not capture independent review baselines.
+
+Suspending a session while a review is open preserves its result for reference. The reviewer's worker cannot continue after the target is destroyed. A later review starts a new reviewer child session.
+
+While a review is preparing or running, Mjolnir starts no recovery copy or worker upgrade for that session; a copy already running when the review begins is finished first. Deferred copies and upgrades start as soon as the review closes.
+
+If Mjolnir restarts during a review, the reviewer workers keep running. The replacement daemon restores the captured target, reviewer sessions, and completed results, then continues the group. A repeated result does not duplicate findings or approve the tree twice. Reviews interrupted before their group could be saved remain unreviewed rather than advancing coverage.
+
+Review traffic is charged through the selected reviewer profile. A different profile ID may still share account-level limits with the primary profile. See [configuration](/configuration/#automatic-review-review) for schema details.

@@ -305,15 +305,10 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: PathBuf::from("/home/dev/.codex"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    PathBuf::from("/home/dev/.codex"),
+                )
             },
         );
         config.review.reviewers = vec![mj_core::config::SubagentChoice {

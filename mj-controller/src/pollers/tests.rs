@@ -61,15 +61,10 @@ fn podman_controller(state: SessionState) -> Controller {
     config.profiles.insert(
         "codex".into(),
         mj_core::config::HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: PathBuf::from("/home/dev/.codex"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                PathBuf::from("/home/dev/.codex"),
+            )
         },
     );
     config.targets.insert(
@@ -104,6 +99,8 @@ fn podman_controller(state: SessionState) -> Controller {
     app_state.sessions.insert(
         session_id.into(),
         mj_core::state::SessionRecord {
+            oracle_choice: None,
+            oracle: true,
             project: None,
             target_runtime: None,
             launch_base: None,
@@ -1098,14 +1095,14 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
             kind.id().into(),
             mj_core::config::HarnessProfile {
                 enabled: true,
-                kind,
-                home: home.clone(),
                 environment: Default::default(),
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(kind, home.clone())
             },
         );
         controller.config.targets.insert(
@@ -1193,14 +1190,14 @@ fn credential_sync_skips_a_local_login_file_linked_to_the_profile() {
             kind.id().into(),
             mj_core::config::HarnessProfile {
                 enabled: true,
-                kind,
-                home: home.clone(),
                 environment: Default::default(),
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(kind, home.clone())
             },
         );
         controller.config.targets.insert(
@@ -1255,15 +1252,10 @@ fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_conta
     controller.config.profiles.insert(
         "codex4".into(),
         mj_core::config::HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: home.path().to_path_buf(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                home.path().to_path_buf(),
+            )
         },
     );
     controller.config.targets.insert(
@@ -2096,4 +2088,38 @@ async fn a_remote_handle_exists_exactly_while_the_daemon_publishes_its_view() {
         .wait_for_session("session-1", wait)
         .await
         .unwrap();
+}
+
+#[test]
+fn cancelled_operation_leaves_the_running_recovery_copy_alone() {
+    let (observations, _receiver) = crate::recovery_gate::observation_channel();
+    let observer = crate::recovery_gate::RecoveryObserver {
+        observations,
+        gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+    };
+    let copy = observer.gate.try_start("session").unwrap();
+
+    let cancelled = AtomicBool::new(true);
+    let error = reserve_recovery_or_cancel(&observer, "session", &cancelled)
+        .err()
+        .expect("a cancelled operation does not reserve");
+    assert!(error.to_string().contains("operation cancelled"));
+    assert!(observer.is_busy("session"));
+    assert!(!copy.load(Ordering::Acquire));
+    // The failed call also left no reservation behind.
+    drop(copy);
+    assert!(observer.gate.try_start("session").is_some());
+
+    // An operation cancelled while it waits still preempts the copy first.
+    let copy = observer.gate.try_start("session").unwrap();
+    let cancelled = AtomicBool::new(false);
+    let reservation = std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| reserve_recovery_or_cancel(&observer, "session", &cancelled));
+        while !copy.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(copy);
+        waiting.join().unwrap()
+    });
+    assert!(reservation.is_ok());
 }

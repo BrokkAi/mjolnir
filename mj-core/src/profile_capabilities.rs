@@ -74,6 +74,27 @@ impl ProfileCapabilitiesSnapshot {
         completed.then_some(options)
     }
 
+    /// The models completed enabled profiles offer, one offer per value, with
+    /// `usage_priced` saying which profiles are billed per use.
+    pub fn model_offers(
+        &self,
+        config: &Config,
+        usage_priced: impl Fn(&str) -> bool,
+    ) -> Vec<crate::review::autoconfigure::ModelOffer> {
+        let ready = config
+            .enabled_profiles()
+            .filter_map(|(id, profile)| {
+                match &self.profiles.get(&profile.capabilities_key(id))?.choices {
+                    CapabilityState::Ready(choices) => {
+                        Some((choices.models.as_slice(), usage_priced(id)))
+                    }
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
+        crate::review::autoconfigure::model_offers(ready)
+    }
+
     /// Why `model`'s efforts are not fully known: a profile that has not
     /// finished discovery (it may offer the model), or one that offers the
     /// model whose effort discovery is pending or failed. A profile whose own
@@ -136,15 +157,7 @@ mod tests {
 
     fn fixture() -> (Config, ProfileCapabilitiesSnapshot) {
         let profile = HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: "/profiles/parent".into(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            legacy_subagents: Default::default(),
+            ..HarnessProfile::new(HarnessKind::Codex, "/profiles/parent")
         };
         let choice = |value: &str| SessionConfigChoice {
             value: value.into(),

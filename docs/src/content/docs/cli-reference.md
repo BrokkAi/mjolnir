@@ -180,6 +180,8 @@ mj move --session <id> [--target <target-id>] [--profile <profile-id>]
         [--subagents native|mjolnir|none]
         [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
         [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
+        [--oracle enabled|disabled]
+        [--subagent-oracle <model>] [--subagent-oracle-effort <effort>]
 mj move-sources --session <id> [--cleanup <operation-id> --yes]
 ```
 
@@ -205,6 +207,15 @@ choice. Either override implies Mjolnir. The matching
 the session's override. `--subagents none` removes delegation tools entirely;
 it needs a Claude, Codex, or DSH session. A retry of a sealed
 Move retains its recorded policy; an explicit different policy is refused.
+
+`--oracle enabled|disabled` turns the session's oracle on or off, and
+`--subagent-oracle M` overrides the oracle model for this session and implies
+`enabled`; neither depends on the delegation policy. `--subagent-oracle-effort`
+requires `--subagent-oracle`, and `adaptive` is invalid. Omitted flags retain the
+session's choice, and turning the oracle off keeps its model override. Combining
+`--subagent-oracle` with `--oracle disabled` is refused. When you ask for the
+oracle but no model is configured or given, the Move still runs with the oracle
+off and says so.
 
 A session that works in a bare checkout on an SSH host cannot move to
 another machine. Its working tree is the checkout itself, so `--target` is
@@ -289,6 +300,8 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--model <name>] [--effort <name>] [--subagents native|mjolnir|none]
        [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
        [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
+       [--oracle enabled|disabled]
+       [--subagent-oracle <model>] [--subagent-oracle-effort <effort>]
        [--review <off|push>] [--reviewer MODEL[:EFFORT]]...
        [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
@@ -318,7 +331,7 @@ mj usage --session <id> [--after-seq <seq>] [--limit <count>] [--json]
 mj put-file --session <id> --path <workspace-relative path> [--overwrite] [--json] <source>|-
 mj elicitations --session <id> [--json]
 mj respond --session <id> --elicitation <id> [<response JSON>|-] [--response-file <path>]
-mj models --profile <id> [--model <name>] [--json]
+mj models --profile <id> [--model <name> | --unrestricted] [--json]
 mj set-config --session <id> [--key <key> --value <value>] [--json]
 mj ui pane (sessions | targets | profiles) (minimized | standard | maximized) [--json]
 mj ui show <session-id> [--right | --below] [--json]
@@ -382,6 +395,15 @@ mj new --workspace eval --bundle product --target builder \
   every child uses the straightforward choice, and the parent is told to
   delegate straightforward work.
   Mjolnir chooses an enabled profile offering its model and effort by quota.
+- `mj new --oracle enabled|disabled` chooses whether the session may consult
+  the oracle, a read-only advisor behind the `ask_oracle` tool. It works with
+  any delegation policy and any harness. Omitted uses the choice last made for
+  the profile, which starts enabled. The oracle needs a model in
+  `[subagents.oracle]` or a session override. `--subagent-oracle M` overrides the
+  model for this session and implies `enabled`; `--subagent-oracle-effort`
+  requires it, and `adaptive` is invalid. Combining `--subagent-oracle` with
+  `--oracle disabled` is refused. When you ask for the oracle without a model,
+  the session starts with the oracle off and says so.
 - `mj new --review off|push` sets the session's review mode, overriding
   `[review]`. `mj import <harness>` takes the same option for the session it
   adopts. Repeat `--reviewer MODEL[:EFFORT]` up to three times to choose reviewers. See
@@ -422,7 +444,9 @@ mj new --workspace eval --bundle product --target builder \
   `--overwrite`.
 - `mj fetch` copies a file, or a directory as a zip archive, from a session's
   target to this machine and prints where it landed. See below.
-- `mj models` lists the models and efforts a profile offers. Usage-priced profiles
+- `mj models` lists the models and efforts a profile offers, after the profile's
+  `models` allow-list; `--unrestricted` lists everything the harness advertises.
+  Usage-priced profiles
   include known per-million-token rates; subscription and unknown billing modes
   are labeled without per-token prices. JSON includes a `billing` field and a
   `price` object or `null` for each model.

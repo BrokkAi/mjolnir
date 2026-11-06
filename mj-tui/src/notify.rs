@@ -40,17 +40,24 @@ pub struct Notification {
 }
 
 /// One stretch of a session needing a person at one level, and whether it
-/// has been reported yet.
+/// has been reported yet. A form that opens during the stretch starts a new
+/// one, so a second request does not hide behind a first one already seen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AttentionEpisode {
     level: AttentionLevel,
+    /// The open forms this episode covers.
+    forms: std::collections::BTreeSet<String>,
     since_ms: u64,
     reported: bool,
 }
 
 impl DashboardState {
     pub(crate) fn attention_notice_level(&self, session_id: &str) -> AttentionLevel {
-        let level = self.attention_level(session_id);
+        self.unseen_failure_level(session_id, self.attention_level(session_id))
+    }
+
+    /// `level`, except that a failure already drawn is no longer news.
+    fn unseen_failure_level(&self, session_id: &str, level: AttentionLevel) -> AttentionLevel {
         if level == AttentionLevel::Failed
             && self.viewed_failures.get(session_id).is_some_and(|seen| {
                 self.state
@@ -86,6 +93,12 @@ impl DashboardState {
     /// episode. Sessions the person is already looking at are marked as
     /// reported without a notification, so switching away later does not
     /// ring for a question they have seen.
+    ///
+    /// Each session's episode follows its own state. A sub-agent child has no
+    /// row of its own, so a child holding an open form has its own episode,
+    /// seen only in the child's conversation, and its notification names the
+    /// parent's row and the child. Two children, or a child and its parent,
+    /// therefore each ring once.
     pub fn notification_events(&mut self, now_ms: u64) -> Vec<Notification> {
         let delay_ms = self.config.notify.delay_seconds.saturating_mul(1000);
         let enabled = self.config.notify.mode != NotifyMode::Off;
@@ -94,30 +107,63 @@ impl DashboardState {
         let mut due = Vec::new();
         episodes.retain(|id, _| self.state.sessions.contains_key(id));
         for id in self.state.sessions.keys() {
-            if self.state.is_subagent_session(id) {
-                continue;
-            }
-            let level = self.attention_notice_level(id);
+            let parent = self
+                .state
+                .subagents
+                .get(id)
+                .map(|child| child.parent_session_id.as_str());
+            let level = match parent {
+                Some(_)
+                    if self
+                        .session_details
+                        .get(id)
+                        .is_some_and(|detail| !detail.pending_elicitations.is_empty())
+                        && self.own_attention_level(id) == AttentionLevel::Waiting =>
+                {
+                    AttentionLevel::Waiting
+                }
+                Some(_) => AttentionLevel::Inactive,
+                None => self.unseen_failure_level(id, self.own_attention_level(id)),
+            };
             if !level.needs_person() {
                 episodes.remove(id);
                 continue;
             }
+            let forms: std::collections::BTreeSet<String> = self
+                .session_details
+                .get(id)
+                .map(|detail| {
+                    detail
+                        .pending_elicitations
+                        .iter()
+                        .map(|request| request.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
             let episode = episodes.entry(id.clone()).or_insert(AttentionEpisode {
                 level,
+                forms: Default::default(),
                 since_ms: now_ms,
                 reported: false,
             });
-            if episode.level != level {
+            if episode.level != level || !forms.is_subset(&episode.forms) {
                 *episode = AttentionEpisode {
                     level,
+                    forms,
                     since_ms: now_ms,
                     reported: false,
                 };
+            } else {
+                // Forget answered forms, so a harness that reuses an id
+                // later still starts a new episode.
+                episode.forms = forms;
             }
             if episode.reported {
                 continue;
             }
-            if visible.as_deref() == Some(id.as_str()) {
+            // An open conversation shows only its first form, so being on
+            // screen sees an episode only when it covers one form.
+            if visible.as_deref() == Some(id.as_str()) && episode.forms.len() <= 1 {
                 episode.reported = true;
                 continue;
             }
@@ -128,14 +174,41 @@ impl DashboardState {
             if !enabled {
                 continue;
             }
-            let Some(session) = self.state.sessions.get(id) else {
+            // A child's reviewer has no row either; name the top-level one.
+            let mut row = id.as_str();
+            let mut steps = 0;
+            while let Some(relation) = self.state.subagents.get(row)
+                && steps < self.state.sessions.len()
+            {
+                row = relation.parent_session_id.as_str();
+                steps += 1;
+            }
+            let Some(session) = self.state.sessions.get(row) else {
                 continue;
             };
+            let body = match (parent, self.session_details.get(id)) {
+                (Some(_), Some(detail)) => format!(
+                    "{} \"{}\": {}",
+                    match self.state.subagents.get(id).map(|relation| relation.kind) {
+                        Some(mj_core::subagent::SubagentKind::Reviewer) => "Reviewer",
+                        _ => "Sub-agent",
+                    },
+                    self.state
+                        .sessions
+                        .get(id)
+                        .map_or(id.as_str(), |child| child.listed_title()),
+                    detail
+                        .pending_elicitations
+                        .last()
+                        .map_or("", |request| request.message.as_str())
+                ),
+                _ => self.notification_body(id, level),
+            };
             due.push(Notification {
-                session_id: id.clone(),
+                session_id: row.to_owned(),
                 session_title: session.listed_title().to_owned(),
                 level,
-                body: self.notification_body(id, level),
+                body,
             });
         }
         self.attention_episodes = episodes;
@@ -148,7 +221,7 @@ impl DashboardState {
         let detail = self.session_details.get(session_id);
         let text = match level {
             AttentionLevel::Waiting => detail
-                .and_then(|detail| detail.pending_elicitations.first())
+                .and_then(|detail| detail.pending_elicitations.last())
                 .map(|request| request.message.clone())
                 .or_else(|| {
                     self.session_review(session_id)
@@ -285,18 +358,15 @@ impl DashboardState {
         ));
     }
 
+    /// "Session" and the shared notice name, cut to fit a notice. See
+    /// [`mj_core::state::State::session_notice_name`].
     pub(crate) fn session_notice_name(&self, session_id: &str) -> String {
-        self.state.sessions.get(session_id).map_or_else(
-            || format!("Session {}", &session_id[..session_id.len().min(8)]),
-            |session| {
-                format!(
-                    "Session {}",
-                    crate::fit_session_name(
-                        crate::render::session_name(session),
-                        crate::NOTICE_NAME_CELLS
-                    )
-                )
-            },
+        format!(
+            "Session {}",
+            crate::fit_session_name(
+                &self.state.session_notice_name(session_id),
+                crate::NOTICE_NAME_CELLS
+            )
         )
     }
 
@@ -367,6 +437,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                last_oracle_choices: Default::default(),
                 operator_presence: Default::default(),
                 last_subagent_policies: Default::default(),
                 subagents: Default::default(),
@@ -480,7 +551,7 @@ mod tests {
     #[test]
     fn an_unreachable_worker_is_reported_plainly_and_withdrawn_on_recovery() {
         let mut dashboard = dashboard();
-        let title = dashboard.state.sessions["done"].display_title().to_owned();
+        let title = dashboard.state.sessions["done"].listed_title().to_owned();
         dashboard.report_session_unreachable("done");
         let notice = dashboard.notice().unwrap();
         assert_eq!(

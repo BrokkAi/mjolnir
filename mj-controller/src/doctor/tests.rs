@@ -173,14 +173,10 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         "disabled-reviewer".to_owned(),
         HarnessProfile {
             enabled: false,
-            kind: HarnessKind::Codex,
-            home: PathBuf::from("/home/example/.codex"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Codex,
+                PathBuf::from("/home/example/.codex"),
+            )
         },
     );
     let subagent_checks = subagent_policy_checks(Ok(&config));
@@ -240,9 +236,6 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
 
     let home = tempfile::tempdir().unwrap();
     let claude = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Claude,
-        home: home.path().to_path_buf(),
         environment: [
             ("CLAUDE_CODE_USE_BEDROCK".to_owned(), "1".to_owned()),
             ("AWS_PROFILE".to_owned(), "example-bedrock".to_owned()),
@@ -250,11 +243,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         ]
         .into_iter()
         .collect(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf())
     };
     assert!(crate::setup::harness_is_authenticated_with_executor(
         &claude,
@@ -464,15 +453,10 @@ fn a_config_without_a_bundle_is_ready_for_sessions() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: directory.path().join("codex-home"),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            HarnessKind::Codex,
+            directory.path().join("codex-home"),
+        )
     };
     Config {
         profiles: [("work".to_owned(), profile)].into_iter().collect(),
@@ -1808,15 +1792,7 @@ fn doctor_reports_an_inline_token_provider_as_usage_priced() {
     )
     .unwrap();
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
     assert_eq!(
         profile_quota_source(&profile),
@@ -1838,15 +1814,8 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
     config.profiles.insert(
         "plain".into(),
         HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: "/profiles/plain".into(),
             environment: literal,
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, "/profiles/plain")
         },
     );
     let referenced = with_secret_resolver(
@@ -1867,15 +1836,8 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
     config.profiles.insert(
         "referenced".into(),
         HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: "/profiles/referenced".into(),
             environment: referenced,
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, "/profiles/referenced")
         },
     );
     let mut target = container("ghcr.io/example/agent:latest");

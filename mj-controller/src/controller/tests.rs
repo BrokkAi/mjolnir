@@ -18,15 +18,10 @@ fn registration_config() -> Config {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: PathBuf::from("/home/dev/.codex"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Codex,
+                PathBuf::from("/home/dev/.codex"),
+            )
         },
     );
     config.bundles.insert(
@@ -704,6 +699,8 @@ fn bundle_creation_skips_unreadable_configured_repositories() {
 
 fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
     SessionLaunchOptions {
+        oracle: None,
+        oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
         review: None,
@@ -722,6 +719,67 @@ fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptio
         project_directory: None,
         session_title_override: None,
     }
+}
+
+// Hard-won: f0f32ab19: an explicitly requested oracle was silently absent from the worker launch.
+#[test]
+fn registration_turns_unavailable_explicit_oracle_off_with_a_notice() {
+    const MARKER: &str = "MJ_TEST_ORACLE_REGISTRATION_NOTICE";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "registration_turns_unavailable_explicit_oracle_off_with_a_notice",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    let implicit = controller
+        .register_session_reporting_review(
+            "codex",
+            "project",
+            "podman",
+            "implicit no model",
+            launch_options(Vec::new()),
+        )
+        .unwrap();
+    assert!(implicit.oracle_notice.is_none());
+    assert!(crate::database::load_state().unwrap().sessions[&implicit.id].oracle);
+    assert_eq!(
+        controller.state.last_oracle_choices.get("codex"),
+        Some(&true)
+    );
+    let mut no_model = launch_options(Vec::new());
+    no_model.oracle = Some(true);
+    let registration = controller
+        .register_session_reporting_review("codex", "project", "podman", "no model", no_model)
+        .unwrap();
+    assert!(
+        registration
+            .oracle_notice
+            .unwrap()
+            .contains("no oracle model is configured")
+    );
+    assert!(!crate::database::load_state().unwrap().sessions[&registration.id].oracle);
+    controller.config.profiles.get_mut("codex").unwrap().kind = HarnessKind::Muse;
+    let mut muse_oracle = launch_options(Vec::new());
+    muse_oracle.oracle = Some(true);
+    muse_oracle.oracle_choice = Some(mj_core::config::SubagentChoice {
+        model: "advisor".into(),
+        effort: None,
+    });
+    let registration = controller
+        .register_session_reporting_review("codex", "project", "podman", "muse oracle", muse_oracle)
+        .unwrap();
+    assert!(registration.oracle_notice.is_none());
+    let stored = &crate::database::load_state().unwrap().sessions[&registration.id];
+    assert!(stored.oracle);
+    assert_eq!(stored.oracle_choice.as_ref().unwrap().model, "advisor");
 }
 
 #[test]
@@ -991,6 +1049,8 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             "podman",
             "start commit",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 at: Some(at.to_uppercase()),
                 branch: Some("town/run-1".into()),
                 ..launch_options(Vec::new())
@@ -1026,6 +1086,8 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             "podman",
             "start commit with base",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 at: Some(at.into()),
                 base: Some("v1.0".into()),
                 ..launch_options(Vec::new())
@@ -1078,6 +1140,8 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     };
     refusal(
         register(SessionLaunchOptions {
+            oracle: None,
+            oracle_choice: None,
             no_later_history: true,
             ..launch_options(Vec::new())
         }),
@@ -1086,6 +1150,8 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     // A name would have to resolve against remote refs the workspace lacks.
     refusal(
         register(SessionLaunchOptions {
+            oracle: None,
+            oracle_choice: None,
             at: Some(at.into()),
             base: Some("origin/main".into()),
             no_later_history: true,
@@ -1095,6 +1161,8 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     );
 
     let id = register(SessionLaunchOptions {
+        oracle: None,
+        oracle_choice: None,
         at: Some(at.to_uppercase()),
         base: Some(base.to_uppercase()),
         branch: Some("review/run-1".into()),
@@ -1141,6 +1209,8 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
             "podman",
             "without later history",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 at: Some(at.into()),
                 no_later_history: true,
                 ..launch_options(Vec::new())
@@ -1314,23 +1384,32 @@ fn configuration_id_rename_rewrites_durable_session_references() {
         state: State::default(),
     };
     controller.config.save().unwrap();
+    controller
+        .state
+        .last_oracle_choices
+        .insert("codex".into(), false);
+    let mut options = launch_options(Vec::new());
+    options.oracle_choice = Some(mj_core::config::SubagentChoice {
+        model: "advisor".into(),
+        effort: None,
+    });
     let session_id = controller
-        .register_session_with_resources(
-            "codex",
-            "project",
-            "podman",
-            "rename references",
-            launch_options(Vec::new()),
-        )
+        .register_session_with_resources("codex", "project", "podman", "rename references", options)
         .unwrap();
     assert_eq!(
         controller.state.last_subagent_policy_for("codex"),
         SubagentPolicy::Native
     );
+    assert!(controller.state.sessions[&session_id].oracle);
+    assert!(controller.state.last_oracle_choice_for("codex"));
 
     controller
         .rename_profile_id("codex", "codex-renamed")
         .unwrap();
+    assert_eq!(
+        controller.state.last_oracle_choices.get("codex-renamed"),
+        Some(&true)
+    );
     assert_eq!(
         controller.state.last_subagent_policies.get("codex-renamed"),
         Some(&SubagentPolicy::Native)
@@ -2170,6 +2249,8 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
             "podman",
             "durable target",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 // Set at creation, since a lifecycle transition does not own
                 // this column (see `update_lifecycle_fields`); this test
                 // reloads the controller before registering a child, and the
@@ -2640,6 +2721,10 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
     config.subagents.max_concurrent = 0;
+    config.subagents.oracle = Some(mj_core::config::SubagentChoice {
+        model: "oracle-model".into(),
+        effort: Some("high".into()),
+    });
     let profile = config.profiles["codex"].clone();
     config.profiles.insert("resolved-reviewer".into(), profile);
     let parent_id = "0123456789abcdef0123456789abcdef";
@@ -2733,6 +2818,96 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             .to_string_lossy()
             .contains(&child.child_session_id)
     );
+    let oracle = controller
+        .register_subagent(RegisterSubagentRequest {
+            kind: mj_core::subagent::SubagentKind::Oracle,
+            reviewer_launch: None,
+            parent_session_id: parent_id.into(),
+            task_name: "oracle".into(),
+            profile_id: "resolved-reviewer".into(),
+            model: Some("oracle-model".into()),
+            effort: Some("high".into()),
+            fast_mode: false,
+            working_directory: Default::default(),
+            initial_prompt: "Question:\nWhich option?".into(),
+            request_key: "oracle-first".into(),
+            report_root: Some("/reports".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        oracle.initial_prompt,
+        format!(
+            "Your report directory is /reports/{}.\n\n{}\n\nQuestion:\nWhich option?",
+            oracle.child_session_id,
+            super::subagents::ORACLE_INSTRUCTIONS
+        )
+    );
+    assert_eq!(oracle.model.as_deref(), Some("oracle-model"));
+    assert_eq!(oracle.effort.as_deref(), Some("high"));
+    assert!(oracle.handback_tool);
+    let oracle_session = &controller.state.sessions[&oracle.child_session_id];
+    assert_eq!(
+        oracle_session.subagents,
+        Some(mj_core::subagent::SubagentPolicy::None)
+    );
+    assert!(!oracle_session.oracle);
+    let muse_parent_id = "fedcba9876543210fedcba9876543210";
+    let mut muse_parent = controller.state.sessions[parent_id].clone();
+    muse_parent.id = muse_parent_id.into();
+    muse_parent.harness_kind = HarnessKind::Kimi;
+    muse_parent.target = Some(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir()
+            .join("workers")
+            .join(muse_parent_id),
+    });
+    controller
+        .state
+        .sessions
+        .insert(muse_parent_id.into(), muse_parent.clone());
+    crate::database::save_session(&muse_parent).unwrap();
+    let mut muse_profile = controller.config.profiles["resolved-reviewer"].clone();
+    muse_profile.kind = HarnessKind::Muse;
+    controller
+        .config
+        .profiles
+        .insert("oracle-muse".into(), muse_profile);
+    let muse_oracle = controller
+        .register_subagent(RegisterSubagentRequest {
+            kind: mj_core::subagent::SubagentKind::Oracle,
+            reviewer_launch: None,
+            parent_session_id: muse_parent_id.into(),
+            task_name: "oracle".into(),
+            profile_id: "oracle-muse".into(),
+            model: Some("muse-model".into()),
+            effort: None,
+            fast_mode: false,
+            working_directory: Default::default(),
+            initial_prompt: "Question:\nWhy?".into(),
+            request_key: "muse-oracle".into(),
+            report_root: Some("/reports".into()),
+        })
+        .unwrap();
+    assert!(!muse_oracle.handback_tool);
+    assert!(
+        muse_oracle
+            .initial_prompt
+            .contains("Send each answer as your last message")
+    );
+    assert!(
+        muse_oracle
+            .initial_prompt
+            .contains("Your report directory is /reports/")
+    );
+    controller
+        .state
+        .sessions
+        .get_mut(&oracle.child_session_id)
+        .unwrap()
+        .state = SessionState::Running;
+    controller.config.subagents.max_concurrent = 1;
+    controller
+        .ensure_subagent_slot_available(parent_id, None)
+        .unwrap();
     // The reviewer holds processes but consumes no ordinary delegation slot.
     controller
         .state
@@ -2740,7 +2915,6 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .get_mut(&child.child_session_id)
         .unwrap()
         .state = SessionState::Running;
-    controller.config.subagents.max_concurrent = 1;
     controller
         .ensure_subagent_slot_available(parent_id, None)
         .unwrap();

@@ -1411,6 +1411,12 @@ fn record_test_subagent_admission(relay_root: &Path, open: bool) {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_else(|| serde_json::json!({"requests": {}, "results": {}}));
+    let transitions = queue["admission_transitions"].as_array_mut().map(|items| {
+        items.push(serde_json::Value::Bool(open));
+    });
+    if transitions.is_none() {
+        queue["admission_transitions"] = serde_json::json!([open]);
+    }
     queue["mutating_admission_open"] = serde_json::Value::Bool(open);
     std::fs::write(queue_path, serde_json::to_vec(&queue).unwrap())
         .expect("persist fake worker sub-agent admission");
@@ -2449,15 +2455,10 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                profile_home,
+            )
         },
     );
     // Checkpoint export must continue after its original template is removed.
@@ -2781,15 +2782,10 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                profile_home,
+            )
         },
     );
     config.bundles.insert(
@@ -3224,15 +3220,10 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         config.profiles.insert(
             "codex".into(),
             HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: profile_home.clone(),
-                environment: Default::default(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    profile_home.clone(),
+                )
             },
         );
         config
@@ -3266,6 +3257,8 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     };
 
     let selection = mj_core::state::MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
@@ -3581,15 +3574,10 @@ async fn close_cut_controller_with(
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                profile_home,
+            )
         },
     );
     config.bundles.insert(

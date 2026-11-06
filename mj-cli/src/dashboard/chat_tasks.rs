@@ -111,7 +111,7 @@ impl DashboardContext {
     fn open_child_workspace(&mut self, parent_id: String, kind: mj_core::subagent::SubagentKind) {
         self.capture_composer_draft(&parent_id);
         match kind {
-            mj_core::subagent::SubagentKind::Worker => {
+            mj_core::subagent::SubagentKind::Worker | mj_core::subagent::SubagentKind::Oracle => {
                 self.dashboard.open_subagent_workspace(parent_id)
             }
             mj_core::subagent::SubagentKind::Reviewer => {
@@ -120,7 +120,8 @@ impl DashboardContext {
         }
         if self.update_subagent_scope() {
             self.dashboard.set_notice(match kind {
-                mj_core::subagent::SubagentKind::Worker => "Loading sub-agents…",
+                mj_core::subagent::SubagentKind::Worker
+                | mj_core::subagent::SubagentKind::Oracle => "Loading sub-agents…",
                 mj_core::subagent::SubagentKind::Reviewer => "Loading reviewers…",
             });
         }
@@ -164,7 +165,10 @@ impl DashboardContext {
                     if let Some(chat) = self.chats.get(&session_id) {
                         let prompt = chat.recalled_startup_prompt(&id, &text);
                         self.startup_prompts.withdraw(
-                            session_id,
+                            io::NamedSession {
+                                name: io::session_notice_name(&self.controller.state, &session_id),
+                                id: session_id,
+                            },
                             prompt,
                             self.dashboard_io_tx.clone(),
                             self.critical_operations.clone(),

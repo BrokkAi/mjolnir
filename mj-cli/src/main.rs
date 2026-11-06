@@ -331,6 +331,9 @@ struct MoveArgs {
     /// or the recorded policy when retrying a sealed Move.
     #[arg(long)]
     subagents: Option<String>,
+    /// Oracle availability for this session.
+    #[arg(long, value_parser = ["enabled", "disabled"])]
+    oracle: Option<String>,
     /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
     subagent_straightforward: Option<String>,
@@ -343,6 +346,12 @@ struct MoveArgs {
     /// Override subtle sub-agent effort (requires --subagent-subtle).
     #[arg(long)]
     subagent_subtle_effort: Option<String>,
+    /// Override the oracle model for this session.
+    #[arg(long)]
+    subagent_oracle: Option<String>,
+    /// Oracle effort; requires --subagent-oracle.
+    #[arg(long, requires = "subagent_oracle")]
+    subagent_oracle_effort: Option<String>,
     /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_model: Option<String>,
@@ -1015,7 +1024,7 @@ async fn run_command(
             if daemon::container::exec_in_container(&container_forwarded_args()).await? {
                 return Ok(DashboardExit::Normal);
             }
-            doctor(args).map(|()| DashboardExit::Normal)
+            doctor(args).await.map(|()| DashboardExit::Normal)
         }
         Some(Command::Setup(args)) => {
             if args.command.is_none()
@@ -1235,6 +1244,16 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         args.subagent_model.as_deref(),
         args.subagent_effort.as_deref(),
     )?;
+    let oracle_choice = api_commands::oracle_override(
+        args.subagent_oracle.as_deref(),
+        args.subagent_oracle_effort.as_deref(),
+        args.oracle.as_deref(),
+    )?;
+    let oracle_enabled = args
+        .oracle
+        .as_deref()
+        .map(|choice| choice == "enabled")
+        .or_else(|| oracle_choice.as_ref().map(|_| true));
     if !args.yes
         && !args.prepare
         && (!std::io::IsTerminal::is_terminal(&std::io::stdin())
@@ -1273,6 +1292,8 @@ async fn move_session(args: MoveArgs) -> Result<()> {
     };
     let selection = MoveSelection {
         subagents,
+        oracle: oracle_enabled,
+        oracle_choice,
         workspace: mj_core::move_workspace::WorkspaceSelection {
             exclusions: args
                 .exclusions
@@ -2808,10 +2829,50 @@ fn setup(args: SetupArgs) -> Result<()> {
     }
 }
 
-fn doctor(args: DoctorArgs) -> Result<()> {
-    let checks = mj_controller::doctor::run_current(mj_controller::doctor::DoctorOptions {
+/// How long doctor waits for the daemon to report one profile's catalogue.
+/// A profile whose discovery is still running is reported as not checked.
+const CATALOG_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The catalogues each enabled profile advertises, read from a daemon that is
+/// already running. Doctor never starts one: it is a diagnostic, and the
+/// answer "not checked" is accurate when nothing has discovered the models.
+async fn doctor_catalogs(config: &mj_core::config::Config) -> mj_controller::doctor::Catalogs {
+    use mj_controller::doctor::Catalogs;
+    let ids = mj_controller::doctor::catalog_profile_ids(config);
+    if ids.is_empty() {
+        return Catalogs::Read(Default::default());
+    }
+    let client = match tokio::time::timeout(CATALOG_WAIT, api_client::ApiClient::connect_running())
+        .await
+    {
+        Ok(Ok(client)) => client,
+        Ok(Err(_)) | Err(_) => {
+            return Catalogs::NotChecked("no running Mjolnir daemon reported the models".into());
+        }
+    };
+    let read = futures::future::join_all(ids.iter().map(|id| async {
+        match tokio::time::timeout(CATALOG_WAIT, client.models(id, None, true)).await {
+            Ok(Ok(choices)) => Ok(choices),
+            Ok(Err(error)) => Err(format!("{error:#}")),
+            Err(_) => Err(format!(
+                "its models were still being discovered after {} seconds",
+                CATALOG_WAIT.as_secs()
+            )),
+        }
+    }))
+    .await;
+    Catalogs::Read(ids.into_iter().zip(read).collect())
+}
+
+async fn doctor(args: DoctorArgs) -> Result<()> {
+    let mut checks = mj_controller::doctor::run_current(mj_controller::doctor::DoctorOptions {
         smoke: args.smoke,
     });
+    // An unreadable configuration is already reported by the checks above.
+    if let Ok(config) = mj_core::config::Config::load_from(&mj_core::config::config_path()) {
+        let catalogs = doctor_catalogs(&config).await;
+        checks.extend(mj_controller::doctor::catalog_checks(&config, &catalogs));
+    }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&checks)?);
     } else {
@@ -3341,6 +3402,8 @@ mod tests {
         state.sessions.insert(
             session_id.into(),
             SessionRecord {
+                oracle_choice: None,
+                oracle: true,
                 project: None,
                 target_runtime: None,
                 launch_base: None,

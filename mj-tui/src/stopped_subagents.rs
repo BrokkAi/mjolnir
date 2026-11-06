@@ -19,7 +19,7 @@ impl DashboardState {
     /// Whether `id` is a Mjolnir sub-agent whose session has stopped, so its
     /// conversation can only be read.
     pub fn is_stopped_subagent(&self, id: &str) -> bool {
-        self.state.subagents.contains_key(id) && self.session_has_no_worker(id)
+        self.state.is_stopped_subagent(id) && self.transition_kind(id).is_none()
     }
 
     /// Start showing a stopped sub-agent. Returns whether the host has to load
@@ -83,7 +83,7 @@ impl DashboardState {
         use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
         let name = self.state.sessions.get(id).map_or_else(
             || id.to_owned(),
-            |session| session.display_title().to_owned(),
+            |session| session.listed_title().to_owned(),
         );
         let title = crate::pane_controls::child_pane_title(
             self,

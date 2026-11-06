@@ -11,6 +11,9 @@ pub(crate) struct SubagentDiscovery {
 /// from the session record.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubagentDraft {
+    pub(crate) oracle: bool,
+    pub(crate) oracle_choice: Option<mj_core::config::SubagentChoice>,
+    oracle_configured: bool,
     /// The drafted intent. A harness without sub-agents of its own shows and
     /// submits Native as None; see [`Self::selected`].
     pub(crate) policy: SubagentPolicy,
@@ -43,12 +46,26 @@ impl DelegationMode {
 }
 
 impl SubagentDraft {
+    pub(crate) fn oracle_available(&self) -> bool {
+        self.oracle_configured || self.oracle_choice.is_some()
+    }
     pub(crate) fn new(policy: SubagentPolicy) -> Self {
         Self {
+            oracle: true,
             last_mjolnir_policy: policy.uses_mjolnir().then(|| Box::new(policy.clone())),
             policy,
             ..Self::default()
         }
+    }
+
+    pub(crate) fn with_oracle(
+        mut self,
+        enabled: bool,
+        choice: Option<mj_core::config::SubagentChoice>,
+    ) -> Self {
+        self.oracle = enabled;
+        self.oracle_choice = choice;
+        self
     }
 
     /// The entries the combo box lists. Native is hidden for a harness
@@ -185,6 +202,10 @@ impl SubagentDraft {
         changed
     }
     pub(crate) fn activate(&mut self, id: WizardControl) -> bool {
+        if id == WizardControl::Oracle && self.oracle_available() {
+            self.combo.open(id, usize::from(!self.oracle));
+            return true;
+        }
         if id != WizardControl::Subagents {
             return false;
         }
@@ -196,10 +217,31 @@ impl SubagentDraft {
             Interaction::ComboBoxCommit(WizardControl::Subagents, selected) => {
                 Some(self.select_policy(*selected))
             }
+            Interaction::ComboBoxCommit(WizardControl::Oracle, selected)
+                if self.oracle_available() =>
+            {
+                let next = *selected == 0;
+                let changed = self.oracle != next;
+                self.oracle = next;
+                Some(changed)
+            }
             _ => None,
         }
     }
     pub(crate) fn declare(&self, form: &mut Dialog<WizardControl>) {
+        if self.oracle_available() {
+            form.declare_with_enabled(
+                WizardControl::Oracle,
+                ControlKind::ComboBox {
+                    len: 2,
+                    selected: self
+                        .combo
+                        .selection(WizardControl::Oracle, usize::from(!self.oracle)),
+                    expanded: self.combo.is_open(WizardControl::Oracle),
+                },
+                true,
+            );
+        }
         form.declare_with_enabled(
             WizardControl::Subagents,
             ControlKind::ComboBox {
@@ -219,8 +261,10 @@ impl SubagentDraft {
         config: &Config,
         snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
         remembered: &SubagentPolicy,
+        remembered_oracle: bool,
     ) {
         if self.profile_id.as_deref() != Some(profile) {
+            self.oracle = remembered_oracle;
             self.profile_id = Some(profile.to_owned());
             self.chosen_policy = None;
             self.last_mjolnir_policy = remembered
@@ -257,6 +301,7 @@ impl SubagentDraft {
         _snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     ) {
         self.harness = config.profiles.get(profile).map(|profile| profile.kind);
+        self.oracle_configured = config.subagents.oracle_configured();
         self.discovery = Some(SubagentDiscovery {
             result: Some(
                 if !config
@@ -273,7 +318,7 @@ impl SubagentDraft {
                     )
                     .is_some()
                 {
-                    // Subtle is optional; straightforward alone enables Mjolnir.
+                    // Subtle and Oracle are optional; straightforward alone enables Mjolnir.
                     Ok(SubagentOptions::default())
                 } else {
                     Err("Set up Mjolnir sub-agents in Settings -> Sub-agents".into())
@@ -314,13 +359,16 @@ impl DashboardState {
         };
         let config = self.config.clone();
         let snapshot = self.profile_capabilities.clone();
+        let oracle_choices = self.state.last_oracle_choices.clone();
         let (draft, profile) = self.review_subagent_draft()?;
+        let remembered_oracle = oracle_choices.get(&profile).copied().unwrap_or(true);
         if creating {
             draft.refresh_create(
                 &profile,
                 &config,
                 &snapshot,
                 remembered.as_ref().expect("Create preference was resolved"),
+                remembered_oracle,
             );
         } else {
             draft.update_choices(&profile, &config, &snapshot);

@@ -247,6 +247,7 @@ fn dashboard_with_live_sessions(count: usize, per_project: usize) -> DashboardSt
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_oracle_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
@@ -916,6 +917,7 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_oracle_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: [(child.id.clone(), relation)].into_iter().collect(),
@@ -1040,6 +1042,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_oracle_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: [(first_child.id.clone(), first_relation.clone())]
@@ -1077,6 +1080,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         handback_tool: false,
     };
     dashboard.set_state(State {
+        last_oracle_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         subagents: [
@@ -1473,6 +1477,7 @@ fn mouse_wheel_scrolls_the_hovered_pane_without_changing_focus() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_oracle_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
@@ -1490,11 +1495,13 @@ fn mouse_wheel_scrolls_the_hovered_pane_without_changing_focus() {
         .expect("draw pane hitboxes");
     let pane_areas = dashboard.pane_areas.expect("dashboard pane hitboxes");
 
-    // The sessions pane moves one row per wheel notch, like a single arrow.
+    // The sessions pane scrolls its list under the wheel and keeps the selection.
     dashboard.handle_mouse(mouse_in(MouseEventKind::ScrollDown, pane_areas[0]));
-    assert_eq!(dashboard.selected_visible_index().unwrap_or(0), 1);
+    assert_eq!(dashboard.selected_visible_index().unwrap_or(0), 0);
+    assert_eq!(dashboard.sessions_scroll.get(), 1);
     dashboard.handle_mouse(mouse_in(MouseEventKind::ScrollUp, pane_areas[0]));
     assert_eq!(dashboard.selected_visible_index().unwrap_or(0), 0);
+    assert_eq!(dashboard.sessions_scroll.get(), 0);
 
     // The quota pane is also a list: one notch moves its selection by one.
     assert_eq!(dashboard.focus, Focus::Sessions);
@@ -1559,6 +1566,7 @@ fn dashboard_with_conversations(count: usize) -> DashboardState {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_oracle_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
@@ -1591,6 +1599,7 @@ fn newly_ready_session_can_be_selected_after_state_refresh() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_oracle_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
@@ -1969,6 +1978,7 @@ fn dashboard_with_attention_mix() -> DashboardState {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_oracle_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
@@ -3573,10 +3583,15 @@ fn resize_mode_respects_custom_commands_and_workspace_changes() {
     assert!(!dashboard.resize_mode_active());
 }
 
-/// A child's pending question belongs to the parent agent; it does not change
-/// the parent's own attention level or notification.
+/// Launch finding R11-1: a Claude sub-agent sat on a permission question in
+/// the Sub-agents view while its parent's row read only "Working" with no
+/// attention mark, so nobody knew to look. A child's question marks its parent
+/// the way the parent's own question would: the row's symbol, the attention
+/// queue and a notification, and the row says whose question it is.
+// Hard-won: 91244ea: a child permission question left its parent without an attention mark.
+// Hard-won: #1451: the restored mark hid the parent's running turn from turn controls, one episode per parent or per session swallowed a child's later form, and a form behind the displayed one counted as seen.
 #[test]
-fn a_subagent_question_does_not_change_parent_attention() {
+fn a_subagent_question_marks_its_parent_for_attention() {
     let (mut dashboard, parent) = dashboard_with_one_subagent();
     dashboard
         .state
@@ -3584,9 +3599,10 @@ fn a_subagent_question_does_not_change_parent_attention() {
         .get_mut("child-session")
         .unwrap()
         .acp_session_title = Some("Answer project codename".into());
+    set_working(&mut dashboard, &parent);
     set_working(&mut dashboard, "child-session");
     dashboard.set_current_session(None);
-    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Idle);
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
     assert!(dashboard.notification_events(0).is_empty());
 
     dashboard
@@ -3595,25 +3611,204 @@ fn a_subagent_question_does_not_change_parent_attention() {
         .unwrap()
         .pending_elicitations = vec![question("child-session")];
 
-    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Idle);
+    // The parent's own turn still runs, so its turn controls still apply.
+    dashboard.command_session_override = Some(parent.clone());
+    assert_eq!(
+        dashboard.dispatch_command(CommandId::InterruptTurn),
+        DashboardAction::InterruptTurn {
+            session_id: parent.clone()
+        }
+    );
+    dashboard.command_session_override = None;
+    // The child's form is not on screen while only the parent is, so the
+    // episode is not marked seen and still rings below.
+    dashboard.set_current_session(Some(&parent));
+    assert!(dashboard.notification_events(0).is_empty());
+    dashboard.set_current_session(None);
+
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Waiting);
+    assert_eq!(
+        dashboard
+            .attention_queue()
+            .iter()
+            .map(|entry| entry.session_id.as_str())
+            .collect::<Vec<_>>(),
+        [parent.as_str()],
+        "the queue lists top-level rows, so it leads to the parent"
+    );
     let lines = drawn(&mut dashboard, 120, 40);
     let row = lines
         .iter()
         .position(|line| line.contains("ACP pretty name"))
         .expect("the parent's row is drawn");
-    assert!(!lines[row].contains(&mj_chat::theme::glyphs().waiting.to_string()));
-    assert!(!lines[row + 1].contains("Sub-agent question"));
+    assert!(
+        lines[row].contains(&format!(
+            "{} ACP pretty name",
+            mj_chat::theme::glyphs().waiting
+        )),
+        "{}",
+        lines[row]
+    );
+    assert!(
+        lines[row + 1].contains("Sub-agent question"),
+        "{}",
+        lines[row + 1]
+    );
     assert!(dashboard.notification_events(0).is_empty());
-    assert!(dashboard.notification_events(2_000).is_empty());
+    let due = dashboard.notification_events(2_000);
+    assert_eq!(due.len(), 1, "{due:?}");
+    assert_eq!(due[0].session_id, parent);
+    assert_eq!(due[0].level, AttentionLevel::Waiting);
+    assert_eq!(
+        due[0].body,
+        "Sub-agent \"Answer project codename\": Choose a path"
+    );
 
-    // Answering the child's question leaves the parent's attention unchanged.
+    // Answering the child's question clears the parent's mark.
     dashboard
         .session_details
         .get_mut("child-session")
         .unwrap()
         .pending_elicitations
         .clear();
-    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Idle);
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
+
+    // The parent's own question was seen; a child's form that arrives while
+    // it is still open has its own episode and still rings.
+    dashboard
+        .session_details
+        .get_mut(&parent)
+        .unwrap()
+        .pending_elicitations = vec![question(&parent)];
+    dashboard.set_current_session(Some(&parent));
+    assert!(dashboard.notification_events(3_000).is_empty());
+    dashboard.set_current_session(None);
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .pending_elicitations = vec![question("child-session")];
+    assert!(dashboard.notification_events(3_000).is_empty());
+    let due = dashboard.notification_events(5_000);
+    assert_eq!(due.len(), 1, "{due:?}");
+    assert_eq!(due[0].session_id, parent);
+    assert_eq!(
+        due[0].body,
+        "Sub-agent \"Answer project codename\": Choose a path"
+    );
+
+    // A second form from the same child, opened while the first one it was
+    // seen for is still open, rings too.
+    dashboard.set_current_session(Some("child-session"));
+    assert!(dashboard.notification_events(6_000).is_empty());
+    dashboard.set_current_session(None);
+    let mut second = question("child-session");
+    second.id = "child-session-second-question".into();
+    second.message = "Allow the command?".into();
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .pending_elicitations
+        .push(second);
+    assert!(dashboard.notification_events(6_000).is_empty());
+    let due = dashboard.notification_events(8_000);
+    assert_eq!(due.len(), 1, "{due:?}");
+    assert_eq!(
+        due[0].body,
+        "Sub-agent \"Answer project codename\": Allow the command?"
+    );
+
+    // The open conversation shows only its first form, so a form that
+    // arrives behind it while the child is on screen still rings.
+    dashboard.set_current_session(Some("child-session"));
+    let mut third = question("child-session");
+    third.id = "child-session-third-question".into();
+    third.message = "Approve the plan?".into();
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .pending_elicitations
+        .push(third);
+    assert!(dashboard.notification_events(9_000).is_empty());
+    let due = dashboard.notification_events(11_000);
+    assert_eq!(due.len(), 1, "{due:?}");
+    assert_eq!(
+        due[0].body,
+        "Sub-agent \"Answer project codename\": Approve the plan?"
+    );
+}
+
+/// Reviewers are listed in their own workspace, not among the Sub-agents,
+/// so a reviewer's open form names the reviewer and leads there.
+// Hard-won: #1451: a reviewer's open form read as a sub-agent question and led to the Sub-agents view, which does not list reviewers.
+#[test]
+fn a_reviewer_question_names_the_reviewer_and_leads_to_its_workspace() {
+    let (mut dashboard, parent) = dashboard_with_one_subagent();
+    let mut state = dashboard.state.clone();
+    state.subagents.get_mut("child-session").unwrap().kind =
+        mj_core::subagent::SubagentKind::Reviewer;
+    dashboard.set_state(state);
+    set_working(&mut dashboard, &parent);
+    set_working(&mut dashboard, "child-session");
+    dashboard.set_current_session(None);
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .pending_elicitations = vec![question("child-session")];
+
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("Reviewer question")),
+        "{lines:#?}"
+    );
+    dashboard.step_attention(1);
+    assert!(dashboard.reviewers_workspace_open());
+    assert_eq!(dashboard.selected_session_id(), Some("child-session"));
+}
+
+/// A child may run its own review. Its reviewer's open form marks the
+/// top-level row, names the reviewer, and leads to it.
+// Hard-won: #1451: a child's reviewer holding an approval marked only the hidden child, so nothing led the person to it.
+#[test]
+fn a_childs_reviewer_question_reaches_the_top_level_row() {
+    let (mut dashboard, parent) = dashboard_with_one_subagent();
+    let mut state = dashboard.state.clone();
+    let mut reviewer = state.sessions["child-session"].clone();
+    reviewer.id = "reviewer-session".into();
+    let mut relation = state.subagents["child-session"].clone();
+    relation.kind = mj_core::subagent::SubagentKind::Reviewer;
+    relation.child_session_id = reviewer.id.clone();
+    relation.parent_session_id = "child-session".into();
+    relation.request_key = "review-1".into();
+    state.sessions.insert(reviewer.id.clone(), reviewer);
+    state.subagents.insert("reviewer-session".into(), relation);
+    dashboard.set_state(state);
+    for id in [parent.as_str(), "child-session", "reviewer-session"] {
+        set_working(&mut dashboard, id);
+    }
+    dashboard.set_current_session(None);
+    dashboard
+        .session_details
+        .get_mut("reviewer-session")
+        .unwrap()
+        .pending_elicitations = vec![question("reviewer-session")];
+
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Waiting);
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("Reviewer question")),
+        "{lines:#?}"
+    );
+    assert!(dashboard.notification_events(0).is_empty());
+    let due = dashboard.notification_events(2_000);
+    assert_eq!(due.len(), 1, "{due:?}");
+    assert_eq!(due[0].session_id, parent);
+    dashboard.step_attention(1);
+    assert!(dashboard.reviewers_workspace_open());
+    assert_eq!(dashboard.selected_session_id(), Some("reviewer-session"));
 }
 
 /// A suspend stops the parent's sub-agents without a checkpoint of their own.

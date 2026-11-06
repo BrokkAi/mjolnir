@@ -183,6 +183,10 @@ pub struct WorkerLaunchConfig {
         skip_serializing_if = "is_default_subtle_subagents"
     )]
     pub subtle_subagents: bool,
+    /// Whether the worker's `mj-agents` server lists `ask_oracle`. Written
+    /// only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub oracle: bool,
     /// The model this session was created for, when its creator chose one: a
     /// sub-agent's spawn model. The harness opens a new session on it rather
     /// than on the profile default; once the session has accepted a model,
@@ -603,6 +607,22 @@ pub struct ProfileConfig {
     pub observed_at: i64,
 }
 
+impl ProfileConfig {
+    /// The catalogue as Mjolnir offers it under a profile's `models`
+    /// allow-list: the listed models plus the profile's current model, which
+    /// stays so a session never runs a model its picker hides. An empty list
+    /// offers everything.
+    pub fn restricted_to(mut self, allowed: &[String]) -> Self {
+        if !allowed.is_empty() {
+            let current = self.model.clone();
+            self.models.retain(|choice| {
+                allowed.contains(&choice.value) || current.as_ref() == Some(&choice.value)
+            });
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -802,6 +822,23 @@ mod tests {
             serde_json::to_value(&launch).unwrap()["subtle_subagents"],
             false
         );
+    }
+
+    #[test]
+    fn oracle_defaults_off_and_is_written_only_when_on() {
+        let launch: WorkerLaunchConfig = serde_json::from_value(launch_json()).unwrap();
+        assert!(!launch.oracle);
+        assert!(
+            serde_json::to_value(&launch)
+                .unwrap()
+                .get("oracle")
+                .is_none()
+        );
+        let mut on = launch_json();
+        on["oracle"] = serde_json::json!(true);
+        let launch: WorkerLaunchConfig = serde_json::from_value(on).unwrap();
+        assert!(launch.oracle);
+        assert_eq!(serde_json::to_value(&launch).unwrap()["oracle"], true);
     }
 
     // Hard-won: f9a3130c: upgraded workers on older launches demanded an unstaged Claude registration.

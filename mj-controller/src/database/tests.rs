@@ -463,6 +463,8 @@ fn event_digest(value: u64) -> String {
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -6563,6 +6565,37 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
 }
 
 #[test]
+fn oracle_choice_and_profile_preference_survive_reopen_and_rename() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("oracle-choice.sqlite3");
+    let mut record = session("advisor-parent", "project");
+    record.oracle = false;
+    record.oracle_choice = Some(mj_core::config::SubagentChoice {
+        model: "advisor".into(),
+        effort: Some("high".into()),
+    });
+    save_new_session_to(&path, &record, None, true, false).unwrap();
+    let state = load_state_from(&path).unwrap();
+    assert_eq!(
+        state.last_oracle_choices.get(&record.last_profile),
+        Some(&false)
+    );
+    assert!(!state.sessions[&record.id].oracle);
+    assert_eq!(
+        state.sessions[&record.id].oracle_choice,
+        record.oracle_choice
+    );
+    rename_profile_references_at(&path, &record.last_profile, "renamed").unwrap();
+    let renamed = load_state_from(&path).unwrap();
+    assert_eq!(renamed.last_oracle_choices.get("renamed"), Some(&false));
+    assert!(
+        !renamed
+            .last_oracle_choices
+            .contains_key(&record.last_profile)
+    );
+}
+
+#[test]
 fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default() {
     use mj_core::subagent::SubagentPolicy;
     let directory = tempfile::tempdir().unwrap();
@@ -7036,7 +7069,7 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
     }
     connection
         .execute_batch(
-            "DELETE FROM schema_migrations WHERE version = 112; PRAGMA user_version = 111;",
+            "DELETE FROM schema_migrations WHERE version = 114; PRAGMA user_version = 113;",
         )
         .unwrap();
     drop(connection);

@@ -1136,7 +1136,10 @@ pub(crate) async fn run_dashboard_for_workspace(
         eprintln!("{error}");
     }
     for (id, error) in &context.read_receipts.failures {
-        eprintln!("Could not save read status for {}: {error}", short_id(id));
+        eprintln!(
+            "Could not save read status for {}: {error}",
+            io::session_notice_name(&context.controller.state, id)
+        );
     }
     // All final persistence shares one budget; independent saves run together.
     let deadline = tokio::time::Instant::now() + io::SAVE_ACK_TIMEOUT;
@@ -1689,6 +1692,7 @@ impl DashboardContext {
         } else {
             Duration::ZERO
         };
+        let session_name = self.session_notice_name(&session_id);
         io::spawn_read_receipt_persist(
             self.client_id.clone(),
             self.controller
@@ -1697,7 +1701,10 @@ impl DashboardContext {
                 .get(&session_id)
                 .map(|session| session.workspace_id.clone())
                 .unwrap_or_else(|| self.workspace_id.clone()),
-            session_id,
+            io::NamedSession {
+                id: session_id,
+                name: session_name,
+            },
             through,
             retry_delay,
             self.dashboard_io_tx.clone(),
@@ -2190,10 +2197,14 @@ fn record_chat_detach_state(
         return None;
     };
     dashboard.clear_notice();
+    let session_name = io::session_notice_name(&controller.state, detached.session_id);
     Some(io::spawn_detached_session_state_persist(
         detached.client_id.to_owned(),
         workspace_id,
-        detached.session_id.to_owned(),
+        io::NamedSession {
+            id: detached.session_id.to_owned(),
+            name: session_name,
+        },
         detached.event_ordinal,
         detached.draft,
         updates.clone(),

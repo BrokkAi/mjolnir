@@ -260,29 +260,22 @@ fn clock_sampling_tracks_displayed_units_and_keeps_the_drawn_baseline() {
 }
 
 #[test]
-fn a_session_created_with_subagents_shows_a_dimmed_entry_before_the_first_child() {
+fn subagent_control_appears_only_after_the_first_child() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
     assert!(!screen.contains("Subagents"), "{screen}");
+    assert!(chat.subagent_control_area.is_none());
 
-    chat.set_subagents_enabled(true);
+    chat.set_subagent_count(1);
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("Subagents · 0 "), "{screen}");
+    assert!(screen.contains("Subagents · 0 ›"), "{screen}");
+    assert!(chat.subagent_control_area.is_some());
     // Launch finding R1-3: the ASCII symbol set draws no middle dot.
     let ascii = crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
         drawn_transcript(&mut chat, 100, 24).join("\n")
     });
     assert!(ascii.contains("Subagents - 0 "), "{ascii}");
     assert!(!ascii.contains('·'), "{ascii}");
-    assert!(
-        chat.subagent_control_area.is_none(),
-        "the dimmed entry is not clickable"
-    );
-
-    chat.set_subagent_count(1);
-    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("Subagents · 0 ›"), "{screen}");
-    assert!(chat.subagent_control_area.is_some());
 }
 
 #[test]
@@ -2264,27 +2257,6 @@ mod golden_cases {
             None,
             |chat| details(&[&format!("control: {:?}", chat.subagent_control_area)]),
         );
-        chat.set_subagents_enabled(true);
-        state(
-            &mut output,
-            "dimmed zero count",
-            &mut chat,
-            WIDTH,
-            HEIGHT,
-            None,
-            |chat| details(&[&format!("control: {:?}", chat.subagent_control_area)]),
-        );
-        crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
-            state(
-                &mut output,
-                "dimmed zero count in ASCII",
-                &mut chat,
-                WIDTH,
-                HEIGHT,
-                None,
-                |_| details(&["symbol mode: ASCII"]),
-            );
-        });
         chat.set_subagent_count(1);
         state(
             &mut output,

@@ -104,6 +104,7 @@ pub(crate) enum WizardControl {
     MountHistory,
     ReviewAttachments,
     Subagents,
+    Oracle,
     CreateManagedWorktree,
     DiscardQueue,
     ChooseMoveFiles,

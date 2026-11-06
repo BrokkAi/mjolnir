@@ -844,6 +844,8 @@ impl ExportRuntime for ParentExports {
 
 fn parent_record(id: &str, profile: &str) -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -1963,7 +1965,7 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         (state.as_str(), output.as_deref(), finished),
         ("failed", Some(expected), true)
     );
-    let entry = super::wait_agent_entry("child", &state, output, finished, &progress);
+    let entry = super::wait_agent_entry("child", &state, output, finished, &progress, false);
     assert_eq!(entry["state"], "failed", "{entry}");
     assert_eq!(entry["output"], expected, "{entry}");
     assert_eq!(entry["report_source"], serde_json::Value::Null, "{entry}");
@@ -1997,15 +1999,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
     )
     .unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
     let mut rejected = mj_core::credentials::RejectedLogins::default();
     rejected.observe(
@@ -2048,7 +2042,7 @@ fn a_wait_entry_bounds_its_output_and_names_the_report_directory() {
     let mut progress = ChildProgress::settled(ReportState::Fallback);
     progress.report_dir = Some("/workspace/p/.mj-agents/c1".into());
     let long = "y".repeat(mj_core::subagent::MAX_HANDBACK_CHARS + 10);
-    let entry = super::wait_agent_entry("c1", "completed", Some(long), true, &progress);
+    let entry = super::wait_agent_entry("c1", "completed", Some(long), true, &progress, false);
     assert_eq!(entry["truncated"], true, "{entry}");
     assert_eq!(entry["report_dir"], "/workspace/p/.mj-agents/c1");
     assert_eq!(entry["report_source"], "last_message");
@@ -2061,6 +2055,7 @@ fn a_wait_entry_bounds_its_output_and_names_the_report_directory() {
         Some("done".into()),
         true,
         &ChildProgress::settled(ReportState::Delivered("done".into())),
+        false,
     );
     assert_eq!(short["output"], "done");
     assert!(short.get("truncated").is_none(), "{short}");
@@ -2745,6 +2740,87 @@ async fn send_message_to_peer_queues_typed_event_with_the_calling_session_as_sen
     assert!(rendered.contains("Message from session \"parent\" (parent-1):"));
     assert!(rendered.contains("session_id parent-1"));
     assert!(rendered.contains("Please check the retry path."));
+}
+
+/// The sender of a peer message is named as the session list names it: a name
+/// a person typed first, then the harness's, then the title it was created
+/// with, which is cut to one bounded line.
+#[tokio::test]
+async fn send_message_names_the_sender_as_the_session_list_does() {
+    if !isolated_parked_test("send_message_names_the_sender_as_the_session_list_does") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut peer = parent_record("peer-1", "peer");
+    peer.no_github_events = true;
+    crate::database::save_session(&peer).unwrap();
+    let exports = ParkingExports::with_modern_worker(SessionState::Running, None, true);
+    let (backend, _) = message_backend_for_session(
+        "peer-1",
+        exports,
+        &[],
+        Arc::new(|| {}),
+        mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL,
+    );
+    let sender_name = |request_id: &'static str| {
+        let backend = backend.clone();
+        async move {
+            let request = mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: request_id.into(),
+                created_at_ms: mj_core::clock::epoch_millis(),
+                action: mj_core::subagent::SubagentToolAction::SendMessage {
+                    child_session_id: "peer-1".into(),
+                    message: "hello".into(),
+                },
+            };
+            let answer = backend
+                .execute_subagent_tool("parent-1".into(), request)
+                .await;
+            assert!(!answer.is_error, "{}", answer.message);
+            let key = format!("session-message-{request_id}");
+            let pending = crate::database::pending_mailbox_events(10).unwrap();
+            let row = pending
+                .iter()
+                .find(|row| {
+                    serde_json::from_str::<mj_core::mailbox::MailboxEvent>(&row.event_json)
+                        .is_ok_and(|event| event.key == key)
+                })
+                .expect("the message was queued");
+            let event: mj_core::mailbox::MailboxEvent =
+                serde_json::from_str(&row.event_json).unwrap();
+            let mj_core::mailbox::MailboxEventBody::SessionMessage {
+                from: mj_core::mailbox::Sender::Session { id, title },
+                ..
+            } = event.body
+            else {
+                panic!("a session message names its sender");
+            };
+            assert_eq!(id, "parent-1");
+            title
+        }
+    };
+
+    let mut parent = parent_record("parent-1", "parent");
+    parent.title = format!(
+        "Fix the parser\n\n{}",
+        "The prompt goes on for paragraphs. ".repeat(20)
+    );
+    crate::database::save_session(&parent).unwrap();
+    let created_with = sender_name("sender-created-with").await;
+    assert!(!created_with.contains('\n'), "{created_with:?}");
+    assert!(created_with.starts_with("Fix the parser The prompt goes on"));
+    assert!(created_with.ends_with('…'));
+    assert!(created_with.chars().count() <= mj_core::state::MESSAGE_NAME_CHARS);
+
+    parent.acp_session_title = Some("Harness name".into());
+    crate::database::save_session(&parent).unwrap();
+    assert_eq!(sender_name("sender-harness").await, "Harness name");
+
+    parent.session_title_override = Some("Typed name".into());
+    crate::database::save_session(&parent).unwrap();
+    assert_eq!(sender_name("sender-typed").await, "Typed name");
 }
 
 #[tokio::test]
@@ -4472,6 +4548,61 @@ async fn report_reconcile_fails_while_the_parent_queue_connects_and_a_retry_reco
     );
 }
 
+/// A person may rename a child after the parent spawned it. The parent's
+/// listing and the child's report show the name the session list shows, beside
+/// the task name and the id the parent acts on.
+#[tokio::test]
+async fn child_listings_and_reports_carry_the_childs_live_name() {
+    if !isolated_parked_test("child_listings_and_reports_carry_the_childs_live_name") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    record_finished_child("child-1", "task-1", "all done", 3, 9, 7);
+    let (backend, exports) = report_backend(active_parent_view("working"));
+    exports
+        .records
+        .lock()
+        .unwrap()
+        .get_mut("child-1")
+        .unwrap()
+        .session_title_override = Some("Renamed child".into());
+
+    let answer = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "observe".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::ListAgents,
+            },
+        )
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    let listing: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+    assert_eq!(listing["agents"][0]["name"], "Renamed child");
+    assert_eq!(listing["agents"][0]["task_name"], "audit deps");
+    assert_eq!(listing["agents"][0]["child_session_id"], "child-1");
+
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&pending[0].event_json).unwrap();
+    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = &event.body else {
+        panic!("wrong event: {event:?}")
+    };
+    assert_eq!(report.child_name.as_deref(), Some("Renamed child"));
+    assert_eq!(report.task_name, "audit deps");
+    let rendered = mj_core::mailbox::render_mailbox_event(&event);
+    assert!(
+        rendered.contains("child task Renamed child finished (child-1)."),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("audit deps"), "{rendered}");
+}
+
 #[tokio::test]
 async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_out() {
     if !isolated_parked_test(
@@ -4915,5 +5046,597 @@ async fn provider_failed_child_report_names_its_turn_profile_and_backoff() {
     assert_eq!(report.failure.as_ref().unwrap()["summary"], expected);
     assert!(
         mj_core::mailbox::render_mailbox_event(&event).contains(&format!("Failure: {expected}"))
+    );
+}
+
+// Hard-won: 193e758af: refresh exempted the old default instead of the new one.
+#[tokio::test]
+async fn forced_refresh_uses_the_new_default_for_the_allowlist() {
+    for selected in [None, Some("allowed".to_owned())] {
+        let mut calls = Vec::new();
+        let (mut choices, default) = refreshed_profile_choices(selected.clone(), |model| {
+            calls.push(model.clone());
+            std::future::ready(Ok(mj_core::worker_launch::ProfileConfig {
+                model: model.or(Some("new-default".into())),
+                models: ["old-default", "new-default", "allowed"]
+                    .map(|value| mj_core::acp::SessionConfigChoice {
+                        value: value.into(),
+                        name: value.into(),
+                        description: None,
+                    })
+                    .to_vec(),
+                efforts: Vec::new(),
+                observed_at: 0,
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.first(), Some(&None));
+        assert_eq!(choices.model, selected.or(Some("new-default".into())));
+        choices.model = default;
+        let choices = choices.restricted_to(&["allowed".into()]);
+        assert_eq!(
+            choices
+                .models
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            ["new-default", "allowed"]
+        );
+    }
+}
+
+/// The daemon side of a primary and its oracles: it registers each requested
+/// child in the store the way the daemon does, so the one-live-oracle rule runs
+/// for real, and keeps every request it was given.
+struct OracleExports {
+    records: std::sync::Mutex<BTreeMap<String, SessionRecord>>,
+    requests: std::sync::Mutex<Vec<crate::controller::RegisterSubagentRequest>>,
+    unparks: std::sync::atomic::AtomicUsize,
+    /// A concurrent first question registers its oracle just before the next
+    /// registration this fake serves.
+    winner_first: std::sync::atomic::AtomicBool,
+}
+
+impl OracleExports {
+    fn new() -> Arc<Self> {
+        let mut primary = parent_record("parent-1", "parent");
+        primary.oracle_choice = Some(mj_core::config::SubagentChoice {
+            model: "luna".into(),
+            effort: Some("low".into()),
+        });
+        Arc::new(Self {
+            records: std::sync::Mutex::new(BTreeMap::from([("parent-1".to_owned(), primary)])),
+            requests: Default::default(),
+            unparks: Default::default(),
+            winner_first: Default::default(),
+        })
+    }
+
+    fn requests(&self) -> Vec<crate::controller::RegisterSubagentRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    /// Change a session's state in this view and in the store, which the
+    /// registration rule reads.
+    fn set_state(&self, id: &str, state: SessionState) {
+        let mut records = self.records.lock().unwrap();
+        let record = records.get_mut(id).unwrap();
+        record.state = state;
+        crate::database::save_session(record).unwrap();
+    }
+}
+
+impl ExportRuntime for OracleExports {
+    fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
+        self.records.lock().unwrap().get(session_id).cloned()
+    }
+    fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
+        Box::pin(load_startup_status(session_id))
+    }
+    fn checkpoint_now(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
+        Box::pin(async move { bail!("session {session_id} cannot be checkpointed in a test") })
+    }
+    fn spawn_subagent(
+        self: Arc<Self>,
+        request: crate::controller::RegisterSubagentRequest,
+    ) -> BoxFuture<'static, Result<mj_core::subagent::SubagentRecord>> {
+        Box::pin(async move {
+            let key = request.kind.request_key(&request.request_key);
+            if let Some(existing) =
+                crate::database::lookup_subagent_request(&request.parent_session_id, &key)?
+            {
+                return Ok(existing);
+            }
+            if self
+                .winner_first
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                let mut winner = request.clone();
+                winner.request_key = "winner".into();
+                Arc::clone(&self).spawn_subagent(winner).await?;
+            }
+            let id = format!("oracle-{}", self.requests.lock().unwrap().len() + 1);
+            let relation = mj_core::subagent::SubagentRecord {
+                kind: request.kind,
+                reviewer_launch: None,
+                child_session_id: id.clone(),
+                parent_session_id: request.parent_session_id.clone(),
+                task_name: request.task_name.clone(),
+                profile_id: request.profile_id.clone(),
+                model: request.model.clone(),
+                effort: request.effort.clone(),
+                working_directory: request.working_directory.clone(),
+                initial_prompt: request.initial_prompt.clone(),
+                request_key: request.request_key.clone(),
+                created_at: "2026-09-24T00:00:00Z".into(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: true,
+            };
+            let mut session = parent_record(&id, &request.profile_id);
+            session.oracle = false;
+            session.oracle_choice = None;
+            crate::database::save_subagent_session(&session, &relation)?;
+            self.records.lock().unwrap().insert(id, session);
+            self.requests.lock().unwrap().push(request);
+            Ok(relation)
+        })
+    }
+    fn unpark_subagent(self: Arc<Self>, session_id: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move {
+            self.unparks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.set_state(&session_id, SessionState::Running);
+            Ok(())
+        })
+    }
+}
+
+fn ask_oracle_request(request_id: &str, message: &str) -> mj_core::subagent::SubagentToolRequest {
+    mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: request_id.into(),
+        created_at_ms: mj_core::clock::epoch_millis(),
+        action: mj_core::subagent::SubagentToolAction::AskOracle {
+            message: message.into(),
+        },
+    }
+}
+
+/// A primary's backend over `exports`, with every profile discoverable, and
+/// the relay of the child `oracle-1` scripted as a current worker.
+async fn oracle_backend(exports: Arc<OracleExports>) -> Arc<ApiBackend> {
+    let catalog = ProfileCatalog::with_probe(models_probe(SAME_MODELS));
+    catalog
+        .sync_now(&test_config(&[
+            ("parent", HarnessKind::Codex),
+            ("codex-high", HarnessKind::Codex),
+            ("deepseek", HarnessKind::Codex),
+        ]))
+        .await;
+    let quotas = BTreeMap::from([
+        (
+            "parent".to_owned(),
+            quota("parent", HarnessKind::Codex, &[80, 0]),
+        ),
+        (
+            "codex-high".to_owned(),
+            quota("codex-high", HarnessKind::Codex, &[60, 55]),
+        ),
+        ("deepseek".to_owned(), usage_priced("deepseek")),
+    ]);
+    let (submitted, _delivered) = mpsc::unbounded_channel();
+    let mut view = ready_view("model");
+    view.snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(mj_core::relay::RELAY_PROTOCOL_VERSION);
+    let session = ScriptedSession {
+        inner: FakeSession {
+            session_id: "oracle-1".into(),
+            accepted_ordinal: 9,
+            submitted,
+            view: Some(view),
+        },
+        failures: Default::default(),
+        on_failure: Arc::new(|| {}),
+        reserved_syncs: Arc::default(),
+    };
+    Arc::new(
+        ApiBackend::new(
+            SessionControl::new(ScriptedControl(session)),
+            running_states(),
+            exports,
+        )
+        .with_profile_catalog(catalog)
+        .with_quota_reports(Arc::new(std::sync::Mutex::new(quotas))),
+    )
+}
+
+fn oracle_children(parent: &str) -> Vec<mj_core::subagent::SubagentRecord> {
+    crate::database::list_subagents(parent)
+        .unwrap()
+        .into_iter()
+        .filter(|child| child.kind == mj_core::subagent::SubagentKind::Oracle)
+        .collect()
+}
+
+#[tokio::test]
+async fn the_first_question_starts_one_oracle_like_a_spawn_and_a_later_one_asks_the_same_oracle() {
+    if !isolated_parked_test(
+        "the_first_question_starts_one_oracle_like_a_spawn_and_a_later_one_asks_the_same_oracle",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    crate::database::save_session(&parent_record("parent-1", "parent")).unwrap();
+    let exports = OracleExports::new();
+    let backend = oracle_backend(exports.clone()).await;
+
+    let first = ask_oracle_request("ask-1", "Choose A or B?");
+    for _ in 0..2 {
+        let answer = backend
+            .execute_subagent_tool_durable("parent-1".into(), first.clone())
+            .await
+            .unwrap()
+            .result;
+        assert!(!answer.is_error, "{}", answer.message);
+        let reply: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+        assert_eq!(reply["status"], "accepted");
+        assert!(reply.get("context_lost").is_none(), "{reply}");
+        assert!(!answer.message.contains("oracle-1"), "no session id leaks");
+    }
+    let requests = exports.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "a replayed first question starts nothing new"
+    );
+    let request = &requests[0];
+    assert_eq!(request.kind, mj_core::subagent::SubagentKind::Oracle);
+    assert_eq!(request.task_name, "oracle");
+    assert_eq!(request.model.as_deref(), Some("luna"));
+    assert_eq!(request.effort.as_deref(), Some("low"));
+    assert_eq!(request.profile_id, "codex-high");
+    assert_eq!(request.initial_prompt, "Question:\nChoose A or B?");
+    assert_eq!(request.request_key, "ask-1");
+    assert_eq!(oracle_children("parent-1").len(), 1);
+
+    // A request replayed after its start was chosen starts that oracle again,
+    // unchanged, rather than asking the oracle it already registered.
+    let prepared = crate::database::PreparedDelegation {
+        request: first.clone(),
+        turn_target: None,
+        spawn: Some(crate::database::PreparedSpawn {
+            profile_id: "codex-high".into(),
+            model: "luna".into(),
+            effort: Some("low".into()),
+            fast_mode: false,
+            prompt: "Question:\nChoose A or B?".into(),
+        }),
+    };
+    let replay = backend
+        .execute_subagent_tool_prepared("parent-1".into(), first.clone(), Some(&prepared))
+        .await;
+    assert!(!replay.is_error, "{}", replay.message);
+    assert_eq!(exports.requests().len(), 1);
+    assert_eq!(oracle_children("parent-1").len(), 1);
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+
+    // The oracle handed back and parked; the next question wakes that child.
+    exports.set_state("oracle-1", SessionState::Parked);
+    let second = ask_oracle_request("ask-2", "And C?");
+    for _ in 0..2 {
+        let answer = backend
+            .execute_subagent_tool_durable("parent-1".into(), second.clone())
+            .await
+            .unwrap()
+            .result;
+        assert!(!answer.is_error, "{}", answer.message);
+    }
+    assert_eq!(exports.requests().len(), 1, "no second oracle is started");
+    assert_eq!(oracle_children("parent-1").len(), 1);
+    assert_eq!(exports.unparks.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1, "a replayed question queues one message");
+    assert_eq!(pending[0].target_session_id, "oracle-1");
+    assert!(pending[0].unpark, "the message resumes a parked oracle");
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&pending[0].event_json).unwrap();
+    assert_eq!(event.key, "subagent-message-ask-2");
+    assert_eq!(
+        event.body,
+        mj_core::mailbox::MailboxEventBody::ParentMessage {
+            text: "Question:\nAnd C?".into()
+        }
+    );
+
+    // A busy oracle is not refused: a third question queues behind it.
+    exports.set_state("oracle-1", SessionState::Running);
+    let third = backend
+        .execute_subagent_tool("parent-1".into(), ask_oracle_request("ask-3", "Why not D?"))
+        .await;
+    assert!(!third.is_error, "{}", third.message);
+    assert_eq!(
+        crate::database::pending_mailbox_events(10).unwrap().len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn a_dead_oracle_is_replaced_and_the_reply_says_its_context_was_lost() {
+    if !isolated_parked_test("a_dead_oracle_is_replaced_and_the_reply_says_its_context_was_lost") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    crate::database::save_session(&parent_record("parent-1", "parent")).unwrap();
+    let exports = OracleExports::new();
+    let backend = oracle_backend(exports.clone()).await;
+    let first = backend
+        .execute_subagent_tool("parent-1".into(), ask_oracle_request("ask-1", "One?"))
+        .await;
+    assert!(!first.is_error, "{}", first.message);
+
+    for dead in [
+        SessionState::Error,
+        SessionState::Lost,
+        SessionState::Stopped,
+    ] {
+        let before = oracle_children("parent-1").len();
+        let live = oracle_children("parent-1")
+            .last()
+            .unwrap()
+            .child_session_id
+            .clone();
+        exports.set_state(&live, dead);
+        let request_id = format!("ask-after-{dead:?}");
+        let answer = backend
+            .execute_subagent_tool("parent-1".into(), ask_oracle_request(&request_id, "Again?"))
+            .await;
+        assert!(!answer.is_error, "{}", answer.message);
+        let reply: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+        assert_eq!(reply["context_lost"], true, "{reply}");
+        assert!(
+            reply["notice"].as_str().unwrap().contains("fresh oracle"),
+            "{reply}"
+        );
+        assert_eq!(oracle_children("parent-1").len(), before + 1);
+    }
+}
+
+#[tokio::test]
+async fn ask_oracle_refuses_a_child_and_a_session_without_an_oracle() {
+    if !isolated_parked_test("ask_oracle_refuses_a_child_and_a_session_without_an_oracle") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let exports = OracleExports::new();
+    let child = parent_record("child-1", "helper");
+    exports
+        .records
+        .lock()
+        .unwrap()
+        .insert("child-1".into(), child);
+    let backend = oracle_backend(exports.clone()).await;
+    let from_child = backend
+        .execute_subagent_tool("child-1".into(), ask_oracle_request("c", "Help?"))
+        .await;
+    assert!(from_child.is_error);
+    assert!(
+        from_child.message.contains("top-level"),
+        "{}",
+        from_child.message
+    );
+
+    for (oracle, choice) in [(false, true), (true, false)] {
+        let mut primary = parent_record("parent-1", "parent");
+        primary.oracle = oracle;
+        primary.oracle_choice = choice.then(|| mj_core::config::SubagentChoice {
+            model: "luna".into(),
+            effort: None,
+        });
+        exports
+            .records
+            .lock()
+            .unwrap()
+            .insert("parent-1".into(), primary);
+        let answer = backend
+            .execute_subagent_tool("parent-1".into(), ask_oracle_request("p", "Help?"))
+            .await;
+        assert!(answer.is_error);
+        assert!(
+            answer
+                .message
+                .contains("The oracle is not configured for this session."),
+            "{}",
+            answer.message
+        );
+    }
+    assert!(exports.requests().is_empty());
+}
+
+#[test]
+fn concurrent_first_oracle_registrations_admit_only_one_oracle() {
+    if !isolated_parked_test("concurrent_first_oracle_registrations_admit_only_one_oracle") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let base = crate::database::load_subagent("child-1").unwrap().unwrap();
+    let barrier = std::sync::Barrier::new(2);
+    let outcomes = std::thread::scope(|scope| {
+        let threads = (1..=2)
+            .map(|number| {
+                let barrier = &barrier;
+                let mut relation = base.clone();
+                relation.kind = mj_core::subagent::SubagentKind::Oracle;
+                relation.child_session_id = format!("oracle-{number}");
+                relation.request_key = format!("first-{number}");
+                scope.spawn(move || {
+                    let session = parent_record(&relation.child_session_id, "helper");
+                    barrier.wait();
+                    crate::database::save_subagent_session(&session, &relation)
+                })
+            })
+            .collect::<Vec<_>>();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert!(outcomes.iter().any(|result| {
+        result.as_ref().err().is_some_and(|error| {
+            error
+                .downcast_ref::<crate::database::OracleAlreadyLive>()
+                .is_some()
+        })
+    }));
+}
+
+#[tokio::test]
+async fn the_oracle_is_hidden_from_the_primarys_ordinary_child_tools() {
+    if !isolated_parked_test("the_oracle_is_hidden_from_the_primarys_ordinary_child_tools") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let exports = OracleExports::new();
+    let backend = oracle_backend(exports.clone()).await;
+    let asked = backend
+        .execute_subagent_tool("parent-1".into(), ask_oracle_request("ask-1", "Which?"))
+        .await;
+    assert!(!asked.is_error, "{}", asked.message);
+    exports.set_state("oracle-1", SessionState::Parked);
+
+    let listed = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "list".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::ListAgents,
+            },
+        )
+        .await;
+    assert!(!listed.message.contains("oracle"), "{}", listed.message);
+
+    for (name, action) in [
+        (
+            "send_message",
+            mj_core::subagent::SubagentToolAction::SendMessage {
+                child_session_id: "oracle-1".into(),
+                message: "hello".into(),
+            },
+        ),
+        (
+            "close",
+            mj_core::subagent::SubagentToolAction::CloseAgent {
+                child_session_id: "oracle-1".into(),
+            },
+        ),
+        (
+            "fetch",
+            mj_core::subagent::SubagentToolAction::Fetch {
+                session_id: "oracle-1".into(),
+                path: "notes.md".into(),
+                ls: false,
+            },
+        ),
+    ] {
+        let answer = backend
+            .execute_subagent_tool(
+                "parent-1".into(),
+                mj_core::subagent::SubagentToolRequest {
+                    originating_command_id: None,
+                    request_id: format!("hidden-{name}"),
+                    created_at_ms: 0,
+                    action,
+                },
+            )
+            .await;
+        assert!(answer.is_error, "{name}: {}", answer.message);
+        assert!(
+            answer.message.contains("does not exist") || answer.message.contains("does not belong"),
+            "{name}: {}",
+            answer.message
+        );
+    }
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty(),
+        "nothing was queued for the oracle"
+    );
+}
+
+#[test]
+fn an_oracle_report_names_ask_oracle_for_the_rest_and_never_send_message() {
+    let progress = ChildProgress::settled(ReportState::Delivered("answer".into()));
+    let long = "x".repeat(mj_core::subagent::MAX_HANDBACK_CHARS + 10);
+    let truncated = super::wait_agent_entry("c1", "completed", Some(long), true, &progress, true);
+    assert_eq!(truncated["oracle"], true);
+    assert_eq!(truncated["truncated"], true);
+    let output = truncated["output"].as_str().unwrap();
+    assert!(output.contains("10 more characters") && output.contains("ask_oracle"));
+    assert!(!output.contains("send_message"), "{output}");
+    let mut answered = super::wait_agent_entry(
+        "c1",
+        "completed",
+        Some("done".into()),
+        true,
+        &progress,
+        true,
+    );
+    answered["task_name"] = "oracle".into();
+    let report: mj_core::mailbox::SubagentFinishedReport =
+        serde_json::from_value(answered).unwrap();
+    assert!(report.oracle);
+    let failed = super::wait_agent_entry("c1", "failed", None, true, &progress, true);
+    assert_eq!(failed["oracle"], true);
+}
+
+#[tokio::test]
+async fn a_first_question_that_loses_the_registration_asks_the_winning_oracle() {
+    if !isolated_parked_test("a_first_question_that_loses_the_registration_asks_the_winning_oracle")
+    {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    crate::database::save_session(&parent_record("parent-1", "parent")).unwrap();
+    let exports = OracleExports::new();
+    exports
+        .winner_first
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let backend = oracle_backend(exports.clone()).await;
+    let answer = backend
+        .execute_subagent_tool("parent-1".into(), ask_oracle_request("late", "Me too?"))
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    let reply: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+    assert_eq!(reply["status"], "accepted");
+    assert!(reply.get("context_lost").is_none(), "{reply}");
+    assert_eq!(oracle_children("parent-1").len(), 1, "one oracle");
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].target_session_id, "oracle-1");
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&pending[0].event_json).unwrap();
+    assert_eq!(
+        event.body,
+        mj_core::mailbox::MailboxEventBody::ParentMessage {
+            text: "Question:\nMe too?".into()
+        }
     );
 }

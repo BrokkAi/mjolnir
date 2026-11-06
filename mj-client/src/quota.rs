@@ -117,6 +117,16 @@ impl ProfileQuota {
         }
     }
 
+    /// Billing of a profile on `harness` given its last report, if any. A
+    /// report that classifies the profile decides; otherwise the harness may
+    /// decide on its own (see [`harness_billing`]).
+    pub fn billing_for(harness: HarnessKind, report: Option<&Self>) -> QuotaBilling {
+        match report.map_or(QuotaBilling::Unknown, Self::billing_class) {
+            QuotaBilling::Unknown => harness_billing(harness),
+            billing => billing,
+        }
+    }
+
     /// `rate limited · retry in N min` while the provider's hold lasts.
     pub fn rate_limit_label(&self, now: u64) -> Option<String> {
         let until = self
@@ -255,6 +265,17 @@ pub enum QuotaBilling {
     Unknown,
 }
 
+/// Billing a harness implies when no report classifies the profile. OpenCode
+/// authenticates with API keys and reports no allowance, and dsh-acp talks to
+/// DeepSeek's API, so both are billed per use. Other harnesses are unknown
+/// until a report says.
+pub fn harness_billing(harness: HarnessKind) -> QuotaBilling {
+    match harness {
+        HarnessKind::OpenCode | HarnessKind::Dsh => QuotaBilling::Usage,
+        _ => QuotaBilling::Unknown,
+    }
+}
+
 fn quota_error_label(error: &str) -> String {
     // This is the stable user-facing marker emitted by the Claude usage
     // adapter. Keep the display contract independent of the controller crate.
@@ -325,8 +346,13 @@ pub enum ResetCountdownStyle {
 }
 
 impl QuotaWindow {
+    /// Whether this is the provider's short rolling five-hour window.
+    pub fn is_five_hour(&self) -> bool {
+        is_short_quota_window(&self.label)
+    }
+
     pub fn reset_countdown_style(&self) -> ResetCountdownStyle {
-        if is_short_quota_window(&self.label) {
+        if self.is_five_hour() {
             ResetCountdownStyle::FiveHour
         } else {
             ResetCountdownStyle::Long

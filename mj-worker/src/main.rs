@@ -570,6 +570,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
                     harness,
                     role,
                     mj_worker::subagent_mcp::ParentTools {
+                        oracle: false,
                         agent_mailboxes_enabled,
                         subtle_subagents,
                     },

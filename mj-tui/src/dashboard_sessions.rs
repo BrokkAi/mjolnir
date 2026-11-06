@@ -148,7 +148,7 @@ pub(crate) fn attention_level(
 /// The attention level of `session` from its own facts alone. Only
 /// [`crate::session_view::SessionFacts`] calls this; everything else reads
 /// the level it keeps.
-pub(crate) fn session_attention_level(
+pub(crate) fn own_attention_level(
     dashboard: &DashboardState,
     session_id: &str,
     session: &SessionRecord,
@@ -397,7 +397,6 @@ impl DashboardState {
         .unwrap_or_default()
         .to_lowercase();
         [
-            session.display_title().to_lowercase(),
             session.listed_title().to_lowercase(),
             branch,
             session.id.to_lowercase(),
@@ -787,6 +786,11 @@ impl DashboardState {
     }
 
     /// The attention level of one session, wherever it lives.
+    ///
+    /// A parent whose Mjolnir sub-agent is waiting on a question reads as
+    /// waiting too. The child has no row outside the Sub-agents view, so
+    /// without this nothing a person normally looks at would show that the
+    /// child needs them (R11-1).
     pub fn attention_level(&self, session_id: &str) -> AttentionLevel {
         self.session_facts().attention_level(session_id)
     }
@@ -816,7 +820,7 @@ impl DashboardState {
     /// question the agent asked in that turn.
     fn has_unfinished_turn(&self, session_id: &str) -> bool {
         matches!(
-            self.attention_level(session_id),
+            self.own_attention_level(session_id),
             AttentionLevel::Working | AttentionLevel::Waiting
         )
     }
@@ -886,6 +890,41 @@ impl DashboardState {
             failures.len(),
             crate::widgets::counted(targets.len(), "turn", "turns"),
         ));
+    }
+
+    /// The attention level from the session's own facts alone.
+    pub(crate) fn own_attention_level(&self, session_id: &str) -> AttentionLevel {
+        self.session_facts().own_attention_level(session_id)
+    }
+
+    /// The child whose open form makes `parent_id` read as waiting when the
+    /// parent itself is not, so a person is taken to that form.
+    pub(crate) fn waiting_child_of(&self, parent_id: &str) -> Option<String> {
+        if self.own_attention_level(parent_id) >= AttentionLevel::Waiting {
+            return None;
+        }
+        self.session_facts()
+            .waiting_child(parent_id)
+            .map(str::to_owned)
+    }
+
+    /// What kind of child [`Self::waiting_child_of`] names, for its label.
+    pub(crate) fn waiting_child_kind(
+        &self,
+        parent_id: &str,
+    ) -> Option<mj_core::subagent::SubagentKind> {
+        let child = self.waiting_child_of(parent_id)?;
+        self.state
+            .subagents
+            .get(&child)
+            .map(|relation| relation.kind)
+    }
+
+    /// Whether the session's own turn is running. Turn controls ask this,
+    /// not [`Self::attention_level`], which reads as waiting while a child
+    /// waits on a person even though the parent's turn still runs.
+    pub(crate) fn own_turn_is_running(&self, session_id: &str) -> bool {
+        self.own_attention_level(session_id) == AttentionLevel::Working
     }
 
     /// Whether a live, reachable session is computing right now: the fact the
@@ -1025,6 +1064,11 @@ impl DashboardState {
             None if delta < 0 => queue[queue.len() - 1].clone(),
             None => queue[0].clone(),
         };
+        // A parent waiting only on a child leads to the child's form, in the
+        // Sub-agents or Reviewers workspace where that child is listed.
+        if let Some(child) = self.waiting_child_of(&target.session_id) {
+            return self.focus_session_from_cpu_report(&child);
+        }
         self.focus_session_anywhere(&target.workspace_id, &target.session_id)
     }
 
@@ -1048,6 +1092,7 @@ impl DashboardState {
                 .entry(workspace_id.to_owned())
                 .or_insert_with(|| WorkspaceViewState {
                     sessions_scroll: 0,
+                    sessions_wheel_scrolled_from: None,
                     targets_scroll: 0,
                     quota_scroll: 0,
                     capacity_index: 0,
@@ -1351,6 +1396,8 @@ impl DashboardState {
         self.recenter_on_selection.set(None);
         if focus == Focus::Sessions {
             self.set_session_action_focus(None);
+            // Choosing a row, even the current one, shows it again.
+            self.sessions_wheel_scrolled_from.take();
         }
         match focus {
             Focus::Sessions => {
@@ -1400,6 +1447,17 @@ impl DashboardState {
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
         self.scroll_selection_for(self.focus, delta);
+    }
+
+    /// Scrolls the Sessions list by `delta` rows without moving the selection.
+    /// The renderer clamps the offset to the list and leaves it alone until
+    /// the selection changes.
+    pub(crate) fn scroll_sessions_view(&mut self, delta: isize) {
+        self.recenter_on_selection.set(None);
+        *self.sessions_wheel_scrolled_from.borrow_mut() =
+            self.selected_session_id().map(str::to_owned);
+        self.sessions_scroll
+            .set(self.sessions_scroll.get().saturating_add_signed(delta));
     }
 
     pub(crate) fn scroll_selection_for(&mut self, focus: Focus, delta: isize) {

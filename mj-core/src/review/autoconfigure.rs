@@ -39,16 +39,104 @@ pub fn fallback_effort(requested: &str, choices: &[SessionConfigChoice]) -> Opti
         .map(|(_, value)| value.clone())
 }
 
-/// Choose review slots from the union of enabled profiles' model choices.
+/// One advertised model value and which enabled profiles offer it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelOffer {
+    pub choice: SessionConfigChoice,
+    /// Enabled profiles offering this exact value.
+    pub profiles: usize,
+    /// Those profiles that are not usage-priced. A profile whose billing is
+    /// unknown counts as a subscription.
+    pub subscription_profiles: usize,
+}
+
+/// Merge each enabled profile's advertised models, flagged usage-priced or
+/// not, into one offer per distinct value, in first-seen order.
+pub fn model_offers<'a>(
+    profiles: impl IntoIterator<Item = (&'a [SessionConfigChoice], bool)>,
+) -> Vec<ModelOffer> {
+    let mut offers: Vec<ModelOffer> = Vec::new();
+    for (models, usage_priced) in profiles {
+        let mut seen = std::collections::BTreeSet::new();
+        for choice in models {
+            if !seen.insert(choice.value.as_str()) {
+                continue;
+            }
+            let index = match offers
+                .iter()
+                .position(|offer| offer.choice.value == choice.value)
+            {
+                Some(index) => index,
+                None => {
+                    offers.push(ModelOffer {
+                        choice: choice.clone(),
+                        profiles: 0,
+                        subscription_profiles: 0,
+                    });
+                    offers.len() - 1
+                }
+            };
+            offers[index].profiles += 1;
+            offers[index].subscription_profiles += usize::from(!usage_priced);
+        }
+    }
+    offers
+}
+
+/// Offers from a merged model list whose sources are unknown: each model
+/// counts as offered by one subscription profile. Enough to ask whether
+/// autoconfigure has any answer; not to rank values by where they come from.
+pub fn merged_model_offers(models: &[SessionConfigChoice]) -> Vec<ModelOffer> {
+    model_offers([(models, false)])
+}
+
+/// Whether `profile_models` includes a model in a family that `drafted`
+/// reviewers use. `all` is every profile's models merged, which names the
+/// identities the families are read from.
+pub fn offers_drafted_family(
+    profile_models: &[SessionConfigChoice],
+    all: &[SessionConfigChoice],
+    drafted: &[SubagentChoice],
+) -> bool {
+    let family = |value: &str| {
+        ReviewModelFamily::for_model(&crate::usage::model_catalog::model_id(all, value))
+    };
+    let drafted = drafted
+        .iter()
+        .filter_map(|choice| family(&choice.model))
+        .collect::<Vec<_>>();
+    profile_models
+        .iter()
+        .any(|model| family(&model.value).is_some_and(|family| drafted.contains(&family)))
+}
+
+/// `id` without a trailing `-YYYYMMDD` snapshot date.
+fn undated(id: &str) -> &str {
+    match id.rsplit_once('-') {
+        Some((base, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => base,
+        _ => id,
+    }
+}
+
+/// Choose review slots from the enabled profiles' model offers. Within a
+/// family a value offered by a subscription profile beats one only
+/// usage-priced profiles offer, then the value more enabled profiles offer
+/// wins, then the newest version. Reviewers are load-balanced only across
+/// profiles that offer their exact value, so this keeps reviews on
+/// subscriptions and spread over as many profiles as possible.
 pub fn autoconfigure(
-    models: &[SessionConfigChoice],
+    offers: &[ModelOffer],
     efforts: impl Fn(&str) -> Option<Vec<SessionConfigChoice>>,
 ) -> Option<Autoconfigured> {
-    // Each family keeps its best (identity, advertised value) pair; identities
-    // decide, values are what the reviewer is launched with.
-    let mut selected: [Option<(String, String)>; 6] = Default::default();
-    for choice in models {
-        let id = crate::usage::model_catalog::model_id(models, &choice.value);
+    let models = offers
+        .iter()
+        .map(|offer| offer.choice.clone())
+        .collect::<Vec<_>>();
+    // Each family keeps its best (offer, identity) pair; identities decide
+    // versions, values are what the reviewer is launched with.
+    let mut selected: [Option<(&ModelOffer, String)>; 6] = Default::default();
+    for offer in offers {
+        let id = crate::usage::model_catalog::model_id(&models, &offer.choice.value);
         let Some(family) = ReviewModelFamily::for_model(&id) else {
             continue;
         };
@@ -61,21 +149,34 @@ pub fn autoconfigure(
             ReviewModelFamily::Kimi => 5,
         };
         let current = &mut selected[index];
-        // The plain Flash model is the general reviewer; max is a distinct variant.
-        let better = current.as_ref().is_none_or(|(old, _)| {
+        let better = current.as_ref().is_none_or(|(old_offer, old)| {
+            // The plain Flash model is the general reviewer; max is a distinct
+            // variant, not a better candidate, so billing and profile counts
+            // never promote it.
             let plain = |identity: &str| !identity.contains("max");
             if index == 3 && plain(&id) != plain(old) {
-                plain(&id)
-            } else {
-                model_version_cmp(&id, old).is_gt()
+                return plain(&id);
             }
+            let subscribed = |offer: &ModelOffer| offer.subscription_profiles > 0;
+            if subscribed(offer) != subscribed(old_offer) {
+                return subscribed(offer);
+            }
+            if offer.profiles != old_offer.profiles {
+                return offer.profiles > old_offer.profiles;
+            }
+            // A dated snapshot is the same version as its undated alias,
+            // which follows the newest snapshot, so the alias wins a tie.
+            let (new_base, old_base) = (undated(&id), undated(old));
+            model_version_cmp(new_base, old_base)
+                .then_with(|| (new_base.len() == id.len()).cmp(&(old_base.len() == old.len())))
+                .is_gt()
         });
         if better {
-            *current = Some((id, choice.value.clone()));
+            *current = Some((offer, id));
         }
     }
     let choice = |index: usize, effort: &str, adjusted: &mut Vec<EffortAdjustment>| {
-        let model = selected[index].as_ref().unwrap().1.clone();
+        let model = selected[index].as_ref().unwrap().0.choice.value.clone();
         let offered = efforts(&model);
         let used = offered
             .map(|choices| fallback_effort(effort, &choices))
@@ -152,8 +253,8 @@ mod tests {
     #[test]
     fn known_empty_haiku_efforts_use_harness_default_but_unknown_keeps_table_effort() {
         let models = choices(&["claude-haiku-4.5"]);
-        let known = autoconfigure(&models, |_| Some(Vec::new())).unwrap();
-        let unknown = autoconfigure(&models, |_| None).unwrap();
+        let known = autoconfigure(&merged_model_offers(&models), |_| Some(Vec::new())).unwrap();
+        let unknown = autoconfigure(&merged_model_offers(&models), |_| None).unwrap();
         assert!(known.reviewers.iter().all(|choice| choice.effort.is_none()));
         assert!(
             unknown
@@ -166,7 +267,7 @@ mod tests {
     #[test]
     fn known_efforts_choose_nearest_lower_then_lowest_and_report_adjustments() {
         let models = choices(&["gpt-6-terra", "gpt-6-sol"]);
-        let configured = autoconfigure(&models, |model| {
+        let configured = autoconfigure(&merged_model_offers(&models), |model| {
             Some(if model.ends_with("terra") {
                 choices(&["low", "high", "max"])
             } else {
@@ -224,12 +325,212 @@ mod tests {
             (&["unrelated-model", "kimi-k3"], &[]),
         ];
         for (ids, expected) in cases {
-            let got = models(autoconfigure(&choices(ids), |_| None));
+            let got = models(autoconfigure(&merged_model_offers(&choices(ids)), |_| None));
             let expected = expected
                 .iter()
                 .map(|(model, effort)| (model.to_string(), effort.to_string()))
                 .collect::<Vec<_>>();
             assert_eq!(got, expected, "{ids:?}");
         }
+    }
+
+    /// Autoconfigure over (usage_priced, models) profiles.
+    fn pick(profiles: &[(bool, &[&str])]) -> Vec<(String, String)> {
+        let lists = profiles
+            .iter()
+            .map(|(priced, ids)| (choices(ids), *priced))
+            .collect::<Vec<_>>();
+        models(autoconfigure(
+            &model_offers(
+                lists
+                    .iter()
+                    .map(|(models, priced)| (models.as_slice(), *priced)),
+            ),
+            |_| None,
+        ))
+    }
+    fn expect(rows: &[(&str, &str)]) -> Vec<(String, String)> {
+        rows.iter()
+            .map(|(model, effort)| (model.to_string(), effort.to_string()))
+            .collect()
+    }
+
+    /// Autoconfigure over named (usage_priced, [(value, name)]) profiles.
+    fn pick_named(profiles: &[(bool, &[(&str, &str)])]) -> Vec<(String, String)> {
+        let lists = profiles
+            .iter()
+            .map(|(priced, items)| {
+                let models = items
+                    .iter()
+                    .map(|(value, name)| SessionConfigChoice {
+                        value: (*value).into(),
+                        name: (*name).into(),
+                        description: None,
+                    })
+                    .collect::<Vec<_>>();
+                (models, *priced)
+            })
+            .collect::<Vec<_>>();
+        models(autoconfigure(
+            &model_offers(
+                lists
+                    .iter()
+                    .map(|(models, priced)| (models.as_slice(), *priced)),
+            ),
+            |_| None,
+        ))
+    }
+
+    const CODEX: &[(&str, &str)] = &[
+        ("gpt-6.1-terra", "gpt-6.1-terra"),
+        ("gpt-6.1-sol", "gpt-6.1-sol"),
+        ("gpt-6-sol", "gpt-6-sol"),
+        ("gpt-5.6-terra", "gpt-5.6-terra"),
+    ];
+    const CLAUDE: &[(&str, &str)] = &[
+        ("haiku", "Haiku 4.5"),
+        ("claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001"),
+    ];
+    const OPENROUTER: &[(&str, &str)] = &[
+        ("openrouter/~openai/gpt-terra-latest", "GPT Terra (latest)"),
+        ("openrouter/~openai/gpt-sol-latest", "GPT Sol (latest)"),
+        (
+            "openrouter/~anthropic/claude-haiku-latest",
+            "Claude Haiku (latest)",
+        ),
+        ("openrouter/anthropic/claude-haiku-5.5", "Claude Haiku 5.5"),
+        ("openrouter/openai/gpt-5.6-terra", "GPT 5.6 Terra"),
+    ];
+
+    #[test]
+    fn subscription_models_beat_newer_latest_aliases_from_a_usage_priced_profile() {
+        let expected = expect(&[
+            ("gpt-6.1-terra", "xhigh"),
+            ("gpt-6.1-sol", "medium"),
+            ("haiku", "high"),
+        ]);
+        // The live catalog: four codex and six claude profiles, one OpenRouter profile.
+        let mut profiles = vec![(true, OPENROUTER)];
+        profiles.extend(std::iter::repeat_n((false, CODEX), 4));
+        profiles.extend(std::iter::repeat_n((false, CLAUDE), 6));
+        assert_eq!(pick_named(&profiles), expected);
+        profiles.reverse();
+        assert_eq!(pick_named(&profiles), expected);
+        // One profile each ties the profile counts, so only the subscription
+        // tier keeps the newer `latest` aliases and Haiku 5.5 from winning.
+        assert_eq!(
+            pick_named(&[(true, OPENROUTER), (false, CODEX), (false, CLAUDE)]),
+            expected
+        );
+    }
+
+    #[test]
+    fn an_undated_alias_beats_its_own_dated_snapshot() {
+        assert_eq!(
+            pick_named(&[(
+                false,
+                &[
+                    ("claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001"),
+                    ("haiku", "Haiku 4.5"),
+                ],
+            )])[0]
+                .0,
+            "haiku"
+        );
+    }
+
+    #[test]
+    fn usage_priced_models_are_used_when_no_subscription_offers_the_family() {
+        assert_eq!(
+            pick(&[
+                (false, &["gpt-6-terra", "gpt-6-sol"]),
+                (true, &["claude-haiku-4.5", "gpt-6.1-terra"]),
+            ]),
+            expect(&[
+                ("gpt-6-terra", "xhigh"),
+                ("gpt-6-sol", "medium"),
+                ("claude-haiku-4.5", "high"),
+            ])
+        );
+    }
+
+    #[test]
+    fn more_offering_profiles_beat_a_newer_version_within_subscriptions() {
+        assert_eq!(
+            pick(&[
+                (false, &["gpt-6-terra", "gpt-6-sol", "claude-haiku-4.5"]),
+                (false, &["gpt-6-terra", "gpt-6.1-sol", "claude-haiku-4.5"]),
+                (false, &["gpt-6.1-terra", "gpt-6-sol", "claude-haiku-5"]),
+            ]),
+            expect(&[
+                ("gpt-6-terra", "xhigh"),
+                ("gpt-6-sol", "medium"),
+                ("claude-haiku-4.5", "high"),
+            ])
+        );
+    }
+
+    #[test]
+    fn newest_version_decides_between_equally_offered_subscription_models() {
+        assert_eq!(
+            pick(&[
+                (false, &["gpt-6-terra", "gpt-6.1-terra", "gpt-6-sol"]),
+                (false, &["gpt-6-terra", "gpt-6.1-terra", "gpt-6-sol"]),
+            ]),
+            expect(&[("gpt-6.1-terra", "xhigh"), ("gpt-6-sol", "medium")])
+        );
+    }
+
+    #[test]
+    fn usage_priced_profiles_do_not_raise_a_subscription_models_count() {
+        // Three usage-priced profiles offer the other value; one subscription
+        // offers this one. Subscription wins before counts are compared.
+        assert_eq!(
+            pick(&[
+                (false, &["kimi-k3.1"]),
+                (true, &["kimi-k3.2"]),
+                (true, &["kimi-k3.2"]),
+                (true, &["kimi-k3.2"]),
+            ]),
+            expect(&[("kimi-k3.1", "high")])
+        );
+    }
+
+    #[test]
+    fn plain_flash_beats_max_even_when_max_is_subscribed_or_more_offered() {
+        let flash = ("deepseek-v3-flash", "high");
+        for order in [false, true] {
+            // Only a usage-priced profile offers plain Flash; a subscription
+            // offers Max.
+            let mut profiles: Vec<(bool, &[&str])> = vec![
+                (true, &["deepseek-v3-flash"]),
+                (false, &["deepseek-v4-flash-max"]),
+            ];
+            if order {
+                profiles.reverse();
+            }
+            assert_eq!(pick(&profiles), expect(&[flash, flash]), "billing {order}");
+            // Three profiles offer Max, one offers plain Flash.
+            let mut profiles: Vec<(bool, &[&str])> = vec![
+                (false, &["deepseek-v3-flash"]),
+                (false, &["deepseek-v4-flash-max"]),
+                (false, &["deepseek-v4-flash-max"]),
+                (false, &["deepseek-v4-flash-max"]),
+            ];
+            if order {
+                profiles.reverse();
+            }
+            assert_eq!(pick(&profiles), expect(&[flash, flash]), "count {order}");
+        }
+    }
+
+    #[test]
+    fn a_value_listed_twice_by_one_profile_counts_once() {
+        let offers = model_offers([(choices(&["a", "a"]).as_slice(), false)]);
+        assert_eq!(offers.len(), 1);
+        assert_eq!(
+            (offers[0].profiles, offers[0].subscription_profiles),
+            (1, 1)
+        );
     }
 }

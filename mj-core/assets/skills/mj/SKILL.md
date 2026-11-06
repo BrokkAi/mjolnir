@@ -102,6 +102,10 @@ child sessions in the same target and filesystem:
   receipt is not child delivery confirmation; do not resend it. `list_agents` shows
   pending messages and delivery failures, marked `via: mailbox` or `via: turn`.
 - `close` — stop a child and keep its conversation.
+- `ask_oracle` — listed when the user configured an oracle model. Consult a
+  strong read-only advisor before a hard-to-reverse decision; send the decision,
+  options and evidence. The oracle keeps its context between questions, and its
+  answer arrives later as a message from Mjolnir.
 
 Finished child reports arrive as messages from Mjolnir. Do independent work
 while children run. When none remains, end your turn with a brief waiting

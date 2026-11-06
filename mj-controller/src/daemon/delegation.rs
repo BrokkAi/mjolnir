@@ -83,6 +83,7 @@ async fn run(
                                     | SubagentToolAction::SendMessage { .. }
                                     | SubagentToolAction::Spawn { .. }
                                     | SubagentToolAction::RequestReview { .. }
+                                    | SubagentToolAction::AskOracle { .. }
                                     | SubagentToolAction::OverrideReview { .. }
                                     | SubagentToolAction::SetReviewBaseline { .. }
                                     // Its lifecycle persists Closing before yielding

@@ -93,15 +93,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         profiles: BTreeMap::from([(
             "codex-1".into(),
             HarnessProfile {
-                enabled: true,
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
-                kind: HarnessKind::Codex,
-                home: "/highly/secret/codex".into(),
                 environment: BTreeMap::from([("GH_TOKEN".into(), "secret-token".into())]).into(),
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, "/highly/secret/codex")
             },
         )]),
         bundles: BTreeMap::from([(
@@ -138,6 +131,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         ]),
     };
     let state = AppState {
+        last_oracle_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         subagents: Default::default(),
@@ -145,6 +139,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         sessions: [(
             "session-1".into(),
             SessionRecord {
+                oracle_choice: None,
+                oracle: true,
                 project: None,
                 target_runtime: None,
                 launch_base: None,
@@ -788,6 +784,69 @@ fn target_snapshot_uses_each_raw_host_project_history_and_leaves_managed_empty()
         vec!["/srv/builder"]
     );
     assert!(target("podman").recent_project_directories.is_empty());
+}
+
+#[test]
+fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
+    let (config, mut state) = sample_config_state();
+    let parent = state.sessions["session-1"].clone();
+    for (id, kind) in [
+        ("worker", mj_core::subagent::SubagentKind::Worker),
+        ("reviewer", mj_core::subagent::SubagentKind::Reviewer),
+    ] {
+        let mut child = parent.clone();
+        child.id = id.into();
+        child.state = if id == "reviewer" {
+            mj_core::state::SessionState::Error
+        } else {
+            mj_core::state::SessionState::Stopped
+        };
+        state.sessions.insert(id.into(), child);
+        state.subagents.insert(
+            id.into(),
+            mj_core::subagent::SubagentRecord {
+                kind,
+                reviewer_launch: None,
+                child_session_id: id.into(),
+                parent_session_id: "session-1".into(),
+                task_name: id.into(),
+                profile_id: "codex-1".into(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                initial_prompt: String::new(),
+                request_key: id.into(),
+                created_at: "now".into(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            }
+            .into(),
+        );
+    }
+
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let row = |id: &str| snapshot.sessions.0.get(id).unwrap();
+    assert_eq!(
+        row("session-1").subagent_session_ids,
+        ["reviewer", "worker"]
+    );
+    assert_eq!(row("session-1").reviewer_session_ids, ["reviewer"]);
+    assert!(row("worker").reviewer_session_ids.is_empty());
+    assert!(row("reviewer").active);
+    assert!(!row("worker").active);
+
+    // The summary rows a compact client sees carry both lists, so Reviewers
+    // and Subagents never wait for a child's own record.
+    let mut stopped = state.clone();
+    stopped.sessions.get_mut("session-1").unwrap().state = mj_core::state::SessionState::Stopped;
+    let snapshot = ViewerSnapshot::from_config_state(&config, &stopped, 1);
+    let wire = viewer_wire::row(snapshot.sessions.0.get("session-1").unwrap()).unwrap();
+    assert_eq!(wire.row["detail"], false);
+    assert_eq!(
+        wire.row["reviewer_session_ids"],
+        serde_json::json!(["reviewer"])
+    );
 }
 
 #[test]
@@ -2792,6 +2851,8 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
+        oracle: None,
+        oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
         review: None,
@@ -2879,6 +2940,8 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
         |target_id: &str,
          resource_allocation: Option<mj_core::state::SessionResourceAllocation>| {
             ControllerAction::New {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
                 review: None,
@@ -2977,15 +3040,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
     config.profiles.insert(
         "claude-1".into(),
         HarnessProfile {
-            enabled: true,
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
-            kind: HarnessKind::Claude,
-            home: "/secret/claude".into(),
-            environment: Default::default(),
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, "/secret/claude")
         },
     );
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
@@ -3147,6 +3202,8 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     snapshot.sessions[0].capabilities.move_session = true;
     let selection = MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,

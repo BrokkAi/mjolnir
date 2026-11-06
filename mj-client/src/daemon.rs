@@ -517,6 +517,10 @@ pub struct CreateSessionRequest {
         deserialize_with = "mj_core::subagent::deserialize_optional_policy"
     )]
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     /// Omitted follows `[review]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<mj_core::config::SessionReview>,

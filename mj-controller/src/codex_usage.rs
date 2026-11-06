@@ -562,32 +562,7 @@ async fn spawn_codex(
     #[cfg(unix)]
     {
         let lease = open_managed_codex_lease(&install)?;
-        let manifest_matches = managed_harness_manifest_matches(
-            &install,
-            HarnessKind::Codex,
-            pin(HarnessKind::Codex).install_id,
-        )
-        .map_err(|error| QueryError::NotInstalled {
-            expected: Some(install.clone()),
-            detail: Some(error.to_string()),
-        })?;
-        if !manifest_matches {
-            return Err(QueryError::NotInstalled {
-                expected: Some(install),
-                detail: Some("missing or mismatched mj-harness.json".to_owned()),
-            });
-        }
-
-        let launcher = install.join(CODEX_CLI_ENTRYPOINT);
-        if !is_executable_file(&launcher) {
-            return Err(QueryError::NotInstalled {
-                expected: Some(install),
-                detail: Some(format!(
-                    "missing or non-executable launcher {}",
-                    launcher.display()
-                )),
-            });
-        }
+        let launcher = managed_codex_launcher(&install)?;
 
         let stdio = spawn_app_server(&launcher, cwd, env)
             .await
@@ -599,6 +574,69 @@ async fn spawn_codex(
                 other => other,
             })?;
         Ok((stdio, lease))
+    }
+}
+
+/// The launcher of the installation at `install`, once its receipt matches
+/// the current pin and the launcher is executable.
+#[cfg(unix)]
+fn managed_codex_launcher(install: &Path) -> Result<PathBuf, QueryError> {
+    let manifest_matches = managed_harness_manifest_matches(
+        install,
+        HarnessKind::Codex,
+        pin(HarnessKind::Codex).install_id,
+    )
+    .map_err(|error| QueryError::NotInstalled {
+        expected: Some(install.to_path_buf()),
+        detail: Some(error.to_string()),
+    })?;
+    if !manifest_matches {
+        return Err(QueryError::NotInstalled {
+            expected: Some(install.to_path_buf()),
+            detail: Some("missing or mismatched mj-harness.json".to_owned()),
+        });
+    }
+    let launcher = install.join(CODEX_CLI_ENTRYPOINT);
+    if !mj_core::program_path::is_executable_file(&launcher) {
+        return Err(QueryError::NotInstalled {
+            expected: Some(install.to_path_buf()),
+            detail: Some(format!(
+                "missing or non-executable launcher {}",
+                launcher.display()
+            )),
+        });
+    }
+    Ok(launcher)
+}
+
+/// Whether this host holds the managed Codex installation a host check would
+/// start: the same lease, receipt and launcher checks `spawn_codex` makes,
+/// without taking the lease. `cache_root` is as in [`CodexLauncher::Managed`].
+///
+/// The launcher is a Node script, and a host check passes it only the
+/// profile's environment, so `node` must also be on `path`, the PATH that
+/// environment gives it. A host whose only Node is Mjolnir's managed copy
+/// therefore uses a container under `auto`.
+pub(crate) fn host_has_codex(cache_root: Option<&Path>, path: Option<&std::ffi::OsStr>) -> bool {
+    #[cfg(unix)]
+    {
+        if mj_core::program_path::find_executable_on_path("node", path).is_none() {
+            return false;
+        }
+        let cache_root = match cache_root {
+            Some(root) => root.to_path_buf(),
+            None => match process_managed_cache_root() {
+                Ok(root) => root,
+                Err(_) => return false,
+            },
+        };
+        let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
+        install.join(LEASE_FILE).is_file() && managed_codex_launcher(&install).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (cache_root, path);
+        false
     }
 }
 
@@ -673,13 +711,6 @@ fn open_managed_codex_lease(install: &Path) -> Result<FileLock, QueryError> {
             detail: Some(format!("could not lock {}: {error}", lease_path.display())),
         }),
     }
-}
-
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 #[derive(Debug)]
@@ -1010,6 +1041,44 @@ mod tests {
 
         assert!(matches!(error, QueryError::NotInstalled { .. }));
         assert!(!marker.exists(), "the PATH codex must not run");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_has_codex_only_for_a_complete_managed_install() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache_root = test_cache_root(&temp);
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        std::fs::write(bin.join("node"), "#!/bin/sh\nexit 0\n").expect("node");
+        std::fs::set_permissions(bin.join("node"), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod node");
+        let with_node = Some(bin.as_os_str());
+        assert!(!host_has_codex(Some(&cache_root), with_node));
+
+        let install = install_fake_managed_codex(&cache_root, "#!/bin/sh\nexit 0\n");
+        assert!(host_has_codex(Some(&cache_root), with_node));
+
+        // The launcher is a Node script: without `node` on its PATH it cannot
+        // start.
+        let empty = tempfile::tempdir().expect("tempdir");
+        assert!(!host_has_codex(
+            Some(&cache_root),
+            Some(empty.path().as_os_str())
+        ));
+        assert!(!host_has_codex(Some(&cache_root), None));
+
+        // A `codex` on PATH is not the managed install.
+        let other = tempfile::tempdir().expect("tempdir");
+        assert!(!host_has_codex(
+            Some(&other.path().join("cache")),
+            with_node
+        ));
+
+        std::fs::remove_file(install.join(mj_core::harness_runtime::MANIFEST_FILE))
+            .expect("remove manifest");
+        assert!(!host_has_codex(Some(&cache_root), with_node));
     }
 
     #[cfg(unix)]
