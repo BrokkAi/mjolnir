@@ -777,10 +777,12 @@ async fn inspect_existing_daemon(_held: &SharedStartGuard) -> Result<ExistingDae
 ///    process is gone.
 /// 3. The engine reports the instance's daemon container running. A container
 ///    daemon holds its guard in the container's volume, which the host cannot
-///    probe, and its record carries PID 0. The engine is asked when `[daemon]
-///    runtime` names one, or when the record has no host PID (the runtime is
-///    then unknown, so every installed engine is asked). An engine that fails
-///    to answer is "unknown", which keeps the record. The container is found
+///    probe, and its record carries PID 0. For such a record every installed
+///    engine is asked, the configured one first: the record does not name the
+///    engine that ran it, and the configuration may have changed since. An
+///    engine that fails to answer is "unknown", which keeps the record. A
+///    container whose daemon died inside it still counts as running; telling
+///    the two apart needs a probe inside the container. The container is found
 ///    by the instance label, not by its name: the name digests the image id,
 ///    and learning that would resolve or pull images.
 /// 4. The endpoint answers `Ping`. An answer is more evidence of life; a
@@ -804,14 +806,23 @@ async fn recorded_daemon_is_gone(metadata: &DaemonMetadata) -> Result<bool> {
     {
         return Ok(false);
     }
-    let configured = load_daemon_config().await.unwrap_or_default().runtime;
-    let engines = if configured.engine().is_some() {
-        vec![configured]
-    } else if pid == 0 {
-        vec![
+    // Only a container daemon's record carries PID 0; a nonzero PID is a host
+    // process, which the guard and the PID already answered for. The record
+    // does not name the engine that ran it, and the configuration may name
+    // another engine since, so every engine is asked, the configured one first.
+    let engines = if pid == 0 {
+        let configured = load_daemon_config().await.unwrap_or_default().runtime;
+        let mut engines = vec![configured];
+        for runtime in [
             mj_core::config::DaemonRuntime::Podman,
             mj_core::config::DaemonRuntime::Docker,
-        ]
+        ] {
+            if !engines.contains(&runtime) {
+                engines.push(runtime);
+            }
+        }
+        engines.retain(|runtime| runtime.engine().is_some());
+        engines
     } else {
         Vec::new()
     };
