@@ -698,6 +698,115 @@ fn automatic_upgrade_waits_for_work_then_migrates_without_another_invocation() {
     assert_upgraded(&path);
 }
 
+// Hard-won: #1457: a `daemon.json` left by a daemon that died with its host made the client wait forever for a handoff nothing could accept.
+#[test]
+fn a_record_whose_daemon_died_does_not_block_the_upgrade() {
+    let current = mj_client::daemon::PROTOCOL_VERSION;
+    // An older release, an older protocol, and a protocol this client cannot
+    // speak: none of them has a process behind it.
+    for (version, protocol) in [
+        ("2.21.0", current),
+        ("2.21.0", current - 1),
+        ("999.0.0", current + 1),
+    ] {
+        let storage = upgrade_storage();
+        let path = current_store(&storage);
+        // An address that refused connections a moment ago, and the id of a
+        // process that has exited.
+        let address = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let mut gone = Command::new(env!("CARGO_BIN_EXE_mj"))
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        gone.wait().unwrap();
+        let stale = mj_client::daemon::DaemonMetadata {
+            protocol_version: protocol,
+            pid: gone.id(),
+            address,
+            token: "died-with-the-host".into(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            build_version: version.into(),
+            instance_id: String::new(),
+            placement: mj_client::daemon::DaemonPlacement::Host,
+        };
+        let metadata_path = storage.path().join("data/daemon.json");
+        fs::write(&metadata_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        let log = storage.path().join("client.log");
+        let (status, output) = run_client_with_deadline(&mut upgrade_command(&storage), &log);
+        assert!(status.success(), "{version}/{protocol}: {output}");
+        let started: mj_client::daemon::DaemonMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        assert_ne!(started.token, stale.token, "{version}/{protocol}");
+        assert!(
+            started
+                .build_version
+                .starts_with(mj_core::worker_build::BUILD_ID),
+            "{}",
+            started.build_version
+        );
+        assert!(path.exists());
+    }
+}
+
+// Hard-won: #1457: a daemon that died while the client waited for it to accept the handoff left the client waiting for ever.
+#[test]
+fn a_daemon_that_dies_during_the_handoff_wait_is_replaced() {
+    use std::time::{Duration, Instant};
+    let storage = upgrade_storage();
+    current_store(&storage);
+    let busy = storage.path().join("work-in-flight");
+    fs::write(&busy, "accepted work").unwrap();
+    let old = OldDaemon(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "old_daemon_fixture", "--nocapture"])
+            .env("MJ_TEST_OLD_DAEMON_VERSION", "2.21.0")
+            .env(
+                "MJ_TEST_OLD_PROTOCOL",
+                mj_client::daemon::PROTOCOL_VERSION.to_string(),
+            )
+            .env("MJ_TEST_UPGRADE_BUSY_FILE", &busy)
+            .env("MJ_INSTANCE", "upgrade-test")
+            .env("MJ_DATA_DIR", storage.path().join("data"))
+            .env("MJ_CONFIG_DIR", storage.path().join("config"))
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let metadata_path = storage.path().join("data/daemon.json");
+    while !metadata_path.exists() {
+        assert!(Instant::now() < deadline, "fixture did not become ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let stale: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    let log = storage.path().join("client.log");
+    let (status, output) = std::thread::scope(|scope| {
+        let mut command = upgrade_command(&storage);
+        let log = &log;
+        let client = scope.spawn(move || run_client_with_deadline(&mut command, log));
+        while !busy.with_extension("observed").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "client did not ask for safe handoff"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Killed, not stopped: the record stays and the store guard is
+        // released by the operating system.
+        drop(old);
+        client.join().unwrap()
+    });
+    assert!(status.success(), "{output}");
+    let started: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    assert_ne!(started.token, stale.token);
+}
+
 #[test]
 fn concurrent_clients_replace_obsolete_daemons_once_and_reuse_the_winner() {
     use std::time::{Duration, Instant};
