@@ -3579,7 +3579,7 @@ fn resize_mode_respects_custom_commands_and_workspace_changes() {
 /// the way the parent's own question would: the row's symbol, the attention
 /// queue and a notification, and the row says whose question it is.
 // Hard-won: 91244ea: a child permission question left its parent without an attention mark.
-// Hard-won: #1451: the restored mark hid the parent's running turn from turn controls, and viewing the parent swallowed the child's notification.
+// Hard-won: #1451: the restored mark hid the parent's running turn from turn controls, and one episode per parent swallowed a child's notification.
 #[test]
 fn a_subagent_question_marks_its_parent_for_attention() {
     let (mut dashboard, parent) = dashboard_with_one_subagent();
@@ -3662,6 +3662,30 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         .pending_elicitations
         .clear();
     assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
+
+    // The parent's own question was seen; a child's form that arrives while
+    // it is still open has its own episode and still rings.
+    dashboard
+        .session_details
+        .get_mut(&parent)
+        .unwrap()
+        .pending_elicitations = vec![question(&parent)];
+    dashboard.set_current_session(Some(&parent));
+    assert!(dashboard.notification_events(3_000).is_empty());
+    dashboard.set_current_session(None);
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .pending_elicitations = vec![question("child-session")];
+    assert!(dashboard.notification_events(3_000).is_empty());
+    let due = dashboard.notification_events(5_000);
+    assert_eq!(due.len(), 1, "{due:?}");
+    assert_eq!(due[0].session_id, parent);
+    assert_eq!(
+        due[0].body,
+        "Sub-agent \"Answer project codename\": Choose a path"
+    );
 }
 
 /// A suspend stops the parent's sub-agents without a checkpoint of their own.

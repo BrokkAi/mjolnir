@@ -1474,10 +1474,7 @@ function attentionParts(session) {
   if (session.operation?.kind === 'move') parts.push(['→', 'Moving']);
   if (session.has_error) parts.push(['!', 'Error']);
   if (pendingFormCount(session)) parts.push(['?', 'Input needed']);
-  else if ((session.subagent_session_ids || []).some(id => {
-    const child = sessionById(id);
-    return child && pendingFormCount(child);
-  })) parts.push(['?', 'Sub-agent input needed']);
+  else if (waitingChildCount(session)) parts.push(['?', 'Sub-agent input needed']);
   const queued = session.detail === false
     ? session.queued_prompt_count || 0
     : (session.queued_prompts || []).length;
@@ -5428,6 +5425,14 @@ function workingChildCount(session) {
     .length;
 }
 
+/// Children with an open form, which only a person can answer.
+function waitingChildCount(session) {
+  return (session?.subagent_session_ids || [])
+    .map(id => sessionById(id))
+    .filter(child => child && pendingFormCount(child))
+    .length;
+}
+
 function sessionInWorkspace(id, workspace) {
   const session = sessionById(id);
   return session?.workspace_id === workspace ? session : undefined;
@@ -8597,10 +8602,17 @@ function renderConversationHeader(session) {
   const working = children.filter(id => sessionById(id)?.chat_phase === 'running').length
     + new Set(native.filter(a => a.state === 'running').map(a => a.stable_id || a.session_id)).size;
   const total = children.length + native.length;
+  // A child's approval is not shown in this conversation, so say it is waiting.
+  const waiting = waitingChildCount(session);
   for (const button of [subagentsButton, subagentsDesktopButton]) {
     if (!button) continue;
-    button.textContent = `Subagents · ${working}`;
-    button.title = `${total} retained agents`;
+    button.textContent = waiting
+      ? `Subagents · ${working} · ${waiting} need${waiting === 1 ? 's' : ''} you`
+      : `Subagents · ${working}`;
+    button.title = waiting
+      ? `${total} retained agents; ${waiting} waiting for your answer`
+      : `${total} retained agents`;
+    button.classList.toggle('alert', waiting > 0);
     button.classList.toggle(
       'hidden',
       total === 0 || Boolean(route.subagentParentId),

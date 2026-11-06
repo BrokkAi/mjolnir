@@ -894,22 +894,6 @@ impl DashboardState {
         ));
     }
 
-    /// The first of this parent's Mjolnir sub-agents that is waiting on a
-    /// question, with that question.
-    pub(crate) fn subagent_question(
-        &self,
-        parent_id: &str,
-    ) -> Option<(&SessionRecord, &mj_core::elicitation::ElicitationRequest)> {
-        let child = self.session_facts().waiting_child(parent_id)?.to_owned();
-        let child = self.state.sessions.get(&child)?;
-        let question = self
-            .session_details
-            .get(&child.id)?
-            .pending_elicitations
-            .first()?;
-        Some((child, question))
-    }
-
     /// The attention level from the session's own facts alone.
     pub(crate) fn own_attention_level(&self, session_id: &str) -> AttentionLevel {
         self.session_facts().own_attention_level(session_id)

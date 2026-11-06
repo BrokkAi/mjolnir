@@ -50,7 +50,11 @@ pub(crate) struct AttentionEpisode {
 
 impl DashboardState {
     pub(crate) fn attention_notice_level(&self, session_id: &str) -> AttentionLevel {
-        let level = self.attention_level(session_id);
+        self.unseen_failure_level(session_id, self.attention_level(session_id))
+    }
+
+    /// `level`, except that a failure already drawn is no longer news.
+    fn unseen_failure_level(&self, session_id: &str, level: AttentionLevel) -> AttentionLevel {
         if level == AttentionLevel::Failed
             && self.viewed_failures.get(session_id).is_some_and(|seen| {
                 self.state
@@ -86,6 +90,12 @@ impl DashboardState {
     /// episode. Sessions the person is already looking at are marked as
     /// reported without a notification, so switching away later does not
     /// ring for a question they have seen.
+    ///
+    /// Each session's episode follows its own state. A sub-agent child has no
+    /// row of its own, so a child holding an open form has its own episode,
+    /// seen only in the child's conversation, and its notification names the
+    /// parent's row and the child. Two children, or a child and its parent,
+    /// therefore each ring once.
     pub fn notification_events(&mut self, now_ms: u64) -> Vec<Notification> {
         let delay_ms = self.config.notify.delay_seconds.saturating_mul(1000);
         let enabled = self.config.notify.mode != NotifyMode::Off;
@@ -94,10 +104,24 @@ impl DashboardState {
         let mut due = Vec::new();
         episodes.retain(|id, _| self.state.sessions.contains_key(id));
         for id in self.state.sessions.keys() {
-            if self.state.is_subagent_session(id) {
-                continue;
-            }
-            let level = self.attention_notice_level(id);
+            let parent = self
+                .state
+                .subagents
+                .get(id)
+                .map(|child| child.parent_session_id.as_str());
+            let level = match parent {
+                Some(_)
+                    if self
+                        .session_details
+                        .get(id)
+                        .is_some_and(|detail| !detail.pending_elicitations.is_empty())
+                        && self.own_attention_level(id) == AttentionLevel::Waiting =>
+                {
+                    AttentionLevel::Waiting
+                }
+                Some(_) => AttentionLevel::Inactive,
+                None => self.unseen_failure_level(id, self.own_attention_level(id)),
+            };
             if !level.needs_person() {
                 episodes.remove(id);
                 continue;
@@ -117,16 +141,7 @@ impl DashboardState {
             if episode.reported {
                 continue;
             }
-            // A child's form is seen only in the child's own conversation.
-            let shown_in = if self.own_attention_level(id) < level {
-                self.session_facts()
-                    .waiting_child(id)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| id.clone())
-            } else {
-                id.clone()
-            };
-            if visible.as_deref() == Some(shown_in.as_str()) {
+            if visible.as_deref() == Some(id.as_str()) {
                 episode.reported = true;
                 continue;
             }
@@ -137,14 +152,29 @@ impl DashboardState {
             if !enabled {
                 continue;
             }
-            let Some(session) = self.state.sessions.get(id) else {
+            let row = parent.unwrap_or(id);
+            let Some(session) = self.state.sessions.get(row) else {
                 continue;
             };
+            let body = match (parent, self.session_details.get(id)) {
+                (Some(_), Some(detail)) => format!(
+                    "Sub-agent \"{}\": {}",
+                    self.state
+                        .sessions
+                        .get(id)
+                        .map_or(id.as_str(), |child| child.listed_title()),
+                    detail
+                        .pending_elicitations
+                        .first()
+                        .map_or("", |request| request.message.as_str())
+                ),
+                _ => self.notification_body(id, level),
+            };
             due.push(Notification {
-                session_id: id.clone(),
+                session_id: row.to_owned(),
                 session_title: session.listed_title().to_owned(),
                 level,
-                body: self.notification_body(id, level),
+                body,
             });
         }
         self.attention_episodes = episodes;
@@ -163,15 +193,6 @@ impl DashboardState {
                     self.session_review(session_id)
                         .and_then(|review| review.activity_label())
                         .map(str::to_owned)
-                })
-                .or_else(|| {
-                    self.subagent_question(session_id).map(|(child, question)| {
-                        format!(
-                            "Sub-agent \"{}\": {}",
-                            child.listed_title(),
-                            question.message
-                        )
-                    })
                 })
                 .or_else(|| {
                     detail
