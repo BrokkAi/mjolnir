@@ -325,8 +325,13 @@ pub enum ResetCountdownStyle {
 }
 
 impl QuotaWindow {
+    /// Whether this is the provider's short rolling five-hour window.
+    pub fn is_five_hour(&self) -> bool {
+        is_short_quota_window(&self.label)
+    }
+
     pub fn reset_countdown_style(&self) -> ResetCountdownStyle {
-        if is_short_quota_window(&self.label) {
+        if self.is_five_hour() {
             ResetCountdownStyle::FiveHour
         } else {
             ResetCountdownStyle::Long

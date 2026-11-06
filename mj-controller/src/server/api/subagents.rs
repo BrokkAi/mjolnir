@@ -1128,6 +1128,7 @@ mod tests {
             },
             quota: remaining.map_or(CandidateQuota::Unknown, |remaining| {
                 CandidateQuota::Subscription {
+                    refreshed_at_epoch_seconds: 0,
                     paid_credits: None,
                     windows: vec![crate::quota::QuotaWindow {
                         label: "Week".into(),
@@ -1186,6 +1187,7 @@ mod tests {
         let CandidateQuota::Subscription {
             windows,
             paid_credits,
+            ..
         } = &mut fable.quota
         else {
             unreachable!("the fixture has a reading");
@@ -1210,6 +1212,62 @@ mod tests {
         let mut for_opus = vec![fable, other];
         rank_candidates(&mut for_opus, None, "claude-opus-5", 1_000);
         assert_eq!(ids(&for_opus), ["fable-profile", "other"]);
+    }
+
+    #[test]
+    fn five_hour_burn_projected_to_run_out_sorts_last_within_its_tier() {
+        let now = 1_000_000;
+        let with_five_hour = |id: &str, remaining: u8| {
+            let mut profile = candidate(id, Some(90), &["luna"]);
+            let CandidateQuota::Subscription {
+                windows,
+                refreshed_at_epoch_seconds,
+                ..
+            } = &mut profile.quota
+            else {
+                unreachable!("the fixture has a reading");
+            };
+            // Read one hour into the window, so using more than 20% outpaces it.
+            *refreshed_at_epoch_seconds = now as u64;
+            windows.push(crate::quota::QuotaWindow {
+                label: "5H".into(),
+                remaining_percent: Some(remaining),
+                duration_seconds: None,
+                model_scope: None,
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: Some(now + 4 * 60 * 60),
+            });
+            profile
+        };
+        let profiles = vec![
+            candidate("unknown", None, &["luna"]),
+            // Scores 1.4, ahead of "steady" on pace alone.
+            with_five_hour("burning", 70),
+            candidate("steady", Some(40), &["luna"]),
+            with_five_hour("pacing", 85),
+        ];
+
+        let mut ranked = profiles.clone();
+        rank_candidates(&mut ranked, None, "luna", now);
+        assert_eq!(ids(&ranked), ["pacing", "steady", "burning", "unknown"]);
+
+        for unit in [1e-9, 0.5, 1.0] {
+            let mut drawn = profiles.clone();
+            let units = vec![unit; drawn.len()];
+            order_by_draw(&mut drawn, None, &units, "luna", now);
+            assert_eq!(ids(&drawn)[2..], ["burning", "unknown"]);
+        }
+
+        // The pace was measured at the reading: an unchanged reading still
+        // projects later, until the window resets.
+        let mut stale = profiles.clone();
+        rank_candidates(&mut stale, None, "luna", now + 30 * 60);
+        assert_eq!(ids(&stale), ["pacing", "steady", "burning", "unknown"]);
+        let mut reset = profiles.clone();
+        rank_candidates(&mut reset, None, "luna", now + 4 * 60 * 60);
+        assert_eq!(ids(&reset), ["burning", "pacing", "steady", "unknown"]);
     }
 
     #[test]
