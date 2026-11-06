@@ -3269,6 +3269,61 @@ fn in_place_move_records_its_oracle_selection_on_the_session() {
     assert_eq!(stored.oracle_choice, Some(choice));
 }
 
+/// A Move that stopped the oracle leaves the same entry a suspend does, and
+/// the primary's first prompt after the swap says so without naming the oracle.
+#[cfg(unix)]
+#[test]
+fn in_place_move_tells_the_primary_its_oracle_was_stopped() {
+    let name = test_name("in_place_move_tells_the_primary_its_oracle_was_stopped");
+    if std::env::var_os("MJ_MOVE_ORACLE_STOPPED_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_MOVE_ORACLE_STOPPED_CHILD", "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let InPlaceFixture {
+        _directory,
+        worker_root,
+        mut controller,
+        ..
+    } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    crate::database::record_stopped_subagents(
+        LATCH_RELAY_SESSION,
+        &[mj_core::subagent::StoppedSubagent::oracle()],
+    )
+    .unwrap();
+    let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+    run_in_place_move(
+        &mut controller,
+        &mut operation,
+        &worker_root,
+        &RecordingProcessExecutor::default(),
+    )
+    .unwrap();
+
+    let relay_snapshot: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+        &fs::read(worker_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
+    let context = relay_snapshot.pending_prompt_context.unwrap().text;
+    assert!(
+        context.contains(mj_core::subagent::STOPPED_ORACLE_LINE),
+        "{context}"
+    );
+    assert!(!context.contains("child_session_id"), "{context}");
+    assert!(
+        crate::database::load_stopped_subagents(LATCH_RELAY_SESSION)
+            .unwrap()
+            .is_empty(),
+        "the delivered entry is forgotten"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn in_place_move_reopens_message_only_queue_after_parent_policy_becomes_native() {
@@ -3404,6 +3459,128 @@ fn in_place_move_reopens_gate_after_lost_admission_close_reply() {
         SessionState::Running
     );
     assert_eq!(executor.move_stop_calls(), 0);
+    let queue: serde_json::Value =
+        serde_json::from_slice(&fs::read(worker_root.join("subagents.json")).unwrap()).unwrap();
+    assert_eq!(queue["mutating_admission_open"], true, "{queue}");
+}
+
+/// A Native source has no parent tools, but its worker still has a request
+/// queue (`ask_oracle`, `request_review`), so an in-place Move closes it first.
+#[cfg(unix)]
+#[test]
+fn in_place_move_drains_the_queue_of_a_native_source() {
+    let name = test_name("in_place_move_drains_the_queue_of_a_native_source");
+    if std::env::var_os("MJ_MOVE_NATIVE_DRAIN_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_MOVE_NATIVE_DRAIN_CHILD", "1")
+            .env(
+                crate::controller::checkpoint::tests::LATCH_RECORD_SUBAGENT_ADMISSION,
+                "1",
+            )
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let InPlaceFixture {
+        _directory,
+        worker_root,
+        mut controller,
+        ..
+    } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let source = controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap();
+    source.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+    crate::database::save_session(source).unwrap();
+    let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+    run_in_place_move(
+        &mut controller,
+        &mut operation,
+        &worker_root,
+        &RecordingProcessExecutor::default(),
+    )
+    .unwrap();
+
+    let queue: serde_json::Value =
+        serde_json::from_slice(&fs::read(worker_root.join("subagents.json")).unwrap()).unwrap();
+    assert_eq!(queue["admission_transitions"][0], false, "{queue}");
+    assert_eq!(queue["mutating_admission_open"], true, "{queue}");
+}
+
+/// The same source, failing after the close, gets its queue back.
+#[cfg(unix)]
+#[test]
+fn in_place_move_reopens_the_queue_of_a_native_source_after_a_failure() {
+    let name = test_name("in_place_move_reopens_the_queue_of_a_native_source_after_a_failure");
+    if std::env::var_os("MJ_MOVE_NATIVE_REOPEN_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_MOVE_NATIVE_REOPEN_CHILD", "1")
+            .env(
+                crate::controller::checkpoint::tests::LATCH_RECORD_SUBAGENT_ADMISSION,
+                "1",
+            )
+            .env(
+                crate::controller::checkpoint::tests::LATCH_DROP_ADMISSION_CLOSE_REPLY,
+                "1",
+            )
+            .env(
+                crate::controller::checkpoint::tests::LATCH_CHECKPOINT_ONLY,
+                "1",
+            )
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let InPlaceFixture {
+        _directory,
+        worker_root,
+        mut controller,
+        ..
+    } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let source = controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap();
+    source.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+    crate::database::save_session(source).unwrap();
+    let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+    let executor = RecordingProcessExecutor::default();
+    let source_relay = seed_source_relay(&worker_root);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(async {
+        let channels = start_source_relay_manager(&source_relay);
+        let result = controller
+            .execute_move(
+                &mut operation,
+                None,
+                &executor,
+                &channels.control,
+                MoveSourceRelay::default(),
+            )
+            .await;
+        channels.shutdown.shutdown().await.unwrap();
+        result
+    });
+    let error = result.unwrap_err();
+    assert!(
+        source_relay
+            .join("drop-admission-close-reply-once")
+            .exists(),
+        "the Native source's queue was closed before the failure; Move error: {error:#}"
+    );
     let queue: serde_json::Value =
         serde_json::from_slice(&fs::read(worker_root.join("subagents.json")).unwrap()).unwrap();
     assert_eq!(queue["mutating_admission_open"], true, "{queue}");

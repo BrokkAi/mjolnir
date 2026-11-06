@@ -1696,6 +1696,22 @@ impl Controller {
         ))
     }
 
+    /// Whether the session's worker exposes the durable sub-agent request
+    /// queue, which every top-level session does.
+    fn source_has_request_queue(&self, id: &str) -> bool {
+        self.state.sessions.get(id).is_some_and(|session| {
+            worker_subagent_queue_enabled(
+                &session.subagents.clone().unwrap_or_default(),
+                session.harness_kind,
+                self.state
+                    .subagents
+                    .get(id)
+                    .map(|child| child.handback_tool),
+                true,
+            )
+        })
+    }
+
     async fn finish_move_result_with_subagent_recovery(
         &mut self,
         operation: &mut MoveOperation,
@@ -1851,11 +1867,8 @@ impl Controller {
                         )
                         && operation.cancellation_requested =>
                 {
-                    let source = self.state.sessions.get(&id).context("move source is missing")?;
-                    if parent_tools_enabled(
-                        &source.subagents.clone().unwrap_or_default(),
-                        source.harness_kind,
-                    ) {
+                    ensure!(self.state.sessions.contains_key(&id), "move source is missing");
+                    if self.source_has_request_queue(&id) {
                         MoveSourceRelay::set_subagent_admission_via_manager(
                             manager, &id, true,
                         )
@@ -2192,10 +2205,10 @@ impl Controller {
             ) && operation.destination_target.is_none()
             {
                 let source = self.state.sessions[&id].clone();
-                let source_has_parent_role = parent_tools_enabled(
-                    &source.subagents.clone().unwrap_or_default(),
-                    source.harness_kind,
-                );
+                // Any worker with an `mj-agents` request queue can register or
+                // message a child (`ask_oracle`, `request_review`), so the gate
+                // covers every such source, not only those with the parent role.
+                let source_has_request_queue = self.source_has_request_queue(&id);
                 let destination_has_parent_role = parent_tools_enabled(
                     &move_subagent_policy(&source, &operation.selection),
                     operation
@@ -2214,7 +2227,7 @@ impl Controller {
                     operation.updated_at = now();
                     crate::database::save_move_operation(operation)?;
                     let mut stopped_subagents_for_legacy_worker = false;
-                    if source_has_parent_role {
+                    if source_has_request_queue {
                         if !source_relay.is_held() {
                             source_relay = MoveSourceRelay::lease(manager, &id).await?;
                         }
@@ -2236,7 +2249,7 @@ impl Controller {
                         if let Some(error) =
                             roleless_move_children_error(&live_move_children(&current, &id))
                         {
-                            if source_has_parent_role {
+                            if source_has_request_queue {
                                 source_relay
                                     .reopen_subagent_mutations(&id)
                                     .await
@@ -2245,7 +2258,7 @@ impl Controller {
                             bail!("{error}; close or finish those children before moving to this harness");
                         }
                         if let Err(error) = executor.before_move_source_stop().await {
-                            if source_has_parent_role {
+                            if source_has_request_queue {
                                 source_relay
                                     .reopen_subagent_mutations(&id)
                                     .await
@@ -2260,7 +2273,7 @@ impl Controller {
                     executor.before_move_source_stop().await?;
                 }
                 if executor.cancellation_requested() {
-                    if operation.in_place && source_has_parent_role {
+                    if operation.in_place && source_has_request_queue {
                         source_relay.reopen_subagent_mutations(&id).await?;
                     }
                     bail!("Move cancelled before source interruption");
@@ -2292,7 +2305,7 @@ impl Controller {
                 .await;
                 if let Err(error) = suspended {
                     if operation.in_place
-                        && source_has_parent_role
+                        && source_has_request_queue
                         && matches!(
                             self.state.sessions[&id].state,
                             SessionState::Running | SessionState::Disconnected

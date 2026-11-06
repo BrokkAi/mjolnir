@@ -107,7 +107,7 @@ pub fn save_subagent_session(
     session: &SessionRecord,
     subagent: &mj_core::subagent::SubagentRecord,
 ) -> Result<()> {
-    register_subagent_with_startup(session, subagent, Vec::new())
+    register_subagent_with_startup(session, subagent, Vec::new(), None)
 }
 
 /// Publish the child and its complete initial input in the same transaction.
@@ -116,9 +116,11 @@ pub(crate) fn register_subagent_with_startup(
     session: &SessionRecord,
     subagent: &mj_core::subagent::SubagentRecord,
     startup: Vec<super::startup::StartupDelivery>,
+    report_dir: Option<&str>,
 ) -> Result<()> {
     let session = session.clone();
     let subagent = subagent.clone();
+    let report_dir = report_dir.map(str::to_owned);
     submit_database_write("save_subagent_session", move |_| {
         let mut connection = open(&database_path())?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -157,6 +159,11 @@ pub(crate) fn register_subagent_with_startup(
             ],
         )?;
         super::startup::enqueue_startup_deliveries_with(&tx, startup)?;
+        // The report directory commits with the registration, so no later
+        // step can leave a registered child without it.
+        if let Some(report_dir) = &report_dir {
+            record_subagent_report_dir_with(&tx, &subagent.child_session_id, report_dir)?;
+        }
         tx.commit()?;
         Ok(())
     })
@@ -406,7 +413,15 @@ pub(super) fn record_subagent_report_dir_to(
     child_session_id: &str,
     report_dir: &str,
 ) -> Result<()> {
-    open(path)?.execute(
+    record_subagent_report_dir_with(&open(path)?, child_session_id, report_dir)
+}
+
+fn record_subagent_report_dir_with(
+    connection: &rusqlite::Connection,
+    child_session_id: &str,
+    report_dir: &str,
+) -> Result<()> {
+    connection.execute(
         "INSERT INTO subagent_handbacks(child_session_id, report_dir)
          SELECT ?1, ?2 WHERE EXISTS (
              SELECT 1 FROM subagent_sessions WHERE child_session_id = ?1

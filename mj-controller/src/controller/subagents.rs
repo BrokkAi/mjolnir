@@ -561,10 +561,12 @@ impl Controller {
             handback_tool,
         };
         let startup = initial_startup_deliveries(&relation, request.fast_mode)?;
-        crate::database::register_subagent_with_startup(&session, &relation, startup)?;
-        if let Some(report_dir) = &report_dir {
-            crate::database::record_subagent_report_dir(&child_id, report_dir)?;
-        }
+        crate::database::register_subagent_with_startup(
+            &session,
+            &relation,
+            startup,
+            report_dir.as_deref(),
+        )?;
         self.state.sessions.insert(child_id, session);
         self.state
             .subagents

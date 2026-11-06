@@ -18,12 +18,18 @@ impl RuntimeState {
     }
 
     /// Register and start a child worker on its parent's existing target.
+    ///
+    /// Once the registration has committed, any failure before the worker's
+    /// own lifecycle takes over leaves a `Provisioning` child that nothing
+    /// owns. One match on that stretch moves such a child to `Error`, so the
+    /// parent sees a failed child and the oracle's one-live-oracle rule frees
+    /// its slot.
     pub async fn start_subagent_session(
         self: &Arc<Self>,
         request: crate::controller::RegisterSubagentRequest,
     ) -> Result<mj_core::subagent::SubagentRecord> {
         let _upgrade_work = crate::upgrade::activity("subagent admission")?;
-        let (relation, needs_provisioning) = blocking(move || {
+        let (relation, needs_provisioning, registered_here) = blocking(move || {
             let mut controller = Controller::load()?;
             if let Some(existing) = crate::database::lookup_subagent_request(
                 &request.parent_session_id,
@@ -42,7 +48,7 @@ impl RuntimeState {
                         request.fast_mode,
                     )?;
                 }
-                return Ok((existing, needs_provisioning));
+                return Ok((existing, needs_provisioning, false));
             }
             let mut request = request;
             // The parent's report root is made before the child exists, so the
@@ -58,9 +64,50 @@ impl RuntimeState {
             }
             controller
                 .register_subagent(request)
-                .map(|relation| (relation, true))
+                .map(|relation| (relation, true, true))
         })
         .await?;
+        if let Err(error) = self
+            .start_registered_subagent(&relation, needs_provisioning)
+            .await
+        {
+            if registered_here {
+                self.fail_unstarted_subagent(&relation.child_session_id, &error)
+                    .await;
+            }
+            if let Err(reload_error) = self.reload_controller().await {
+                tracing::warn!(
+                    child_session_id = %relation.child_session_id,
+                    error = format!("{reload_error:#}"),
+                    "could not reload the controller after a sub-agent failed to start"
+                );
+            }
+            if let Err(prompt_error) = self
+                .reconcile_parent_reports(&relation.parent_session_id)
+                .await
+            {
+                tracing::warn!(
+                    child_session_id = %relation.child_session_id,
+                    parent_session_id = %relation.parent_session_id,
+                    error = format!("{prompt_error:#}"),
+                    "could not enqueue the parent's finished child reports after provisioning failure"
+                );
+            }
+            return Err(error);
+        }
+        self.reload_controller().await?;
+        Ok(relation)
+    }
+
+    /// Everything a registered child needs before its own lifecycle owns it:
+    /// publishing the registration, queueing its first delivery, and admitting
+    /// the lifecycle that provisions it. The lifecycle records its own
+    /// failures.
+    async fn start_registered_subagent(
+        self: &Arc<Self>,
+        relation: &mj_core::subagent::SubagentRecord,
+        needs_provisioning: bool,
+    ) -> Result<()> {
         self.reload_controller().await?;
         if relation.kind != mj_core::subagent::SubagentKind::Reviewer {
             let id = relation.child_session_id.clone();
@@ -71,12 +118,12 @@ impl RuntimeState {
             }
         }
         if !needs_provisioning {
-            return Ok(relation);
+            return Ok(());
         }
         let session_id = relation.child_session_id.clone();
         let parent_session_id = relation.parent_session_id.clone();
         let control = LifecycleControl::default();
-        let started = self.start_or_join_lifecycle_controlled(
+        self.start_or_join_lifecycle_controlled(
             session_id.clone(),
             LifecycleKind::Create,
             None,
@@ -125,24 +172,31 @@ impl RuntimeState {
                 }
                 Ok(DaemonLifecycleResult::Done)
             },
-        );
-        if let Err(error) = started {
-            self.reload_controller().await?;
-            if let Err(prompt_error) = self
-                .reconcile_parent_reports(&relation.parent_session_id)
-                .await
-            {
-                tracing::warn!(
-                    child_session_id = %relation.child_session_id,
-                    parent_session_id = %relation.parent_session_id,
-                    error = format!("{prompt_error:#}"),
-                    "could not enqueue the parent's finished child reports after provisioning failure"
-                );
-            }
-            return Err(error);
+        )?;
+        Ok(())
+    }
+
+    /// Record, through the ordinary lifecycle write, that a child registered by
+    /// this call failed before its lifecycle started. A child that has already
+    /// left `Provisioning` is not touched.
+    async fn fail_unstarted_subagent(
+        self: &Arc<Self>,
+        child_session_id: &str,
+        error: &anyhow::Error,
+    ) {
+        let cause = format!("sub-agent startup failed: {error:#}");
+        let written = blocking({
+            let child_session_id = child_session_id.to_owned();
+            move || Controller::load()?.fail_interrupted_lifecycle(&child_session_id, &cause)
+        })
+        .await;
+        if let Err(write_error) = written {
+            tracing::warn!(
+                child_session_id,
+                error = format!("{write_error:#}"),
+                "could not record a sub-agent that failed to start"
+            );
         }
-        self.reload_controller().await?;
-        Ok(relation)
     }
 
     pub(crate) async fn start_reviewer_child(self: &Arc<Self>, child: &str) -> Result<()> {
