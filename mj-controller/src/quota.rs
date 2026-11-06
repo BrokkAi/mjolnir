@@ -40,7 +40,7 @@ pub(crate) fn surface_quota_report(report: &ProfileQuota) -> ProfileQuota {
     visible
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QuotaRefreshRequest {
     pub profile_id: String,
     pub harness: HarnessKind,

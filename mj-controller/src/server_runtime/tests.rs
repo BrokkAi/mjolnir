@@ -7,7 +7,8 @@ use agent_client_protocol::v1::schema::{
     SessionConfigSelectOptions,
 };
 use mj_core::config::{
-    CONFIG_VERSION, Config, HarnessKind, ProjectBundle, ProjectRepository, TargetTemplate,
+    CONFIG_VERSION, Config, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository,
+    TargetTemplate,
 };
 use mj_core::state::SessionState;
 
@@ -1999,13 +2000,11 @@ fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do(
 #[test]
 fn a_profile_added_while_the_server_runs_reaches_the_quota_refresher() {
     let (profiles_tx, profiles_rx) = tokio::sync::watch::channel(QuotaRefreshBatch::default());
-    let mut published = std::collections::BTreeMap::new();
     let mut batch = QuotaRefreshBatch::default();
     let controller = controller_with_profiles(&["codex"]);
 
     assert!(republish_quota_profiles(
         &controller,
-        &mut published,
         &mut batch,
         &profiles_tx
     ));
@@ -2024,19 +2023,13 @@ fn a_profile_added_while_the_server_runs_reaches_the_quota_refresher() {
     // must not restart a harness process per profile.
     assert!(!republish_quota_profiles(
         &controller,
-        &mut published,
         &mut batch,
         &profiles_tx
     ));
     assert_eq!(profiles_rx.borrow().generation, first_generation);
 
     let grown = controller_with_profiles(&["claude", "codex"]);
-    assert!(republish_quota_profiles(
-        &grown,
-        &mut published,
-        &mut batch,
-        &profiles_tx
-    ));
+    assert!(republish_quota_profiles(&grown, &mut batch, &profiles_tx));
     assert_eq!(
         profiles_rx
             .borrow()
@@ -2047,6 +2040,41 @@ fn a_profile_added_while_the_server_runs_reaches_the_quota_refresher() {
         vec!["claude".to_owned(), "codex".to_owned()]
     );
     assert!(profiles_rx.borrow().generation > first_generation);
+}
+
+#[test]
+fn a_quota_runtime_change_reaches_the_quota_refresher() {
+    let (profiles_tx, profiles_rx) = tokio::sync::watch::channel(QuotaRefreshBatch::default());
+    let mut batch = QuotaRefreshBatch::default();
+    let mut controller = controller_with_profiles(&["codex"]);
+    controller.config.quota.runtime = mj_core::config::QuotaRuntimeChoice::Auto;
+    assert!(republish_quota_profiles(
+        &controller,
+        &mut batch,
+        &profiles_tx
+    ));
+    let first_generation = profiles_rx.borrow().generation;
+
+    // The profiles stay as they are; only where a check runs changes.
+    controller.config.quota.runtime = mj_core::config::QuotaRuntimeChoice::Host;
+    assert!(republish_quota_profiles(
+        &controller,
+        &mut batch,
+        &profiles_tx
+    ));
+    let sent = profiles_rx.borrow().clone();
+    assert!(sent.generation > first_generation);
+    assert_eq!(
+        sent.profiles[0].runtime.choice,
+        mj_core::config::QuotaRuntimeChoice::Host
+    );
+
+    assert!(!republish_quota_profiles(
+        &controller,
+        &mut batch,
+        &profiles_tx
+    ));
+    assert_eq!(profiles_rx.borrow().generation, sent.generation);
 }
 
 #[test]
