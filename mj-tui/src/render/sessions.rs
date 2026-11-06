@@ -1643,10 +1643,9 @@ pub(crate) fn render_sessions(
             // The wheel moved the list, not the selection, so the selected row
             // may be off screen. The table below must not scroll to it either:
             // that would put its rows out of step with the hit areas, so it
-            // only marks a selection that already fits where it is.
+            // only marks a selection that already fits, whole, where it is.
             reveal_selected = selected >= offset
-                && offset_showing_selected(offset, selected, content, row_heights, viewport)
-                    == offset;
+                && row_heights[offset..selected].iter().sum::<usize>() + content <= viewport;
         } else if selected < offset {
             offset = selected;
         } else {

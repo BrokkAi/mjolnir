@@ -2962,8 +2962,8 @@ fn sessions_wheel_stops_at_the_last_session_in_a_short_pane() {
     dashboard.clear_sessions_filter();
     dashboard.select_active_session("worker-a");
     dashboard.focus = Focus::Sessions;
-    // Room for the borders, the action row and one line of a session.
-    let mut terminal = Terminal::new(TestBackend::new(60, 4)).unwrap();
+    // Room for the borders, the action row and two lines of a row.
+    let mut terminal = Terminal::new(TestBackend::new(60, 5)).unwrap();
     for _ in 0..10 {
         dashboard.scroll_sessions_view(1);
         terminal
@@ -2976,6 +2976,25 @@ fn sessions_wheel_stops_at_the_last_session_in_a_short_pane() {
     let rows = terminal.backend().to_string();
     assert!(rows.contains("worker-b"), "{rows}");
     assert!(!rows.contains("No sessions"), "{rows}");
+
+    // With the last session selected and taller than the pane, the wheel
+    // must not hand the table a selection it would scroll past.
+    dashboard.select_active_session("worker-b");
+    for delta in [-1, 1, 1, -1] {
+        dashboard.scroll_sessions_view(delta);
+        terminal
+            .draw(|frame| {
+                let layout = crate::render::SessionsLayout::new(&dashboard, frame.area().width - 2);
+                crate::render::render_sessions(frame, frame.area(), &dashboard, &layout);
+            })
+            .unwrap();
+        let rows = terminal.backend().to_string();
+        assert!(!rows.contains("No sessions"), "{rows}");
+        assert!(
+            rows.contains("worker-a") || rows.contains("worker-b"),
+            "{rows}"
+        );
+    }
 }
 
 #[test]
