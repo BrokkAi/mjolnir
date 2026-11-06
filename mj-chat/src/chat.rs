@@ -521,6 +521,12 @@ pub struct ChatState {
     /// Stored prompts from this session, oldest-first.
     session_history: Vec<String>,
     session_history_error: Option<String>,
+    /// The latest session-history listing requested; an older answer that
+    /// arrives after a newer request is dropped.
+    session_history_generation: u64,
+    /// A listing to request, set when the chat opens and after each turn so
+    /// prompts sent to this session from elsewhere reach Up and Ctrl-P.
+    pending_session_history: Option<u64>,
     prompt_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
@@ -724,6 +730,8 @@ impl ChatState {
             input_generation: 0,
             session_history: Vec::new(),
             session_history_error: None,
+            session_history_generation: 0,
+            pending_session_history: None,
             prompt_history: Vec::new(),
             history_index: None,
             history_draft: String::new(),

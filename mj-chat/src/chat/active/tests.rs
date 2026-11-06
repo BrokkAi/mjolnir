@@ -3392,13 +3392,9 @@ async fn late_prompt_refusal_from_a_parked_worker_view_reaches_the_live_composer
     assert!(standby.pending_submissions.is_empty());
 }
 
-/// One history page request a test answers: where it resumes, how many
-/// matches it wants, and where the page goes.
-type HistoryPageCall = (
-    Option<mj_core::storage::HistoryCursor>,
-    usize,
-    tokio::sync::oneshot::Sender<anyhow::Result<mj_core::storage::PromptHistoryPage>>,
-);
+/// One listing of the session's stored prompts that a test answers.
+type SessionPromptsCall =
+    tokio::sync::oneshot::Sender<anyhow::Result<Vec<mj_core::storage::PromptHistoryEntry>>>;
 
 #[derive(Clone)]
 struct DelayedNativeSession {
@@ -3407,8 +3403,8 @@ struct DelayedNativeSession {
         mj_core::relay::RelayCommand,
         tokio::sync::oneshot::Sender<anyhow::Result<u64>>,
     )>,
-    /// When set, history searches go to the test instead of the delegate.
-    history: Option<tokio::sync::mpsc::UnboundedSender<HistoryPageCall>>,
+    /// When set, session-prompt listings go to the test instead of the delegate.
+    history: Option<tokio::sync::mpsc::UnboundedSender<SessionPromptsCall>>,
 }
 impl mj_client::session::SessionHandleBackend for DelayedNativeSession {
     fn clone_box(&self) -> Box<dyn mj_client::session::SessionHandleBackend> {
@@ -3441,15 +3437,6 @@ impl mj_client::session::SessionHandleBackend for DelayedNativeSession {
         limit: usize,
     ) -> mj_client::session::BoxFuture<'_, anyhow::Result<mj_core::storage::PromptHistoryPage>>
     {
-        if let Some(history) = &self.history {
-            let (reply, page) = tokio::sync::oneshot::channel();
-            let sent = history.send((after, limit, reply));
-            return Box::pin(async move {
-                sent.map_err(|_| anyhow::anyhow!("test history closed"))?;
-                page.await
-                    .map_err(|_| anyhow::anyhow!("test history reply dropped"))?
-            });
-        }
         Box::pin(
             self.delegate
                 .search_prompts(bundle, scope, query, after, limit),
@@ -3459,6 +3446,16 @@ impl mj_client::session::SessionHandleBackend for DelayedNativeSession {
         &self,
     ) -> mj_client::session::BoxFuture<'_, anyhow::Result<Vec<mj_core::storage::PromptHistoryEntry>>>
     {
+        if let Some(history) = &self.history {
+            let (reply, listing) = tokio::sync::oneshot::channel();
+            let sent = history.send(reply);
+            return Box::pin(async move {
+                sent.map_err(|_| anyhow::anyhow!("test history closed"))?;
+                listing
+                    .await
+                    .map_err(|_| anyhow::anyhow!("test history reply dropped"))?
+            });
+        }
         Box::pin(self.delegate.session_prompts())
     }
     fn config_result(
@@ -3758,17 +3755,17 @@ async fn deferred_move_prompts_keep_their_original_operation_through_attach_and_
     assert_eq!(unresolved.draft(), "do not rebind this deferred prompt");
 }
 
-// Hard-won: a58ad7eb8: a refill queued while a page was applied waited for the next key press
+// Hard-won: 747d8ed78: a prompt sent to an open session from the web never reached Up
 #[tokio::test]
-async fn a_history_page_of_repeats_fetches_the_next_page_without_a_key_press() {
-    use mj_core::storage::{HistoryCursor, PromptHistoryEntry, PromptHistoryPage};
-    let fixture = mj_client::session::replacement_session_test_fixture("history-refill", 1);
+async fn a_completed_turn_lists_the_sessions_prompts_again_for_up() {
+    use mj_core::storage::PromptHistoryEntry;
+    let fixture = mj_client::session::replacement_session_test_fixture("history-refresh", 1);
     fixture
         .replacement_view
-        .send_replace(managed_view(MaterializedSession::empty("history-refill")));
-    let delegate = fixture.control.session("history-refill").await.unwrap();
+        .send_replace(managed_view(MaterializedSession::empty("history-refresh")));
+    let delegate = fixture.control.session("history-refresh").await.unwrap();
     let (replies, _observed) = tokio::sync::mpsc::unbounded_channel();
-    let (history, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let (history, mut listings) = tokio::sync::mpsc::unbounded_channel();
     let session = mj_client::session::SessionHandle::new(DelayedNativeSession {
         delegate,
         replies,
@@ -3783,65 +3780,51 @@ async fn a_history_page_of_repeats_fetches_the_next_page_without_a_key_press() {
         String::new(),
         Notices::default(),
     );
-    let page = |texts: &[String], next| PromptHistoryPage {
-        entries: texts
-            .iter()
-            .enumerate()
-            .map(|(index, text)| PromptHistoryEntry {
-                id: index as i64,
-                session_id: "history-refill".into(),
-                text: text.clone(),
-            })
-            .collect(),
-        next,
+    let entry = |id: i64, text: &str| PromptHistoryEntry {
+        id,
+        session_id: "history-refresh".into(),
+        text: text.into(),
     };
-    async fn next_request(
-        requests: &mut tokio::sync::mpsc::UnboundedReceiver<HistoryPageCall>,
-    ) -> HistoryPageCall {
-        tokio::time::timeout(Duration::from_secs(2), requests.recv())
+    async fn answer(
+        chat: &mut ActiveChat,
+        listings: &mut tokio::sync::mpsc::UnboundedReceiver<SessionPromptsCall>,
+        entries: Vec<PromptHistoryEntry>,
+    ) {
+        let reply = tokio::time::timeout(Duration::from_secs(2), listings.recv())
             .await
-            .expect("a history page was requested")
-            .unwrap()
-    }
-    async fn apply_reply(chat: &mut ActiveChat) {
+            .expect("the session's prompts were listed")
+            .unwrap();
+        reply.send(Ok(entries)).unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
-            while !chat.state.has_composer_updates() {
+            loop {
+                chat.drain().await;
+                if !chat.state.session_history.is_empty() {
+                    break;
+                }
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("the history page arrived");
-        chat.drain().await;
+        .expect("the listing arrived");
     }
 
-    chat.handle_event_result(Event::Key(ctrl('r')));
-    for character in "fix".chars() {
-        chat.handle_event_result(Event::Key(key(KeyCode::Char(character))));
-    }
-    let first_cursor = HistoryCursor {
-        tier: 0,
-        before: 50,
-    };
-    let (after, limit, reply) = next_request(&mut requests).await;
-    assert_eq!((after, limit), (None, 9));
-    let first: Vec<String> = (0..9).map(|index| format!("fix {index}")).collect();
-    reply.send(Ok(page(&first, Some(first_cursor)))).unwrap();
-    apply_reply(&mut chat).await;
-    assert_eq!(chat.state.input, "fix 0");
+    answer(&mut chat, &mut listings, vec![entry(1, "typed here")]).await;
+    // The web viewer sent a prompt and its turn finished.
+    chat.state.apply_event(&SequencedEvent {
+        seq: 2,
+        recorded_at_ms: None,
+        request_id: None,
+        event: WorkerEvent::TurnCompleted,
+    });
+    chat.drain().await;
+    chat.state.session_history.clear();
+    answer(
+        &mut chat,
+        &mut listings,
+        vec![entry(2, "sent from the web"), entry(1, "typed here")],
+    )
+    .await;
 
-    // Stepping leaves seven queued, so the key press asks for one more.
-    chat.handle_event_result(Event::Key(ctrl('r')));
-    let (after, limit, reply) = next_request(&mut requests).await;
-    assert_eq!((after, limit), (Some(first_cursor), 1));
-    let later = HistoryCursor {
-        tier: 1,
-        before: 20,
-    };
-    // The page repeats a listed prompt, so the queue is still short.
-    reply
-        .send(Ok(page(&["fix 3".into()], Some(later))))
-        .unwrap();
-    apply_reply(&mut chat).await;
-    let (after, limit, _reply) = next_request(&mut requests).await;
-    assert_eq!((after, limit), (Some(later), 1));
+    chat.handle_event_result(Event::Key(key(KeyCode::Up)));
+    assert_eq!(chat.state.input, "sent from the web");
 }

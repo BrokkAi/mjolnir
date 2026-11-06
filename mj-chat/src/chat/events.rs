@@ -90,6 +90,9 @@ impl ChatState {
                 );
             }
             WorkerEvent::TurnCompleted => {
+                // The turn's prompt may have come from the web viewer or the
+                // API; its stored record is written by now.
+                self.request_session_history();
                 self.phase = WorkerPhase::Idle;
                 self.prompt_in_flight = false;
                 self.session_activity.prompt_in_flight = false;

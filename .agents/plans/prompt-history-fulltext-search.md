@@ -81,6 +81,18 @@ To see it working, open a session in the terminal and press Ctrl-R. Type three o
   Rationale: reading past every repeat made a page's cost follow the number of repeats, which review found could be thousands of rows per keystroke. A bounded peek keeps the answer exact in the common case and the cost bounded in all cases.
   Date/Author: 2026-11-06, agent, after review.
 
+- Decision: each tier query groups its matches by text in SQL (`GROUP BY p.text`, ordered by each text's newest row), leaves out texts an earlier tier holds, and pages with `HAVING newest < cursor`. This replaces the Rust `seen` set, the 16-row peek past a full page, and the composer's removal of repeats.
+  Rationale: three review rounds found defects in handling repeated rows after the fact (stalled refills, unbounded scans before and after a full page, refills walking repeat-only pages). The kept live rows hold 4,828 prompts but 4,266 distinct texts, with `/clear` 173 times and `continue` 99 times. Grouping makes each text appear once across all pages by construction. A request costs one query per tier and follows the tier's matches; on a copy of the live store the session and project tiers took under 5 ms and the other-projects tier 12 to 14 ms for common queries.
+  Date/Author: 2026-11-06, agent, after review.
+
+- Decision: an open chat lists its session's stored prompts again after each `TurnCompleted`, and Up/Ctrl-P show each text once at its newest place.
+  Rationale: prompts sent to the session from the web viewer or the API are recorded by the daemon, not by this chat. `PromptAccepted` events also carry agent `send_message` turns, so the event text cannot feed Up directly; the stored listing holds only recorded user prompts, and its record is written before the turn ends.
+  Date/Author: 2026-11-06, agent, after review.
+
+- Decision: web and API prompt records are written by a task that holds an upgrade admission (`crate::upgrade::activity("prompt history record")`), spawned with no await after acceptance.
+  Rationale: AGENTS.md requires accepted daemon work to survive client disconnects and to take part in handoff.
+  Date/Author: 2026-11-06, agent, after review.
+
 - Decision: remove the in-memory substring fallback `ChatState::local_history_search_results`.
   Rationale: it ran only when a chat had no project ID, which an open chat always has (`ActiveChat` calls `set_history_context` on open), so it was a second matching mode reachable only from tests.
   Date/Author: 2026-11-06, agent.

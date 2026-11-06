@@ -112,8 +112,7 @@ fn a_bounded_prompt_search_reports_that_it_stopped_early() {
     assert_eq!(repeats.entries.len(), 10);
     assert!(repeats.next.is_none(), "repeated text is not another match");
 
-    // A long run of repeats after a full page is left to the next request,
-    // which skips it and finds nothing new.
+    // However often each is repeated, the ten texts fill one page exactly.
     for round in 2..5 {
         for index in 0..10 {
             record_prompt_to(
@@ -127,28 +126,18 @@ fn a_bounded_prompt_search_reports_that_it_stopped_early() {
             .unwrap();
         }
     }
-    let page = |after| {
-        search_prompt_page_from(
-            &database,
-            "session-1",
-            "bundle-1",
-            HistoryScope::Session,
-            "repeat",
-            after,
-            10,
-        )
-        .unwrap()
-    };
-    let full = page(None);
-    assert_eq!(full.entries.len(), 10);
-    let rest = page(Some(full.next.expect("the repeats outlast the peek")));
-    assert!(
-        rest.entries
-            .iter()
-            .all(|entry| full.entries.iter().any(|seen| seen.text == entry.text)),
-        "every later match repeats a listed prompt"
-    );
-    assert!(rest.next.is_none());
+    let repeated = search_prompt_page_from(
+        &database,
+        "session-1",
+        "bundle-1",
+        HistoryScope::Session,
+        "repeat",
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(repeated.entries.len(), 10);
+    assert!(repeated.next.is_none());
 }
 
 /// The eviction the daemon performs depends on the typed cause reaching the
@@ -3561,10 +3550,6 @@ fn wider_history_scopes_list_smaller_scopes_first_and_dedupe_at_the_smallest() {
             None => break,
         }
     }
-    // The session's "alpha session old" reappears from the project tier on a
-    // later page; a caller holding earlier pages drops it, as the composer does.
-    let mut seen = std::collections::HashSet::new();
-    paged.retain(|text| seen.insert(text.clone()));
     assert_eq!(paged, texts(HistoryScope::All));
 
     assert!(

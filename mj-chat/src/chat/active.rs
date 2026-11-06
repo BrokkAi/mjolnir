@@ -92,7 +92,10 @@ enum ChatIoUpdate {
             String,
         >,
     },
-    SessionHistoryPrefetched(std::result::Result<Vec<PromptHistoryEntry>, String>),
+    SessionHistoryListed {
+        generation: u64,
+        result: std::result::Result<Vec<PromptHistoryEntry>, String>,
+    },
     /// The history a large session did not convert when it opened, built off
     /// the event loop. `attempt` counts the tries so far, so a transcript that
     /// keeps changing under the conversion cannot retry for ever.
@@ -121,6 +124,27 @@ enum ChatIoUpdate {
 /// tail. Compaction rewriting the history under a pending conversion is rare,
 /// and one rebuild against the current snapshot normally lands.
 const MAX_PREFIX_CONVERSION_ATTEMPTS: u32 = 3;
+
+fn dispatch_session_history_request(
+    session: ManagedSessionHandle,
+    chat: &mut ChatState,
+    updates: &tokio::sync::mpsc::UnboundedSender<ChatIoUpdate>,
+) {
+    let Some(generation) = chat.take_session_history_request() else {
+        return;
+    };
+    let updates = updates.clone();
+    tokio::spawn(async move {
+        let result = session
+            .session_prompts()
+            .await
+            .map_err(|error| format!("{error:#}"));
+        if let Err(error) = updates.send(ChatIoUpdate::SessionHistoryListed { generation, result })
+        {
+            tracing::debug!(%error, "session history result dropped because the chat closed");
+        }
+    });
+}
 
 fn dispatch_history_search_request(session: ManagedSessionHandle, chat: &mut ChatState) {
     let Some(request) = chat.take_history_search_request() else {
@@ -264,10 +288,16 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
                 chat.set_notice(format!("Earlier messages failed to load: {error}"));
             }
         },
-        ChatIoUpdate::SessionHistoryPrefetched(Ok(entries)) => chat.set_session_history(entries),
-        ChatIoUpdate::SessionHistoryPrefetched(Err(error)) => {
-            tracing::warn!(%error, "session chat history prefetch failed");
-            chat.set_session_history_unavailable(error);
+        ChatIoUpdate::SessionHistoryListed {
+            generation,
+            result: Ok(entries),
+        } => chat.set_session_history(generation, entries),
+        ChatIoUpdate::SessionHistoryListed {
+            generation,
+            result: Err(error),
+        } => {
+            tracing::warn!(%error, "session chat history listing failed");
+            chat.set_session_history_unavailable(generation, error);
         }
         ChatIoUpdate::ToolDiffstats {
             tool_call_id,
@@ -644,19 +674,8 @@ impl ActiveChat {
         state.restore_draft(draft);
         state.notices = notices;
         let (chat_io_tx, chat_io_rx) = tokio::sync::mpsc::unbounded_channel::<ChatIoUpdate>();
-        {
-            let updates = chat_io_tx.clone();
-            let history_session = session.clone();
-            tokio::spawn(async move {
-                let result = history_session
-                    .session_prompts()
-                    .await
-                    .map_err(|error| format!("{error:#}"));
-                if let Err(error) = updates.send(ChatIoUpdate::SessionHistoryPrefetched(result)) {
-                    tracing::debug!(%error, "session history result dropped because the chat closed");
-                }
-            });
-        }
+        state.request_session_history();
+        dispatch_session_history_request(session.clone(), &mut state, &chat_io_tx);
         if let Some(pending) = pending_prefix {
             spawn_transcript_prefix(pending, 1, chat_io_tx.clone());
         }

@@ -63,9 +63,10 @@ impl ActiveChat {
             self.apply_session_view(view);
         }
         self.publish_conversation_notices();
-        // Applying a history page can queue the next one; every wakeup ends
-        // here, so a refill never waits for a key press.
+        // Applying an update can queue a history page or listing; every
+        // wakeup ends here, so neither waits for a key press.
         dispatch_history_search_request(self.session.clone(), &mut self.state);
+        dispatch_session_history_request(self.session.clone(), &mut self.state, &self.chat_io_tx);
     }
 
     pub(super) fn publish_conversation_notices(&mut self) {

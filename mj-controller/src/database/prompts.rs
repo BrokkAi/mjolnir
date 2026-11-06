@@ -166,16 +166,12 @@ pub(super) fn session_prompts_from(
     session_id: &str,
 ) -> Result<Vec<PromptHistoryEntry>> {
     let connection = open_reader(path)?;
-    let mut seen = std::collections::HashSet::new();
-    Ok(query_history_page(
+    query_history_page(
         &connection,
-        "SELECT history_id, session_id, text FROM prompt_history
-         WHERE session_id = ?1 ORDER BY history_id DESC",
+        "SELECT max(history_id) AS newest, session_id, text FROM prompt_history
+         WHERE session_id = ?1 GROUP BY text ORDER BY newest DESC",
         [session_id],
-    )?
-    .into_iter()
-    .filter(|entry| seen.insert(entry.text.clone()))
-    .collect())
+    )
 }
 
 /// Where prompts come from, smallest scope first. The discriminant is the
@@ -204,8 +200,11 @@ impl HistoryTier {
         }
     }
 
-    /// Up to `count` of the tier's matches older than `before`, newest first.
-    /// The full-text index drives each query, so it reads matches only.
+    /// Up to `count` of the tier's distinct matching prompts, newest first by
+    /// each text's newest row, among texts whose newest row is older than
+    /// `before`. A text an earlier tier holds is left out, so every text
+    /// appears in one tier and on one page. The full-text index drives each
+    /// query, so the work follows the tier's matches, not its rows.
     fn page(
         self,
         connection: &Connection,
@@ -222,31 +221,43 @@ impl HistoryTier {
             // row, which took 75 ms for a 291-prompt session instead of 6 ms.
             HistoryTier::Session => query_history_page(
                 connection,
-                "SELECT p.history_id, p.session_id, p.text
+                "SELECT max(p.history_id) AS newest, p.session_id, p.text
                  FROM prompt_history_text f JOIN prompt_history p ON p.history_id = f.rowid
-                 WHERE prompt_history_text MATCH ?1 AND f.rowid < ?2 AND +p.session_id = ?3
-                 ORDER BY f.rowid DESC LIMIT ?4",
-                params![phrase, before, session_id, count],
+                 WHERE prompt_history_text MATCH ?1 AND +p.session_id = ?2
+                 GROUP BY p.text HAVING newest < ?3
+                 ORDER BY newest DESC LIMIT ?4",
+                params![phrase, session_id, before, count],
             ),
             HistoryTier::Project => query_history_page(
                 connection,
-                "SELECT p.history_id, p.session_id, p.text
+                "SELECT max(p.history_id) AS newest, p.session_id, p.text
                  FROM prompt_history_text f JOIN prompt_history p ON p.history_id = f.rowid
-                 WHERE prompt_history_text MATCH ?1 AND f.rowid < ?2 AND p.session_id <> ?3
+                 WHERE prompt_history_text MATCH ?1 AND p.session_id <> ?2
                    AND EXISTS (SELECT 1 FROM session_contexts c
-                               WHERE c.session_id = p.session_id AND c.bundle_id = ?4)
-                 ORDER BY f.rowid DESC LIMIT ?5",
-                params![phrase, before, session_id, bundle_id, count],
+                               WHERE c.session_id = p.session_id AND c.bundle_id = ?3)
+                   AND p.text NOT IN (SELECT text FROM prompt_history WHERE session_id = ?2)
+                 GROUP BY p.text HAVING newest < ?4
+                 ORDER BY newest DESC LIMIT ?5",
+                params![phrase, session_id, bundle_id, before, count],
             ),
             HistoryTier::Elsewhere => query_history_page(
                 connection,
-                "SELECT p.history_id, p.session_id, p.text
+                "SELECT max(p.history_id) AS newest, p.session_id, p.text
                  FROM prompt_history_text f JOIN prompt_history p ON p.history_id = f.rowid
-                 WHERE prompt_history_text MATCH ?1 AND f.rowid < ?2
+                 WHERE prompt_history_text MATCH ?1 AND p.session_id <> ?2
                    AND NOT EXISTS (SELECT 1 FROM session_contexts c
                                    WHERE c.session_id = p.session_id AND c.bundle_id = ?3)
-                 ORDER BY f.rowid DESC LIMIT ?4",
-                params![phrase, before, bundle_id, count],
+                   AND p.text NOT IN (
+                       SELECT h.text
+                       FROM prompt_history_text g JOIN prompt_history h ON h.history_id = g.rowid
+                       WHERE prompt_history_text MATCH ?1
+                         AND (h.session_id = ?2
+                              OR EXISTS (SELECT 1 FROM session_contexts d
+                                         WHERE d.session_id = h.session_id
+                                           AND d.bundle_id = ?3)))
+                 GROUP BY p.text HAVING newest < ?4
+                 ORDER BY newest DESC LIMIT ?5",
+                params![phrase, session_id, bundle_id, before, count],
             ),
         }
     }
@@ -259,21 +270,12 @@ fn fulltext_phrase(query: &str) -> Option<String> {
         .then(|| format!("\"{}\"", query.replace('"', "\"\"")))
 }
 
-/// Rows read per query at least, so a run of repeated prompts past a full
-/// page takes a few queries rather than one per row.
-const MIN_PAGE_ROWS: usize = 16;
-
-/// Rows a full page reads past its last match looking for one that repeats
-/// no listed text. Past this budget the page reports that more may follow,
-/// so a long run of repeats costs the next request, not this one.
-const PEEK_ROWS: usize = 16;
-
 /// The one prompt search behind the terminal composer and the web viewer.
 ///
-/// Tiers are read in order from the cursor, and the search stops as soon as
-/// it holds `limit` matches, so its work follows the matches returned rather
-/// than the size of the history. Repeated text appears once within a page;
-/// a caller that keeps several pages drops repeats across them.
+/// Tiers are read in order from the cursor, each with one query for the
+/// matches it still needs plus one, and the search stops as soon as it holds
+/// `limit` matches. Each prompt text is listed once across all pages, at its
+/// smallest scope.
 pub(super) fn search_prompt_page_from(
     path: &Path,
     session_id: &str,
@@ -292,57 +294,39 @@ pub(super) fn search_prompt_page_from(
         tier: HistoryTier::Session as u8,
         before: i64::MAX,
     });
-    let mut seen = std::collections::HashSet::new();
-    let mut entries = Vec::new();
-    let mut peeked = 0;
+    let mut entries: Vec<PromptHistoryEntry> = Vec::new();
     for &tier in HistoryTier::of_scope(scope)
         .iter()
         .filter(|tier| **tier as u8 >= start.tier)
     {
-        let mut before = if tier as u8 == start.tier {
+        let before = if tier as u8 == start.tier {
             start.before
         } else {
             i64::MAX
         };
-        loop {
-            // Read one row past what is still needed: a further match that
-            // repeats no listed text is what shows that more exist.
-            let count = limit
-                .saturating_sub(entries.len())
-                .saturating_add(1)
-                .max(MIN_PAGE_ROWS);
-            let rows = tier.page(
-                &connection,
-                &phrase,
-                session_id,
-                &canonical_bundle,
-                before,
-                count,
-            )?;
-            let exhausted = rows.len() < count;
-            for entry in rows {
-                let repeat = seen.contains(&entry.text);
-                if entries.len() == limit && (!repeat || peeked == PEEK_ROWS) {
-                    return Ok(PromptHistoryPage {
-                        entries,
-                        next: Some(HistoryCursor {
-                            tier: tier as u8,
-                            before,
-                        }),
-                    });
-                }
-                before = entry.id;
-                if entries.len() == limit {
-                    peeked += 1;
-                } else if !repeat {
-                    seen.insert(entry.text.clone());
-                    entries.push(entry);
-                }
-            }
-            if exhausted {
-                break;
-            }
+        let wanted = limit.saturating_sub(entries.len());
+        // One past what is still needed shows whether more exist.
+        let mut rows = tier.page(
+            &connection,
+            &phrase,
+            session_id,
+            &canonical_bundle,
+            before,
+            wanted.saturating_add(1),
+        )?;
+        if rows.len() > wanted {
+            rows.truncate(wanted);
+            let before = rows.last().map_or(before, |entry| entry.id);
+            entries.extend(rows);
+            return Ok(PromptHistoryPage {
+                entries,
+                next: Some(HistoryCursor {
+                    tier: tier as u8,
+                    before,
+                }),
+            });
         }
+        entries.extend(rows);
     }
     Ok(PromptHistoryPage {
         entries,

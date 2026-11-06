@@ -63,8 +63,26 @@ pub(super) struct HistorySearchRequest {
 }
 
 impl ChatState {
-    /// `entries` are this session's stored prompts, newest first.
-    pub(super) fn set_session_history(&mut self, entries: Vec<PromptHistoryEntry>) {
+    /// Ask for this session's stored prompts again.
+    pub(super) fn request_session_history(&mut self) {
+        self.session_history_generation = self.session_history_generation.wrapping_add(1);
+        self.pending_session_history = Some(self.session_history_generation);
+    }
+
+    pub(super) fn take_session_history_request(&mut self) -> Option<u64> {
+        self.pending_session_history.take()
+    }
+
+    /// `entries` are this session's stored prompts, newest first, as listed
+    /// for request `generation`.
+    pub(super) fn set_session_history(
+        &mut self,
+        generation: u64,
+        entries: Vec<PromptHistoryEntry>,
+    ) {
+        if generation != self.session_history_generation {
+            return;
+        }
         self.session_history_error = None;
         self.session_history = entries.into_iter().rev().map(|entry| entry.text).collect();
         if let Some(index) = self.history_index
@@ -76,7 +94,10 @@ impl ChatState {
         }
     }
 
-    pub(super) fn set_session_history_unavailable(&mut self, error: String) {
+    pub(super) fn set_session_history_unavailable(&mut self, generation: u64, error: String) {
+        if generation != self.session_history_generation {
+            return;
+        }
         if self.session_history_error.as_deref() != Some(error.as_str()) {
             self.session_history_error = Some(error);
         }
@@ -180,13 +201,8 @@ impl ChatState {
         search.fetching = false;
         match result {
             Ok(page) => {
-                // A page repeats text an earlier page already listed when the
-                // same prompt was sent in several scopes; keep the first.
-                for entry in page.entries {
-                    if !search.matches.iter().any(|known| known.text == entry.text) {
-                        search.matches.push(entry);
-                    }
-                }
+                // The store lists each prompt text once across all pages.
+                search.matches.extend(page.entries);
                 search.next = page.next;
                 search.unavailable = None;
                 if search.selected.is_none()
@@ -337,9 +353,19 @@ impl ChatState {
         self.history_draft_images.clear();
     }
 
+    /// Stored prompts, then this visit's, oldest first. A prompt in both, or
+    /// sent again, is listed once at its newest place.
     fn navigation_history(&self) -> Vec<String> {
-        let mut history = self.session_history.clone();
-        history.extend(self.prompt_history.iter().cloned());
+        let mut seen = std::collections::HashSet::new();
+        let mut history: Vec<String> = self
+            .session_history
+            .iter()
+            .chain(&self.prompt_history)
+            .rev()
+            .filter(|text| seen.insert(text.as_str()))
+            .cloned()
+            .collect();
+        history.reverse();
         history
     }
 
@@ -633,13 +659,8 @@ mod tests {
         // Stepping leaves seven ahead, so the next page resumes at the cursor.
         chat.handle_key(ctrl('r'));
         assert_eq!(chat.input, "fix 1");
-        let later = HistoryCursor { tier: 2, before: 7 };
-        // A repeat of a listed prompt, as a wider tier returns it, is dropped
-        // and the shortfall is requested again at once.
-        let request = answer_history_page(&mut chat, &["fix 3"], Some(later));
-        assert_eq!((request.after, request.limit), (Some(cursor), 1));
         let request = answer_history_page(&mut chat, &["fix elsewhere"], None);
-        assert_eq!((request.after, request.limit), (Some(later), 1));
+        assert_eq!((request.after, request.limit), (Some(cursor), 1));
 
         for _ in 0..20 {
             chat.handle_key(ctrl('r'));
@@ -695,18 +716,23 @@ mod tests {
     fn move_history_walks_only_this_sessions_prompts() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_history_context("bundle");
-        chat.set_session_history(vec![
-            PromptHistoryEntry {
-                id: 3,
-                session_id: "1234567890".into(),
-                text: "mine newest".into(),
-            },
-            PromptHistoryEntry {
-                id: 1,
-                session_id: "1234567890".into(),
-                text: "mine oldest".into(),
-            },
-        ]);
+        chat.request_session_history();
+        let generation = chat.take_session_history_request().unwrap();
+        chat.set_session_history(
+            generation,
+            vec![
+                PromptHistoryEntry {
+                    id: 3,
+                    session_id: "1234567890".into(),
+                    text: "mine newest".into(),
+                },
+                PromptHistoryEntry {
+                    id: 1,
+                    session_id: "1234567890".into(),
+                    text: "mine oldest".into(),
+                },
+            ],
+        );
         chat.record_prompt_history("this visit");
 
         let mut recalled = Vec::new();

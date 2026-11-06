@@ -3202,7 +3202,7 @@ impl SubagentBackend for ApiBackend {
             let ordinal = self
                 .prompt_with_id(session_id.clone(), text.clone(), command_id)
                 .await?;
-            super::actions::record_user_prompt(session_id, ordinal, text).await;
+            super::actions::record_user_prompt(session_id, ordinal, text);
             Ok(ordinal)
         })
     }
