@@ -3271,8 +3271,6 @@ fn removable_profile_root_names_a_per_session_profile_directory_for_every_harnes
 
     let profile = |kind: HarnessKind, home: &str| HarnessProfile {
         enabled: true,
-        kind,
-        home: std::path::PathBuf::from(home),
         environment: Default::default(),
         context_window_bytes: None,
         models: Default::default(),
@@ -3280,6 +3278,7 @@ fn removable_profile_root_names_a_per_session_profile_directory_for_every_harnes
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
     };
     let worker_root = format!("/var/lib/hel/workers/{SESSION}");
     let local = TargetLocator::LocalBare {
@@ -3351,8 +3350,6 @@ fn a_session_never_runs_from_the_profile_home_itself() {
 
     let profile = |kind: HarnessKind, home: &str| HarnessProfile {
         enabled: true,
-        kind,
-        home: std::path::PathBuf::from(home),
         environment: Default::default(),
         context_window_bytes: None,
         models: Default::default(),
@@ -3360,6 +3357,7 @@ fn a_session_never_runs_from_the_profile_home_itself() {
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
     };
     let local = TargetLocator::LocalBare {
         worker_root: format!("/var/lib/hel/workers/{SESSION}"),

@@ -425,16 +425,7 @@ fn sample_config() -> Config {
         profiles: BTreeMap::from([(
             "codex-1".into(),
             HarnessProfile {
-                enabled: true,
-                context_window_bytes: None,
-                kind: HarnessKind::Codex,
-                home: PathBuf::from("/home/test/.codex"),
-                environment: Default::default(),
-                models: Default::default(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
+                ..HarnessProfile::new(HarnessKind::Codex, PathBuf::from("/home/test/.codex"))
             },
         )]),
         bundles: BTreeMap::from([(

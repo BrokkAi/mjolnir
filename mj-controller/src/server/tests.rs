@@ -93,16 +93,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         profiles: BTreeMap::from([(
             "codex-1".into(),
             HarnessProfile {
-                enabled: true,
-                context_window_bytes: None,
-                models: Default::default(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
-                kind: HarnessKind::Codex,
-                home: "/highly/secret/codex".into(),
                 environment: BTreeMap::from([("GH_TOKEN".into(), "secret-token".into())]).into(),
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, "/highly/secret/codex")
             },
         )]),
         bundles: BTreeMap::from([(
@@ -3048,16 +3040,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
     config.profiles.insert(
         "claude-1".into(),
         HarnessProfile {
-            enabled: true,
-            context_window_bytes: None,
-            models: Default::default(),
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
-            kind: HarnessKind::Claude,
-            home: "/secret/claude".into(),
-            environment: Default::default(),
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, "/secret/claude")
         },
     );
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);

@@ -617,16 +617,8 @@ pub fn build_config(homes: &[DiscoveredHome], repository: Option<&GithubReposito
         config.profiles.insert(
             id,
             HarnessProfile {
-                enabled: true,
-                kind: home.kind,
-                home: home.path.clone(),
-                environment: Default::default(),
-                context_window_bytes: None,
-                models: Default::default(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
                 codex_profile: home.codex_profile.clone(),
+                ..mj_core::config::HarnessProfile::new(home.kind, home.path.clone())
             },
         );
     }

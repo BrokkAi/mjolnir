@@ -1357,16 +1357,10 @@ pub(crate) fn test_config(profiles: &[(&str, HarnessKind)]) -> Config {
                 (
                     (*id).to_owned(),
                     HarnessProfile {
-                        enabled: true,
-                        kind: *kind,
-                        home: std::path::PathBuf::from("/home/agent").join(id),
-                        environment: Default::default(),
-                        context_window_bytes: None,
-                        models: Default::default(),
-                        legacy_subagents: Default::default(),
-                        guardian_review_model: None,
-                        codex_profile: None,
-                        muse_auto_review: None,
+                        ..mj_core::config::HarnessProfile::new(
+                            *kind,
+                            std::path::PathBuf::from("/home/agent").join(id),
+                        )
                     },
                 )
             })

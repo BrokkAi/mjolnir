@@ -1128,6 +1128,22 @@ fn installation_home(path: &Path) -> PathBuf {
 }
 
 impl HarnessProfile {
+    /// Creates an enabled profile with all optional settings unset.
+    pub fn new(kind: HarnessKind, home: impl Into<PathBuf>) -> Self {
+        Self {
+            enabled: true,
+            kind,
+            home: home.into(),
+            environment: Default::default(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+            codex_profile: None,
+            muse_auto_review: None,
+            models: Default::default(),
+            legacy_subagents: None,
+        }
+    }
+
     pub fn discovery_inputs(&self) -> ProfileDiscoveryInputs {
         ProfileDiscoveryInputs {
             kind: self.kind,
@@ -1979,16 +1995,9 @@ mod tests {
     #[test]
     fn a_managed_harness_upgrade_invalidates_discovered_capabilities() {
         let profile = HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Muse,
-            home: PathBuf::from("/profiles/muse"),
             environment: Environment::default(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            models: Default::default(),
             legacy_subagents: None,
+            ..HarnessProfile::new(HarnessKind::Muse, PathBuf::from("/profiles/muse"))
         };
         let inputs = profile.discovery_inputs();
         assert_eq!(inputs.managed_install, pin(HarnessKind::Muse).install_id);

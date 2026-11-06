@@ -796,9 +796,6 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("device_id"), "profile-device").unwrap();
         let profile = HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Kimi,
-            home: home.path().to_path_buf(),
             environment: BTreeMap::from([
                 ("KIMI_API_KEY".into(), "profile-key".into()),
                 (
@@ -812,12 +809,7 @@ mod tests {
                 ("PATH".into(), "/missing-kimi-runtime".into()),
             ])
             .into(),
-            context_window_bytes: None,
-            models: Default::default(),
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Kimi, home.path().to_path_buf())
         };
         let backend = backend_for_profile(&profile).unwrap().unwrap();
         assert_eq!(backend.list_models().await.unwrap(), vec!["kimi-k2.5"]);
@@ -833,15 +825,10 @@ mod tests {
             "codex".into(),
             HarnessProfile {
                 enabled: false,
-                kind: HarnessKind::Codex,
-                home: PathBuf::from("/profiles/codex"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                models: Default::default(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(
+                    HarnessKind::Codex,
+                    PathBuf::from("/profiles/codex"),
+                )
             },
         );
         let runtime = UtilityLlmRuntime::default();
@@ -961,16 +948,7 @@ mod tests {
         )
         .unwrap();
         let profile = HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: home.path().to_path_buf(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            models: Default::default(),
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
         };
         assert_eq!(utility_family(&profile), Some(UtilityFamily::DeepSeek));
         assert!(

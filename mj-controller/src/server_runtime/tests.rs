@@ -321,16 +321,10 @@ fn golden_phone_new_session_preflight() {
     config.profiles.insert(
         "codex".into(),
         mj_core::config::HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: PathBuf::from("/home/dev/.codex"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            models: Default::default(),
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                PathBuf::from("/home/dev/.codex"),
+            )
         },
     );
     config.review.trigger = mj_core::config::ReviewTrigger::Turn;
@@ -1452,16 +1446,10 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
                     (
                         (*id).to_owned(),
                         HarnessProfile {
-                            enabled: true,
-                            context_window_bytes: None,
-                            models: Default::default(),
-                            legacy_subagents: Default::default(),
-                            guardian_review_model: None,
-                            codex_profile: None,
-                            muse_auto_review: None,
-                            kind: HarnessKind::Codex,
-                            home: PathBuf::from("/home/agent").join(id),
-                            environment: Default::default(),
+                            ..mj_core::config::HarnessProfile::new(
+                                HarnessKind::Codex,
+                                PathBuf::from("/home/agent").join(id),
+                            )
                         },
                     )
                 })

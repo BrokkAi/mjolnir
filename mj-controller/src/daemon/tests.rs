@@ -5666,8 +5666,6 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
         "codex".into(),
         mj_core::config::HarnessProfile {
             enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home,
             environment: environment.into_iter().collect(),
             context_window_bytes: None,
             guardian_review_model: None,
@@ -5675,6 +5673,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             muse_auto_review: None,
             models: Default::default(),
             legacy_subagents: None,
+            ..mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Codex, home)
         },
     );
     config.targets.insert(
@@ -7073,16 +7072,10 @@ fn seed_live_session(directory: &Path, relay_root: &Path) {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: profile_home,
-                environment: Default::default(),
-                context_window_bytes: None,
-                models: Default::default(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    profile_home,
+                )
             },
         );
         Ok(())
@@ -11125,16 +11118,10 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: project.path().join("codex-home"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                models: Default::default(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    project.path().join("codex-home"),
+                )
             },
         );
         config.targets.insert(

@@ -1601,9 +1601,8 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
                 guardian_review_model: None,
                 muse_auto_review: None,
                 codex_profile: None,
-                kind,
-                home: PathBuf::from("/profiles/harness"),
                 environment: Default::default(),
+                ..mj_core::config::HarnessProfile::new(kind, PathBuf::from("/profiles/harness"))
             },
         )]);
         config
@@ -1673,16 +1672,10 @@ fn a_missing_profile_is_left_out_of_the_profile_step_and_named() {
     config.profiles.insert(
         "kimi-1".into(),
         HarnessProfile {
-            enabled: true,
-            context_window_bytes: None,
-            models: Default::default(),
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            kind: HarnessKind::Kimi,
-            home: PathBuf::from("/profiles/kimi"),
-            environment: Default::default(),
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Kimi,
+                PathBuf::from("/profiles/kimi"),
+            )
         },
     );
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
@@ -1713,16 +1706,10 @@ fn new_session_profile_step_aligns_its_columns() {
     config.profiles.insert(
         "kimi-1".into(),
         HarnessProfile {
-            enabled: true,
-            context_window_bytes: None,
-            models: Default::default(),
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            kind: HarnessKind::Kimi,
-            home: PathBuf::from("/profiles/kimi"),
-            environment: Default::default(),
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Kimi,
+                PathBuf::from("/profiles/kimi"),
+            )
         },
     );
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
@@ -1843,16 +1830,10 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
     config.profiles = BTreeMap::from([(
         "kimi".into(),
         HarnessProfile {
-            enabled: true,
-            context_window_bytes: None,
-            models: Default::default(),
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            kind: HarnessKind::Kimi,
-            home: PathBuf::from("/profiles/kimi"),
-            environment: Default::default(),
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Kimi,
+                PathBuf::from("/profiles/kimi"),
+            )
         },
     )]);
     config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
@@ -2967,16 +2948,10 @@ fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
     dashboard.config.profiles.insert(
         "kimi-1".into(),
         HarnessProfile {
-            enabled: true,
-            context_window_bytes: None,
-            models: Default::default(),
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            kind: HarnessKind::Kimi,
-            home: PathBuf::from("/profiles/kimi"),
-            environment: Default::default(),
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Kimi,
+                PathBuf::from("/profiles/kimi"),
+            )
         },
     );
     open_resume_wizard(&mut dashboard);
