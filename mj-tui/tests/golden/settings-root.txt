@@ -309,16 +309,9 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
 
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
-  │Trigger   Off ▾                                                                               │
-  │Profile   Auto ▾                                                                              │
-  │Model     Auto policy ▾                                                                       │
-  │Effort    Auto policy ▾                                                                       │
-  │Reviewers 2                                                                                   │
-  │                                                                                              │
-  │                                                                                              │
-  │Changes stay in the Settings draft until you save Settings.                                   │
-  │Auto resolves a reviewer when review starts                                                   │
-  │1–3 reviewers are reasonable; more have diminishing returns.                                  │
+  │Trigger     Off ▾                                                                             │
+  │  Add reviewer     Autoconfigure                                                              │
+  │Loading review models…                                                                        │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -331,8 +324,15 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
-  │Tab moves · Enter opens choices · Esc goes back                                               │
-  │  Cancel     Back     Refresh choices     Save Settings                                       │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │  Cancel     Back     Save Settings                                                           │
   ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
 

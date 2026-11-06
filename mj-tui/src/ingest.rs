@@ -596,7 +596,6 @@ impl DashboardState {
         if *self.config == config {
             return;
         }
-        self.invalidate_review_settings_choices_for_config(&config);
         self.quotas
             .retain(|id, _| config.enabled_profile(id).is_some());
         self.quota_refreshing

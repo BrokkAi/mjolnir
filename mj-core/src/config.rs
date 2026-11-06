@@ -132,49 +132,23 @@ impl PhoneConfig {
     }
 }
 
-/// Automatic cross-harness review and its trigger.
-///
-/// Review is armed here, in the one file that belongs to the machine rather
-/// than to any surface: a session driven from a phone is reviewed on the same
-/// terms as one driven from the terminal, and the person who set it can see
-/// what they set. `profile` names a harness profile defined in this same file
-/// -- or Auto when absent. A reviewer always has its own conversation, even
-/// when it uses the primary session's profile.
+/// Automatic review trigger and ordered reviewer choices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "ReviewConfigInput")]
 pub struct ReviewConfig {
     #[serde(default)]
     pub trigger: ReviewTrigger,
-    /// Number of independent reviewers to launch for each review.
-    #[serde(default = "default_review_count")]
-    pub count: std::num::NonZeroUsize,
-    /// Deprecated review tier. Accepted for old configurations and ignored.
-    #[serde(default, skip_serializing)]
-    pub tier: Option<String>,
-    /// The harness profile the reviewing agents run under.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
-    /// Main reviewer overrides for a named profile. Auto uses its fixed policy.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
+    #[serde(default)]
+    pub reviewers: Vec<SubagentChoice>,
 }
 
-/// Independent review sessions assigned when a configuration omits the count.
-pub fn default_review_count() -> std::num::NonZeroUsize {
-    std::num::NonZeroUsize::new(2).expect("two is nonzero")
-}
+pub const MAX_REVIEWERS: usize = 3;
 
 impl Default for ReviewConfig {
     fn default() -> Self {
         Self {
             trigger: ReviewTrigger::Off,
-            count: default_review_count(),
-            tier: None,
-            profile: None,
-            model: None,
-            effort: None,
+            reviewers: Vec::new(),
         }
     }
 }
@@ -203,13 +177,17 @@ impl std::fmt::Display for ReviewTrigger {
 struct ReviewConfigInput {
     #[serde(default)]
     trigger: Option<ReviewTrigger>,
-    #[serde(default = "default_review_count")]
-    count: std::num::NonZeroUsize,
+    #[serde(default)]
+    reviewers: Option<Vec<SubagentChoice>>,
+    #[serde(default)]
+    count: Option<std::num::NonZeroUsize>,
     #[serde(default)]
     enabled: Option<bool>,
     #[serde(default)]
+    #[expect(dead_code, reason = "accepted only so that old files still load")]
     tier: Option<String>,
     #[serde(default)]
+    #[expect(dead_code, reason = "accepted only so that old files still load")]
     profile: Option<String>,
     #[serde(default)]
     model: Option<String>,
@@ -219,17 +197,25 @@ struct ReviewConfigInput {
 
 impl From<ReviewConfigInput> for ReviewConfig {
     fn from(input: ReviewConfigInput) -> Self {
+        // The old profile pin and tier are dropped: reviewers are
+        // load-balanced across enabled profiles.
+        let ReviewConfigInput {
+            trigger,
+            reviewers,
+            count,
+            enabled,
+            tier: _,
+            profile: _,
+            model,
+            effort,
+        } = input;
         Self {
-            trigger: input.trigger.unwrap_or(if input.enabled == Some(true) {
+            trigger: trigger.unwrap_or(if enabled == Some(true) {
                 ReviewTrigger::Turn
             } else {
                 ReviewTrigger::Off
             }),
-            count: input.count,
-            tier: input.tier,
-            profile: input.profile,
-            model: input.model,
-            effort: input.effort,
+            reviewers: legacy_reviewers(reviewers, count, model, effort).unwrap_or_default(),
         }
     }
 }
@@ -238,53 +224,129 @@ impl From<ReviewConfigInput> for ReviewConfig {
 /// overrides `[review]` for that session only; a session without one follows
 /// `[review]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(from = "SessionReviewInput", into = "SessionReviewOutput")]
 pub enum SessionReview {
-    /// Follow the current `[review]` trigger, with optional session settings.
     Inherit {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reviewers: Option<Vec<SubagentChoice>>,
+    },
+    Off,
+    Turn {
+        reviewers: Option<Vec<SubagentChoice>>,
+    },
+    Push {
+        reviewers: Option<Vec<SubagentChoice>>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
+enum SessionReviewInput {
+    Inherit {
+        reviewers: Option<Vec<SubagentChoice>>,
         count: Option<std::num::NonZeroUsize>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
-        /// Deprecated review tier. Accepted in old session records and API
-        /// requests, ignored, and omitted from newly serialized values.
-        #[serde(default, skip_serializing)]
+        #[expect(dead_code, reason = "accepted only so that old files still load")]
         tier: Option<String>,
     },
-    /// Never review this session automatically. A manual `/review` still runs.
     Off,
-    /// Review every turn. A field left empty keeps the `[review]` value; a
-    /// model without a `[review]` profile makes Auto pick a profile that
-    /// offers it.
     #[serde(alias = "on")]
     Turn {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reviewers: Option<Vec<SubagentChoice>>,
         count: Option<std::num::NonZeroUsize>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
-        /// Deprecated review tier. Accepted in old session records and API
-        /// requests, ignored, and omitted from newly serialized values.
-        #[serde(default, skip_serializing)]
+        #[expect(dead_code, reason = "accepted only so that old files still load")]
         tier: Option<String>,
     },
     Push {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reviewers: Option<Vec<SubagentChoice>>,
         count: Option<std::num::NonZeroUsize>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
-        /// Deprecated review tier. Accepted in old session records and API
-        /// requests, ignored, and omitted from newly serialized values.
-        #[serde(default, skip_serializing)]
+        #[expect(dead_code, reason = "accepted only so that old files still load")]
         tier: Option<String>,
     },
 }
 
+#[derive(Serialize)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
+enum SessionReviewOutput {
+    Inherit {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reviewers: Option<Vec<SubagentChoice>>,
+    },
+    Off,
+    Turn {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reviewers: Option<Vec<SubagentChoice>>,
+    },
+    Push {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reviewers: Option<Vec<SubagentChoice>>,
+    },
+}
+
+/// The reviewer list, or the one a configuration written before reviewer
+/// lists implies: `count` copies of its model (two when `count` is absent,
+/// the old default), and none when it named no model (old Auto).
+fn legacy_reviewers(
+    reviewers: Option<Vec<SubagentChoice>>,
+    count: Option<std::num::NonZeroUsize>,
+    model: Option<String>,
+    effort: Option<String>,
+) -> Option<Vec<SubagentChoice>> {
+    reviewers.or_else(|| {
+        model.map(|model| {
+            vec![SubagentChoice { model, effort }; count.map_or(2, |c| c.get()).min(MAX_REVIEWERS)]
+        })
+    })
+}
+
+impl From<SessionReviewInput> for SessionReview {
+    fn from(input: SessionReviewInput) -> Self {
+        match input {
+            SessionReviewInput::Inherit {
+                reviewers,
+                count,
+                model,
+                effort,
+                tier: _,
+            } => Self::Inherit {
+                reviewers: legacy_reviewers(reviewers, count, model, effort),
+            },
+            SessionReviewInput::Off => Self::Off,
+            SessionReviewInput::Turn {
+                reviewers,
+                count,
+                model,
+                effort,
+                tier: _,
+            } => Self::Turn {
+                reviewers: legacy_reviewers(reviewers, count, model, effort),
+            },
+            SessionReviewInput::Push {
+                reviewers,
+                count,
+                model,
+                effort,
+                tier: _,
+            } => Self::Push {
+                reviewers: legacy_reviewers(reviewers, count, model, effort),
+            },
+        }
+    }
+}
+impl From<SessionReview> for SessionReviewOutput {
+    fn from(input: SessionReview) -> Self {
+        match input {
+            SessionReview::Inherit { reviewers } => Self::Inherit { reviewers },
+            SessionReview::Off => Self::Off,
+            SessionReview::Turn { reviewers } => Self::Turn { reviewers },
+            SessionReview::Push { reviewers } => Self::Push { reviewers },
+        }
+    }
+}
 impl SessionReview {
     pub fn trigger(&self) -> Option<ReviewTrigger> {
         match self {
@@ -312,37 +374,18 @@ impl ReviewConfig {
         match session {
             None => {}
             Some(SessionReview::Off) => config.trigger = ReviewTrigger::Off,
-            Some(
-                choice @ (SessionReview::Inherit {
-                    model,
-                    effort,
-                    count,
-                    ..
-                }
-                | SessionReview::Turn {
-                    model,
-                    effort,
-                    count,
-                    ..
-                }
-                | SessionReview::Push {
-                    model,
-                    effort,
-                    count,
-                    ..
-                }),
-            ) => {
+            Some(choice) => {
                 if let Some(trigger) = choice.trigger() {
                     config.trigger = trigger;
                 }
-                if model.is_some() {
-                    config.model.clone_from(model);
-                }
-                if effort.is_some() {
-                    config.effort.clone_from(effort);
-                }
-                if let Some(count) = count {
-                    config.count = *count;
+                let reviewers = match choice {
+                    SessionReview::Inherit { reviewers }
+                    | SessionReview::Turn { reviewers }
+                    | SessionReview::Push { reviewers } => reviewers,
+                    SessionReview::Off => unreachable!(),
+                };
+                if let Some(reviewers) = reviewers {
+                    config.reviewers.clone_from(reviewers);
                 }
             }
         }
@@ -399,33 +442,18 @@ impl ReviewConfig {
         self == &Self::default()
     }
 
-    /// Rejects a configuration that cannot review.
-    ///
-    /// Auto needs no profile; explicit selections must remain usable.
-    fn validate(&self, profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {
-        if let Some(profile_id) = self.profile.as_ref()
-            && let Some(profile) = profiles.get(profile_id)
-            && !profile.enabled
-        {
-            bail!("[review] profile {profile_id:?} is disabled");
+    fn validate(&self, _profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {
+        if self.reviewers.len() > MAX_REVIEWERS {
+            bail!("[review] supports at most {MAX_REVIEWERS} reviewers");
         }
-        if self.profile.is_none() && (self.model.is_some() || self.effort.is_some()) {
-            bail!(
-                "[review] Auto uses fixed model and effort settings; name a profile to override model or effort"
-            );
-        }
-        if let Some(profile) = &self.profile
-            && !profiles.contains_key(profile)
+        if self
+            .reviewers
+            .iter()
+            .any(|reviewer| reviewer.model.trim().is_empty())
         {
-            bail!("[review] profile {profile:?} is not a profile defined in this config");
+            bail!("[review] reviewer model must not be empty");
         }
         Ok(())
-    }
-
-    /// Explicit reviewer profile, or None for Auto.
-    #[must_use]
-    pub fn reviewer_profile(&self) -> Option<&str> {
-        self.profile.as_deref()
     }
 }
 
@@ -655,11 +683,13 @@ impl Config {
             .flatten()
             .map(|choice| choice.model.clone())
             .collect::<BTreeSet<_>>();
-        if self.review.profile.as_deref() == Some(id)
-            && let Some(model) = &self.review.model
-        {
-            models.insert(model.clone());
-        }
+        let _ = id;
+        models.extend(
+            self.review
+                .reviewers
+                .iter()
+                .map(|choice| choice.model.clone()),
+        );
         models
     }
 

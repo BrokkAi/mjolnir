@@ -7540,7 +7540,7 @@ function sessionReviewStatusConfig(snapshot, session) {
   return {
     ...snapshot?.review_config,
     trigger: session?.review_trigger ?? snapshot?.review_config?.trigger,
-    count: session?.review_count ?? snapshot?.review_config?.count,
+    count: session?.review_count ?? snapshot?.review_config?.reviewers?.length,
   };
 }
 
@@ -7549,23 +7549,14 @@ function sessionReviewStatusConfig(snapshot, session) {
 /// Keep this byte-for-byte aligned with `hel_chat::review_status_line`: the
 /// same configuration should answer the same way on the terminal and phone.
 function reviewStatusLine(review, open) {
-  const enabled = review?.trigger === "turn";
-  const profile = review?.profile;
-  let armed;
-  if (review?.trigger === "push") {
-    armed = "Review trigger is before push";
-  } else if (enabled && profile) {
-    armed = `Reviewing every completed turn with [review] profile ${JSON.stringify(profile)}`;
-  } else if (enabled) {
-    armed = 'Reviewing every completed turn with Auto';
-  } else if (profile) {
-    armed = `Automatic review is off; /review reviews one turn with ${JSON.stringify(profile)}`;
-  } else {
-    armed = 'Automatic review is off; /review uses Auto';
-  }
-  const count = review?.count;
-  if (count) armed += `; ${count} reviewer${count === 1 ? '' : 's'}`;
-  return open ? `${armed}. A review is open now.` : armed;
+  const trigger = review?.trigger;
+  const armed = trigger === "push" ? "Review trigger is before push"
+    : trigger === "turn" ? "Reviewing every completed turn"
+      : "Automatic review is off; /review reviews one turn";
+  const count = review?.count ?? review?.reviewers?.length ?? 0;
+  const status = count === 0 ? `${armed}; reviewers autoconfigured at review time`
+    : `${armed}; ${count} reviewer${count === 1 ? '' : 's'}`;
+  return open ? `${status}. A review is open now.` : status;
 }
 
 /// Run a local command, or report that nothing here can.

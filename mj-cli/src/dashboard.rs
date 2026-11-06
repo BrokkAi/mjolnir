@@ -340,8 +340,6 @@ pub(crate) struct DashboardContext {
     /// What the daemon says about quota. The daemon is the only prober; this
     /// process never asks a provider.
     quota: Feed<watch::Receiver<mj_client::quota::QuotaSnapshot>>,
-    review_capabilities:
-        watch::Receiver<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>,
     profile_capabilities:
         Feed<watch::Receiver<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>>,
     /// The daemon's finished-cycle count when the person last pressed
@@ -350,13 +348,10 @@ pub(crate) struct DashboardContext {
     /// The daemon's finished-cycle count in the latest snapshot.
     pub(crate) quota_cycles: u64,
     pub(crate) target_test_cancel: Option<Arc<AtomicBool>>,
-    /// The active global review choice discovery. New profile/model
-    /// selections cancel the old request before starting another one.
     pub(crate) path_input_job: Option<(String, Arc<AtomicBool>)>,
     /// The completion request in flight, with the draft it was asked for. A
     /// newer request or a changed draft cancels it.
     pub(crate) completion_job: Option<(String, Arc<AtomicBool>)>,
-    pub(crate) review_discovery_cancel: Option<Arc<AtomicBool>>,
     /// The cancellable worker resolving an isolated session's network clone
     /// plan, keyed by the TUI generation that requested it.
     pub(crate) session_preflight_cancel: Option<(u64, Arc<AtomicBool>)>,
@@ -1857,7 +1852,6 @@ impl DashboardContext {
             target_test_cancel: None,
             path_input_job: None,
             completion_job: None,
-            review_discovery_cancel: None,
             session_preflight_cancel: None,
             worker: Feed::new(worker_updates_rx),
             runtime_state: Feed::new(runtime_state_rx),
@@ -1871,7 +1865,6 @@ impl DashboardContext {
             ui_request_actions: Vec::new(),
             runtime_review_views,
             runtime_config: Feed::new(runtime_config_rx),
-            review_capabilities: capabilities_rx.clone(),
             profile_capabilities: Feed::new(capabilities_rx),
             pending_runtime_updates: Vec::new(),
             remote_lifecycle_operations: BTreeMap::new(),

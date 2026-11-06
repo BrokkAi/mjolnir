@@ -11,6 +11,11 @@ impl HostState {
             return Err(format!("{session_id}: missing active review group"));
         };
         let snapshot = group.driver.clone();
+        if group.reviewers.len() != snapshot.roles.len() {
+            return Err(format!(
+                "{session_id}: stored review group has inconsistent reviewer slots"
+            ));
+        }
         let roles: BTreeSet<_> = snapshot
             .roles
             .iter()
@@ -64,7 +69,7 @@ impl HostState {
             ReviewSlot {
                 epoch: self.next_epoch,
                 driver,
-                reviewer: group.reviewer.clone(),
+                reviewers: group.reviewers.clone(),
                 state,
                 _background: None,
                 push,

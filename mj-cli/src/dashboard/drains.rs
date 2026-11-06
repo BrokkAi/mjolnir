@@ -59,9 +59,6 @@ impl DashboardContext {
         self.usage_report.cancel();
         self.cancel_chat_open();
         self.critical_operations.cancel_all();
-        if let Some(cancelled) = &self.review_discovery_cancel {
-            cancelled.store(true, Ordering::Release);
-        }
         self.cancel_session_preflight();
         for operation in self.lifecycle_operations.values() {
             operation.cancelled.store(true, Ordering::Release);

@@ -168,6 +168,7 @@ pub(crate) async fn resolve_session_model_profile_selection(
 enum ModelProfileCandidateSource<'a> {
     Session { ranking_anchor: Option<&'a str> },
     Subagents { parent_profile: &'a str },
+    Reviewers,
 }
 
 impl<'a> ModelProfileCandidateSource<'a> {
@@ -175,6 +176,7 @@ impl<'a> ModelProfileCandidateSource<'a> {
         match self {
             Self::Session { .. } => "configured",
             Self::Subagents { .. } => "enabled",
+            Self::Reviewers => "enabled",
         }
     }
 }
@@ -184,6 +186,25 @@ enum EffortRequirement<'a> {
     Any,
     Default,
     Exact(&'a str),
+}
+
+/// A reviewer uses the same enabled-profile chooser and effort validation as spawn.
+pub(crate) async fn resolve_reviewer_model_profile_selection(
+    backend: &Arc<dyn SubagentBackend>,
+    model: &str,
+    effort: Option<&str>,
+) -> Result<SubagentSelection, ApiFailure> {
+    resolve_model_profile_selection_matching(
+        backend,
+        None,
+        model,
+        effort
+            .map(EffortRequirement::Exact)
+            .unwrap_or(EffortRequirement::Default),
+        None,
+        ModelProfileCandidateSource::Reviewers,
+    )
+    .await
 }
 
 async fn resolve_model_profile_selection_matching(
@@ -196,6 +217,7 @@ async fn resolve_model_profile_selection_matching(
 ) -> Result<SubagentSelection, ApiFailure> {
     let candidates = match source {
         ModelProfileCandidateSource::Session { .. } => backend.session_profile_candidates().await?,
+        ModelProfileCandidateSource::Reviewers => backend.reviewer_candidates().await?,
         ModelProfileCandidateSource::Subagents { parent_profile } => {
             backend
                 .subagent_candidates(parent_profile.to_owned())
@@ -228,6 +250,9 @@ async fn resolve_model_profile_selection_matching(
                 ModelProfileCandidateSource::Subagents { .. } => format!(
                     "profile {requested:?} is unavailable for sub-agent use from this session"
                 ),
+                ModelProfileCandidateSource::Reviewers => {
+                    format!("profile {requested:?} is unavailable for reviewer use")
+                }
             };
             return Err(ApiFailure::bad_request(message));
         }
@@ -239,6 +264,9 @@ async fn resolve_model_profile_selection_matching(
                 model,
                 now_epoch_seconds(),
             )?,
+            ModelProfileCandidateSource::Reviewers => {
+                draw_candidates(&mut offered, None, model, now_epoch_seconds())?
+            }
             ModelProfileCandidateSource::Session { ranking_anchor } => {
                 rank_candidates(&mut offered, ranking_anchor, model, now_epoch_seconds())
             }
@@ -370,6 +398,14 @@ fn choose_model_profile(
     match source {
         ModelProfileCandidateSource::Subagents { parent_profile } => {
             choose_subagent_profile(candidates, requested_profile, parent_profile, model)
+        }
+        ModelProfileCandidateSource::Reviewers => {
+            let SubagentCandidates {
+                mut offered,
+                unavailable,
+            } = candidates;
+            draw_candidates(&mut offered, None, model, now_epoch_seconds())?;
+            take_healthy_offer(offered, &unavailable, model, "enabled")
         }
         ModelProfileCandidateSource::Session { ranking_anchor } => {
             let SubagentCandidates {
@@ -1126,6 +1162,10 @@ mod tests {
             let candidates = self.candidates.clone();
             Box::pin(async move { Ok(candidates) })
         }
+        fn reviewer_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+            let candidates = self.candidates.clone();
+            Box::pin(async move { Ok(candidates) })
+        }
         fn session_handle(
             &self,
             _session_id: String,
@@ -1296,6 +1336,49 @@ mod tests {
         ] {
             assert!(error.message.contains(detail), "{}", error.message);
         }
+    }
+
+    #[tokio::test]
+    async fn reviewer_selection_shares_spawn_effort_health_and_draw_rules() {
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            discovery_fails: false,
+            config: Default::default(),
+            candidates: SubagentCandidates {
+                offered: vec![
+                    candidate("first", Some(70), &["no-effort", "fixed"]),
+                    candidate("second", Some(70), &["no-effort", "fixed"]),
+                ],
+                unavailable: Vec::new(),
+            },
+        });
+        let selected = resolve_reviewer_model_profile_selection(&backend, "fixed", Some("high"))
+            .await
+            .unwrap();
+        assert_eq!(selected.effort.as_deref(), Some("high"));
+        let error = resolve_reviewer_model_profile_selection(&backend, "missing", None)
+            .await
+            .unwrap_err();
+        assert!(
+            error.message.contains("no enabled profile"),
+            "{}",
+            error.message
+        );
+        let mut saw_different_profiles = false;
+        for _ in 0..48 {
+            let first = resolve_reviewer_model_profile_selection(&backend, "no-effort", None)
+                .await
+                .unwrap();
+            let second = resolve_reviewer_model_profile_selection(&backend, "no-effort", None)
+                .await
+                .unwrap();
+            assert_eq!(first.effort, None);
+            assert_eq!(second.effort, None);
+            saw_different_profiles |= first.profile_id != second.profile_id;
+        }
+        assert!(
+            saw_different_profiles,
+            "same-model reviewer slots never drew different profiles"
+        );
     }
 
     #[tokio::test]

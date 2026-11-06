@@ -425,7 +425,7 @@ pub fn null_label(path: &[String], draft: &Value) -> String {
         }
         ["profiles", _, "codex_profile"] => "None — config.toml only".to_owned(),
         // Review needs a named reviewer profile; there is no fallback to a
-        // first enabled profile (`ReviewConfig::reviewer_profile`).
+        // models offered by enabled profiles.
         ["review", "profile"] => "Auto — choose by provider and quota".to_owned(),
         ["review", "model" | "effort"] => match draft["review"]["profile"].as_str() {
             Some(profile) => format!("{profile}'s default"),

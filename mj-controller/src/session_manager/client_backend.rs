@@ -35,19 +35,6 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
         })
     }
 
-    fn resolve_review_settings(
-        &self,
-        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> mj_client::session::BoxFuture<'_, Result<mj_core::review::settings::ResolvedReviewSettings>>
-    {
-        Box::pin(crate::review_selection::resolve(
-            self.0.clone(),
-            None,
-            cancelled,
-            None,
-        ))
-    }
-
     fn config_result(
         &self,
         command_id: String,

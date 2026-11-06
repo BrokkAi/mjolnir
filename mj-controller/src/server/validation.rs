@@ -436,20 +436,31 @@ fn validate_action_against(
             no_project_memory: _,
             no_github_events: _,
         } => {
-            if let Some(
-                mj_core::config::SessionReview::Inherit { model, effort, .. }
-                | mj_core::config::SessionReview::Turn { model, effort, .. }
-                | mj_core::config::SessionReview::Push { model, effort, .. },
-            ) = review
-                && [model, effort].into_iter().flatten().any(|value| {
-                    value.trim().is_empty()
-                        || value.len() > 256
-                        || value.chars().any(char::is_control)
-                })
-            {
-                return Err(ApiError::bad_request(
-                    "a review model or effort must be 1-256 characters of plain text",
-                ));
+            if let Some(review) = review {
+                let reviewers = match review {
+                    mj_core::config::SessionReview::Inherit { reviewers }
+                    | mj_core::config::SessionReview::Turn { reviewers }
+                    | mj_core::config::SessionReview::Push { reviewers } => {
+                        reviewers.as_deref().unwrap_or_default()
+                    }
+                    mj_core::config::SessionReview::Off => &[],
+                };
+                if reviewers.len() > mj_core::config::MAX_REVIEWERS
+                    || reviewers.iter().any(|choice| {
+                        choice.model.trim().is_empty()
+                            || choice.model.len() > 256
+                            || choice.model.chars().any(char::is_control)
+                            || choice.effort.as_ref().is_some_and(|effort| {
+                                effort.trim().is_empty()
+                                    || effort.len() > 256
+                                    || effort.chars().any(char::is_control)
+                            })
+                    })
+                {
+                    return Err(ApiError::bad_request(
+                        "reviewers must name 1-3 plain-text models and optional efforts",
+                    ));
+                }
             }
             if !workspace_id.is_empty() {
                 validate_public_id(workspace_id)?;

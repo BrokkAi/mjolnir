@@ -6433,12 +6433,25 @@ async fn session_review_api_rejects_the_legacy_on_mode() {
     assert!(actions.is_empty());
 }
 
+#[tokio::test]
+async fn session_review_api_rejects_stored_legacy_fields() {
+    let (app, actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(start_request(start_body(
+            r#", "review":{"mode":"turn","model":"gpt-6-astra","count":2}"#,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(actions.is_empty());
+}
+
 // Hard-won: 06cfc1cfe: reviewer-only flags replaced before-push review with end-of-turn.
 #[tokio::test]
 async fn session_review_api_accepts_inherit_and_forwards_its_settings() {
     let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = tokio::spawn(app.oneshot(start_request(start_body(
-        r#", "review":{"mode":"inherit","count":3,"model":"gpt-6-astra","effort":"high"}"#,
+        r#", "review":{"mode":"inherit","reviewers":[{"model":"gpt-6-astra","effort":"high"}]}"#,
     ))));
     let request = actions.recv().await.unwrap();
     let ControllerAction::New { review, .. } = request.action else {
@@ -6447,10 +6460,10 @@ async fn session_review_api_accepts_inherit_and_forwards_its_settings() {
     assert_eq!(
         review,
         Some(mj_core::config::SessionReview::Inherit {
-            count: std::num::NonZeroUsize::new(3),
-            model: Some("gpt-6-astra".into()),
-            effort: Some("high".into()),
-            tier: None,
+            reviewers: Some(vec![mj_core::config::SubagentChoice {
+                model: "gpt-6-astra".into(),
+                effort: Some("high".into())
+            }]),
         })
     );
     request

@@ -467,7 +467,7 @@ struct NotificationChildSnapshot {
 }
 
 impl ApiBackend {
-    async fn discover_profile_candidates(
+    pub(crate) async fn discover_profile_candidates(
         &self,
         mut ids: Vec<(String, mj_core::config::HarnessKind)>,
         candidate_kind: &str,
@@ -553,6 +553,13 @@ impl ApiBackend {
             );
         }
         Ok(candidates)
+    }
+
+    pub(crate) async fn reviewer_candidates(
+        &self,
+    ) -> Result<crate::server::api::SubagentCandidates> {
+        self.discover_profile_candidates(self.profile_catalog.candidates()?, "reviewer")
+            .await
     }
 
     pub(crate) async fn start_followup_with_id(
@@ -2803,6 +2810,10 @@ impl SubagentBackend for ApiBackend {
             let ids = self.profile_catalog.candidates()?;
             self.discover_profile_candidates(ids, "sub-agent").await
         })
+    }
+
+    fn reviewer_candidates(&self) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
+        Box::pin(ApiBackend::reviewer_candidates(self))
     }
 
     fn session_profile_candidates(

@@ -694,11 +694,13 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
         trigger: mj_core::config::ReviewTrigger::Turn,
-        count: mj_core::config::default_review_count(),
-        tier: Some("extended".into()),
-        profile: Some("reviewer-1".into()),
-        model: Some("private-review-model".into()),
-        effort: Some("private-review-effort".into()),
+        reviewers: vec![
+            mj_core::config::SubagentChoice {
+                model: "private-review-model".into(),
+                effort: Some("private-review-effort".into())
+            };
+            2
+        ],
     };
 
     let value =
@@ -707,8 +709,7 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
         value.get("review_config"),
         Some(&serde_json::json!({
             "trigger": "turn",
-            "profile": "reviewer-1",
-            "count": 2,
+            "reviewers": [{"model":"private-review-model","effort":"private-review-effort"},{"model":"private-review-model","effort":"private-review-effort"}],
         }))
     );
     let json = value.to_string();
@@ -717,8 +718,8 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     assert!(!json.contains("secret-target"));
     assert!(!json.contains("secret.registry"));
     assert!(!json.contains("native-secret-id"));
-    assert!(!json.contains("private-review-model"));
-    assert!(!json.contains("private-review-effort"));
+    assert!(json.contains("private-review-model"));
+    assert!(json.contains("private-review-effort"));
     assert!(json.contains("\"has_error\":true"));
 }
 
@@ -781,11 +782,13 @@ fn public_snapshot_exposes_only_review_status_configuration() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
         trigger: mj_core::config::ReviewTrigger::Turn,
-        count: mj_core::config::default_review_count(),
-        tier: Some("extended".into()),
-        profile: Some("reviewer-1".into()),
-        model: Some("private-review-model".into()),
-        effort: Some("private-review-effort".into()),
+        reviewers: vec![
+            mj_core::config::SubagentChoice {
+                model: "private-review-model".into(),
+                effort: Some("private-review-effort".into())
+            };
+            2
+        ],
     };
 
     let value =
@@ -795,31 +798,36 @@ fn public_snapshot_exposes_only_review_status_configuration() {
         value.get("review_config"),
         Some(&serde_json::json!({
             "trigger": "turn",
-            "profile": "reviewer-1",
-            "count": 2,
+            "reviewers": [{"model":"private-review-model","effort":"private-review-effort"},{"model":"private-review-model","effort":"private-review-effort"}],
         }))
     );
     let json = value.to_string();
-    assert!(!json.contains("private-review-model"));
-    assert!(!json.contains("private-review-effort"));
+    assert!(json.contains("private-review-model"));
+    assert!(json.contains("private-review-effort"));
 }
 
 #[test]
 fn session_review_count_overrides_phone_status_projection() {
     let (mut config, mut state) = sample_config_state();
-    config.review.count = mj_core::config::default_review_count();
+    config.review.reviewers = vec![
+        mj_core::config::SubagentChoice {
+            model: "model-a".into(),
+            effort: None
+        };
+        2
+    ];
     state.sessions.get_mut("session-1").unwrap().review =
         Some(mj_core::config::SessionReview::Turn {
-            count: std::num::NonZeroUsize::new(1),
-            model: None,
-            effort: None,
-            tier: None,
+            reviewers: Some(vec![mj_core::config::SubagentChoice {
+                model: "model-b".into(),
+                effort: None,
+            }]),
         });
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 9);
-    assert_eq!(snapshot.review_config.count.get(), 2);
+    assert_eq!(snapshot.review_config.reviewers.len(), 2);
     let session = snapshot.sessions.get("session-1").unwrap();
     assert_eq!(session.review_trigger, mj_core::config::ReviewTrigger::Turn);
-    assert_eq!(session.review_count.get(), 1);
+    assert_eq!(session.review_count, 1);
     let wire = serde_json::to_value(session).unwrap();
     assert_eq!(wire["review_count"], 1);
 }

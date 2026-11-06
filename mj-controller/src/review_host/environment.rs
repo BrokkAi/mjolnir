@@ -31,7 +31,7 @@ pub trait ReviewEnvironment: Send + Sync {
         cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> mj_client::session::BoxFuture<
         'a,
-        Result<mj_core::review::settings::ResolvedReviewSettings, String>,
+        Result<Vec<mj_core::review::settings::ResolvedReviewSettings>, String>,
     >;
 
     fn register_child(
@@ -330,7 +330,7 @@ impl ReviewEnvironment for ControllerEnvironment {
         cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> mj_client::session::BoxFuture<
         'a,
-        Result<mj_core::review::settings::ResolvedReviewSettings, String>,
+        Result<Vec<mj_core::review::settings::ResolvedReviewSettings>, String>,
     > {
         Box::pin(async move {
             let catalog = self
@@ -338,7 +338,20 @@ impl ReviewEnvironment for ControllerEnvironment {
                 .as_ref()
                 .and_then(|catalog| catalog.get())
                 .cloned();
-            crate::review_selection::resolve(handle, Some(config), cancelled, catalog)
+            let runtime = self.runtime().await?;
+            let backend = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(backend) = runtime.report_backend.get() {
+                        return backend
+                            .upgrade()
+                            .ok_or_else(|| "reviewer profile service stopped".to_owned());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .map_err(|_| "reviewer profile service did not start".to_owned())??;
+            crate::review_selection::resolve(handle, Some(config), cancelled, catalog, backend)
                 .await
                 .map_err(|e| format!("{e:#}"))
         })

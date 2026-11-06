@@ -150,8 +150,7 @@ are not importable yet either.
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
 | `--review <off\|turn\|push>` | Set the imported session's review trigger, overriding `[review]`. |
-| `--review-count <count>` | Independent reviewer sessions, overriding the configured count (default 2). 1–3 is reasonable; more has diminishing returns. Used alone selects turn review. |
-| `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Set the reviewer model or a named profile's effort. Auto always uses High. Without `--review`, these options select `turn`. The deprecated tier option still accepts either value but ignores it. |
+| `--reviewer MODEL[:EFFORT]` | Add a reviewer choice; repeat up to three times. |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
 Import leaves the source checkout and the harness's source transcript unchanged. The imported session starts suspended and is available through `prefix+g`.
@@ -290,8 +289,8 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--model <name>] [--effort <name>] [--subagents native|mjolnir|none]
        [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
        [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
-       [--review <off|turn|push>] [--review-count <count>] [--review-model <name>] [--review-effort <name>]
-       [--review-tier quick|extended] [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
+       [--review <off|turn|push>] [--reviewer MODEL[:EFFORT]]...
+       [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>]
           [--timeout <seconds>] [--return-on-input] [--json]
@@ -386,12 +385,7 @@ mj new --workspace eval --bundle product --target builder \
   Mjolnir chooses an enabled profile offering its model and effort by quota.
 - `mj new --review off|turn|push` sets the session's trigger, overriding
   `[review]`. `mj import <harness>` takes the same option for the session it
-  adopts. `--review-model <name>` and `--review-effort <name>` set reviewer
-  choices; Auto always uses High effort. `--review-count <count>` selects the
-  number of independent reviewers (default 2). 1–3 is reasonable; more has
-  diminishing returns. Without `--review`, any of these options selects `turn`. The deprecated
-  `--review-tier quick|extended` also selects `turn` when used alone, but its
-  value is ignored. See
+  adopts. Repeat `--reviewer MODEL[:EFFORT]` up to three times to choose reviewers. See
   [per-session settings](/turn-review/#per-session-settings).
 - `mj new --no-project-memory` starts the session with no project memory:
   nothing from the workspace's project memory is put in the agent's startup

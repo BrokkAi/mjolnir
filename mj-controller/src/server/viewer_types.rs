@@ -278,7 +278,7 @@ impl ViewerSnapshot {
                     .flatten()
                     .or_else(|| session.public_error().map(str::to_owned)),
                     review_trigger: review.trigger,
-                    review_count: review.count,
+                    review_count: review.reviewers.len(),
                     review_unavailable: session.review_unavailable().map(str::to_owned),
                     storage_problem: None,
                     preview: Vec::new(),
@@ -439,8 +439,7 @@ impl ViewerSnapshot {
             bundles,
             review_config: ViewerReviewConfig {
                 trigger: config.review.trigger,
-                profile: config.review.profile.clone(),
-                count: config.review.count,
+                reviewers: config.review.reviewers.clone(),
             },
             capacity: Vec::new(),
             launch_failures: Vec::new(),
@@ -478,8 +477,8 @@ impl ViewerSession {
 pub struct ViewerSession {
     #[serde(default)]
     pub review_trigger: mj_core::config::ReviewTrigger,
-    #[serde(default = "mj_core::config::default_review_count")]
-    pub review_count: std::num::NonZeroUsize,
+    #[serde(default)]
+    pub review_count: usize,
     /// Why review cannot run for this session, when it cannot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_unavailable: Option<String>,
@@ -825,24 +824,12 @@ pub enum ViewerCommandSource {
 }
 
 /// Public review configuration: exactly what `/review status` needs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerReviewConfig {
     pub trigger: mj_core::config::ReviewTrigger,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
-    #[serde(default = "mj_core::config::default_review_count")]
-    pub count: std::num::NonZeroUsize,
-}
-
-impl Default for ViewerReviewConfig {
-    fn default() -> Self {
-        Self {
-            trigger: mj_core::config::ReviewTrigger::default(),
-            profile: None,
-            count: mj_core::config::default_review_count(),
-        }
-    }
+    #[serde(default)]
+    pub reviewers: Vec<mj_core::config::SubagentChoice>,
 }
 
 /// A turn review as a phone renders it.

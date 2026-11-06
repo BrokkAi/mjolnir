@@ -94,7 +94,7 @@ def save_review_settings(lab, tmux, evidence):
     if expected == "turn":
         tmux.send_key("Down")
     tmux.send_key("Enter")
-    click(tmux, "  Save Setup  ")
+    click(tmux, "Save Settings")
     absent(tmux, "× Setup")
     lab.wait_snapshot(lambda value: value["review_config"]["trigger"] == expected, "review setting persisted")
     record(
@@ -110,7 +110,7 @@ def save_review_settings(lab, tmux, evidence):
     for _ in range({"off": 0, "turn": 1, "push": 2}[original["trigger"]]):
         tmux.send_key("Down")
     tmux.send_key("Enter")
-    click(tmux, "  Save Setup  ")
+    click(tmux, "Save Settings")
     absent(tmux, "× Setup")
     lab.wait_snapshot(lambda value: value["review_config"] == original, "original review settings restored")
 

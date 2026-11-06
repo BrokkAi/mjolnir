@@ -2,28 +2,44 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The preferred review families, in the user's priority order. Models are
-/// identified from advertised IDs, independently of the harness or profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Model families used by reviewer autoconfiguration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewModelFamily {
     Terra,
-    Flash,
+    Sol,
     Haiku,
+    Flash,
     Grok,
+    Kimi,
 }
-
 impl ReviewModelFamily {
     pub fn for_model(model: &str) -> Option<Self> {
         let model = crate::usage::pricing::normalize_model(model);
         let model = model.rsplit('/').next().unwrap_or(&model);
         if model.starts_with("gpt-") && model_matches_family(model, "terra") {
             Some(Self::Terra)
-        } else if model.starts_with("deepseek-") && model_matches_family(model, "flash") {
-            Some(Self::Flash)
-        } else if model.starts_with("claude-") && model_matches_family(model, "haiku") {
+        } else if model.starts_with("gpt-") && model_matches_family(model, "sol") {
+            Some(Self::Sol)
+        } else if model.starts_with("claude-") && model.contains("haiku") {
             Some(Self::Haiku)
-        } else if model.starts_with("grok-") {
+        } else if (model.starts_with("deepseek-") && model_matches_family(model, "flash"))
+            || matches!(model, "dsf" | "dsfmax")
+        {
+            Some(Self::Flash)
+        } else if model.starts_with("grok-")
+            && !["non-reasoning", "multi-agent", "build"]
+                .iter()
+                .any(|part| model.contains(part))
+        {
             Some(Self::Grok)
+        } else if model.starts_with("kimi-k3.")
+            && model[8..]
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+                .is_some_and(|n| n >= 1)
+        {
+            Some(Self::Kimi)
         } else {
             None
         }
@@ -42,24 +58,22 @@ pub struct ReviewModelSettings {
 pub struct ResolvedReviewSettings {
     pub profile: String,
     pub main: ReviewModelSettings,
-    pub automatic: bool,
     #[serde(default)]
-    pub price_unknown: bool,
+    pub autoconfigured: bool,
 }
 
 impl ResolvedReviewSettings {
     pub fn description(&self) -> String {
         format!(
-            "{}{}: {} / {}{}",
-            if self.automatic { "Auto → " } else { "" },
-            self.profile,
-            self.main.model.as_deref().unwrap_or("harness default"),
-            self.main.effort.as_deref().unwrap_or("default effort"),
-            if self.automatic && self.price_unknown {
-                " (price unavailable)"
+            "{}{}: {} / {}",
+            if self.autoconfigured {
+                "Autoconfigured: "
             } else {
                 ""
-            }
+            },
+            self.profile,
+            self.main.model.as_deref().unwrap_or("harness default"),
+            self.main.effort.as_deref().unwrap_or("default effort")
         )
     }
 }
@@ -91,18 +105,13 @@ pub fn model_version_cmp(left: &str, right: &str) -> std::cmp::Ordering {
 }
 
 /// Whether a review can choose a reviewer for a session with `session`'s
-/// review choice, so its launch should take a review baseline. It applies
-/// the same per-profile rule as the reviewer choice and does not perform
-/// network or quota discovery.
+/// review choice, so its launch should take a review baseline. Every
+/// reviewer is load-balanced across enabled profiles, so any enabled profile
+/// may serve; this performs no network or quota discovery.
 pub fn can_review(
     config: &crate::config::Config,
-    session: Option<&crate::config::SessionReview>,
+    _session: Option<&crate::config::SessionReview>,
 ) -> bool {
-    let settings = config.review.for_session(session);
-    if let Some(id) = settings.profile.as_deref() {
-        return config.enabled_profile(id).is_some();
-    }
-    // Auto can use any advertised model as its cheapest-model fallback.
     config.enabled_profiles().next().is_some()
 }
 

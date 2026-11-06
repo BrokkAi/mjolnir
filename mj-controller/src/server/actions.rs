@@ -638,6 +638,42 @@ pub(super) fn deserialize_session_review<'de, D: serde::Deserializer<'de>>(
         .transpose()
 }
 
+/// Public requests accept only current reviewer fields. The durable action
+/// reader above still loads an accepted legacy request after an upgrade.
+pub(super) fn deserialize_api_session_review<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<mj_core::config::SessionReview>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            if !matches!(
+                value.get("mode").and_then(serde_json::Value::as_str),
+                Some("inherit" | "off" | "turn" | "push")
+            ) {
+                return Err(serde::de::Error::custom(
+                    "review.mode must be inherit, off, turn, or push",
+                ));
+            }
+            let mode = value
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                .unwrap();
+            let object = value
+                .as_object()
+                .ok_or_else(|| serde::de::Error::custom("review must be an object"))?;
+            if object
+                .keys()
+                .any(|key| key != "mode" && (mode == "off" || key != "reviewers"))
+            {
+                return Err(serde::de::Error::custom(
+                    "review accepts only mode and reviewers",
+                ));
+            }
+            serde_json::from_value(value).map_err(serde::de::Error::custom)
+        })
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::ControllerAction;

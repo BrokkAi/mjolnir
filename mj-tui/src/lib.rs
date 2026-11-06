@@ -129,7 +129,6 @@ pub use crate::ingest::{
 pub use crate::keybinds::KeyRoute;
 pub use crate::render::sessions::{NOTICE_NAME_CELLS, fit_session_name};
 pub use crate::resume::resume_profile_placeholders;
-pub use crate::review_settings::{ReviewSettingsChoices, ReviewSettingsDiscoveryResult};
 pub use crate::setup::{DetectScope, RejectedRuntime, SetupDetection};
 pub use crate::workspaces::{
     WorkspaceDraftEntry, WorkspaceManagementEntry, WorkspaceManagementOutcome,
@@ -626,15 +625,6 @@ pub enum DashboardAction {
         generation: u64,
         profile_id: String,
     },
-    /// Discover the selectors advertised by the selected reviewer profile.
-    /// The generation ties the response to the current dialog draft.
-    DiscoverReviewSettings {
-        generation: u64,
-        profile_id: String,
-        model: Option<String>,
-    },
-    /// Cancel a reviewer selector discovery that is no longer visible.
-    CancelReviewSettingsDiscovery,
     /// Persist the client-side activity animation without replacing other settings.
     SaveSpinnerStyle {
         style: mj_core::config::SpinnerStyle,
@@ -1122,15 +1112,7 @@ pub struct DashboardState {
     pub(crate) unreachable_notices: BTreeMap<String, String>,
     modal_click_transition: Option<(u16, u16, Instant)>,
     suppress_modal_release: bool,
-    /// Monotonic identity for global review settings discoveries. Keeping it on
-    /// the dashboard prevents a late result from an older dialog instance
-    /// matching a newly opened dialog with the same values.
-    pub(crate) review_settings_generation: u64,
     pub(crate) spinner_save_pending: bool,
-    /// Successful reviewer selector discoveries, retained after the dialog
-    /// closes. The key is the profile definition's id and the optional model
-    /// whose effort choices were discovered.
-    pub(crate) review_settings_choices: BTreeMap<(String, Option<String>), ReviewSettingsChoices>,
     session_preflight_generation: u64,
     pub(crate) wiki_search_generation: u64,
     /// Monotonic identity for move preparation requests. This lives outside
@@ -1371,9 +1353,7 @@ impl DashboardState {
             usage_request_generation: 0,
             modal_click_transition: None,
             suppress_modal_release: false,
-            review_settings_generation: 0,
             spinner_save_pending: false,
-            review_settings_choices: BTreeMap::new(),
             session_preflight_generation: 0,
             wiki_search_generation: 0,
             next_move_preparation_request_id: 0,
