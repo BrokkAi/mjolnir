@@ -781,13 +781,14 @@ pub(super) fn refused_policy_warning(
     )
 }
 
-/// Claude's own mode, which a session leaving Plan takes when Claude refuses
-/// the policy mode: it asks before every change, so it is never looser than
-/// the policy, and Plan can always be left.
-const CLAUDE_DEFAULT_MODE: &str = "default";
+/// The mode Claude and Kimi leave Plan for when the policy sets no mode, and
+/// Claude's when it refuses the policy's: it asks before every change, so it
+/// is never looser than the policy, and Plan can always be left.
+const PLAN_EXIT_DEFAULT_MODE: &str = "default";
 
 /// Leave Plan for the policy mode, returning the warning to show when the
 /// harness refused it and the session took Claude's default mode instead.
+/// A policy that sets no mode leaves Plan for the harness default.
 pub(super) async fn leave_plan_for_policy(
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
@@ -796,6 +797,21 @@ pub(super) async fn leave_plan_for_policy(
     config_options: &mut Vec<SessionConfigOption>,
     modes: &mut Option<SessionModeState>,
 ) -> Result<Option<String>> {
+    if enforcement
+        .and_then(ExecutionEnforcement::acp_mode)
+        .is_none()
+    {
+        enforce_execution_mode(
+            connection,
+            session_id,
+            harness,
+            None,
+            PLAN_EXIT_DEFAULT_MODE,
+            config_options,
+            modes,
+        )
+        .await?;
+    }
     let Some(refusal) = reassert_execution_policy(
         connection,
         session_id,
@@ -817,7 +833,7 @@ pub(super) async fn leave_plan_for_policy(
         session_id,
         harness,
         None,
-        CLAUDE_DEFAULT_MODE,
+        PLAN_EXIT_DEFAULT_MODE,
         config_options,
         modes,
     )
@@ -912,51 +928,6 @@ pub(super) fn policy_permits(
             policy_mode(value)
         }
         Some(_) => true,
-    }
-}
-
-/// Answer a mode change from outside the worker that `policy_permits` turned
-/// down. Leaving Plan returns to the policy's mode whatever mode the caller
-/// named (Kimi's Plan control asks for `default`), so every harness leaves
-/// Plan the same way; any other change is refused. Returns the mode the
-/// session is in after leaving Plan, or the refusal to report.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn answer_refused_mode_change(
-    connection: &ConnectionTo<Agent>,
-    session_id: &SessionId,
-    harness: HarnessKind,
-    enforcement: Option<ExecutionEnforcement>,
-    config_options: &mut Vec<SessionConfigOption>,
-    modes: &mut Option<SessionModeState>,
-    key: Option<&str>,
-    events: &mpsc::Sender<RuntimeEvent>,
-) -> Result<std::result::Result<String, String>> {
-    let setting = enforcement
-        .and_then(ExecutionEnforcement::acp_setting)
-        .map(|(setting, _)| setting);
-    let in_plan = current_session_mode(config_options, modes).as_deref() == Some("plan");
-    if !in_plan || (key.is_some() && key == setting) {
-        return Ok(Err(POLICY_OWNED_MODE.to_owned()));
-    }
-    let left = leave_plan_for_policy(
-        connection,
-        session_id,
-        harness,
-        enforcement,
-        config_options,
-        modes,
-    )
-    .await;
-    match left {
-        Ok(warning) => {
-            if let Some(message) = warning {
-                emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
-            }
-            Ok(current_session_mode(config_options, modes)
-                .context("the policy mode was not reported")
-                .map_err(|error| format!("{error:#}")))
-        }
-        Err(error) => Ok(Err(format!("leave Plan: {error:#}"))),
     }
 }
 

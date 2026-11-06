@@ -1447,31 +1447,15 @@ pub(super) async fn serve_session(
                 value,
             } => {
                 if !policy_permits(enforcement, &config_options, Some(&key), &value) {
-                    let event = match answer_refused_mode_change(
-                        connection,
-                        &session_id,
-                        spec.harness,
-                        enforcement,
-                        &mut config_options,
-                        &mut modes,
-                        Some(&key),
+                    emit_runtime_event(
                         events,
-                    )
-                    .await?
-                    {
-                        Ok(value) => RuntimeEvent::ConfigApplied {
-                            request_id,
-                            key,
-                            value,
-                            config_options: config_options.clone(),
-                        },
-                        Err(message) => RuntimeEvent::CommandRejected {
+                        RuntimeEvent::CommandRejected {
                             reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
                             request_id,
-                            message,
+                            message: POLICY_OWNED_MODE.into(),
                         },
-                    };
-                    emit_runtime_event(events, event).await?;
+                    )
+                    .await?;
                     continue;
                 }
                 let previous_model = session_model(&config_options);
@@ -1502,8 +1486,6 @@ pub(super) async fn serve_session(
                             )
                             .await?;
                         }
-                        let value =
-                            surface::config_current_value(&config_options, &key).unwrap_or(value);
                         spec.accepted_config
                             .lock()
                             .map_err(|_| {
@@ -1596,31 +1578,15 @@ pub(super) async fn serve_session(
                 mode_id,
             } => {
                 if !policy_permits(enforcement, &config_options, None, &mode_id) {
-                    let event = match answer_refused_mode_change(
-                        connection,
-                        &session_id,
-                        spec.harness,
-                        enforcement,
-                        &mut config_options,
-                        &mut modes,
-                        None,
+                    emit_runtime_event(
                         events,
-                    )
-                    .await?
-                    {
-                        Ok(mode_id) => RuntimeEvent::SessionModeApplied {
-                            request_id,
-                            mode_id,
-                            config_options: config_options.clone(),
-                            modes: modes.clone(),
-                        },
-                        Err(message) => RuntimeEvent::CommandRejected {
+                        RuntimeEvent::CommandRejected {
                             reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
                             request_id,
-                            message,
+                            message: POLICY_OWNED_MODE.into(),
                         },
-                    };
-                    emit_runtime_event(events, event).await?;
+                    )
+                    .await?;
                     continue;
                 }
                 let advertised = modes.as_ref().is_some_and(|state| {

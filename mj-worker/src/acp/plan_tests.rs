@@ -250,20 +250,25 @@ async fn a_caller_outside_the_worker_cannot_move_a_policy_owned_mode() {
     probe.close().await;
 }
 
-/// Kimi leaves Plan by asking for `default`. The policy owns the mode, so
-/// leaving Plan returns to the policy's own mode instead of being refused.
+/// Kimi carries its execution mode on the Plan selector, like Claude, so it
+/// leaves Plan through the worker, which restores the policy's own mode.
 // Hard-won: ac3b724: refusing every mode but Plan and the policy's left Kimi stuck in Plan
 #[tokio::test]
-async fn leaving_plan_by_naming_another_mode_restores_the_policy_mode() {
+async fn kimi_leaves_plan_for_the_policy_mode() {
     let mut probe =
         PlanProbe::with_harness(ExecutionPolicy::Unconstrained, true, HarnessKind::Kimi).await;
     set_claude_config_mode(&mut probe, "enter-plan", "plan").await;
+    let mut surface = mj_core::acp::surface::AcpSessionSurface::default();
+    surface.set_harness_kind(HarnessKind::Kimi);
+    surface.set_config_options(&serde_json::from_value::<Vec<_>>(mode_config("plan")).unwrap());
+    assert_eq!(
+        surface.plan_control(false),
+        Ok(mj_core::acp::PlanControl::RestoreExecutionMode)
+    );
     probe
         .commands
-        .send(CommandRequest::SetConfig {
+        .send(CommandRequest::RestoreExecutionMode {
             request_id: "exit-plan".into(),
-            key: "mode".into(),
-            value: "default".into(),
         })
         .await
         .unwrap();
