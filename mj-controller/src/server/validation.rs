@@ -364,6 +364,11 @@ pub(super) async fn validate_action_live(
         _ => None,
     };
     validate_action_against(action, &state.snapshot_rx.borrow(), live.as_deref())?;
+    if let ControllerAction::Resume { workspace_id, .. }
+    | ControllerAction::ChangeWorkspace { workspace_id, .. } = action
+    {
+        require_listed_workspace(state, workspace_id).await?;
+    }
     require_worker_source(state, action).await
 }
 
@@ -576,7 +581,6 @@ fn validate_action_against(
             validate_public_id(profile_id)?;
             validate_public_id(target_id)?;
             let session = require_session_record(snapshot, session_id)?;
-            require_workspace(snapshot, workspace_id)?;
             require_profile(snapshot, profile_id)?;
             require_launchable_target(snapshot, target_id)?;
             if session
@@ -691,7 +695,6 @@ fn validate_action_against(
                     "this session cannot change workspace now",
                 ));
             }
-            require_workspace(snapshot, workspace_id)?;
         }
         ControllerAction::SetContainerSettings { session_id, .. } => {
             validate_public_id(session_id)?;
@@ -849,13 +852,29 @@ pub(super) fn require_session_record<'a>(
         .ok_or_else(|| ApiError::not_found("unknown session"))
 }
 
-pub(super) fn require_workspace(snapshot: &ViewerSnapshot, id: &str) -> Result<(), ApiError> {
-    snapshot
-        .workspaces
-        .iter()
-        .any(|workspace| workspace.id == id)
-        .then_some(())
-        .ok_or_else(|| ApiError::bad_request("unknown workspace"))
+/// Refuse a workspace the store does not list.
+///
+/// The store owns which workspaces exist, and it lists `default` only while
+/// that workspace holds a session. The snapshot's copy of the list is
+/// republished on a few daemon actions, so it can lag behind the store; a
+/// session that has just landed in `default` made the lag a refusal (#1334).
+/// Every check that a workspace exists therefore asks the store here.
+async fn require_listed_workspace(state: &ServerState, id: &str) -> Result<(), ApiError> {
+    let backend = state
+        .subagent
+        .as_ref()
+        .ok_or_else(ApiError::controller_unavailable)?;
+    match backend.workspace(id.to_owned()).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(ApiError::bad_request("unknown workspace")),
+        Err(error) => {
+            tracing::warn!(error = format!("{error:#}"), "workspace lookup failed");
+            Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not read the workspace list",
+            ))
+        }
+    }
 }
 
 pub(super) fn require_profile<'a>(

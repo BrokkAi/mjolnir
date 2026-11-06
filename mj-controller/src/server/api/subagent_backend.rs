@@ -190,6 +190,17 @@ pub trait SubagentBackend: Send + Sync {
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::workspace::WorkspaceRecord>>> {
         Box::pin(async { tokio::task::spawn_blocking(crate::database::list_workspaces).await? })
     }
+    /// One listed workspace, read from the store. `None` means the list
+    /// would not contain it. Action validation asks this instead of the
+    /// published copy of the list, which can lag behind the store (#1334).
+    fn workspace(
+        &self,
+        id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_core::workspace::WorkspaceRecord>>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || crate::database::workspace_record(&id)).await?
+        })
+    }
     /// The workspace with this name, creating it when the store holds none.
     ///
     /// This is the daemon's own `CreateWorkspace` operation: create-or-get, so
