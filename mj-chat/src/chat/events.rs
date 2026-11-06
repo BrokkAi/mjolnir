@@ -82,6 +82,10 @@ impl ChatState {
     pub(crate) fn apply_event(&mut self, event: &SequencedEvent) {
         match &event.event {
             WorkerEvent::PromptAccepted { text, .. } => {
+                // The prompt may have come from the web viewer or the API.
+                // Every surface records a prompt before submitting it, so the
+                // listing this asks for already holds it.
+                self.request_session_history();
                 self.mark_prompt_submitted(text);
                 self.start_turn_clock(event.recorded_at_ms);
                 self.entries.push(
@@ -122,6 +126,7 @@ impl ChatState {
                 self.apply_adapter(event.seq, event.recorded_at_ms, payload);
             }
             WorkerEvent::QueuedPromptAdded { prompt } => {
+                self.request_session_history();
                 if !self.pending_queue_removals.contains(&prompt.id) {
                     self.queued_prompts.push_back(QueuedPrompt {
                         id: prompt.id.clone(),

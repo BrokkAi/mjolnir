@@ -7437,13 +7437,15 @@ async function searchHistory(query) {
       // Saying the answer is partial is the whole reason the bound reports it.
       paletteMatches.push({
         insert: composerText(),
-        label: `More matches than ${paletteMatches.length} — narrow the search`,
+        label: `Stopped after ${paletteMatches.length} matches — narrow the search`,
         hint: '',
       });
     }
     paletteSelected = 0;
     if (!paletteMatches.length) {
-      commandPalette.replaceChildren(el('p', 'dim palette-row', 'No earlier prompts match.'));
+      // The daemon's trigram index matches substrings of three characters or more.
+      const hint = [...query].length < 3 ? 'Type at least 3 characters.' : 'No earlier prompts match.';
+      commandPalette.replaceChildren(el('p', 'dim palette-row', hint));
       commandPalette.classList.remove('hidden');
       return;
     }
