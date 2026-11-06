@@ -36,9 +36,9 @@ impl ReviewCapture {
         match request {
             mj_core::relay::ReviewerRequest::CaptureDelta {
                 baselines: _,
-                scope,
+                scope: _,
                 repositories,
-            } => self.capture_delta(scope, repositories).await,
+            } => self.capture_delta(repositories).await,
             mj_core::relay::ReviewerRequest::RecordReviewed { trees } => {
                 tokio::task::spawn_blocking(move || -> Result<()> {
                     for (root, (tree, commit)) in trees {
@@ -56,9 +56,6 @@ impl ReviewCapture {
                 Ok(RelayResponseBody::Ok {
                     payload: RelayResponsePayload::ReviewBaselineAdvanced,
                 })
-            }
-            mj_core::relay::ReviewerRequest::AdvanceBaseline { .. } => {
-                anyhow::bail!("per-turn review was removed")
             }
             mj_core::relay::ReviewerRequest::RecordOverridden { trees } => {
                 tokio::task::spawn_blocking(move || -> Result<()> {
@@ -94,15 +91,7 @@ impl ReviewCapture {
     /// Git work is blocking and can take a moment on a large tree, so it runs
     /// on the blocking pool rather than on the runtime that also serves the
     /// primary session's relay.
-    async fn capture_delta(
-        &self,
-        scope: mj_core::relay::CaptureScope,
-        requested: Option<Vec<PathBuf>>,
-    ) -> Result<RelayResponseBody> {
-        anyhow::ensure!(
-            scope == mj_core::relay::CaptureScope::PushableCommits,
-            "per-turn review was removed"
-        );
+    async fn capture_delta(&self, requested: Option<Vec<PathBuf>>) -> Result<RelayResponseBody> {
         let roots = self.roots();
         let cwd = self.cwd.clone();
         let session_id = self.session_id.clone();
@@ -701,25 +690,6 @@ mod tests {
             .trim(),
             head.trim()
         );
-        for request in [
-            ReviewerRequest::AdvanceBaseline {
-                trees: Default::default(),
-            },
-            ReviewerRequest::CaptureDelta {
-                baselines: Default::default(),
-                scope: CaptureScope::TurnDelta,
-                repositories: None,
-            },
-        ] {
-            assert!(
-                capture
-                    .handle(request)
-                    .await
-                    .unwrap_err()
-                    .to_string()
-                    .contains("per-turn review was removed")
-            );
-        }
         std::fs::write(repository.join("tracked.rs"), "dirty\n").unwrap();
         let error = capture
             .handle(ReviewerRequest::CaptureDelta {

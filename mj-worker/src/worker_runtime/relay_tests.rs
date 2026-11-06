@@ -218,8 +218,8 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,
-        review_capture: true,
         review_trigger: Default::default(),
+        review_capture: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -7398,7 +7398,6 @@ async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot
 
     let mut config = launch_config("profile-home");
     config.cwd = workspace.path().to_owned();
-    config.review_capture = false;
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
     let appeared = tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -7452,7 +7451,6 @@ async fn the_control_socket_answers_while_the_harness_is_prepared() {
         format!("{}:/usr/bin:/bin", temp.path().display()),
     );
     config.cwd = temp.path().to_owned();
-    config.review_capture = false;
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
     let steps = || -> Vec<String> {

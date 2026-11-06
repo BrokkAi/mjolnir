@@ -2632,7 +2632,7 @@ impl DaemonClient {
             .await?
         {
             DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected turn-review reply {reply:?}"),
+            reply => bail!("unexpected review reply {reply:?}"),
         }
     }
 

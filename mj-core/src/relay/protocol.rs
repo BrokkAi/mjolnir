@@ -251,7 +251,6 @@ pub enum RelayRequest {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureScope {
-    TurnDelta,
     #[default]
     PushableCommits,
 }
@@ -260,16 +259,8 @@ pub enum CaptureScope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", content = "params", rename_all = "snake_case")]
 pub enum ReviewerRequest {
-    /// Report what changed in every workspace repository since `baselines`.
-    ///
-    /// A baseline is the `current_tree` id an earlier capture reported, keyed
-    /// by repository root: a Git tag naming the captured tree and the HEAD it
-    /// was taken at, or a bare tree id from an earlier worker. Either is a
-    /// tree-ish. When that baseline is unavailable, the worker uses the
-    /// baseline pinned before its primary harness started. If neither tree is
-    /// available, coverage starts at this capture rather than presenting the
-    /// whole repository as this turn's work. Capture never touches the
-    /// repository's index or working tree.
+    /// Capture committed changes since the push review base. `scope` and
+    /// `baselines` remain on the wire for older workers.
     CaptureDelta {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repositories: Option<Vec<std::path::PathBuf>>,
@@ -281,9 +272,6 @@ pub enum ReviewerRequest {
     /// review baselines, pinning each so a later `git gc` cannot collect it.
     RecordReviewed {
         trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
-    },
-    AdvanceBaseline {
-        trees: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
     /// Record `trees` as overridden: a push of that tree is allowed, but unlike
     /// `RecordReviewed` it does not become the base of the next push review.
@@ -371,7 +359,6 @@ impl ReviewerRequest {
     pub const fn action_name(&self) -> &'static str {
         match self {
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
-            Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
             Self::RecordReviewed { .. } => "reviewer_record_reviewed",
             Self::RecordOverridden { .. } => "reviewer_record_overridden",
             Self::SetReviewBase { .. } => "reviewer_set_review_base",
@@ -480,7 +467,6 @@ impl RelayRequest {
                 ..
             } => super::RELAY_PUSH_REVIEW_PROTOCOL,
 
-            Self::Reviewer { .. } => 6,
             _ => RELAY_MIN_PROTOCOL_VERSION,
         }
     }
@@ -713,6 +699,7 @@ pub enum RelayResponsePayload {
         repositories: Vec<RepoDelta>,
     },
     /// The review baselines now name the trees the controller sent.
+    /// Acknowledges `RecordReviewed` and `RecordOverridden`.
     ReviewBaselineAdvanced,
     /// The repository, commit and tree `SetReviewBase` made the review base.
     ReviewBaseSet {

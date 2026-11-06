@@ -682,7 +682,6 @@ impl Controller {
         };
         // Older workers still read this launch field. Push capture does not
         // need working-tree baselines at startup.
-        launch.review_capture = false;
         if let Some(subagent) = &subagent {
             let parent = self
                 .state

@@ -284,12 +284,12 @@ impl ReviewEnvironment for ControllerEnvironment {
             crate::controller::Controller::load().map_err(|error| format!("{error:#}"))?;
         let Some(reviewer) = controller.config.profiles.get(profile) else {
             return Err(format!(
-                "turn review needs a reviewer: [review] profile {profile:?} is not a profile in config.toml"
+                "code review needs a reviewer: [review] profile {profile:?} is not a profile in config.toml"
             ));
         };
         if !reviewer.enabled {
             return Err(format!(
-                "turn review needs an enabled reviewer: [review] profile {profile:?} is disabled"
+                "code review needs an enabled reviewer: [review] profile {profile:?} is disabled"
             ));
         }
         validate_review_profile(

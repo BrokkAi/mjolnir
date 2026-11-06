@@ -235,7 +235,7 @@ where
                     %session_id,
                     attempt,
                     %reason,
-                    "turn review waits for another operation on the session"
+                    "code review waits for another operation on the session"
                 );
             }
             outcome => return outcome,
