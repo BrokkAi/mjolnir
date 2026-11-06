@@ -35,12 +35,16 @@ pub(crate) async fn resolve(
             .iter()
             .flat_map(|candidate| candidate.choices.models.iter().cloned())
             .collect::<Vec<_>>();
-        autoconfigure(&models)
-            .context("No reviewers can be autoconfigured; choose reviewers in Settings > Code Review")?
+        autoconfigure(&models).context(
+            "No reviewers can be autoconfigured; choose reviewers in Settings > Code Review",
+        )?
     } else {
         settings.reviewers
     };
-    ensure!(!choices.is_empty(), "choose reviewers in Settings > Code Review");
+    ensure!(
+        !choices.is_empty(),
+        "choose reviewers in Settings > Code Review"
+    );
     let mut resolved = Vec::with_capacity(choices.len());
     for SubagentChoice { model, effort } in choices {
         ensure!(

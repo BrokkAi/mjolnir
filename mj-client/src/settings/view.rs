@@ -147,8 +147,8 @@ fn read_only(path: &[String], draft: &Value) -> bool {
         // The terminal inspects the machine's mbx installation first, which
         // may own these budgets itself.
         [section, _, page, ..] if section == "machines" && page == "build_cache" => true,
-        // Offered models and efforts come from discovery.
-        [section, key] if section == "review" && matches!(key.as_str(), "model" | "effort") => true,
+        // Reviewers are configured in terminal Settings.
+        [section, key, ..] if section == "review" && key == "reviewers" => true,
         [section, task, key]
             if section == "subagents"
                 && matches!(key.as_str(), "model" | "effort")
@@ -176,7 +176,7 @@ fn notices(path: &[String]) -> Vec<String> {
             "Build cache settings change in the terminal Settings, which inspects this machine's mbx installation first.".to_owned(),
         ],
         ["review"] => vec![
-            "The reviewer's model and effort are chosen in the terminal Settings, which discovers what the profile offers.".to_owned(),
+            "Reviewers and Autoconfigure are in the terminal Settings › Code Review.".to_owned(),
         ],
         _ => Vec::new(),
     }
@@ -386,5 +386,28 @@ pub fn apply(
                 notice: removal.notice,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reviewers_are_read_only_and_the_trigger_is_editable() {
+        let draft = json!({"review": {"trigger": "push", "reviewers": [{"model": "gpt-6-terra"}]}});
+        let path = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(read_only(&path(&["review", "reviewers"]), &draft));
+        assert!(read_only(
+            &path(&["review", "reviewers", "0", "model"]),
+            &draft
+        ));
+        assert!(!read_only(&path(&["review", "trigger"]), &draft));
     }
 }

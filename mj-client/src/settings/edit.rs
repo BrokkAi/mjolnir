@@ -238,20 +238,7 @@ pub fn toggle(draft: &mut Value, path: &[String]) -> Result<Option<String>, Stri
     if section != "profiles" || field != "enabled" || enabled {
         return Ok(None);
     }
-    let mut cleared = Vec::new();
-    if draft["review"]["profile"].as_str() == Some(profile_id) {
-        draft["review"]["profile"] = Value::Null;
-        draft["review"]["trigger"] = Value::String("off".into());
-        cleared.push("Code Review and turned off automatic review");
-    }
-    Ok(Some(if cleared.is_empty() {
-        format!("Disabled profile {profile_id:?}.")
-    } else {
-        format!(
-            "Disabled profile {profile_id:?}. Cleared it from {}.",
-            cleared.join(" and ")
-        )
-    }))
+    Ok(Some(format!("Disabled profile {profile_id:?}.")))
 }
 
 /// Add an entry to the collection at `collection`. A list grows by one
@@ -406,4 +393,25 @@ pub fn remove_entry(draft: &mut Value, path: &[String]) -> Result<Removal, Strin
         list_index,
         notice,
     })
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Reviewers are load-balanced across enabled profiles, so disabling one
+    /// leaves `[review]` as it was.
+    #[test]
+    fn disabling_a_profile_leaves_review_unchanged() {
+        let review =
+            json!({"trigger": "push", "reviewers": [{"model": "gpt-6-terra", "effort": "xhigh"}]});
+        let mut draft = json!({"profiles": {"codex": {"enabled": true}}, "review": review.clone()});
+        let path = ["profiles", "codex", "enabled"].map(str::to_owned);
+        assert_eq!(
+            toggle(&mut draft, &path).unwrap().as_deref(),
+            Some("Disabled profile \"codex\".")
+        );
+        assert_eq!(draft["review"], review);
+    }
 }
