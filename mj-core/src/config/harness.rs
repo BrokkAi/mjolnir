@@ -159,14 +159,29 @@ impl StagedSetting {
 }
 
 impl ExecutionEnforcement {
-    /// ACP selectors reserved for the target's execution policy: the option
-    /// the worker selects the policy mode on, and the policy setting.
+    /// ACP selectors reserved for the target's execution policy: the selector
+    /// the policy mode lives on, and the policy setting. The mode selector is
+    /// the policy's named one when the bridge has it, else its Mode selector
+    /// (Muse images before muse-acp 0.10 carry approvals on `mode`). It stays
+    /// owned when the bridge does not offer the policy's mode right now, such
+    /// as Auto on a model without it, so no other mode can be chosen then.
     pub fn owned_config_keys(
         self,
         options: &[agent_client_protocol::v1::schema::SessionConfigOption],
     ) -> Vec<String> {
-        let mode = self.acp_mode.and_then(|desired| {
-            crate::acp::execution_mode_option(options, self.acp_mode_selector, desired)
+        use agent_client_protocol::v1::schema::SessionConfigOptionCategory;
+        let mode = self.acp_mode.and_then(|_| {
+            self.acp_mode_selector
+                .and_then(|selector| {
+                    options
+                        .iter()
+                        .find(|option| option.id.to_string() == selector)
+                })
+                .or_else(|| {
+                    options
+                        .iter()
+                        .find(|option| option.category == Some(SessionConfigOptionCategory::Mode))
+                })
                 .map(|option| option.id.to_string())
         });
         mode.into_iter()

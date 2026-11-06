@@ -276,6 +276,33 @@ fn a_mode_alias_is_checked_against_the_selector_it_reaches() {
     }
 }
 
+/// On a model without Auto the bridge does not list it, and the mode selector
+/// must stay the policy's: no other mode can be chosen then either.
+// Hard-won: 49cecf8: without Auto on offer the mode selector stopped being owned
+#[test]
+fn a_guardian_mode_selector_stays_owned_without_auto_on_offer() {
+    let options: Vec<SessionConfigOption> = serde_json::from_value(json!([{
+        "id": "mode", "name": "Mode", "category": "mode", "type": "select",
+        "currentValue": "default", "options": [
+            {"value": "default", "name": "Default"}, {"value": "plan", "name": "Plan"},
+            {"value": "bypassPermissions", "name": "Bypass"}
+        ]
+    }]))
+    .unwrap();
+    let guardian = HarnessKind::Claude.execution_enforcement(ExecutionPolicy::ConfiguredApprovals);
+    assert_eq!(
+        guardian.unwrap().owned_config_keys(&options),
+        vec!["mode".to_owned()]
+    );
+    assert!(!policy_permits(
+        guardian,
+        &options,
+        Some("mode"),
+        "bypassPermissions"
+    ));
+    assert!(policy_permits(guardian, &options, Some("mode"), "plan"));
+}
+
 /// Kimi carries its execution mode on the Plan selector, like Claude, so it
 /// leaves Plan through the worker, which restores the policy's own mode.
 // Hard-won: ac3b724: refusing every mode but Plan and the policy's left Kimi stuck in Plan
