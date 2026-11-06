@@ -319,7 +319,7 @@ impl ProfileCatalog {
                 omitted.join(", ")
             );
         }
-        let (reviewers, known) = crate::review_selection::upgrade_reviewers(
+        let (reviewers, known, adjustments) = crate::review_selection::upgrade_reviewers(
             &legacy,
             &available,
             |profile, model| {
@@ -343,6 +343,35 @@ impl ProfileCatalog {
             anyhow::bail!("legacy review upgrade found no reviewers; waiting for matching models");
         }
         let count = reviewers.len();
+        let configured_notice = (!reviewers.is_empty()).then(|| {
+            let rows = reviewers
+                .iter()
+                .map(|choice| match &choice.effort {
+                    Some(effort) => format!("{} {effort}", choice.model),
+                    None => format!("{} default", choice.model),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let changes = adjustments
+                .iter()
+                .map(|adjustment| {
+                    format!(
+                        "{} uses {} ({} is not offered)",
+                        adjustment.model,
+                        adjustment.used.as_deref().unwrap_or("default"),
+                        adjustment.requested
+                    )
+                })
+                .collect::<Vec<_>>();
+            if changes.is_empty() {
+                format!("Code review reviewers were configured from your profiles: {rows}.")
+            } else {
+                format!(
+                    "Code review reviewers were configured from your profiles: {rows}; {}.",
+                    changes.join("; ")
+                )
+            }
+        });
         let path = self
             .config_path
             .clone()
@@ -363,6 +392,15 @@ impl ProfileCatalog {
                 {
                     notice(message.to_owned());
                 }
+            }
+            if let Some(message) = configured_notice
+                && let Some(notice) = self
+                    .notice
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone()
+            {
+                notice(message);
             }
             tracing::info!(
                 count,
@@ -933,7 +971,7 @@ impl ProfileCatalog {
             .map_err(|error| anyhow::anyhow!("{}", error.message))
     }
 
-    fn live(&self) -> Result<Config> {
+    pub(crate) fn live(&self) -> Result<Config> {
         self.lock()
             .live
             .clone()

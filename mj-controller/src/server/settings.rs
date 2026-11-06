@@ -302,14 +302,15 @@ async fn autoconfigure_settings(
         .subagent
         .clone()
         .ok_or_else(|| ApiError::bad_request("Reviewer discovery is unavailable."))?;
-    let (mut draft, config) = tokio::task::spawn_blocking(move || {
+    let (mut draft, config, incoming) = tokio::task::spawn_blocking(move || {
+        let incoming = request.draft.clone();
         let mut draft = request.draft;
         let stored =
             serde_json::to_value(Config::load().map_err(unreadable)?).map_err(unreadable)?;
         hidden::restore(&mut draft, &stored).map_err(ApiError::bad_request)?;
         let config = draft::config_from_draft(draft.clone())
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
-        Ok::<_, ApiError>((draft, config))
+        Ok::<_, ApiError>((draft, config, incoming))
     })
     .await
     .map_err(unreadable)??;
@@ -425,7 +426,7 @@ async fn autoconfigure_settings(
     for key in ["count", "profile", "effort"] {
         draft["review"].as_object_mut().unwrap().remove(key);
     }
-    hidden::hide(&mut draft);
+    hidden::rehide_restored(&mut draft, &incoming);
     let snapshot = capabilities(&state);
     let backend = state.subagent.clone();
     tokio::task::spawn_blocking(move || {

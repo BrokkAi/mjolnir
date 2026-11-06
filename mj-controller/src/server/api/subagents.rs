@@ -354,7 +354,10 @@ async fn resolve_model_profile_selection_matching(
             });
         }
     }
-    let mut ready_results = std::collections::HashMap::new();
+    let mut ready_results: std::collections::HashMap<
+        String,
+        Result<Vec<mj_core::acp::SessionConfigChoice>, ApiFailure>,
+    > = std::collections::HashMap::new();
     let all_offered = offered.clone();
     let mut matching_model = false;
     let mut offered_any_effort = false;
@@ -372,6 +375,22 @@ async fn resolve_model_profile_selection_matching(
             loop {
                 if let Some(result) = ready_results.remove(&candidate.profile_id) {
                     break result;
+                }
+                let later_ready = offered.iter().skip(index + 1).any(|later| {
+                    offers_model(later, model)
+                        && unhealthy_note(later, model).is_none()
+                        && ready_results.get(&later.profile_id).is_some_and(|result| {
+                            result.as_ref().is_ok_and(|efforts| match requirement {
+                                EffortRequirement::Exact(requested) => {
+                                    efforts.iter().any(|effort| effort.value == requested)
+                                }
+                                _ => false,
+                            })
+                        })
+                });
+                if later_ready {
+                    candidate_deadline = candidate_deadline
+                        .min(tokio::time::Instant::now() + std::time::Duration::from_secs(2));
                 }
                 match tokio::time::timeout_at(candidate_deadline, probes.join_next()).await {
                     Ok(Some(Ok((id, result)))) => {
@@ -1593,6 +1612,46 @@ mod tests {
         assert_eq!(
             tokio::time::Instant::now().duration_since(start),
             std::time::Duration::from_secs(2)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reviewer_completed_third_candidate_bounds_each_stalled_predecessor() {
+        let mut ready = candidate("ready-third", Some(0), &["fixed"]);
+        ready.choices.model = Some("fixed".into());
+        ready.choices.efforts = vec![mj_core::acp::SessionConfigChoice {
+            value: "high".into(),
+            name: "High".into(),
+            description: None,
+        }];
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
+            discovery_fails: false,
+            config: Default::default(),
+            candidates: SubagentCandidates {
+                offered: vec![
+                    candidate("stalled-first", Some(80), &["fixed"]),
+                    candidate("stalled-second", Some(80), &["fixed"]),
+                    ready,
+                ],
+                unavailable: Vec::new(),
+            },
+        });
+        let start = tokio::time::Instant::now();
+        let selected = resolve_model_profile_selection_matching(
+            &backend,
+            None,
+            "fixed",
+            EffortRequirement::Exact("high"),
+            None,
+            ModelProfileCandidateSource::ReviewersReady,
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.profile_id, "ready-third");
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(start),
+            std::time::Duration::from_secs(4)
         );
     }
 

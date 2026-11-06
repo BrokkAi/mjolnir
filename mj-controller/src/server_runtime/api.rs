@@ -2828,7 +2828,62 @@ impl SubagentBackend for ApiBackend {
     ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
         Box::pin(async move {
             let ids = self.profile_catalog.ready_candidates(&model)?;
-            self.discover_profile_candidates(ids, "reviewer").await
+            let config = self.profile_catalog.live()?;
+            let snapshot = self.profile_catalog.snapshot();
+            let rejected = self
+                .rejected_logins
+                .lock()
+                .map_err(|_| anyhow!("refused logins lock poisoned"))?;
+            let quota_reports = self
+                .quota_reports
+                .lock()
+                .map_err(|_| anyhow!("profile quota reports lock poisoned"))?;
+            let health = crate::profile_health::shared()
+                .lock()
+                .map_err(|_| anyhow!("profile health lock poisoned"))?;
+            let now = std::time::SystemTime::now();
+            let mut candidates = crate::server::api::SubagentCandidates::default();
+            for (profile_id, harness) in ids {
+                if let Some(reason) = rejected.refusal(&profile_id) {
+                    candidates.unavailable.push((profile_id, reason));
+                    continue;
+                }
+                let Some(profile) = config.enabled_profile(&profile_id) else {
+                    continue;
+                };
+                let Some(entry) = snapshot
+                    .profiles
+                    .get(&profile.capabilities_key(&profile_id))
+                else {
+                    continue;
+                };
+                let mj_core::profile_capabilities::CapabilityState::Ready(choices) = &entry.choices
+                else {
+                    continue;
+                };
+                let unhealthy = choices
+                    .models
+                    .iter()
+                    .filter_map(|model| {
+                        health
+                            .unhealthy(&profile_id, &model.value, now)
+                            .cloned()
+                            .map(|mark| (model.value.clone(), mark))
+                    })
+                    .collect();
+                candidates
+                    .offered
+                    .push(crate::server::api::SubagentCandidate {
+                        profile_id: profile_id.clone(),
+                        harness,
+                        choices: choices.clone(),
+                        quota: crate::server::api::CandidateQuota::from_report(
+                            quota_reports.get(&profile_id),
+                        ),
+                        unhealthy,
+                    });
+            }
+            Ok(candidates)
         })
     }
 

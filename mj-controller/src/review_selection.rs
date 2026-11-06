@@ -154,7 +154,7 @@ async fn configured_choices(
         {
             anyhow::bail!("review profile {profile:?} has no available reviewer model");
         }
-        let (choices, _) = upgrade_reviewers(
+        let (choices, _, _) = upgrade_reviewers(
             settings.legacy.as_ref().expect("legacy review"),
             &available,
             |profile, model| {
@@ -180,7 +180,11 @@ pub(crate) async fn upgrade_reviewers<F, Fut>(
     available: &[(String, ProfileConfig)],
     probe: F,
     cancelled: Option<&AtomicBool>,
-) -> Result<(Vec<SubagentChoice>, bool)>
+) -> Result<(
+    Vec<SubagentChoice>,
+    bool,
+    Vec<mj_core::review::autoconfigure::EffortAdjustment>,
+)>
 where
     F: Fn(String, String) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<ProfileConfig>>,
@@ -225,10 +229,15 @@ where
         return Ok((
             vec![SubagentChoice { model, effort }; count],
             efforts.is_some(),
+            Vec::new(),
         ));
     }
     let (choices, known) = autoconfigure_with_efforts(available, probe, cancelled).await?;
-    Ok((choices.reviewers, known.values().all(|known| *known)))
+    Ok((
+        choices.reviewers,
+        known.values().all(|known| *known),
+        choices.adjusted,
+    ))
 }
 
 /// Compute the ordered legacy Auto preset using the same model and effort
@@ -395,7 +404,7 @@ mod tests {
                 observed_at: 1,
             },
         )];
-        let (choices, known) =
+        let (choices, known, _) =
             upgrade_reviewers(&legacy, &available, |_, _| async { unreachable!() }, None)
                 .await
                 .unwrap();
@@ -428,7 +437,7 @@ mod tests {
                 observed_at: 1,
             },
         )];
-        let (choices, known) = upgrade_reviewers(
+        let (choices, known, _) = upgrade_reviewers(
             &legacy,
             &available,
             |_, _| async { anyhow::bail!("probe unavailable") },

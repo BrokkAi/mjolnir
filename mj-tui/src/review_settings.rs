@@ -61,6 +61,7 @@ pub(crate) struct ReviewSettingsDialog {
     models_partial: bool,
     efforts_known: Vec<bool>,
     efforts_partial: Vec<bool>,
+    effort_failures: Vec<String>,
     suggested: Option<Vec<SubagentChoice>>,
     suggested_adjustments: Vec<mj_core::review::autoconfigure::EffortAdjustment>,
     pending_autoconfigure: Option<(Vec<SubagentChoice>, Instant)>,
@@ -82,6 +83,7 @@ impl ReviewSettingsDialog {
             models_partial: false,
             efforts_known: Vec::new(),
             efforts_partial: Vec::new(),
+            effort_failures: Vec::new(),
             suggested: None,
             suggested_adjustments: Vec::new(),
             pending_autoconfigure: None,
@@ -150,38 +152,70 @@ impl ReviewSettingsDialog {
                     })
             });
             if ready || started.elapsed() >= Duration::from_secs(20) {
-                let mut resolved = draft.clone();
+                let configured =
+                    mj_core::review::autoconfigure::autoconfigure(&self.models, |model| {
+                        snapshot.options(config, Some(model)).and_then(|options| {
+                            if options.unavailable.is_empty() {
+                                Some(options.efforts)
+                            } else {
+                                None
+                            }
+                        })
+                    });
+                let mut resolved = configured
+                    .as_ref()
+                    .map(|result| result.reviewers.clone())
+                    .unwrap_or_else(|| draft.clone());
+                let adjustments = configured.map(|result| result.adjusted).unwrap_or_default();
+                let mut notices = Vec::new();
+                if !adjustments.is_empty() {
+                    notices.push(format!(
+                        "Adjusted reviewer efforts: {}",
+                        adjustments
+                            .iter()
+                            .map(|item| format!(
+                                "{}: {} → {}",
+                                item.model,
+                                item.requested,
+                                item.used.as_deref().unwrap_or("default")
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                let mut failures = Vec::new();
                 for choice in &mut resolved {
-                    if let Some(effort) = choice.effort.as_deref() {
-                        let offered = snapshot.options(config, Some(&choice.model));
-                        if offered.as_ref().is_none_or(|options| {
-                            !options.efforts.iter().any(|item| item.value == effort)
-                        }) {
-                            choice.effort = None;
-                            if offered
-                                .as_ref()
-                                .is_none_or(|options| !options.unavailable.is_empty())
-                            {
-                                self.effort_notice = Some(
-                                    "Some reviewer efforts could not be checked; using defaults."
-                                        .into(),
-                                );
+                    let offered = snapshot.options(config, Some(&choice.model));
+                    let unknown = offered.as_ref().is_none_or(|options| {
+                        !options.unavailable.is_empty()
+                            && choice.effort.as_deref().is_none_or(|effort| {
+                                !options.efforts.iter().any(|item| item.value == effort)
+                            })
+                    });
+                    if unknown {
+                        choice.effort = None;
+                        for reason in offered.into_iter().flat_map(|options| options.unavailable) {
+                            let reason = if reason.contains("discovery pending") {
+                                format!(
+                                    "{} (timed out)",
+                                    reason.replace(": effort discovery pending", "")
+                                )
+                            } else {
+                                reason
+                            };
+                            if !failures.contains(&reason) {
+                                failures.push(reason);
                             }
                         }
                     }
                 }
-                let failures = resolved
-                    .iter()
-                    .filter_map(|choice| snapshot.options(config, Some(&choice.model)))
-                    .flat_map(|options| options.unavailable)
-                    .filter(|reason| !reason.contains("discovery pending"))
-                    .collect::<Vec<_>>();
                 if !failures.is_empty() {
-                    self.effort_notice = Some(format!(
+                    notices.push(format!(
                         "Reviewer effort discovery failed: {}; using defaults.",
                         failures.join("; ")
                     ));
                 }
+                self.effort_notice = (!notices.is_empty()).then(|| notices.join(" "));
                 self.review.reviewers = resolved;
                 self.review.clear_legacy();
                 self.pending_autoconfigure = None;
@@ -190,15 +224,18 @@ impl ReviewSettingsDialog {
         self.efforts.clear();
         self.efforts_known.clear();
         self.efforts_partial.clear();
+        self.effort_failures.clear();
         for reviewer in &self.review.reviewers {
             match snapshot.options(config, Some(&reviewer.model)) {
                 Some(options) => {
+                    self.effort_failures.push(options.unavailable.join("; "));
                     self.efforts_partial.push(!options.unavailable.is_empty());
                     self.efforts.push(options.efforts);
                     self.efforts_known.push(true);
                 }
                 None => {
                     self.efforts.push(Vec::new());
+                    self.effort_failures.push(String::new());
                     self.efforts_partial.push(false);
                     self.efforts_known.push(false);
                 }
@@ -676,12 +713,14 @@ pub(crate) fn render_review_settings(
                 &[(Remove(*i), label.as_str(), !dialog.saving)],
                 &mut form,
             );
-            if dialog.effort_unavailable(*i) {
+            if dialog.effort_unavailable(*i) || !dialog.effort_failures[*i].is_empty() {
+                let reason = if dialog.effort_failures[*i].is_empty() {
+                    "Effort unavailable for this model"
+                } else {
+                    dialog.effort_failures[*i].as_str()
+                };
                 frame.render_widget(
-                    Line::styled(
-                        "Effort unavailable for this model",
-                        Style::default().fg(theme::palette().warning),
-                    ),
+                    Line::styled(reason, Style::default().fg(theme::palette().warning)),
                     row(1 + reviewer_rows * *i as u16 + reviewer_rows - 1),
                 );
             }

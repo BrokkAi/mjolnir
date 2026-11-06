@@ -458,7 +458,9 @@ fn autoconfigure_timeout_finishes_on_clock_tick_without_a_catalog_update() {
     );
     assert_eq!(
         editor.effort_notice.as_deref(),
-        Some("Some reviewer efforts could not be checked; using defaults.")
+        Some(
+            "Reviewer effort discovery failed: claude-1 (timed out); codex-1 (timed out); codex-2 (timed out); using defaults."
+        )
     );
 }
 
