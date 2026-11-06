@@ -569,7 +569,7 @@ function enqueueSettings(work) {
 /// whose models are not known yet, or a selected model whose efforts are not.
 function settingsDiscovering() {
   const options = settingsState.subagentOptions;
-  const subagentsPending = options && typeof options === 'object' && ['straightforward', 'subtle']
+  const subagentsPending = options && typeof options === 'object' && ['straightforward', 'subtle', 'oracle']
     .some(task => options[task] === null || options[task]?.efforts_pending === true);
   const reviewersPending = Object.values(settingsState.reviewerOptions || {})
     .some(choice => choice === null || choice?.efforts_pending === true);
@@ -2351,6 +2351,7 @@ function freshDraft() {
     resourceError: '',
   };
   draft.subagents = rememberedDelegationPolicy(draft.profileId);
+  draft.oracle = rememberedOracleChoice(draft.profileId);
   if (draft.subagents.mode === 'mjolnir' && !mjolnirAvailable(draft)) draft.subagents = { mode: 'native' };
   setNewTargetSizing(draft, draft.targetId);
   return draft;
@@ -2363,10 +2364,15 @@ function rememberedDelegationPolicy(profileId) {
     : Object.hasOwn(policies, '') ? policies[''] : { mode: 'native' });
 }
 
+function rememberedOracleChoice(profileId) {
+  return snapshot?.last_oracle_choices?.[profileId] ?? true;
+}
+
 function selectNewProfile(draft, profileId) {
   if (draft.profileId === profileId) return;
   draft.profileId = profileId;
   draft.subagents = rememberedDelegationPolicy(profileId);
+  draft.oracle = rememberedOracleChoice(profileId);
   if (draft.subagents.mode === 'mjolnir' && !mjolnirAvailable(draft)) draft.subagents = { mode: 'native' };
 }
 
@@ -2375,6 +2381,11 @@ function selectNewProfile(draft, profileId) {
 function subagentChoiceApplies(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
   return kind === 'claude' || kind === 'codex' || kind === 'dsh';
+}
+
+// Every top-level session's message-only server carries ask_oracle, whatever its harness.
+function oracleChoiceApplies(draft = newDraft) {
+  return snapshot?.profiles.some(profile => profile.id === draft?.profileId) === true;
 }
 
 // Mirrors HarnessKind::has_native_subagents. DSH has none, so Native would
@@ -2421,6 +2432,22 @@ function subagentSelectionError(draft) {
 // Create and Move share the same delegation choices. A disabled Mjolnir
 // option remains visible so the setup path is discoverable.
 function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}) {
+  if (oracleChoiceApplies(draft) && (snapshot?.oracle_configured || draft.oracleChoice || draft.storedOracleChoice)) {
+    const oracleField = el('label', 'field');
+    oracleField.append(document.createTextNode('Oracle'));
+    const oracleSelect = el('select');
+    oracleSelect.id = `${prefix}-oracle`;
+    for (const [value, title] of [['enabled', 'enabled'], ['disabled', 'disabled']]) {
+      const option = el('option', '', title);
+      option.value = value;
+      oracleSelect.append(option);
+    }
+    oracleSelect.value = draft.oracle === false ? 'disabled' : 'enabled';
+    oracleSelect.disabled = draft.queueLocked === true;
+    oracleSelect.onchange = () => { draft.oracle = oracleSelect.value === 'enabled'; onChange(); rerender(); };
+    oracleField.append(oracleSelect);
+    body.append(oracleField);
+  }
   const field = el('label', 'field');
   field.append(document.createTextNode('Delegation'));
   const select = el('select');
@@ -3494,6 +3521,7 @@ async function commitNew() {
     subagents: shownDelegation(draft, draft.subagents),
     no_github_events: false,
   };
+  if (oracleChoiceApplies(draft) && (snapshot?.oracle_configured || draft.oracleChoice)) body.oracle = draft.oracle;
   if (!bare) body.additional_mounts = mountEditorWire(draft.mountEditors[draft.targetId]);
   const kind = targetResourceKind(draft.targetId);
   const target = snapshot?.targets.find(item => item.id === draft.targetId);
@@ -4470,6 +4498,10 @@ function freshMoveDraft(session) {
     // when the draft differs from it.
     storedSubagents: delegationPolicy(session.subagents),
     subagents: delegationPolicy(recovery?.subagents || session.subagents),
+    storedOracle: session.oracle !== false,
+    oracle: recovery?.oracle ?? (session.oracle !== false),
+    storedOracleChoice: session.oracle_choice,
+    oracleChoice: recovery?.oracle_choice ?? session.oracle_choice,
   };
 }
 
@@ -4788,6 +4820,8 @@ async function prepareMove() {
         additional_mounts: draft.destinationAdditionalMounts,
         resource_allocation: draft.destinationResourceAllocation,
         subagents: moveSubagentChange(draft),
+        oracle: draft.oracle === draft.storedOracle ? null : draft.oracle,
+        oracle_choice: JSON.stringify(draft.oracleChoice) === JSON.stringify(draft.storedOracleChoice) ? null : draft.oracleChoice,
       }),
     });
     if (draft.preparation.workspace && !draft.filesReviewed) {

@@ -28,6 +28,12 @@ pub struct MoveSelection {
     /// Delegation policy for the destination. `None` keeps the session's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagents: Option<crate::subagent::SubagentPolicy>,
+    /// Oracle choice for the destination; omitted retains the session value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<bool>,
+    /// Destination oracle model override; omitted retains the session value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_choice: Option<crate::config::SubagentChoice>,
 }
 
 /// What moving a local checkout into an isolated workspace will do, shown

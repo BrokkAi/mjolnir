@@ -34,6 +34,10 @@ pub struct ViewerSnapshot {
     )]
     pub last_subagent_policies:
         std::collections::BTreeMap<String, mj_core::subagent::SubagentPolicy>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub last_oracle_choices: std::collections::BTreeMap<String, bool>,
+    #[serde(default)]
+    pub oracle_configured: bool,
     #[serde(default)]
     pub subagents_configured: bool,
     pub revision: u64,
@@ -215,6 +219,8 @@ impl ViewerSnapshot {
                 let start = session.start_selection();
                 let review = config.review.for_session(session.review.as_ref());
                 ViewerSession {
+                    oracle: session.oracle,
+                    oracle_choice: session.oracle_choice.clone(),
                     subagents: session.subagents.clone().unwrap_or_default(),
                     at: start.at,
                     branch: start.branch,
@@ -425,6 +431,8 @@ impl ViewerSnapshot {
         Self {
             profile_capabilities: Default::default(),
             last_subagent_policies: state.last_subagent_policies.clone(),
+            last_oracle_choices: state.last_oracle_choices.clone(),
+            oracle_configured: config.subagents.oracle_configured(),
             operator_away: state.operator_presence.away,
             auto_afk_minutes: config.advanced.auto_afk_minutes,
             subagents_configured: config.subagents.is_configured(),
@@ -475,6 +483,10 @@ impl ViewerSession {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSession {
+    #[serde(default = "oracle_default_enabled")]
+    pub oracle: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     #[serde(default)]
     pub review_trigger: mj_core::config::ReviewTrigger,
     #[serde(default)]
@@ -701,9 +713,17 @@ pub struct ViewerSession {
     pub capabilities: ViewerSessionCapabilities,
 }
 
+fn oracle_default_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerMoveRecovery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     pub operation_id: String,
     pub source_profile_id: String,
     pub source_target_template_id: String,
@@ -745,6 +765,8 @@ impl ViewerMoveRecovery {
             return None;
         }
         Some(Self {
+            oracle: operation.selection.oracle,
+            oracle_choice: operation.selection.oracle_choice.clone(),
             operation_id: operation.operation_id.clone(),
             source_profile_id: operation.source_profile_id.clone(),
             source_target_template_id: operation.source_target_template_id.clone(),

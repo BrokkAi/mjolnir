@@ -104,6 +104,8 @@ fn podman_controller(state: SessionState) -> Controller {
     app_state.sessions.insert(
         session_id.into(),
         mj_core::state::SessionRecord {
+            oracle_choice: None,
+            oracle: true,
             project: None,
             target_runtime: None,
             launch_base: None,

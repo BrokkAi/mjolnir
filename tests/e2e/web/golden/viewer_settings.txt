@@ -93,7 +93,7 @@ layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Set
 Settings
 Sub-agents
 
-Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.
+Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.
 
 Maximum concurrent children
 
@@ -107,6 +107,10 @@ Subtle model
 None
 opus
 sonnet
+Oracle model
+None
+opus
+sonnet
 
 Unsaved changes. Save writes them to the configuration file.
 
@@ -115,12 +119,13 @@ Save
 control Maximum concurrent children: "99" (text, placeholder "6 (default)")
 control Straightforward model: None
 control Subtle model: None
+control Oracle model: None
 layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents"}
 === inline task models start unset and efforts are hidden (390x844) ===
 Settings
 Sub-agents
 
-Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.
+Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.
 
 Maximum concurrent children
 
@@ -134,6 +139,10 @@ Subtle model
 None
 opus
 sonnet
+Oracle model
+None
+opus
+sonnet
 
 Unsaved changes. Save writes them to the configuration file.
 
@@ -142,12 +151,13 @@ Save
 control Maximum concurrent children: "99" (text, placeholder "6 (default)")
 control Straightforward model: None
 control Subtle model: None
+control Oracle model: None
 layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents"}
 === Subtle model is edited inline (390x844) ===
 Settings
 Sub-agents
 
-Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.
+Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.
 
 Maximum concurrent children
 
@@ -165,6 +175,10 @@ Subtle effort
 Default (Harness default)
 high
 max
+Oracle model
+None
+opus
+sonnet
 
 Unsaved changes. Save writes them to the configuration file.
 
@@ -174,12 +188,13 @@ control Maximum concurrent children: "99" (text, placeholder "6 (default)")
 control Straightforward model: None
 control Subtle model: opus
 control Subtle effort: Default (Harness default)
+control Oracle model: None
 layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents"}
 === a refused save keeps the Subtle model in the draft (390x844) ===
 Settings
 Sub-agents
 
-Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.
+Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.
 
 Maximum concurrent children
 
@@ -197,6 +212,10 @@ Subtle effort
 Default (Harness default)
 high
 max
+Oracle model
+None
+opus
+sonnet
 
 [subagents.subtle] requires [subagents.straightforward]; configure straightforward alone or both
 
@@ -208,12 +227,13 @@ control Maximum concurrent children: "99" (text, placeholder "6 (default)")
 control Straightforward model: None
 control Subtle model: opus
 control Subtle effort: Default (Harness default)
+control Oracle model: None
 layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents"}
 === saving returns the saved draft (390x844) ===
 Settings
 Sub-agents
 
-Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.
+Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.
 
 Maximum concurrent children
 Straightforward model
@@ -232,6 +252,10 @@ Subtle effort
 Default (Harness default)
 high
 max
+Oracle model
+None
+opus
+sonnet
 
 Saved.
 
@@ -242,4 +266,5 @@ control Straightforward model: opus
 control Straightforward effort: high
 control Subtle model: opus
 control Subtle effort: Default (Harness default)
+control Oracle model: None
 layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":false,"menu":"Settings","hash":"#settings/subagents"}
