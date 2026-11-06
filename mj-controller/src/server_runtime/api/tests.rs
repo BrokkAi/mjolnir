@@ -361,7 +361,10 @@ async fn override_review_dispatch_forwards_parent_and_reason_to_export() {
                 request_id: "override-review".into(),
                 created_at_ms: 0,
                 action: mj_core::subagent::SubagentToolAction::OverrideReview {
-                    reason: "finding is unreasonable".into(),
+                    overrides: vec![mj_core::subagent::ReviewOverride {
+                        finding: "F".into(),
+                        reason: "finding is unreasonable".into(),
+                    }],
                 },
             },
         )
@@ -369,7 +372,7 @@ async fn override_review_dispatch_forwards_parent_and_reason_to_export() {
     assert!(!result.is_error, "{}", result.message);
     assert_eq!(
         exports.override_call(),
-        Some(("parent-1".into(), "finding is unreasonable".into()))
+        Some(("parent-1".into(), "F: finding is unreasonable".into()))
     );
 }
 

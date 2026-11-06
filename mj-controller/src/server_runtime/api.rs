@@ -910,10 +910,19 @@ impl ApiBackend {
                     .request_review(parent_session_id.to_owned(), path.clone())
                     .await
             }
-            SubagentToolAction::OverrideReview { reason } => {
+            // Transitional: per-finding overrides replace this joined reason.
+            SubagentToolAction::OverrideReview { overrides } => {
+                let reason = overrides
+                    .iter()
+                    .map(|entry| format!("{}: {}", entry.finding, entry.reason))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 self.exports
-                    .override_review(parent_session_id.to_owned(), reason.to_owned())
+                    .override_review(parent_session_id.to_owned(), reason)
                     .await
+            }
+            SubagentToolAction::SetReviewBaseline { .. } => {
+                anyhow::bail!("set_review_baseline is not available yet")
             }
             SubagentToolAction::ListProfiles => {
                 anyhow::bail!("list_profiles is no longer available")

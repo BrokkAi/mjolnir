@@ -680,7 +680,10 @@ fn call_with_budget_and_options(
                 bail!("override_review reason cannot be empty");
             }
             SubagentToolAction::OverrideReview {
-                reason: reason.to_owned(),
+                overrides: vec![mj_core::subagent::ReviewOverride {
+                    finding: mj_core::subagent::LEGACY_WHOLE_VERDICT_FINDING.into(),
+                    reason: reason.to_owned(),
+                }],
             }
         }
         "list_agents" => SubagentToolAction::ListAgents,
@@ -1161,7 +1164,10 @@ mod tests {
                 (
                     json!({"name":"override_review","arguments":{"reason":"finding is unreasonable"}}),
                     SubagentToolAction::OverrideReview {
-                        reason: "finding is unreasonable".into(),
+                        overrides: vec![mj_core::subagent::ReviewOverride {
+                            finding: mj_core::subagent::LEGACY_WHOLE_VERDICT_FINDING.into(),
+                            reason: "finding is unreasonable".into(),
+                        }],
                     },
                     true,
                 ),

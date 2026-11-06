@@ -371,6 +371,19 @@ pub struct FileSourceRanges {
     pub ranges: Vec<LineRange>,
 }
 
+/// One before-push review finding the agent declines to fix, in the agent's
+/// own words, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewOverride {
+    pub finding: String,
+    pub reason: String,
+}
+
+/// The finding recorded for a queued override from an older worker, which
+/// overrode the whole verdict with one reason.
+pub const LEGACY_WHOLE_VERDICT_FINDING: &str = "Every finding in the reviewed verdict";
+
 /// One MCP request created inside a parent worker and consumed by the
 /// controller. `request_id` is the idempotency identity across reconnects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,7 +417,13 @@ pub enum SubagentToolAction {
         path: Option<String>,
     },
     OverrideReview {
-        reason: String,
+        overrides: Vec<ReviewOverride>,
+    },
+    /// Mark commits through `commit` as reviewed, so later reviews start there.
+    SetReviewBaseline {
+        commit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     Spawn {
         task_name: String,
@@ -475,7 +494,17 @@ enum SubagentToolActionWire {
         path: Option<String>,
     },
     OverrideReview {
-        reason: String,
+        #[serde(default)]
+        overrides: Vec<ReviewOverride>,
+        /// A queued request from an older worker, which overrode the whole
+        /// verdict with one reason.
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    SetReviewBaseline {
+        commit: String,
+        #[serde(default)]
+        path: Option<String>,
     },
     Spawn {
         task_name: String,
@@ -533,6 +562,7 @@ impl SubagentToolAction {
             Self::Spawn { .. }
                 | Self::RequestReview { .. }
                 | Self::OverrideReview { .. }
+                | Self::SetReviewBaseline { .. }
                 | Self::SendInput { .. }
                 | Self::SendMessage { .. }
                 | Self::LegacyInterruptAgent { .. }
@@ -584,7 +614,21 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
             },
             SubagentToolActionWire::ListProfiles => Self::ListProfiles,
             SubagentToolActionWire::RequestReview { path } => Self::RequestReview { path },
-            SubagentToolActionWire::OverrideReview { reason } => Self::OverrideReview { reason },
+            SubagentToolActionWire::OverrideReview {
+                mut overrides,
+                reason,
+            } => {
+                if let Some(reason) = reason {
+                    overrides.push(ReviewOverride {
+                        finding: LEGACY_WHOLE_VERDICT_FINDING.into(),
+                        reason,
+                    });
+                }
+                Self::OverrideReview { overrides }
+            }
+            SubagentToolActionWire::SetReviewBaseline { commit, path } => {
+                Self::SetReviewBaseline { commit, path }
+            }
             SubagentToolActionWire::Spawn {
                 task_name,
                 instructions,
@@ -1650,7 +1694,14 @@ mod tests {
                 child_session_id: "child".into(),
             },
             SubagentToolAction::OverrideReview {
-                reason: "reason".into(),
+                overrides: vec![ReviewOverride {
+                    finding: "finding".into(),
+                    reason: "reason".into(),
+                }],
+            },
+            SubagentToolAction::SetReviewBaseline {
+                commit: "abc123".into(),
+                path: None,
             },
         ];
         assert!(
