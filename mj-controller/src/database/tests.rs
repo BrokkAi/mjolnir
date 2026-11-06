@@ -1384,10 +1384,9 @@ fn inherited_session_review_survives_lifecycle_writes_and_keeps_trigger_inherita
             ]),
         }
     );
-    // The session inherits whether review is on: reviewers alone do not
-    // switch it on, and a global that is on stays on.
+    // The session reviewer choice enables review with either global list.
     for (global_reviewers, trigger) in [
-        (Vec::new(), mj_core::config::ReviewTrigger::Off),
+        (Vec::new(), mj_core::config::ReviewTrigger::Push),
         (
             vec![mj_core::config::SubagentChoice {
                 model: "gpt-6-sol".into(),
@@ -4457,77 +4456,6 @@ fn detached_drafts_keep_source_pid_and_workspace_without_overwriting_each_other(
 }
 
 #[test]
-fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
-    use mj_core::review::driver::PendingForward;
-
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    save_session_to(&database, &session("session-1", "project-1")).unwrap();
-
-    assert_eq!(
-        turn_review_state_in(&database, "session-1").unwrap(),
-        TurnReviewState::default(),
-        "an unreviewed session starts with no baseline"
-    );
-
-    let state = TurnReviewState {
-        pending_followup: true,
-        forward_attempts: 2,
-        child_session_id: Some("reviewer-child".into()),
-        baselines: std::collections::BTreeMap::from([(
-            std::path::PathBuf::from("/workspace/app"),
-            "1234abcd".to_string(),
-        )]),
-        reviewed_through_ordinal: 42,
-        declined_findings: vec![mj_core::subagent::ReviewOverride {
-            finding: "[P2] src/a.rs:9 -- naming".to_string(),
-            reason: "matches the module's style".to_string(),
-        }],
-        active: Some("{\"phase\":\"running\"}".to_string()),
-        pending_forward: Some(PendingForward {
-            synthesis: "[P1] src/a.rs:1 -- broken".to_string(),
-            evidence: Default::default(),
-            command_id: "turn-review-forward-1".to_string(),
-            trees: std::collections::BTreeMap::from([(
-                std::path::PathBuf::from("/workspace/app"),
-                "5678efgh".to_string(),
-            )]),
-            reviewed_through_ordinal: 43,
-            // Stored and read back: a quick review's handoff must retry with
-            // the same "unverified" note after a restart.
-            provenance: mj_core::review::driver::FindingsProvenance::SingleReviewer,
-        }),
-        push_findings: None,
-        active_group: None,
-    };
-    save_turn_review_state_in(&database, "session-1", &state).unwrap();
-    assert_eq!(
-        pending_review_followups_in(&database).unwrap(),
-        vec!["session-1"]
-    );
-    assert_eq!(turn_review_state_in(&database, "session-1").unwrap(), state);
-
-    // On recovery the in-flight review is dropped without advancing the
-    // baseline, so the next review still covers the same changes.
-    let recovered = TurnReviewState {
-        pending_followup: false,
-        forward_attempts: 2,
-        active: None,
-        ..state.clone()
-    };
-    save_turn_review_state_in(&database, "session-1", &recovered).unwrap();
-    let restored = turn_review_state_in(&database, "session-1").unwrap();
-    assert_eq!(restored.active, None);
-    assert_eq!(restored.baselines, state.baselines);
-    assert_eq!(restored.reviewed_through_ordinal, 42);
-    assert_eq!(restored.pending_forward, state.pending_forward);
-    assert!(
-        restored.pending_followup,
-        "a stale state write cannot lose a follow-up"
-    );
-}
-
-#[test]
 fn old_review_rows_load_without_findings_and_recovery_keeps_new_findings() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
@@ -4561,77 +4489,6 @@ fn old_review_rows_load_without_findings_and_recovery_keeps_new_findings() {
 
 /// A review interrupted by a daemon restart is cancelled, not resumed, and the
 /// baseline it never advanced stays where it was.
-#[test]
-fn clearing_interrupted_reviews_keeps_every_baseline() {
-    use mj_core::review::driver::PendingForward;
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    save_session_to(&database, &session("session-1", "project-1")).unwrap();
-    save_session_to(&database, &session("session-2", "project-1")).unwrap();
-
-    let baselines = std::collections::BTreeMap::from([(
-        std::path::PathBuf::from("/workspace/app"),
-        "1234abcd".to_string(),
-    )]);
-    save_turn_review_state_in(
-        &database,
-        "session-1",
-        &TurnReviewState {
-            pending_followup: false,
-            forward_attempts: 0,
-            child_session_id: Some("reviewer-child".into()),
-            baselines: baselines.clone(),
-            reviewed_through_ordinal: 42,
-            declined_findings: Vec::new(),
-            active: Some("{\"opened_at_ordinal\":42}".to_string()),
-            pending_forward: Some(PendingForward {
-                synthesis: "[P1] broken".to_string(),
-                evidence: Default::default(),
-                command_id: "forward-1".to_string(),
-                trees: baselines.clone(),
-                reviewed_through_ordinal: 42,
-                provenance: Default::default(),
-            }),
-            push_findings: None,
-            active_group: None,
-        },
-    )
-    .unwrap();
-    save_turn_review_state_in(
-        &database,
-        "session-2",
-        &TurnReviewState {
-            pending_followup: false,
-            forward_attempts: 0,
-            child_session_id: Some("reviewer-child".into()),
-            baselines: baselines.clone(),
-            reviewed_through_ordinal: 7,
-            declined_findings: Vec::new(),
-            active: None,
-            pending_forward: None,
-            push_findings: None,
-            active_group: None,
-        },
-    )
-    .unwrap();
-
-    let interrupted = clear_interrupted_turn_reviews_in(&database).unwrap();
-    assert_eq!(interrupted, vec!["session-1".to_string()]);
-
-    let restored = turn_review_state_in(&database, "session-1").unwrap();
-    assert_eq!(restored.active, None);
-    assert_eq!(
-        restored.baselines, baselines,
-        "the baseline is left alone, so the next review covers the same change"
-    );
-    assert_eq!(restored.reviewed_through_ordinal, 42);
-    assert!(restored.pending_forward.is_some());
-    assert_eq!(
-        clear_interrupted_turn_reviews_in(&database).unwrap(),
-        vec!["session-1".to_string()],
-        "a pending handoff remains recoverable until its command is accepted"
-    );
-}
 
 #[test]
 fn active_review_group_survives_interrupted_sweep_with_registered_children() {
@@ -4641,8 +4498,6 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
     let seed = mj_core::review::driver::TurnReviewSeed {
         task: "inspect the parser".into(),
         user_messages: Vec::new(),
-        baselines: Default::default(),
-        through_ordinal: 17,
         declined: Vec::new(),
     };
     let (driver, _) = mj_review::driver::TurnReviewDriver::start(
@@ -4653,7 +4508,6 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
     let group = mj_core::storage::ActiveReviewGroup {
         driver: driver.snapshot(),
         reviewers: vec![Default::default(); 2],
-        scope: mj_core::relay::CaptureScope::TurnDelta,
         registrations: vec![
             mj_core::storage::ReviewerRegistration {
                 role: "reviewer-1".into(),
@@ -4668,8 +4522,6 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         ],
     };
     let state = TurnReviewState {
-        pending_followup: false,
-        forward_attempts: 0,
         active: Some("group-1".into()),
         active_group: Some(group),
         ..Default::default()
@@ -4678,7 +4530,6 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         &database,
         "session-group",
         &TurnReviewState {
-            pending_followup: true,
             ..Default::default()
         },
     )
@@ -4697,52 +4548,9 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         turn_review_state_in(&database, "session-group").unwrap(),
         state
     );
-    mark_review_followup_in(&database, "session-group").unwrap();
-    save_turn_review_state_in(&database, "session-group", &state).unwrap();
-    assert!(
-        turn_review_state_in(&database, "session-group")
-            .unwrap()
-            .pending_followup
-    );
-    let closed = TurnReviewState {
-        active: None,
-        active_group: None,
-        ..state.clone()
-    };
-    save_turn_review_state_in(&database, "session-group", &closed).unwrap();
-    assert!(
-        turn_review_state_in(&database, "session-group")
-            .unwrap()
-            .pending_followup
-    );
-    save_turn_review_state_in(&database, "session-group", &state).unwrap();
-    assert!(
-        !turn_review_state_in(&database, "session-group")
-            .unwrap()
-            .pending_followup
-    );
 }
 
 // Hard-won: ee65b804b: a follow-up for a never-reviewed session had no row to mark and was never durable.
-#[test]
-fn a_followup_for_a_never_reviewed_session_survives_a_restart() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    save_session_to(&database, &session("session-new", "project-1")).unwrap();
-    mark_review_followup_in(&database, "session-new").unwrap();
-    mark_review_followup_in(&database, "session-new").unwrap();
-    assert_eq!(
-        pending_review_followups_in(&database).unwrap(),
-        vec!["session-new".to_owned()]
-    );
-    assert_eq!(
-        turn_review_state_in(&database, "session-new").unwrap(),
-        TurnReviewState {
-            pending_followup: true,
-            ..Default::default()
-        }
-    );
-}
 
 /// A projection page must carry the whole turn record, not just the transcript
 /// rows: the wait endpoint reads the outcome back from these columns long after

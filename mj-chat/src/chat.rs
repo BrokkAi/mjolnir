@@ -129,7 +129,7 @@ pub use attachments::{CHAT_DRAFT_PREFIX, PromptImage, PromptPayload};
 pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) -> String {
     let armed = match review.trigger() {
         mj_core::config::ReviewTrigger::Push => "Review trigger is before push",
-        mj_core::config::ReviewTrigger::Off => "Automatic review is off; /review reviews one turn",
+        mj_core::config::ReviewTrigger::Off => "Automatic review is off; /review reviews commits",
     };
     let count = review.reviewers.len();
     let armed = if count == 0 {

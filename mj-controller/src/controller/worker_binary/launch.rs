@@ -672,12 +672,6 @@ impl Controller {
             })
             .collect::<Result<Vec<_>>>()?;
         }
-        // Capturing the working tree is only ever useful to a turn review, so
-        // it is spent only on a session a review can run for: one whose
-        // review configuration, with the session's own choice applied, has an
-        // eligible reviewer, and that is not a child. A child works in its
-        // parent's tree, and reviewing it would report the parent's work as
-        // the child's.
         launch.review_trigger = if subagent.is_none() {
             self.config
                 .review
@@ -686,11 +680,9 @@ impl Controller {
         } else {
             Default::default()
         };
-        launch.review_capture =
-            mj_core::review::settings::can_review(&self.config, session.review.as_ref())
-                && subagent.is_none()
-                && (launch.review_trigger != mj_core::config::ReviewTrigger::Push
-                    || launch.review_gate());
+        // Older workers still read this launch field. Push capture does not
+        // need working-tree baselines at startup.
+        launch.review_capture = false;
         if let Some(subagent) = &subagent {
             let parent = self
                 .state

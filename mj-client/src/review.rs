@@ -83,7 +83,6 @@ impl RuntimeReviewView {
                 TurnReviewPhase::CapturingDelta
                     | TurnReviewPhase::LaunchingReviewer
                     | TurnReviewPhase::Running { .. }
-                    | TurnReviewPhase::Forwarding { error: None, .. }
             )
     }
 
@@ -94,8 +93,6 @@ impl RuntimeReviewView {
         match &self.phase {
             TurnReviewPhase::Resolved(_) => None,
             _ if !self.questions.is_empty() => Some("Question"),
-            TurnReviewPhase::Forwarding { error: None, .. } => Some("Sending findings"),
-            TurnReviewPhase::Forwarding { error: Some(_), .. } => Some("Forward failed"),
             TurnReviewPhase::Verdict(verdict) => Some(match verdict {
                 ReviewVerdict::Findings { .. } => "Findings",
                 ReviewVerdict::Failed { .. } => "Review failed",

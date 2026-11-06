@@ -3080,10 +3080,9 @@ mod tests {
                 reviewers: Some(choices.clone())
             }
         );
-        // Reviewer flags alone keep the global on/off: review is on only when
-        // the global configuration already has reviewers.
+        // Session reviewer flags enable review even without global reviewers.
         for (global_reviewers, trigger) in [
-            (Vec::new(), ReviewTrigger::Off),
+            (Vec::new(), ReviewTrigger::Push),
             (vec![choices[1].clone()], ReviewTrigger::Push),
         ] {
             let global = ReviewConfig {

@@ -107,8 +107,7 @@ pub(crate) fn attention_level(
     let review_level = review
         .filter(|review| review.activity_label().is_some())
         .map(|review| match &review.phase {
-            TurnReviewPhase::Verdict(ReviewVerdict::Failed { .. })
-            | TurnReviewPhase::Forwarding { error: Some(_), .. } => AttentionLevel::Failed,
+            TurnReviewPhase::Verdict(ReviewVerdict::Failed { .. }) => AttentionLevel::Failed,
             _ if review.is_working() => AttentionLevel::Working,
             TurnReviewPhase::Verdict(ReviewVerdict::Clean) => AttentionLevel::Unread,
             _ => AttentionLevel::Waiting,

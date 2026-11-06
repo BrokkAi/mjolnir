@@ -1,43 +1,24 @@
 //! Shared turn-review requests, status and recovery data.
 
 use super::lanes::UserMessage;
-use super::verdict::{ReviewPassEvidence, ReviewVerdict};
+use super::verdict::ReviewVerdict;
 use crate::relay::RepoDelta;
 use crate::subagent::ReviewOverride;
-use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 /// What the driver needs the caller to do next.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ReviewRequest {
-    /// Ask the worker what changed since these baselines.
-    CaptureDelta {
-        baselines: BTreeMap<PathBuf, String>,
-    },
+    /// Ask the worker to capture pushable commits.
+    CaptureDelta,
     /// Register a fresh reviewer child with this initial prompt.
     StartReviewer {
         role: String,
         command_id: String,
         prompt: String,
     },
-    /// Send `prompt` to the primary session under `command_id`.
-    PromptPrimary { command_id: String, prompt: String },
     /// Close the reviewer child.
     CloseReviewer { role: String },
-    /// Record these trees, and this transcript ordinal, as reviewed.
-    AdvanceBaseline {
-        trees: BTreeMap<PathBuf, String>,
-        reviewed_through_ordinal: u64,
-    },
-    /// Retired: reviews no longer verify prior findings. Kept so a snapshot
-    /// written by an older daemon still decodes; the host ignores it.
-    RecordPriorReview {},
-    /// Retired with `RecordPriorReview`; ignored.
-    ClearPriorReview,
-    /// An incomplete findings handoff was accepted, but coverage must stay put.
-    /// Clear its durable retry record when closing without advancing a baseline.
-    ClearPendingForward,
-    /// The review is over; close the pane and release the prompt lock.
+    /// The review is over; close its pane.
     Close,
 }
 
@@ -82,25 +63,18 @@ pub struct RoleStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Resolution {
-    /// The findings went to the primary agent as a corrective prompt.
-    Forwarded,
-    /// The user read the findings and kept them.
-    Dismissed,
-    /// The user stopped the review. The baseline does not advance, so the next
-    /// review covers this turn too.
+    /// Delivery completed. Keep the terminal tag older clients understand.
+    #[serde(rename = "dismissed")]
+    Completed,
+    /// The user stopped the review; its commits remain unreviewed.
     Cancelled,
-    /// Nothing changed, so there was nothing to review.
-    NothingToReview,
-    /// The workspace had no usable baseline, so this capture becomes one and
-    /// review coverage starts from here.
-    CoverageStarted,
 }
 
 /// Where the review has got to.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum TurnReviewPhase {
-    /// Asking the worker what the turn changed.
+    /// Asking the worker for committed work.
     CapturingDelta,
     /// Staging and starting the first reviewing agent.
     LaunchingReviewer,
@@ -108,19 +82,8 @@ pub enum TurnReviewPhase {
     Running {
         roles: Vec<RoleStatus>,
     },
-    /// A verdict is on screen, waiting for the user.
+    /// The verdict is being delivered to the agent.
     Verdict(ReviewVerdict),
-    /// The findings are being handed to the primary session. The review stays
-    /// open until the relay durably accepts the corrective prompt. Keeping the
-    /// findings and command id here makes a retry idempotent and lossless.
-    Forwarding {
-        synthesis: String,
-        evidence: ReviewPassEvidence,
-        command_id: String,
-        /// Set when the relay rejected the handoff. The findings remain the
-        /// same and the command id is deliberately reused on retry.
-        error: Option<String>,
-    },
     Resolved(Resolution),
 }
 
@@ -132,16 +95,12 @@ pub const REVIEWER_ROLE: &str = "reviewer";
 pub const COMMAND_ID_PREFIX: &str = "turn-review-";
 
 /// Everything about the reviewed turn that is known before the capture lands.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct TurnReviewSeed {
     /// The latest real user prompt; earlier requirements remain in the history.
     pub task: String,
     /// All real user messages in chronological order, excluding harness notes.
     pub user_messages: Vec<UserMessage>,
-    /// Baselines the capture is taken against.
-    pub baselines: BTreeMap<PathBuf, String>,
-    /// The transcript ordinal a completed review advances to.
-    pub through_ordinal: u64,
     /// Findings the author declined to fix, for the reviewer prompt. An older
     /// snapshot has none.
     #[serde(default)]
@@ -157,7 +116,7 @@ pub struct ReviewerOutcomeSlot {
 }
 
 /// Durable pure-driver state. Child registration and live identity remain host-owned.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct ReviewDriverSnapshot {
     pub review_id: String,
     pub seed: TurnReviewSeed,
@@ -165,129 +124,105 @@ pub struct ReviewDriverSnapshot {
     pub last_verdict: Option<ReviewVerdict>,
     pub deltas: Vec<RepoDelta>,
     pub roles: Vec<ReviewerOutcomeSlot>,
-    pub provenance: FindingsProvenance,
     pub sequence: u64,
     /// Exact requests emitted by the current stage, before any side effect.
+    #[serde(default, deserialize_with = "deserialize_replay_requests")]
     pub replay_requests: Vec<ReviewRequest>,
 }
 
-/// Durable information needed to reconcile a corrective prompt after the
-/// review host is restarted. The command id is the relay's idempotency key;
-/// the captured trees and ordinal are what make a later accepted retry safe
-/// to finalize without re-running the reviewer.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PendingForward {
-    pub synthesis: String,
-    #[serde(default)]
-    pub evidence: ReviewPassEvidence,
-    pub command_id: String,
-    pub trees: BTreeMap<PathBuf, String>,
-    pub reviewed_through_ordinal: u64,
-    /// Who produced the findings, which decides how the corrective prompt
-    /// describes them. Durable so a retried handoff sends the same prompt the
-    /// first attempt did. Records written before it existed used the legacy
-    /// vetted wording.
-    #[serde(default, skip_serializing_if = "FindingsProvenance::is_vetted")]
-    pub provenance: FindingsProvenance,
+fn deserialize_replay_requests<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<ReviewRequest>, D::Error> {
+    let values = <Vec<serde_json::Value> as serde::Deserialize>::deserialize(d)?;
+    values
+        .into_iter()
+        .filter(|v| {
+            let kind = v.as_str().or_else(|| {
+                v.as_object()
+                    .and_then(|m| m.keys().next().map(String::as_str))
+            });
+            matches!(
+                kind,
+                Some("CaptureDelta" | "StartReviewer" | "CloseReviewer" | "Close")
+            )
+        })
+        .map(|v| {
+            if v.get("CaptureDelta").is_some() {
+                Ok(ReviewRequest::CaptureDelta)
+            } else {
+                serde_json::from_value(v).map_err(serde::de::Error::custom)
+            }
+        })
+        .collect()
 }
 
-/// Who produced a review's findings. `Vetted` remains for old pending
-/// forwards, whose retry must preserve its original correction note.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FindingsProvenance {
-    /// Legacy review output vetted by the removed multi-reviewer flow.
-    #[default]
-    Vetted,
-    /// The sole current reviewer. Nothing checks its findings before they
-    /// reach the primary agent.
-    SingleReviewer,
-    /// Separate reviewer sessions independently inspected the same target.
-    IndependentReviewers,
+// Keep old snapshot readers working while the runtime carries no turn state.
+impl serde::Serialize for TurnReviewSeed {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut value = serializer.serialize_struct("TurnReviewSeed", 5)?;
+        value.serialize_field("task", &self.task)?;
+        value.serialize_field("user_messages", &self.user_messages)?;
+        value.serialize_field("declined", &self.declined)?;
+        value.serialize_field(
+            "baselines",
+            &std::collections::BTreeMap::<String, String>::new(),
+        )?;
+        value.serialize_field("through_ordinal", &0_u64)?;
+        value.end()
+    }
 }
-
-impl FindingsProvenance {
-    #[must_use]
-    pub const fn is_vetted(&self) -> bool {
-        matches!(self, Self::Vetted)
+impl serde::Serialize for ReviewDriverSnapshot {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut value = serializer.serialize_struct("ReviewDriverSnapshot", 9)?;
+        value.serialize_field("review_id", &self.review_id)?;
+        value.serialize_field("seed", &self.seed)?;
+        value.serialize_field("phase", &self.phase)?;
+        value.serialize_field("last_verdict", &self.last_verdict)?;
+        value.serialize_field("deltas", &self.deltas)?;
+        value.serialize_field("roles", &self.roles)?;
+        value.serialize_field("provenance", "independent_reviewers")?;
+        value.serialize_field("sequence", &self.sequence)?;
+        let requests: Vec<_> = self
+            .replay_requests
+            .iter()
+            .map(|r| match r {
+                ReviewRequest::CaptureDelta => serde_json::json!({"CaptureDelta":{"baselines":{}}}),
+                other => serde_json::to_value(other).expect("review requests contain JSON values"),
+            })
+            .collect();
+        value.serialize_field("replay_requests", &requests)?;
+        value.end()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::review::verdict::LaneOutcome;
-
-    // A snapshot written while reviews still verified prior findings holds the
-    // retired requests and the seed's `prior_review`.
-    #[test]
-    fn a_snapshot_from_the_corrective_pass_era_still_decodes() {
-        let request: ReviewRequest = serde_json::from_str(
-            r#"{"RecordPriorReview":{"prior":{"synthesis":"[P1] a.rs:1 -- broken"}}}"#,
-        )
-        .unwrap();
-        assert_eq!(request, ReviewRequest::RecordPriorReview {});
-        let seed: TurnReviewSeed = serde_json::from_str(
-            r#"{"task":"t","user_messages":[],"baselines":{},"through_ordinal":3,"prior_review":{"synthesis":"old"}}"#,
-        )
-        .unwrap();
-        assert!(seed.declined.is_empty());
-    }
-
-    /// A handoff persisted before provenance was recorded came from a
-    /// supervisor or the removed validator, and retries with the vetted note.
-    #[test]
-    fn a_pending_forward_without_provenance_reads_as_vetted() {
-        let stored = r#"{"synthesis":"[P1] a.rs:1 -- broken","command_id":"forward-1","trees":{"/w":"t"},"reviewed_through_ordinal":3}"#;
-        let pending: PendingForward = serde_json::from_str(stored).unwrap();
-        assert_eq!(pending.provenance, FindingsProvenance::Vetted);
-        assert!(
-            !serde_json::to_string(&pending)
-                .unwrap()
-                .contains("provenance")
-        );
-    }
 
     #[test]
-    fn a_single_reviewer_handoff_keeps_its_provenance() {
-        let pending = PendingForward {
-            synthesis: "[P2] a.rs:1 -- weak test".to_owned(),
-            evidence: ReviewPassEvidence::default(),
-            command_id: "forward-2".to_owned(),
-            trees: BTreeMap::new(),
-            reviewed_through_ordinal: 4,
-            provenance: FindingsProvenance::SingleReviewer,
-        };
-        let stored = serde_json::to_string(&pending).unwrap();
-        assert!(
-            stored.contains(r#""provenance":"single_reviewer""#),
-            "{stored}"
-        );
+    fn old_push_snapshots_skip_retired_replay_and_keep_live_requests_strict() {
+        let mut stored = serde_json::json!({
+            "review_id":"push-1", "seed":{"task":"review commits","user_messages":[],"baselines":{},"through_ordinal":12},
+            "phase":{"phase":"capturing_delta"}, "last_verdict":null,
+            "deltas":[], "roles":[], "provenance":"single_reviewer", "sequence":0,
+            "replay_requests":[{"CaptureDelta":{"baselines":{}}},{"AdvanceBaseline":{"trees":{},"reviewed_through_ordinal":12}},"ClearPriorReview",{"PromptPrimary":{"command_id":"old","prompt":"old"}},"Close"]
+        });
+        let decoded: ReviewDriverSnapshot = serde_json::from_value(stored.clone()).unwrap();
         assert_eq!(
-            serde_json::from_str::<PendingForward>(&stored).unwrap(),
-            pending
+            decoded.replay_requests,
+            vec![ReviewRequest::CaptureDelta, ReviewRequest::Close]
         );
-    }
-
-    #[test]
-    fn a_legacy_pending_forward_with_lane_evidence_still_loads() {
-        let stored = r#"{
-            "synthesis":"legacy finding",
-            "evidence":{
-                "intent_brief":"Goal: add a retry",
-                "intent_available":true,
-                "lanes":[{"id":"tests","outcome":{"outcome":"completed"}}]
-            },
-            "command_id":"forward-legacy",
-            "trees":{"/w":"tree-2"},
-            "reviewed_through_ordinal":7,
-            "provenance":"vetted"
-        }"#;
-        let pending: PendingForward = serde_json::from_str(stored).unwrap();
-        assert_eq!(pending.provenance, FindingsProvenance::Vetted);
-        assert_eq!(pending.evidence.lanes.len(), 1);
-        assert_eq!(pending.evidence.lanes[0].id, "tests");
-        assert_eq!(pending.evidence.lanes[0].outcome, LaneOutcome::Completed);
+        let saved = serde_json::to_value(decoded).unwrap();
+        assert_eq!(saved["seed"]["baselines"], serde_json::json!({}));
+        assert_eq!(saved["seed"]["through_ordinal"], 0);
+        assert_eq!(saved["provenance"], "independent_reviewers");
+        assert_eq!(
+            saved["replay_requests"][0],
+            serde_json::json!({"CaptureDelta":{"baselines":{}}})
+        );
+        stored["replay_requests"] = serde_json::json!([{"StartReviewer":{}}]);
+        assert!(serde_json::from_value::<ReviewDriverSnapshot>(stored).is_err());
     }
 }

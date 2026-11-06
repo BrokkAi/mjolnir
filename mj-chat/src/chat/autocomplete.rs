@@ -420,7 +420,7 @@ pub(super) fn builtin_command_choices() -> Vec<CommandChoice> {
         ),
         (
             "review",
-            "review the finished turn now, or report how review is configured",
+            "review committed work now, or report how review is configured",
             Some("status"),
         ),
         (

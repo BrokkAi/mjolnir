@@ -7568,7 +7568,7 @@ function sessionReviewStatusConfig(snapshot, session) {
 function reviewStatusLine(review, open) {
   const trigger = review?.trigger;
   const armed = trigger === "push" ? "Review trigger is before push"
-    : "Automatic review is off; /review reviews one turn";
+    : "Automatic review is off; /review reviews commits";
   const count = review?.count ?? review?.reviewers?.length ?? 0;
   const status = count === 0 ? `${armed}; no reviewers`
     : `${armed}; ${count} reviewer${count === 1 ? '' : 's'}`;

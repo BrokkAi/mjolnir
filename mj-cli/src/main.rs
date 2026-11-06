@@ -190,7 +190,7 @@ enum Command {
     Resume(api_commands::ResumeArgs),
     /// Cancel the turn a session is running.
     InterruptTurn(api_commands::SessionArgs),
-    /// Start a review of a session's last turn, or show the review it has open.
+    /// Review a session's committed work, or show the review it has open.
     Review(api_commands::ReviewArgs),
     /// Stop a session's background task, or all tasks the worker can stop.
     StopTask(api_commands::StopTaskArgs),

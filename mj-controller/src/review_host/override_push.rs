@@ -74,11 +74,7 @@ impl HostState {
             Some("this session's review trigger is not push; this tool only works for push review")
         } else if crate::controller::move_session::move_owns_session(session_id) {
             Some("session is moving; try again after the move finishes")
-        } else if self.reviews.contains_key(session_id)
-            || self.preparing.contains_key(session_id)
-            || self.recovery_candidates.contains(session_id)
-            || self.recovery_in_flight.contains(session_id)
-        {
+        } else if self.reviews.contains_key(session_id) || self.preparing.contains_key(session_id) {
             Some("a review is open; wait for its verdict or cancel it, then try again")
         } else {
             None
@@ -206,11 +202,7 @@ async fn run_override(
         let outcome = resolve::push_action(
             &control,
             &session_id,
-            ReviewerAction::CaptureDelta {
-                repositories,
-                scope: mj_core::relay::CaptureScope::PushableCommits,
-                baselines: state.baselines.clone(),
-            },
+            ReviewerAction::CaptureDelta { repositories },
         )
         .await
         .map_err(StartRefusal)?;

@@ -105,14 +105,9 @@ impl TurnReviewHost {
                 preparing: BTreeMap::new(),
                 pending_open: BTreeMap::new(),
                 closing: BTreeSet::new(),
-                awaiting_forward_persistence: BTreeMap::new(),
                 awaiting_capture_persistence: BTreeMap::new(),
                 next_epoch: 0,
                 sessions: BTreeMap::new(),
-                followups: BTreeSet::new(),
-                followup_saving: BTreeSet::new(),
-                recovery_candidates: BTreeSet::new(),
-                recovery_in_flight: BTreeSet::new(),
                 startup_ready: false,
                 startup_failure: None,
                 deferred_handbacks: Vec::new(),
@@ -132,39 +127,14 @@ impl TurnReviewHost {
     }
 
     pub fn observe(&self, session_id: &str, view: &ManagedSessionView) {
-        // Running -> Idle is an edge, not a level: the session manager
-        // suppresses unchanged views, so dropping one here can lose an
-        // automatic review permanently. An unbounded hand-off keeps the
-        // daemon's update loop nonblocking without dropping that edge.
+        // Retain the latest reviewer questions without blocking the daemon's
+        // update loop.
         let _ = self.events.send(HostEvent::View {
             session_id: session_id.to_owned(),
             snapshot: view
                 .snapshot
                 .as_ref()
                 .map(|snapshot| Box::new(snapshot.materialized.clone())),
-            prompt_driven: view.snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot
-                    .operational
-                    .active_prompt
-                    .as_ref()
-                    .is_some_and(|prompt| {
-                        let user_id = format!("user:{}", prompt.command_id);
-                        !snapshot
-                            .materialized
-                            .transcript
-                            .iter()
-                            .find(|item| item.stable_id == user_id)
-                            .is_some_and(|item| match &item.body {
-                                mj_core::state::TranscriptBody::User { content } => matches!(
-                                    mj_core::acp::context_command_text(
-                                        &mj_core::transcript::materialized_content_text(content)
-                                    ),
-                                    Some((mj_core::acp::ContextCommand::Compact, _))
-                                ),
-                                _ => false,
-                            })
-                    })
-            }),
         });
     }
 
@@ -224,19 +194,9 @@ impl TurnReviewHost {
             .map_err(|_| StartRefusal("the review host stopped".into()))?
     }
 
-    /// Reviews the turn that just finished, on request.
-    pub async fn start(&self, session_id: &str, manual: bool) -> Result<(), StartRefusal> {
-        let (reply, answer) = oneshot::channel();
-        self.events
-            .send(HostEvent::Start {
-                session_id: session_id.to_owned(),
-                manual,
-                reply: Some(reply),
-            })
-            .map_err(|_| StartRefusal("the review host stopped".to_owned()))?;
-        answer
-            .await
-            .map_err(|_| StartRefusal("the review host stopped".to_owned()))?
+    /// Reviews committed work through the request_review gate.
+    pub async fn start(&self, session_id: &str) -> Result<(), StartRefusal> {
+        self.begin_push(session_id, None).await.map(|_| ())
     }
 
     pub(crate) async fn reviewer_finished(
