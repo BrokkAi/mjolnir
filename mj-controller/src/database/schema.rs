@@ -2005,6 +2005,45 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Compatible: adds a full-text index over `prompt_history` and the
+    // triggers that keep it current. Older readers ignore the index. Older
+    // writers insert into and delete from `prompt_history`, and the triggers
+    // live in the database, so the index follows their writes too; every
+    // shipped build links a bundled SQLite compiled with FTS5, so they can run
+    // them. The compatibility floor stays where it is. A later migration that
+    // recreates `prompt_history`, as revision 77 did, drops these triggers and
+    // must create them again.
+    if version < 111 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE VIRTUAL TABLE IF NOT EXISTS prompt_history_text USING fts5(
+                 text, content='prompt_history', content_rowid='history_id',
+                 tokenize='trigram');
+             CREATE TRIGGER IF NOT EXISTS prompt_history_text_insert
+                 AFTER INSERT ON prompt_history BEGIN
+                     INSERT INTO prompt_history_text(rowid, text)
+                         VALUES (new.history_id, new.text);
+                 END;
+             CREATE TRIGGER IF NOT EXISTS prompt_history_text_delete
+                 AFTER DELETE ON prompt_history BEGIN
+                     INSERT INTO prompt_history_text(prompt_history_text, rowid, text)
+                         VALUES ('delete', old.history_id, old.text);
+                 END;
+             CREATE TRIGGER IF NOT EXISTS prompt_history_text_update
+                 AFTER UPDATE OF text ON prompt_history BEGIN
+                     INSERT INTO prompt_history_text(prompt_history_text, rowid, text)
+                         VALUES ('delete', old.history_id, old.text);
+                     INSERT INTO prompt_history_text(rowid, text)
+                         VALUES (new.history_id, new.text);
+                 END;
+             INSERT INTO prompt_history_text(prompt_history_text) VALUES ('rebuild');
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (111, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 111;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -3871,6 +3910,72 @@ mod reader_tests {
                 .exists([&record.id])
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn prompt_text_index_covers_existing_rows_and_follows_previous_writers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let connection = open_writer(&path).unwrap();
+        // Rewind to revision 110 with a prompt already stored.
+        connection
+            .execute_batch(
+                "INSERT INTO session_contexts(session_id, bundle_id, created_at)
+                     VALUES ('session', 'project', '2026-01-01T00:00:00Z');
+                 INSERT INTO prompt_history(session_id, event_ordinal, submitted_at, text)
+                     VALUES ('session', 1, '2026-01-01T00:00:00Z', 'Fix the Parser');
+                 DROP TRIGGER prompt_history_text_insert;
+                 DROP TRIGGER prompt_history_text_delete;
+                 DROP TRIGGER prompt_history_text_update;
+                 DROP TABLE prompt_history_text;
+                 DELETE FROM schema_migrations WHERE version >= 111;
+                 PRAGMA user_version = 110;",
+            )
+            .unwrap();
+        drop(connection);
+        forget_verified_schema(&path);
+
+        let connection = open_writer(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        state
+            .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+            .expect("a revision-110 build still reads and writes the store");
+        let matching = |query: &str| -> Vec<String> {
+            connection
+                .prepare(
+                    "SELECT p.text FROM prompt_history_text f
+                     JOIN prompt_history p ON p.history_id = f.rowid
+                     WHERE prompt_history_text MATCH ?1 ORDER BY f.rowid",
+                )
+                .unwrap()
+                .query_map([query], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(matching("\"the parser\""), ["Fix the Parser"]);
+
+        // The writes a revision-110 build makes, in plain SQL.
+        connection
+            .execute_batch(
+                "INSERT INTO prompt_history(session_id, event_ordinal, submitted_at, text)
+                     VALUES ('session', 2, '2026-01-01T00:00:00Z', 'parser follow-up');
+                 UPDATE prompt_history SET text = 'renamed prompt' WHERE event_ordinal = 1;",
+            )
+            .unwrap();
+        assert_eq!(matching("\"parser\""), ["parser follow-up"]);
+        assert_eq!(matching("\"renamed\""), ["renamed prompt"]);
+        connection
+            .execute("DELETE FROM prompt_history WHERE event_ordinal = 2", [])
+            .unwrap();
+        assert!(matching("\"parser\"").is_empty());
+        connection
+            .execute(
+                "INSERT INTO prompt_history_text(prompt_history_text) VALUES ('integrity-check')",
+                [],
+            )
+            .expect("the index agrees with prompt_history");
     }
 
     #[test]
