@@ -995,13 +995,20 @@ impl DashboardState {
         }
     }
 
-    /// Profiles whose quota report says they are billed per use. A profile
-    /// with no report yet counts as a subscription.
-    pub(crate) fn usage_priced_profiles(&self) -> std::collections::BTreeSet<String> {
-        self.quotas
-            .iter()
-            .filter(|(_, quota)| quota.is_usage_priced())
-            .map(|(id, _)| id.clone())
+    /// The profiles of `config` billed per use: their quota report says so, or
+    /// their harness implies it (OpenCode reports no allowance). A profile whose
+    /// billing neither decides counts as a subscription.
+    pub(crate) fn usage_priced_profiles(
+        &self,
+        config: &mj_core::config::Config,
+    ) -> std::collections::BTreeSet<String> {
+        use mj_client::quota::QuotaBilling;
+        config
+            .enabled_profiles()
+            .filter(|(id, profile)| {
+                ProfileQuota::billing_for(profile.kind, self.quotas.get(*id)) == QuotaBilling::Usage
+            })
+            .map(|(id, _)| id.to_owned())
             .collect()
     }
 
@@ -1009,6 +1016,7 @@ impl DashboardState {
         self.quota_refreshing.retain(|id| !quotas.contains_key(id));
         self.quotas = quotas;
         self.clamp_selections();
+        self.refresh_review_choices();
     }
 
     /// Show what the daemon says about quota. The daemon is the only process
@@ -1018,11 +1026,13 @@ impl DashboardState {
         self.quotas = snapshot.reports;
         self.quota_refreshing = snapshot.probing;
         self.clamp_selections();
+        self.refresh_review_choices();
     }
 
     pub fn apply_quota(&mut self, quota: ProfileQuota) {
         self.quota_refreshing.remove(&quota.profile_id);
         self.quotas.insert(quota.profile_id.clone(), quota);
+        self.refresh_review_choices();
     }
 
     /// Install the daemon's storage verdicts, replacing what was held.

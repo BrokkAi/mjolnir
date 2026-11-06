@@ -481,7 +481,7 @@ impl ReviewSettingsDialog {
                     self.update_choices(
                         config,
                         &dashboard.profile_capabilities,
-                        &dashboard.usage_priced_profiles(),
+                        &dashboard.usage_priced_profiles(config),
                     );
                 }
             }
@@ -501,7 +501,7 @@ impl ReviewSettingsDialog {
                     self.update_choices(
                         config,
                         &dashboard.profile_capabilities,
-                        &dashboard.usage_priced_profiles(),
+                        &dashboard.usage_priced_profiles(config),
                     );
                 }
             }
@@ -511,10 +511,17 @@ impl ReviewSettingsDialog {
                 self.update_choices(
                     config,
                     &dashboard.profile_capabilities,
-                    &dashboard.usage_priced_profiles(),
+                    &dashboard.usage_priced_profiles(config),
                 );
             }
             Some(Interaction::Activate(Autoconfigure)) => {
+                // The cached suggestion may predate the latest quota reports,
+                // which decide which profiles are billed per use.
+                self.update_choices(
+                    config,
+                    &dashboard.profile_capabilities,
+                    &dashboard.usage_priced_profiles(config),
+                );
                 if let Some(reviewers) = self.suggested() {
                     self.effort_notice = (!self.suggested_adjustments.is_empty()).then(|| {
                         format!(
@@ -566,7 +573,7 @@ impl ReviewSettingsDialog {
                     self.update_choices(
                         &config,
                         &dashboard.profile_capabilities,
-                        &dashboard.usage_priced_profiles(),
+                        &dashboard.usage_priced_profiles(&config),
                     );
                 }
             }

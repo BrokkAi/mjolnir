@@ -124,6 +124,149 @@ fn autoconfigure_skips_models_only_usage_priced_profiles_offer() {
     assert!(suggested(&[])[0].starts_with("openrouter/"));
 }
 
+const SUBSCRIPTION_MODELS: [&str; 3] = ["gpt-6.1-terra", "gpt-6.1-sol", "claude-haiku-4.5"];
+const API_MODELS: [&str; 3] = [
+    "openrouter/~openai/gpt-terra-latest",
+    "openrouter/~openai/gpt-sol-latest",
+    "openrouter/~anthropic/claude-haiku-latest",
+];
+
+/// Every profile offers the subscription models except `api`, which offers
+/// only newer-looking OpenRouter aliases.
+fn billing_snapshot(config: &Config, api: &[&str]) -> ProfileCapabilitiesSnapshot {
+    let mut snapshot = catalog(config, &SUBSCRIPTION_MODELS);
+    let api_entry = catalog(config, &API_MODELS)
+        .profiles
+        .into_values()
+        .next()
+        .unwrap();
+    for id in api {
+        snapshot
+            .profiles
+            .insert(config.profiles[*id].capabilities_key(id), api_entry.clone());
+    }
+    snapshot
+}
+
+fn api_quota(
+    profile: &str,
+    harness: mj_core::config::HarnessKind,
+) -> mj_client::quota::ProfileQuota {
+    mj_client::quota::ProfileQuota {
+        paid_credits: None,
+        banked_resets: None,
+        profile_id: profile.into(),
+        harness,
+        windows: Vec::new(),
+        extra: Some(mj_client::quota::API_LABEL.into()),
+        error: None,
+        refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
+    }
+}
+
+fn setup_review_models(dashboard: &DashboardState) -> Vec<String> {
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    setup
+        .review_editor
+        .as_ref()
+        .unwrap()
+        .review
+        .reviewers
+        .iter()
+        .map(|choice| choice.model.clone())
+        .collect()
+}
+
+fn press_autoconfigure(dashboard: &mut DashboardState) {
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    setup
+        .review_editor
+        .as_mut()
+        .unwrap()
+        .form
+        .get_mut()
+        .focus(ReviewSettingsFocus::Autoconfigure);
+    dashboard.handle_key(key(KeyCode::Enter));
+}
+
+#[test]
+fn autoconfigure_button_uses_the_quota_reports_present_when_pressed() {
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    // The suggestion is computed before any quota report: both OpenRouter
+    // profiles count as subscriptions and their newer aliases win.
+    let snapshot = billing_snapshot(&dashboard.config, &["codex-1", "codex-2"]);
+    dashboard.set_profile_capabilities(snapshot);
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    assert!(
+        setup.review_editor.as_ref().unwrap().suggested().unwrap()[0]
+            .model
+            .starts_with("openrouter/")
+    );
+    // The reports arrive without any event that refreshes the dialog.
+    for id in ["codex-1", "codex-2"] {
+        dashboard.quotas.insert(
+            id.into(),
+            api_quota(id, mj_core::config::HarnessKind::Codex),
+        );
+    }
+    press_autoconfigure(&mut dashboard);
+    assert_eq!(setup_review_models(&dashboard), SUBSCRIPTION_MODELS);
+}
+
+#[test]
+fn quota_updates_refresh_the_open_dialogs_suggestion() {
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let snapshot = billing_snapshot(&dashboard.config, &["codex-1", "codex-2"]);
+    dashboard.set_profile_capabilities(snapshot);
+    let suggested = |dashboard: &DashboardState| {
+        let Mode::Setup(setup) = &dashboard.mode else {
+            panic!("setup")
+        };
+        setup.review_editor.as_ref().unwrap().suggested().unwrap()[0]
+            .model
+            .clone()
+    };
+    assert!(suggested(&dashboard).starts_with("openrouter/"));
+    dashboard.apply_quota(api_quota("codex-1", mj_core::config::HarnessKind::Codex));
+    dashboard.apply_quota(api_quota("codex-2", mj_core::config::HarnessKind::Codex));
+    assert_eq!(suggested(&dashboard), "gpt-6.1-terra");
+}
+
+#[test]
+fn an_opencode_profile_without_a_report_is_usage_priced() {
+    let mut config = config();
+    config.profiles.insert(
+        "openrouter".into(),
+        mj_core::config::HarnessProfile {
+            kind: mj_core::config::HarnessKind::OpenCode,
+            home: "/profiles/openrouter/opencode".into(),
+            ..config.profiles["codex-1"].clone()
+        },
+    );
+    let mut dashboard = DashboardState::new(config, Default::default(), Default::default());
+    assert_eq!(
+        dashboard.usage_priced_profiles(&dashboard.config),
+        std::collections::BTreeSet::from(["openrouter".to_owned()])
+    );
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let snapshot = billing_snapshot(&dashboard.config, &["openrouter"]);
+    dashboard.set_profile_capabilities(snapshot);
+    press_autoconfigure(&mut dashboard);
+    assert_eq!(setup_review_models(&dashboard), SUBSCRIPTION_MODELS);
+}
+
 #[test]
 fn opening_with_reviewers_preserves_them_when_catalog_arrives() {
     let mut config = config();
