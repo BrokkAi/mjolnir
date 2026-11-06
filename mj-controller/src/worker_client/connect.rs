@@ -103,33 +103,25 @@ impl RelayClient {
     ///
     /// When the proxy runs over a shared SSH connection, a session is leased
     /// first (opening a master if needed) and kept for the life of the
-    /// proxy. An admission permit is then taken before the proxy is spawned
-    /// and released once hello completes: `sshd` counts only unauthenticated
-    /// connections against `MaxStartups`, so the long-lived relay stops
-    /// occupying a slot as soon as it is authenticated and talking.
+    /// proxy.
     pub(super) async fn connect_attempt(
         spec: &CommandSpec,
         expected_session_id: &str,
         request_timeout: Duration,
         handshake_timeout: Duration,
     ) -> std::result::Result<Self, ConnectFailure> {
-        let Some(destination) = spec
-            .ssh_destination
-            .clone()
-            // SSH runs on the node, which leases the session and the
-            // admission slot itself, beside the connection it shares.
-            .filter(|_| mj_core::targets::command_host(spec).is_none())
-        else {
+        // SSH that runs on the node is leased there, beside the connection
+        // it shares.
+        if spec.ssh_destination.is_none() || mj_core::targets::command_host(spec).is_some() {
             return Self::spawn_and_handshake(
                 spec,
                 expected_session_id,
                 request_timeout,
                 handshake_timeout,
                 None,
-                None,
             )
             .await;
-        };
+        }
         let requested = spec.clone();
         let executor =
             crate::targets::CancellableProcessExecutor::with_timeout(SSH_MASTER_OPEN_TIMEOUT);
