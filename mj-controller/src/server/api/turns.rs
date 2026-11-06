@@ -148,15 +148,16 @@ pub(super) async fn submit_prompt(
         None => mj_client::session::new_command_id("api-history")
             .map_err(|error| ApiFailure::unavailable(format!("{error:#}")))?,
     };
-    // The prompt is recorded while it can still be withdrawn: an interrupt
-    // during the write still finds the hold. A withdrawn prompt stays in the
-    // history, as an abandoned draft does.
+    // The prompt is held while it is recorded, even for a session that was
+    // ready at once, so an interrupt during the write withdraws it. A
+    // withdrawn prompt stays in the history, as an abandoned draft does.
+    let held = hold.unwrap_or_else(|| state.held_prompts.hold(&session_id));
     backend
         .record_user_prompt(session_id.clone(), history_command, text.clone())
         .await;
     // Taking the hold back and an interrupt withdrawing it are one decision,
     // so a prompt is either submitted or withdrawn, never both.
-    if hold.is_some_and(|held| !held.release()) {
+    if !held.release() {
         return Err(withdrawn_prompt());
     }
     Ok(backend.prompt_with_id(session_id, text, command_id).await?)

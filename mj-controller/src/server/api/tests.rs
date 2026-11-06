@@ -958,6 +958,9 @@ struct CapturedSessionMessageRequest {
 
 #[derive(Default)]
 struct FakeBackend {
+    /// When set, a history write announces itself on the first and waits
+    /// for the second before it finishes.
+    record_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     usage_queries: Mutex<Vec<mj_core::usage::SessionUsageQuery>>,
     workspaces: FakeWorkspaces,
     /// Successive answers to `turn_state`, newest last. The final entry
@@ -1197,6 +1200,19 @@ impl SubagentBackend for FakeBackend {
         Box::pin(async move {
             self.prompts.lock().unwrap().push((session_id, text));
             Ok(self.prompt_ordinal)
+        })
+    }
+    fn record_user_prompt(
+        &self,
+        _session_id: String,
+        _command_id: String,
+        _text: String,
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            if let Some((started, release)) = &self.record_gate {
+                started.notify_one();
+                release.notified().await;
+            }
         })
     }
     fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, AnyResult<String>> {
@@ -1864,6 +1880,58 @@ async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches(
 }
 
 // Hard-won: 5dafd135: a withdrawn startup prompt was still submitted after the worker attached.
+// Hard-won: 09f2862aa: an interrupt during a ready session's history write could not withdraw its prompt
+#[tokio::test]
+async fn an_interrupt_during_the_history_write_withdraws_a_ready_sessions_prompt() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let backend = Arc::new(FakeBackend {
+        prompt_ordinal: 3,
+        record_gate: Some((started.clone(), release.clone())),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+        snapshot.sessions[0].capabilities.prompt = true;
+        snapshot.sessions[0].capabilities.interrupt_turn = false;
+    });
+    let prompt = tokio::spawn(
+        app.clone().oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"stop me"}"#))
+                .unwrap(),
+        ),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .expect("the history write began");
+
+    let interrupted = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("the interrupt found the prompt to withdraw")
+    .unwrap();
+    assert_eq!(interrupted.status(), StatusCode::ACCEPTED);
+    release.notify_one();
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), prompt)
+        .await
+        .expect("the withdrawn prompt answers")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(
+        backend.prompts.lock().unwrap().is_empty(),
+        "a withdrawn prompt is never submitted"
+    );
+}
+
 #[tokio::test]
 async fn an_interrupt_withdraws_a_prompt_held_for_a_starting_session() {
     // R2-1: an ACP cancel sent while the prompt was held reached
