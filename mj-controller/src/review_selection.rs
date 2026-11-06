@@ -11,7 +11,7 @@ use mj_core::config::{
     LegacyReview, ReviewConfig, SessionReview, SubagentChoice, apply_legacy_override,
 };
 use mj_core::review::autoconfigure::{
-    Autoconfigured, autoconfigure, merged_model_offers, model_offers,
+    Autoconfigured, autoconfigure, merged_model_offers, model_offers, offers_drafted_family,
 };
 use mj_core::review::settings::{ResolvedReviewSettings, ReviewModelSettings};
 use mj_core::worker_launch::ProfileConfig;
@@ -187,17 +187,58 @@ async fn configured_choices(
     Ok((choices, autoconfigured))
 }
 
-/// The profiles among `candidates` whose last quota report says they are
-/// billed per use. A profile with no report or a failed one counts as a
-/// subscription.
+/// The profiles among `candidates` billed per use: their last quota report
+/// says so, or their harness implies it (OpenCode reports no allowance, so a
+/// profile on it has no subscription report). A profile whose billing neither
+/// decides counts as a subscription here; see [`unclassified_in_draft`] for
+/// callers that must not guess.
 pub(crate) fn usage_priced_profiles(
     candidates: &crate::server::api::SubagentCandidates,
 ) -> BTreeSet<String> {
+    use mj_client::quota::QuotaBilling;
     candidates
         .offered
         .iter()
-        .filter(|candidate| candidate.quota == crate::server::api::CandidateQuota::UsagePriced)
+        .filter(|candidate| candidate.quota.billing(candidate.harness) == QuotaBilling::Usage)
         .map(|candidate| candidate.profile_id.clone())
+        .collect()
+}
+
+/// The profiles in `unclassified` (billing not yet known) that offer a model
+/// in a family the legacy upgrade would draft from `available`. Empty when a
+/// pinned profile decides the reviewers without Autoconfigure.
+pub(crate) fn unclassified_in_draft(
+    legacy: &LegacyReview,
+    available: &[(String, ProfileConfig)],
+    usage_priced: &BTreeSet<String>,
+    unclassified: &BTreeSet<String>,
+) -> Vec<String> {
+    if unclassified.is_empty()
+        || available
+            .iter()
+            .any(|(id, _)| legacy.profile.as_ref() == Some(id))
+    {
+        return Vec::new();
+    }
+    let offers = model_offers(
+        available
+            .iter()
+            .map(|(profile, choices)| (choices.models.as_slice(), usage_priced.contains(profile))),
+    );
+    let Some(draft) = autoconfigure(&offers, |_| None) else {
+        return Vec::new();
+    };
+    let all = available
+        .iter()
+        .flat_map(|(_, choices)| choices.models.iter().cloned())
+        .collect::<Vec<_>>();
+    available
+        .iter()
+        .filter(|(id, choices)| {
+            unclassified.contains(id)
+                && offers_drafted_family(&choices.models, &all, &draft.reviewers)
+        })
+        .map(|(id, _)| id.clone())
         .collect()
 }
 
@@ -623,6 +664,80 @@ mod tests {
             .iter()
             .map(|choice| (choice.model.as_str(), choice.effort.as_deref()))
             .collect()
+    }
+
+    #[test]
+    fn only_unclassified_profiles_offering_a_drafted_family_block_the_upgrade() {
+        let legacy = LegacyReview::default();
+        let mut available = live_catalog();
+        available.push((
+            "other".to_owned(),
+            catalog_profile(&["some-unrelated-model"]),
+        ));
+        let usage_priced = BTreeSet::from(["openrouter".to_owned()]);
+        let blocked = |names: &[&str]| {
+            unclassified_in_draft(
+                &legacy,
+                &available,
+                &usage_priced,
+                &names.iter().map(|name| (*name).to_owned()).collect(),
+            )
+        };
+        assert!(blocked(&[]).is_empty());
+        // Outside every drafted family: nothing to guess about.
+        assert!(blocked(&["other"]).is_empty());
+        assert_eq!(
+            blocked(&["other", "claude3", "codex2"]),
+            ["codex2", "claude3"]
+        );
+        // A pinned profile decides without Autoconfigure.
+        let pinned = LegacyReview {
+            profile: Some("codex1".into()),
+            ..LegacyReview::default()
+        };
+        assert!(
+            unclassified_in_draft(
+                &pinned,
+                &available,
+                &usage_priced,
+                &BTreeSet::from(["claude3".to_owned()])
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn candidates_without_a_report_are_usage_priced_only_when_their_harness_says_so() {
+        use crate::server::api::{CandidateQuota, SubagentCandidate, SubagentCandidates};
+        use mj_core::config::HarnessKind;
+        let candidate = |id: &str, harness, quota| SubagentCandidate {
+            profile_id: id.to_owned(),
+            harness,
+            choices: catalog_profile(&["haiku"]),
+            quota,
+            unhealthy: BTreeMap::new(),
+        };
+        let candidates = SubagentCandidates {
+            offered: vec![
+                candidate("opencode", HarnessKind::OpenCode, CandidateQuota::Unknown),
+                candidate("dsh", HarnessKind::Dsh, CandidateQuota::Unknown),
+                candidate("claude", HarnessKind::Claude, CandidateQuota::Unknown),
+                candidate("api", HarnessKind::Codex, CandidateQuota::UsagePriced),
+                candidate(
+                    "codex",
+                    HarnessKind::Codex,
+                    CandidateQuota::Subscription {
+                        windows: Vec::new(),
+                        paid_credits: None,
+                    },
+                ),
+            ],
+            unavailable: Vec::new(),
+        };
+        assert_eq!(
+            usage_priced_profiles(&candidates),
+            BTreeSet::from(["opencode".to_owned(), "dsh".to_owned(), "api".to_owned()])
+        );
     }
 
     #[tokio::test]

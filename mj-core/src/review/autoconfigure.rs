@@ -90,6 +90,26 @@ pub fn merged_model_offers(models: &[SessionConfigChoice]) -> Vec<ModelOffer> {
     model_offers([(models, false)])
 }
 
+/// Whether `profile_models` includes a model in a family that `drafted`
+/// reviewers use. `all` is every profile's models merged, which names the
+/// identities the families are read from.
+pub fn offers_drafted_family(
+    profile_models: &[SessionConfigChoice],
+    all: &[SessionConfigChoice],
+    drafted: &[SubagentChoice],
+) -> bool {
+    let family = |value: &str| {
+        ReviewModelFamily::for_model(&crate::usage::model_catalog::model_id(all, value))
+    };
+    let drafted = drafted
+        .iter()
+        .filter_map(|choice| family(&choice.model))
+        .collect::<Vec<_>>();
+    profile_models
+        .iter()
+        .any(|model| family(&model.value).is_some_and(|family| drafted.contains(&family)))
+}
+
 /// `id` without a trailing `-YYYYMMDD` snapshot date.
 fn undated(id: &str) -> &str {
     match id.rsplit_once('-') {
@@ -130,6 +150,13 @@ pub fn autoconfigure(
         };
         let current = &mut selected[index];
         let better = current.as_ref().is_none_or(|(old_offer, old)| {
+            // The plain Flash model is the general reviewer; max is a distinct
+            // variant, not a better candidate, so billing and profile counts
+            // never promote it.
+            let plain = |identity: &str| !identity.contains("max");
+            if index == 3 && plain(&id) != plain(old) {
+                return plain(&id);
+            }
             let subscribed = |offer: &ModelOffer| offer.subscription_profiles > 0;
             if subscribed(offer) != subscribed(old_offer) {
                 return subscribed(offer);
@@ -137,18 +164,12 @@ pub fn autoconfigure(
             if offer.profiles != old_offer.profiles {
                 return offer.profiles > old_offer.profiles;
             }
-            // The plain Flash model is the general reviewer; max is a distinct variant.
-            let plain = |identity: &str| !identity.contains("max");
-            if index == 3 && plain(&id) != plain(old) {
-                plain(&id)
-            } else {
-                // A dated snapshot is the same version as its undated alias,
-                // which follows the newest snapshot, so the alias wins a tie.
-                let (new_base, old_base) = (undated(&id), undated(old));
-                model_version_cmp(new_base, old_base)
-                    .then_with(|| (new_base.len() == id.len()).cmp(&(old_base.len() == old.len())))
-                    .is_gt()
-            }
+            // A dated snapshot is the same version as its undated alias,
+            // which follows the newest snapshot, so the alias wins a tie.
+            let (new_base, old_base) = (undated(&id), undated(old));
+            model_version_cmp(new_base, old_base)
+                .then_with(|| (new_base.len() == id.len()).cmp(&(old_base.len() == old.len())))
+                .is_gt()
         });
         if better {
             *current = Some((offer, id));
@@ -473,6 +494,34 @@ mod tests {
             ]),
             expect(&[("kimi-k3.1", "high")])
         );
+    }
+
+    #[test]
+    fn plain_flash_beats_max_even_when_max_is_subscribed_or_more_offered() {
+        let flash = ("deepseek-v3-flash", "high");
+        for order in [false, true] {
+            // Only a usage-priced profile offers plain Flash; a subscription
+            // offers Max.
+            let mut profiles: Vec<(bool, &[&str])> = vec![
+                (true, &["deepseek-v3-flash"]),
+                (false, &["deepseek-v4-flash-max"]),
+            ];
+            if order {
+                profiles.reverse();
+            }
+            assert_eq!(pick(&profiles), expect(&[flash, flash]), "billing {order}");
+            // Three profiles offer Max, one offers plain Flash.
+            let mut profiles: Vec<(bool, &[&str])> = vec![
+                (false, &["deepseek-v3-flash"]),
+                (false, &["deepseek-v4-flash-max"]),
+                (false, &["deepseek-v4-flash-max"]),
+                (false, &["deepseek-v4-flash-max"]),
+            ];
+            if order {
+                profiles.reverse();
+            }
+            assert_eq!(pick(&profiles), expect(&[flash, flash]), "count {order}");
+        }
     }
 
     #[test]

@@ -167,25 +167,39 @@ impl ProfileCatalog {
             .unwrap_or_else(PoisonError::into_inner) = Some(reports);
     }
 
-    /// The profiles in `ids` billed per use according to the latest quota
-    /// reports, and whether every one of them has a report. The upgrade
-    /// writes its choice once, so it waits briefly for reports to arrive.
-    fn usage_priced_among(&self, ids: &[String]) -> (BTreeSet<String>, bool) {
+    /// The profiles in `profiles` billed per use, and those whose billing is
+    /// not known yet: no report classifies them and their harness does not
+    /// decide. The upgrade writes its choice once, so it waits briefly for
+    /// reports to arrive and refuses to guess afterwards. Without a report
+    /// source (no daemon), every profile counts as a subscription.
+    fn billing_among(
+        &self,
+        profiles: &[(String, HarnessKind)],
+    ) -> (BTreeSet<String>, BTreeSet<String>) {
+        use mj_client::quota::QuotaBilling;
         let reports = self
             .quota_reports
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         let Some(reports) = reports else {
-            return (BTreeSet::new(), true);
+            return (BTreeSet::new(), BTreeSet::new());
         };
         let reports = reports.lock().unwrap_or_else(PoisonError::into_inner);
-        let priced = ids
-            .iter()
-            .filter(|id| reports.get(*id).is_some_and(ProfileQuota::is_usage_priced))
-            .cloned()
-            .collect();
-        (priced, ids.iter().all(|id| reports.contains_key(id)))
+        let mut priced = BTreeSet::new();
+        let mut unknown = BTreeSet::new();
+        for (id, harness) in profiles {
+            match ProfileQuota::billing_for(*harness, reports.get(id)) {
+                QuotaBilling::Usage => {
+                    priced.insert(id.clone());
+                }
+                QuotaBilling::Subscription => {}
+                QuotaBilling::Unknown => {
+                    unknown.insert(id.clone());
+                }
+            }
+        }
+        (priced, unknown)
     }
 
     pub(crate) fn set_notice(&self, notice: NoticeCallback) {
@@ -319,10 +333,10 @@ impl ProfileCatalog {
             .legacy
             .clone()
             .context("review is no longer legacy")?;
-        let ids = self
-            .candidates()?
-            .into_iter()
-            .map(|(id, _)| id)
+        let harnesses = self.candidates()?;
+        let ids = harnesses
+            .iter()
+            .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         // Each profile has its own deadline so one stuck probe cannot hide
         // results from profiles that answered. Partial results remain transient
@@ -358,18 +372,33 @@ impl ProfileCatalog {
                 omitted.join(", ")
             );
         }
-        let available_ids = available
-            .iter()
-            .map(|(id, _)| id.clone())
+        let offering = harnesses
+            .into_iter()
+            .filter(|(id, _)| available.iter().any(|(available, _)| available == id))
             .collect::<Vec<_>>();
         let deadline = tokio::time::Instant::now() + QUOTA_REPORT_WAIT;
-        let usage_priced = loop {
-            let (priced, complete) = self.usage_priced_among(&available_ids);
-            if complete || tokio::time::Instant::now() >= deadline {
-                break priced;
+        let (usage_priced, unclassified) = loop {
+            let (priced, unknown) = self.billing_among(&offering);
+            if unknown.is_empty() || tokio::time::Instant::now() >= deadline {
+                break (priced, unknown);
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         };
+        // A profile with no quota report yet may be a paid API. Persisting a
+        // guess would keep its models in the reviewers for good, so wait for a
+        // later attempt whenever such a profile offers a drafted family.
+        let waiting = crate::review_selection::unclassified_in_draft(
+            &legacy,
+            &available,
+            &usage_priced,
+            &unclassified,
+        );
+        if !waiting.is_empty() {
+            anyhow::bail!(
+                "legacy review upgrade waiting for quota reports: {}",
+                waiting.join(", ")
+            );
+        }
         let (reviewers, known, adjustments) = crate::review_selection::upgrade_reviewers(
             &legacy,
             &available,
@@ -1876,6 +1905,11 @@ mod tests {
 
     fn legacy_review_file_with(path: &Path, profiles: &[(&str, HarnessKind)]) {
         let mut config = test_config(profiles);
+        for profile in config.profiles.values_mut() {
+            if profile.kind == HarnessKind::OpenCode {
+                profile.home.push("opencode");
+            }
+        }
         config.review = mj_core::config::ReviewConfig::legacy_default();
         config.review.trigger = mj_core::config::ReviewTrigger::Turn;
         config.save_to(path).unwrap();
@@ -1900,32 +1934,48 @@ mod tests {
         assert_eq!(review.reviewers[0].model, "gpt-6-terra");
     }
 
-    fn usage_report(profile: &str, usage_priced: bool) -> ProfileQuota {
+    /// The report a refresh produces for a subscription profile.
+    fn subscription_report(profile: &str, harness: HarnessKind) -> ProfileQuota {
         ProfileQuota {
             paid_credits: None,
             banked_resets: None,
             profile_id: profile.into(),
-            harness: HarnessKind::OpenCode,
-            windows: Vec::new(),
-            extra: usage_priced.then(|| mj_client::quota::API_LABEL.to_owned()),
+            harness,
+            windows: vec![mj_client::quota::QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(80),
+                duration_seconds: None,
+                model_scope: None,
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: None,
+            }],
+            extra: None,
             error: None,
             refreshed_at_epoch_seconds: 0,
             rate_limited_until_epoch_seconds: None,
         }
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn legacy_upgrade_skips_models_only_usage_priced_profiles_offer() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("custom-config.toml");
-        legacy_review_file_with(
-            &path,
-            &[
-                ("codex", HarnessKind::Codex),
-                ("haiku", HarnessKind::Claude),
-                ("openrouter", HarnessKind::Codex),
-            ],
-        );
+    /// The report a refresh produces for an OpenCode profile.
+    fn not_reported(profile: &str) -> ProfileQuota {
+        ProfileQuota {
+            windows: Vec::new(),
+            extra: Some(mj_client::quota::NOT_REPORTED_LABEL.to_owned()),
+            ..subscription_report(profile, HarnessKind::OpenCode)
+        }
+    }
+
+    /// A catalog over codex, haiku and an OpenCode "openrouter" profile whose
+    /// catalogue holds only `latest` aliases, with quota reports `reports`.
+    fn billing_catalog(path: &Path, reports: QuotaReports) -> Arc<ProfileCatalog> {
+        let profiles = [
+            ("codex", HarnessKind::Codex),
+            ("haiku", HarnessKind::Claude),
+            ("openrouter", HarnessKind::OpenCode),
+        ];
+        legacy_review_file_with(path, &profiles);
         let probe: Arc<Probe> = Arc::new(|profile| {
             Box::pin(async move {
                 let models = match profile.as_str() {
@@ -1957,41 +2007,103 @@ mod tests {
             probe.clone(),
             Arc::new(move |profile, _| probe(profile)),
         );
-        Arc::get_mut(&mut catalog).unwrap().config_path = Some(path.clone());
-        let reports: QuotaReports = Arc::new(Mutex::new(BTreeMap::from([(
-            "codex".to_owned(),
-            usage_report("codex", false),
-        )])));
-        catalog.set_quota_reports(reports.clone());
-        let mut config = test_config(&[
-            ("codex", HarnessKind::Codex),
-            ("haiku", HarnessKind::Claude),
-            ("openrouter", HarnessKind::Codex),
-        ]);
+        Arc::get_mut(&mut catalog).unwrap().config_path = Some(path.to_owned());
+        catalog.set_quota_reports(reports);
+        let mut config = Config::load_from(path).unwrap();
         config.review = mj_core::config::ReviewConfig::legacy_default();
         catalog.sync(&config);
+        catalog
+    }
+
+    fn upgraded_models(path: &Path) -> Vec<String> {
+        Config::load_from(path)
+            .unwrap()
+            .review
+            .reviewers
+            .into_iter()
+            .map(|choice| choice.model)
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn legacy_upgrade_skips_models_only_opencode_profiles_offer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("custom-config.toml");
+        // The OpenCode profile's real report is `n/a`, not an API label.
+        let reports: QuotaReports = Arc::new(Mutex::new(BTreeMap::from([
+            (
+                "codex".to_owned(),
+                subscription_report("codex", HarnessKind::Codex),
+            ),
+            ("openrouter".to_owned(), not_reported("openrouter")),
+        ])));
+        let catalog = billing_catalog(&path, reports.clone());
         let upgrade = {
             let catalog = Arc::clone(&catalog);
             tokio::spawn(async move { catalog.upgrade_legacy_review(1).await })
         };
-        // The upgrade waits for the remaining profiles' first reports, so the
-        // billing of the OpenCode profile is known when it chooses.
+        // The upgrade waits for the Claude profile's first report, whose
+        // billing is not known otherwise.
         tokio::time::advance(Duration::from_secs(5)).await;
         assert!(Config::load_from(&path).unwrap().review.is_legacy());
-        {
-            let mut reports = reports.lock().unwrap();
-            reports.insert("haiku".into(), usage_report("haiku", false));
-            reports.insert("openrouter".into(), usage_report("openrouter", true));
-        }
+        reports.lock().unwrap().insert(
+            "haiku".into(),
+            subscription_report("haiku", HarnessKind::Claude),
+        );
         upgrade.await.unwrap().unwrap();
-        let review = Config::load_from(&path).unwrap().review;
-        assert!(!review.is_legacy());
+        assert!(!Config::load_from(&path).unwrap().review.is_legacy());
         assert_eq!(
-            review
-                .reviewers
-                .iter()
-                .map(|choice| choice.model.as_str())
-                .collect::<Vec<_>>(),
+            upgraded_models(&path),
+            ["gpt-6.1-terra", "gpt-6.1-sol", "haiku"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn legacy_upgrade_treats_an_opencode_profile_without_a_report_as_usage_priced() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("custom-config.toml");
+        let reports: QuotaReports = Arc::new(Mutex::new(BTreeMap::from([
+            (
+                "codex".to_owned(),
+                subscription_report("codex", HarnessKind::Codex),
+            ),
+            (
+                "haiku".to_owned(),
+                subscription_report("haiku", HarnessKind::Claude),
+            ),
+        ])));
+        let catalog = billing_catalog(&path, reports);
+        catalog.upgrade_legacy_review(1).await.unwrap();
+        assert_eq!(
+            upgraded_models(&path),
+            ["gpt-6.1-terra", "gpt-6.1-sol", "haiku"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn legacy_upgrade_does_not_persist_while_a_drafted_profile_has_no_billing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("custom-config.toml");
+        // The Claude profile's quota probe never reports.
+        let reports: QuotaReports = Arc::new(Mutex::new(BTreeMap::from([(
+            "codex".to_owned(),
+            subscription_report("codex", HarnessKind::Codex),
+        )])));
+        let catalog = billing_catalog(&path, reports.clone());
+        let error = catalog.upgrade_legacy_review(1).await.unwrap_err();
+        assert!(
+            error.to_string().contains("quota reports: haiku"),
+            "{error:#}"
+        );
+        assert!(Config::load_from(&path).unwrap().review.is_legacy());
+        // A report that arrives before the next attempt lets it finish.
+        reports.lock().unwrap().insert(
+            "haiku".into(),
+            subscription_report("haiku", HarnessKind::Claude),
+        );
+        catalog.upgrade_legacy_review(2).await.unwrap();
+        assert_eq!(
+            upgraded_models(&path),
             ["gpt-6.1-terra", "gpt-6.1-sol", "haiku"]
         );
     }

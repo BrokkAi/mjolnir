@@ -344,14 +344,23 @@ async fn autoconfigure_settings(
         .enabled_profiles()
         .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
         .collect::<std::collections::BTreeMap<_, _>>();
-    // Billing comes from the daemon's quota reports by profile id; a profile
-    // the daemon cannot report on (such as one added in this draft) counts
-    // as a subscription.
-    let usage_priced = backend
+    // Billing comes from the daemon's quota reports by profile id and from
+    // the harness (OpenCode bills per use). A profile the daemon cannot report
+    // on, such as one added in this draft, is classified by its harness alone.
+    let mut usage_priced = backend
         .reviewer_ready_candidates(String::new())
         .await
         .map(|candidates| crate::review_selection::usage_priced_profiles(&candidates))
         .unwrap_or_default();
+    usage_priced.extend(
+        config
+            .enabled_profiles()
+            .filter(|(_, profile)| {
+                mj_client::quota::harness_billing(profile.kind)
+                    == mj_client::quota::QuotaBilling::Usage
+            })
+            .map(|(id, _)| id.to_owned()),
+    );
     let (configured, known) = crate::review_selection::autoconfigure_with_efforts(
         &available,
         &usage_priced,

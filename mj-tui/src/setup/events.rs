@@ -108,16 +108,30 @@ impl DashboardState {
             .retain(|key, _| self.profile_hydration_requests.contains_key(key));
         self.profile_capabilities = snapshot;
         self.take_setup_subagent_choices();
-        let usage_priced = self.usage_priced_profiles();
+        self.refresh_review_choices();
+        self.take_subagent_discovery();
+    }
+
+    /// Recompute the open Code Review editor's choices and Autoconfigure
+    /// suggestion from the current capabilities and quota reports.
+    pub(crate) fn refresh_review_choices(&mut self) {
+        let Mode::Setup(dialog) = &self.mode else {
+            return;
+        };
+        if dialog.review_editor.is_none() {
+            return;
+        }
+        let Ok(config) = config_from_draft(dialog.draft.clone()) else {
+            return;
+        };
+        let usage_priced = self.usage_priced_profiles(&config);
         if let Mode::Setup(dialog) = &mut self.mode
             && let Some(review) = dialog.review_editor.as_mut()
-            && let Ok(config) = config_from_draft(dialog.draft.clone())
         {
             review.update_choices(&config, &self.profile_capabilities, &usage_priced);
             let review = review.as_ref().clone();
             dialog.sync_review_validation(&review);
         }
-        self.take_subagent_discovery();
     }
 
     /// Replace the saved-profile sign-in statuses read off the loop.
@@ -242,17 +256,24 @@ impl DashboardState {
     /// The one-second UI clock completes an Autoconfigure wait even if discovery
     /// never publishes another snapshot.
     pub fn tick_review_autoconfigure(&mut self) -> bool {
-        let usage_priced = self.usage_priced_profiles();
+        let Mode::Setup(dialog) = &self.mode else {
+            return false;
+        };
+        if !dialog
+            .review_editor
+            .as_ref()
+            .is_some_and(|review| review.checking_efforts())
+        {
+            return false;
+        }
+        let Ok(config) = config_from_draft(dialog.draft.clone()) else {
+            return false;
+        };
+        let usage_priced = self.usage_priced_profiles(&config);
         let Mode::Setup(dialog) = &mut self.mode else {
             return false;
         };
         let Some(review) = dialog.review_editor.as_mut() else {
-            return false;
-        };
-        if !review.checking_efforts() {
-            return false;
-        }
-        let Ok(config) = config_from_draft(dialog.draft.clone()) else {
             return false;
         };
         review.update_choices(&config, &self.profile_capabilities, &usage_priced);
@@ -329,7 +350,7 @@ impl DashboardState {
                         review.update_choices(
                             &config,
                             &self.profile_capabilities,
-                            &self.usage_priced_profiles(),
+                            &self.usage_priced_profiles(&config),
                         );
                         dialog.sync_review_validation(&review);
                     }

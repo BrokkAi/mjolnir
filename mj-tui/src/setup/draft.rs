@@ -406,7 +406,7 @@ impl SetupDialog {
         review.update_choices(
             &config,
             &dashboard.profile_capabilities,
-            &dashboard.usage_priced_profiles(),
+            &dashboard.usage_priced_profiles(&config),
         );
         self.sync_review_validation(&review);
         self.review_editor = Some(Box::new(review));
