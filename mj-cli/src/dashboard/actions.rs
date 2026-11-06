@@ -1,7 +1,7 @@
 //! What the dashboard does with the work its key handling asks for.
 //!
-//! Every arm here either updates UI state directly or starts a background job;
-//! none of them block the loop.
+//! Every arm here either updates UI state directly or starts a background job,
+//! except `SetupLogin`, which hands the terminal to `mj login` and waits for it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -668,6 +668,7 @@ pub(crate) async fn apply_dashboard_action(
             profile_id,
         } => {
             let result = run_setup_login(context, &profile_id).await;
+            context.loop_stalls.forget_pass();
             context
                 .dashboard
                 .setup_login_finished(generation, &profile_id, result);
