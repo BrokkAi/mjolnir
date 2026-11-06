@@ -38,7 +38,7 @@ impl RelayClient {
         handshake_timeout: Duration,
     ) -> Result<Self> {
         let purpose = format!("{} for session {expected_session_id}", spec.purpose);
-        let mut refusals = mj_core::targets::SshRefusalRetry::new();
+        let mut refusals = mj_core::targets::SshRefusalRetry::for_command(spec);
         let mut socket_waits = 0;
         loop {
             let outcome = Self::connect_attempt(
@@ -89,6 +89,10 @@ impl RelayClient {
                         return Err(error);
                     };
                     socket_waits += 1;
+                    // The session ran, so its shard accepted it: only a
+                    // refusal advances the walk. The retry starts on the same
+                    // shard instead of visiting, and maybe opening, another.
+                    refusals.walk().retry_last_shard();
                     tracing::debug!(
                         session_id = %expected_session_id,
                         purpose = %purpose,

@@ -1012,7 +1012,7 @@ fn with_ssh_refusal_retry(
     let Some(destination) = command.ssh_destination.as_deref() else {
         return run(command, None);
     };
-    let mut retry = SshRefusalRetry::new();
+    let mut retry = SshRefusalRetry::for_command(command);
     loop {
         let session = command.open_ssh_session(executor, retry.walk())?;
         let output = run(session.command(), session.gate())?;
@@ -3249,6 +3249,32 @@ mod executor_tests {
                 "cancellable: {cancellable}, retried within the bound"
             );
         }
+    }
+
+    /// A fail-fast probe (target validation, `mj doctor`) fails within its own
+    /// connect timeout when the server closes every connection before
+    /// authentication, instead of retrying for the persistent-refusal bound
+    /// of a minute like a command that has to get in.
+    // Hard-won: ca6580092: probes retried pre-authentication refusals for the full 60 s bound.
+    #[test]
+    fn a_probe_gives_a_refusal_no_more_time_than_its_connect_timeout() {
+        let _fast_retries = FastRetries::new();
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut command = flaky_ssh_script(directory.path(), u32::MAX);
+        command.ssh_session_probe = true;
+        let started = Instant::now();
+        let error = ProcessExecutor
+            .execute(&command)
+            .expect_err("a server that always closes fails the probe");
+        let elapsed = started.elapsed();
+        let message = format!("{error:#}");
+        assert!(message.contains("build@10.0.0.1"), "{message}");
+        assert!(message.contains("firewall"), "{message}");
+        assert!(
+            elapsed >= Duration::from_secs(3) && elapsed < Duration::from_secs(15),
+            "{elapsed:?}"
+        );
+        assert!(attempts(directory.path()) > 3, "retried within the bound");
     }
 
     /// Pins both defects of an exit-255 rule without a start proof: a command

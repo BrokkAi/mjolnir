@@ -503,7 +503,7 @@ async fn serve_stream(
     // preparation below.
     let cancelled = Arc::new(AtomicBool::new(false));
     let _cancel_on_exit = CancelOnDrop(cancelled.clone());
-    let mut retry = SshRefusalRetry::new();
+    let mut retry = SshRefusalRetry::for_command(&command);
     loop {
         // A command over a shared SSH connection leases its session here,
         // where SSH runs, exactly as a local launch does. The executor opens

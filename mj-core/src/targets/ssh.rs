@@ -658,7 +658,7 @@ pub fn ssh_validation_command(
         "-o".into(),
         "BatchMode=yes".into(),
         "-o".into(),
-        "ConnectTimeout=3".into(),
+        format!("ConnectTimeout={}", SSH_PROBE_CONNECT_TIMEOUT.as_secs()),
         "-o".into(),
         "ServerAliveInterval=2".into(),
         "-o".into(),
@@ -998,9 +998,9 @@ impl SshRefusal {
 
 /// How long a refusal that the command's walk cannot route around is retried
 /// in place before the command fails: a connection closed before
-/// authentication, a session refused on a master this command opened itself
-/// (no other shard is left for it), or a refusal for a lease with no shared
-/// master.
+/// authentication, a session refused on every shard the command can reach
+/// (it opened a master itself and no other shard is left to try), or a
+/// refusal for a lease with no shared master.
 ///
 /// `sshd`'s `MaxStartups` (start:rate:full) drops connections at random and
 /// only while unauthenticated connections pile up, and a slot frees when one
@@ -1009,6 +1009,11 @@ impl SshRefusal {
 /// connection, `MaxSessions 0`, or sessions that never end. Cancellation and
 /// deadlines of the caller end the retries sooner.
 const SSH_PERSISTENT_REFUSAL: Duration = Duration::from_secs(60);
+
+/// The `ConnectTimeout` of a fail-fast probe (target validation), which is
+/// also the longest its refusals are retried: a probe that waited longer for
+/// the server to let it in than it waits to connect would not be fail-fast.
+const SSH_PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Test override of [`SSH_PERSISTENT_REFUSAL`] in milliseconds. `u64::MAX`
 /// means "no override".
@@ -1079,14 +1084,18 @@ impl std::error::Error for SshRefusalPersisted {}
 /// The command never ran, so it is safe to retry. A refused session on a
 /// shared master that another shard may still have room on retries at once:
 /// the command's [`SshWalk`], which this value owns, sends the next lease to
-/// another master. Every other refusal (see [`SSH_PERSISTENT_REFUSAL`]) waits
-/// with a jittered backoff and retries on the same shard, and fails once
-/// the first such refusal is a full [`SSH_PERSISTENT_REFUSAL`] old. The same
-/// bound applies whether or not the caller can be cancelled.
+/// another master, if the walk has one left (see [`SshWalk`]). Every other
+/// refusal (see [`SSH_PERSISTENT_REFUSAL`]) waits with a jittered backoff and
+/// retries, and fails once the first such refusal is a full bound old: the
+/// [`SSH_PERSISTENT_REFUSAL`], or for a fail-fast probe its own connect
+/// timeout. The same bound applies whether or not the caller can be
+/// cancelled.
 pub struct SshRefusalRetry {
     walk: SshWalk,
     /// When the first refusal that did not walk on happened.
     stuck_since: Option<Instant>,
+    /// How long such refusals are retried.
+    bound: Duration,
     /// Refusals that waited; indexes the backoff.
     waits: usize,
 }
@@ -1102,8 +1111,19 @@ impl SshRefusalRetry {
         Self {
             walk: SshWalk::default(),
             stuck_since: None,
+            bound: persistent_refusal(),
             waits: 0,
         }
+    }
+
+    /// The retry for `command`: a fail-fast probe gives a refusal no more
+    /// time than its own connect timeout.
+    pub fn for_command(command: &CommandSpec) -> Self {
+        let mut retry = Self::new();
+        if command.ssh_session_probe {
+            retry.bound = retry.bound.min(SSH_PROBE_CONNECT_TIMEOUT);
+        }
+        retry
     }
 
     /// The command's walk across the shards of its connection. Pass it to
@@ -1126,17 +1146,27 @@ impl SshRefusalRetry {
         stderr: &str,
     ) -> Result<Duration, SshRefusalPersisted> {
         let stderr = stderr.trim();
-        if walks_on {
+        // Ask the walk now, so shards added since the lease count.
+        if walks_on && self.walk.can_walk_on() {
             // The walk sends the next lease to a shard this command has not
-            // tried, so this refusal cannot repeat: no wait, no time spent.
+            // tried, or opens a new one, so this refusal cannot repeat: no
+            // wait, no time spent. The command is no longer stuck, so a later
+            // refusal it cannot route around gets the whole bound again; the
+            // walk still ends, because each walk opens at most one master.
+            self.stuck_since = None;
             refusal.log_retry(destination, purpose, self.waits, Duration::ZERO, stderr);
             return Ok(Duration::ZERO);
         }
-        // No other shard is left for this command: try the same one again.
-        self.walk.retry_last_shard();
+        // A connection dropped before authentication usually means the master
+        // died: try the same shard again. A session refused on every shard
+        // the command has tried goes back to the one tried least recently.
+        if refusal == SshRefusal::BeforeAuthentication {
+            self.walk.retry_last_shard();
+        }
         let stuck_since = *self.stuck_since.get_or_insert_with(Instant::now);
         let elapsed = stuck_since.elapsed();
-        let Some(remaining) = persistent_refusal()
+        let Some(remaining) = self
+            .bound
             .checked_sub(elapsed)
             .filter(|remaining| !remaining.is_zero())
         else {
@@ -1424,12 +1454,16 @@ pub const SSH_MASTER_OPEN_TIMEOUT: Duration = Duration::from_secs(60);
 /// processes share the same control sockets, so no count kept here can say
 /// whether a shard has room. A command instead tries shards in order: when
 /// the server refuses its session on one (`MaxSessions`), the command's next
-/// lease takes the next shard it has not tried, and only when it has tried
-/// every shard that exists does it open a new one. The walk is the state
-/// change that ends the retry loop, so a refusal needs no wait and spends no
-/// time. A shard the command opened itself is the end of the walk: a refusal
-/// there leaves no other shard to go to, so [`SshRefusalRetry`] retries it in
-/// place for a bounded time.
+/// lease takes the next shard it has not tried, whoever opened that shard.
+/// When it has tried every shard that exists, it opens a new one, unless it
+/// already opened a master during this walk: then the server is refusing
+/// masters one after another (`MaxSessions 0`, or sessions that never end),
+/// and the command retries the shard it tried least recently, after the wait
+/// [`SshRefusalRetry`] decides, within the persistent-refusal bound. Each
+/// retry first looks for shards added meanwhile. The walk is the state change
+/// that ends the retry loop, so a refusal that has a shard to go to needs no
+/// wait and spends no time. [`Placement`] is the one rule, shared by the lease
+/// and by the question whether a refusal can walk on.
 ///
 /// One command owns one walk (see [`SshRefusalRetry::walk`]) and passes it to
 /// each lease it takes.
@@ -1440,22 +1474,89 @@ pub struct SshWalk {
     /// refusals and never a failure.
     #[cfg(unix)]
     start: Option<usize>,
-    /// The shards this command has already leased, whether or not they
-    /// accepted it.
+    /// The shards this command has leased, least recently tried first,
+    /// whether or not they accepted it.
     #[cfg(unix)]
     visited: Vec<usize>,
     /// The shards whose master this command opened.
     #[cfg(unix)]
     opened: Vec<usize>,
+    /// The connection the walk is on, once it has leased a shard.
+    #[cfg(unix)]
+    connection: Option<WalkedConnection>,
+}
+
+/// The ledger and connection key of the shards a walk goes over.
+#[cfg(unix)]
+struct WalkedConnection {
+    ledger: Arc<SessionLedger>,
+    key: String,
+}
+
+#[cfg(unix)]
+impl std::fmt::Debug for WalkedConnection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.key)
+    }
+}
+
+/// Where a walk's next lease goes.
+#[cfg(unix)]
+enum Placement {
+    /// A shard the command has not tried.
+    Untried(usize),
+    /// Every shard has been tried and the command opened no master yet: add
+    /// a shard and open its master.
+    OpenNew,
+    /// Every shard has been tried and the command already opened a master:
+    /// the shard it tried least recently.
+    RetryOldest(usize),
+}
+
+#[cfg(unix)]
+impl Placement {
+    fn of(connection: &Connection, walk: &SshWalk) -> Self {
+        let count = connection.shards.len();
+        let start = walk.start.unwrap_or(connection.hint);
+        (0..count)
+            .map(|offset| (start + offset) % count)
+            .find(|shard| !walk.visited.contains(shard))
+            .map(Self::Untried)
+            .or_else(|| match walk.visited.first() {
+                Some(&oldest) if !walk.opened.is_empty() => Some(Self::RetryOldest(oldest)),
+                _ => None,
+            })
+            .unwrap_or(Self::OpenNew)
+    }
 }
 
 impl SshWalk {
-    /// The command's last lease cannot be answered by another shard (a
+    /// Whether the next lease of this walk goes to a shard that can answer a
+    /// session the server refused for `MaxSessions` at once: one the command
+    /// has not tried, or a new one. Looked up when asked, so shards added
+    /// since the last lease count.
+    fn can_walk_on(&self) -> bool {
+        #[cfg(unix)]
+        return self.connection.as_ref().is_some_and(|walked| {
+            walked
+                .ledger
+                .connections()
+                .get(&walked.key)
+                .is_some_and(|connection| {
+                    !matches!(Placement::of(connection, self), Placement::RetryOldest(_))
+                })
+        });
+        #[cfg(not(unix))]
+        false
+    }
+
+    /// The command's last lease cannot be answered by another shard: a
     /// connection dropped before authentication usually means the master
-    /// died; a master this command opened has no shard after it), so the
-    /// retry takes that shard again; its lease checks the master and reopens
-    /// it if needed.
-    fn retry_last_shard(&mut self) {
+    /// died. The retry takes that shard again; its lease checks the master and
+    /// reopens it if needed. A retry after a failure that was no refusal (the
+    /// session ran, so the shard accepted it) takes it again too, instead of
+    /// advancing the walk.
+    pub fn retry_last_shard(&mut self) {
         #[cfg(unix)]
         self.visited.pop();
     }
@@ -1525,22 +1626,27 @@ impl SessionLedger {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Choose the shard for `walk`'s next lease: the first shard the walk has
-    /// not tried, in order from the walk's start and wrapping, or a new shard
-    /// when it has tried them all. This is the only placement rule, and the
-    /// ledger's lock makes it one decision.
-    fn reserve(&self, key: &str, walk: &mut SshWalk) -> Reservation {
+    /// Choose the shard for `walk`'s next lease by [`Placement`]. This is the
+    /// only placement rule, and the ledger's lock makes it one decision.
+    fn reserve(self: &Arc<Self>, key: &str, walk: &mut SshWalk) -> Reservation {
+        walk.connection.get_or_insert_with(|| WalkedConnection {
+            ledger: Arc::clone(self),
+            key: key.to_owned(),
+        });
         let mut connections = self.connections();
         let connection = connections.entry(key.to_owned()).or_default();
-        let count = connection.shards.len();
-        let start = *walk.start.get_or_insert(connection.hint);
-        let index = (0..count)
-            .map(|offset| (start + offset) % count)
-            .find(|shard| !walk.visited.contains(shard))
-            .unwrap_or_else(|| {
+        walk.start.get_or_insert(connection.hint);
+        let index = match Placement::of(connection, walk) {
+            Placement::Untried(shard) => shard,
+            Placement::OpenNew => {
                 connection.shards.push(Shard::new());
-                count
-            });
+                connection.shards.len() - 1
+            }
+            Placement::RetryOldest(shard) => {
+                walk.visited.retain(|visited| *visited != shard);
+                shard
+            }
+        };
         walk.visited.push(index);
         Reservation {
             shard: index,
@@ -1601,9 +1707,7 @@ impl SessionLedger {
                 slot.set_verified(Some(Instant::now()));
             }
         }
-        let mut lease = SshSessionLease::new(Some(slot), false);
-        lease.own_master = walk.opened.contains(&reservation.shard);
-        Ok(lease)
+        Ok(SshSessionLease::new(Some(slot), false))
     }
 
     /// Place a fail-fast probe on `walk`'s next shard, without checking or
@@ -1938,10 +2042,6 @@ pub struct SshSessionLease {
     /// otherwise connects directly, so it carries no `ProxyCommand=false`.
     #[cfg(unix)]
     probe: bool,
-    /// The command this lease was taken for opened its shard's master, so no
-    /// shard remains for it to walk to.
-    #[cfg(unix)]
-    own_master: bool,
     gate: Arc<StartGate>,
 }
 
@@ -1961,7 +2061,6 @@ impl SshSessionLease {
         Self {
             slot,
             probe,
-            own_master: false,
             gate: StartGate::new(confirm),
         }
     }
@@ -1972,8 +2071,6 @@ impl SshSessionLease {
             slot: None,
             #[cfg(unix)]
             probe: false,
-            #[cfg(unix)]
-            own_master: false,
             gate: StartGate::new(None),
         }
     }
@@ -2014,22 +2111,19 @@ impl SshSessionLease {
     /// command's [`SshWalk`] already lists this shard, so its next lease lands
     /// on another one.
     ///
-    /// Returns `true` when retrying at once is a step of the walk (a refused
-    /// session on a shared master that the command did not open itself, so
-    /// another shard remains). A connection dropped before authentication, a
-    /// refusal on a master this command opened, and a refusal for a lease with
-    /// no shared master return `false`: the retry has to wait, in place, within
-    /// the persistent-refusal bound.
+    /// Returns `true` for a refused session on a shared master: the walk may
+    /// answer it by going to another shard, if one is left (see
+    /// [`SshRefusalRetry::next`], which asks the walk). A connection dropped
+    /// before authentication and a refusal for a lease with no shared master
+    /// return `false`: the retry has to wait, in place, within the
+    /// persistent-refusal bound.
     pub fn note_refusal(&self, refusal: SshRefusal) -> bool {
         match refusal {
             SshRefusal::BeforeAuthentication => {
                 self.invalidate();
                 false
             }
-            #[cfg(unix)]
-            SshRefusal::SessionLimit => self.control_path().is_some() && !self.own_master,
-            #[cfg(not(unix))]
-            SshRefusal::SessionLimit => false,
+            SshRefusal::SessionLimit => self.control_path().is_some(),
         }
     }
 }
@@ -3137,6 +3231,11 @@ mod tests {
         ssh: SshTarget,
         sockets: PathBuf,
         marker: PathBuf,
+        /// How long the other process's session lasts, in seconds.
+        hold_seconds: u32,
+        /// Another command adds a shard to the ledger while the other
+        /// process's session runs.
+        adds_shard: bool,
         holder: std::cell::RefCell<Option<std::process::Child>>,
     }
 
@@ -3165,7 +3264,7 @@ mod tests {
                     [
                         "sh".to_owned(),
                         "-c".to_owned(),
-                        "touch \"$0\"; sleep 2".to_owned(),
+                        format!("touch \"$0\"; sleep {}", self.hold_seconds),
                         self.marker.display().to_string(),
                     ],
                 );
@@ -3181,6 +3280,14 @@ mod tests {
                 while !self.marker.exists() {
                     assert!(Instant::now() < deadline, "the other session never started");
                     std::thread::sleep(Duration::from_millis(20));
+                }
+                if self.adds_shard {
+                    SessionLedger::global()
+                        .connections()
+                        .entry(connection_key(&self.ssh))
+                        .or_default()
+                        .shards
+                        .push(Shard::new());
                 }
             }
             Ok(output)
@@ -3216,6 +3323,8 @@ mod tests {
             ssh: ssh.clone(),
             sockets: socket_dir.path().to_path_buf(),
             marker: marker_dir.path().join("held"),
+            hold_seconds: 2,
+            adds_shard: false,
             holder: std::cell::RefCell::new(None),
         };
         let command = ssh_command(&ssh, ["true"]);
@@ -3248,6 +3357,73 @@ mod tests {
             holder_status.success(),
             "the master was closed under the other process's session: {holder_status:?}"
         );
+        drop(server);
+    }
+
+    /// With `MaxSessions 1`, a long-lived session of another process (a relay)
+    /// takes the only session of the master a command just opened. Another
+    /// shard exists by then, opened by some other command. The refused
+    /// command walks to it at once and runs, instead of waiting in place for
+    /// the persistent-refusal bound on the master it opened.
+    // Hard-won: ca6580092: the command that opened a master was pinned to it, so a long-lived session on that master made it fail after 60 s while other shards had room.
+    #[test]
+    #[cfg(unix)]
+    fn a_command_that_opened_a_full_master_walks_to_a_shard_another_command_added() {
+        let _guard = SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let socket_dir = sharing_socket_dir();
+        let Some(server) = LocalSshd::start(1, socket_dir.path()) else {
+            eprintln!("skipped: this machine has no sshd");
+            return;
+        };
+        let ssh = server.ssh.clone();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
+            socket_dir.path().to_path_buf(),
+        )));
+        let marker_dir = tempfile::tempdir().unwrap();
+        let executor = JoinsNewMaster {
+            ssh: ssh.clone(),
+            sockets: socket_dir.path().to_path_buf(),
+            marker: marker_dir.path().join("held"),
+            hold_seconds: 30,
+            adds_shard: true,
+            holder: std::cell::RefCell::new(None),
+        };
+        let command = ssh_command(&ssh, ["true"]);
+        let started = Instant::now();
+        let outcome =
+            crate::targets::with_ssh_refusal_retry(&command, &executor, None, |command, gate| {
+                crate::targets::ProcessExecutor.run_once(command, gate)
+            });
+        let waited = started.elapsed();
+        set_ssh_connection_sharing_for_test(None);
+        let mut holder = executor
+            .holder
+            .borrow_mut()
+            .take()
+            .expect("the other session ran");
+        let still_held = holder.try_wait().expect("poll the other session").is_none();
+        let _ = holder.kill();
+        let _ = holder.wait();
+        let shards = SessionLedger::global()
+            .connections()
+            .get(&connection_key(&ssh))
+            .map_or(0, |connection| connection.shards.len());
+
+        let output = outcome.expect("the command ran on the other shard");
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(still_held, "the other session outlasted the command");
+        assert!(
+            waited < Duration::from_secs(15),
+            "the command waited instead of walking on: {waited:?}"
+        );
+        assert_eq!(shards, 2, "the command used the shard that was added");
         drop(server);
     }
 
@@ -3444,9 +3620,11 @@ mod tests {
 
     /// A command's walk tries each shard once, in order from where the last
     /// started session was, wrapping around, and opens a new shard only after
-    /// it has tried every one. A stale hint (here, a shard that no longer
-    /// exists in the order the walk expects) changes the order and never
-    /// fails a lease. A probe walks the same way and opens no master.
+    /// it has tried every one. A command that has opened a master does not
+    /// open another: with every shard tried it goes back to the one it tried
+    /// least recently. A stale hint (here, a shard that no longer exists in
+    /// the order the walk expects) changes the order and never fails a lease.
+    /// A probe walks the same way and opens no master.
     #[test]
     #[cfg(unix)]
     fn a_walk_tries_every_shard_once_before_it_opens_a_new_one() {
@@ -3455,9 +3633,16 @@ mod tests {
         let ssh = plain_target("walk-host");
         let masters = FakeMasters::default();
 
-        let mut first = SshWalk::default();
-        let leases: Vec<_> = (0..3)
-            .map(|_| next_lease(&ledger, &ssh, dir.path(), &masters, &mut first))
+        // Three commands, each refused on every shard that exists, each
+        // opening the next shard.
+        let leases: Vec<_> = (1..=3)
+            .map(|shards| {
+                let mut walk = SshWalk::default();
+                (0..shards)
+                    .map(|_| next_lease(&ledger, &ssh, dir.path(), &masters, &mut walk))
+                    .last()
+                    .unwrap()
+            })
             .collect();
         assert_eq!(
             leases.iter().map(shard_of).collect::<Vec<_>>(),
@@ -3467,10 +3652,11 @@ mod tests {
         assert_eq!(masters.openers(), 3);
 
         // A session started on shard 2: the next walk starts there, wraps
-        // through 0 and 1, and only then opens shard 3.
+        // through 0 and 1, and only then opens shard 3. Having opened it, it
+        // goes back to shard 2, tried least recently, and then to 0.
         leases[2].gate().mark_started();
         let mut second = SshWalk::default();
-        let walked: Vec<_> = (0..5)
+        let walked: Vec<_> = (0..6)
             .map(|_| {
                 shard_of(&next_lease(
                     &ledger,
@@ -3481,7 +3667,15 @@ mod tests {
                 ))
             })
             .collect();
-        assert_eq!(walked, ["2", "0", "1", "3", "4"]);
+        assert_eq!(walked, ["2", "0", "1", "3", "2", "0"]);
+
+        // A command that opened no master tries all four shards and opens a
+        // fifth.
+        let mut third = SshWalk::default();
+        let walked: Vec<_> = (0..5)
+            .map(|_| shard_of(&next_lease(&ledger, &ssh, dir.path(), &masters, &mut third)))
+            .collect();
+        assert_eq!(walked, ["2", "3", "0", "1", "4"]);
 
         // A probe never opens a master, even past the last shard.
         let openers = masters.openers();
@@ -3502,6 +3696,14 @@ mod tests {
         let ledger = SessionLedger::new();
         let ssh = plain_target("shared-walk-host");
         let masters = FakeMasters::default();
+        // Another command opened shard 0; these three joined it.
+        drop(next_lease(
+            &ledger,
+            &ssh,
+            dir.path(),
+            &masters,
+            &mut SshWalk::default(),
+        ));
         let mut walks = [SshWalk::default(), SshWalk::default(), SshWalk::default()];
         for walk in &mut walks {
             drop(next_lease(&ledger, &ssh, dir.path(), &masters, walk));
@@ -3515,22 +3717,48 @@ mod tests {
         assert_eq!(masters.openers(), 2, "one master for the shard they share");
     }
 
-    /// A refused session on a shared master that another command opened walks
-    /// on at once. A refusal with no shared master to walk on (user-configured
-    /// sharing) does not, or the zero-delay retry would never end; neither
-    /// does a refusal on the master this command opened itself, which has no
-    /// shard after it, nor a connection dropped before authentication.
+    /// A refused session on a shared master walks on at once when a shard is
+    /// left for the command, whoever opened it: one it has not tried (looked
+    /// up when the refusal happens, so a shard added meanwhile counts), or a
+    /// new one when it has opened no master itself. A command that opened a
+    /// master and has tried every shard has nowhere to go: the retry waits.
+    /// So does a refusal with no shared master (user-configured sharing), or
+    /// the zero-delay retry would never end, and a connection dropped before
+    /// authentication.
+    // Hard-won: ca6580092: a command was pinned to the master it opened, so a full master made it retry in place while other shards had room.
     #[test]
     #[cfg(unix)]
-    fn only_a_refused_session_on_a_shared_master_walks_on() {
+    fn a_refused_session_walks_on_only_while_a_shard_is_left_for_the_command() {
         let dir = sharing_socket_dir();
         let ledger = SessionLedger::new();
         let ssh = plain_target("refused-host");
         let masters = FakeMasters::default();
-        let opener = next_lease(&ledger, &ssh, dir.path(), &masters, &mut SshWalk::default());
-        let shared = next_lease(&ledger, &ssh, dir.path(), &masters, &mut SshWalk::default());
-        assert!(!opener.note_refusal(SshRefusal::SessionLimit));
-        assert!(shared.note_refusal(SshRefusal::SessionLimit));
+        let mut opening = SshWalk::default();
+        let opener = next_lease(&ledger, &ssh, dir.path(), &masters, &mut opening);
+        assert!(opener.note_refusal(SshRefusal::SessionLimit));
+        assert!(
+            !opening.can_walk_on(),
+            "it opened the only shard and has tried it"
+        );
+
+        // Another command joins shard 0 and is refused there too: it opens
+        // shard 1, which is now left for the opener.
+        let mut joining = SshWalk::default();
+        let shared = next_lease(&ledger, &ssh, dir.path(), &masters, &mut joining);
+        assert!(
+            joining.can_walk_on(),
+            "a command that opened nothing opens one"
+        );
+        let second = next_lease(&ledger, &ssh, dir.path(), &masters, &mut joining);
+        assert_eq!(shard_of(&second), "1");
+        assert!(
+            opening.can_walk_on(),
+            "a shard the opener has not tried exists"
+        );
+        let next = next_lease(&ledger, &ssh, dir.path(), &masters, &mut opening);
+        assert_eq!(shard_of(&next), "1", "whoever opened it");
+        assert!(!opening.can_walk_on());
+
         assert!(!shared.note_refusal(SshRefusal::BeforeAuthentication));
         assert!(!SshSessionLease::unshared().note_refusal(SshRefusal::SessionLimit));
     }

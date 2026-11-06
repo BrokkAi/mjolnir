@@ -333,7 +333,7 @@ pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<Co
     use crate::targets::{SshRefusalRetry, ssh_refusal};
     // The poller bounds the whole probe, retries included, with
     // `RESOURCE_POLL_TIMEOUT`; a refusal that outlasts the retry bound fails it sooner.
-    let mut retry = SshRefusalRetry::new();
+    let mut retry = SshRefusalRetry::for_command(command);
     loop {
         let (output, ssh_session) = run_resource_command(command, retry.walk()).await?;
         if output.status == 0 {
