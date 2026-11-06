@@ -3579,7 +3579,7 @@ fn resize_mode_respects_custom_commands_and_workspace_changes() {
 /// the way the parent's own question would: the row's symbol, the attention
 /// queue and a notification, and the row says whose question it is.
 // Hard-won: 91244ea: a child permission question left its parent without an attention mark.
-// Hard-won: #1451: the restored mark hid the parent's running turn from turn controls, and one episode per parent swallowed a child's notification.
+// Hard-won: #1451: the restored mark hid the parent's running turn from turn controls, and one episode per parent or per session swallowed a child's later form.
 #[test]
 fn a_subagent_question_marks_its_parent_for_attention() {
     let (mut dashboard, parent) = dashboard_with_one_subagent();
@@ -3686,6 +3686,57 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         due[0].body,
         "Sub-agent \"Answer project codename\": Choose a path"
     );
+
+    // A second form from the same child, opened while the first one it was
+    // seen for is still open, rings too.
+    dashboard.set_current_session(Some("child-session"));
+    assert!(dashboard.notification_events(6_000).is_empty());
+    dashboard.set_current_session(None);
+    let mut second = question("child-session");
+    second.id = "child-session-second-question".into();
+    second.message = "Allow the command?".into();
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .pending_elicitations
+        .push(second);
+    assert!(dashboard.notification_events(6_000).is_empty());
+    let due = dashboard.notification_events(8_000);
+    assert_eq!(due.len(), 1, "{due:?}");
+    assert_eq!(
+        due[0].body,
+        "Sub-agent \"Answer project codename\": Allow the command?"
+    );
+}
+
+/// Reviewers are listed in their own workspace, not among the Sub-agents,
+/// so a reviewer's open form names the reviewer and leads there.
+// Hard-won: #1451: a reviewer's open form read as a sub-agent question and led to the Sub-agents view, which does not list reviewers.
+#[test]
+fn a_reviewer_question_names_the_reviewer_and_leads_to_its_workspace() {
+    let (mut dashboard, parent) = dashboard_with_one_subagent();
+    let mut state = dashboard.state.clone();
+    state.subagents.get_mut("child-session").unwrap().kind =
+        mj_core::subagent::SubagentKind::Reviewer;
+    dashboard.set_state(state);
+    set_working(&mut dashboard, &parent);
+    set_working(&mut dashboard, "child-session");
+    dashboard.set_current_session(None);
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .pending_elicitations = vec![question("child-session")];
+
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("Reviewer question")),
+        "{lines:#?}"
+    );
+    dashboard.step_attention(1);
+    assert!(dashboard.reviewers_workspace_open());
+    assert_eq!(dashboard.selected_session_id(), Some("child-session"));
 }
 
 /// A suspend stops the parent's sub-agents without a checkpoint of their own.

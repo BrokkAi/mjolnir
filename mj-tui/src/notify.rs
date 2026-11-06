@@ -40,10 +40,13 @@ pub struct Notification {
 }
 
 /// One stretch of a session needing a person at one level, and whether it
-/// has been reported yet.
+/// has been reported yet. A form that opens during the stretch starts a new
+/// one, so a second request does not hide behind a first one already seen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AttentionEpisode {
     level: AttentionLevel,
+    /// The open forms this episode covers.
+    forms: std::collections::BTreeSet<String>,
     since_ms: u64,
     reported: bool,
 }
@@ -126,17 +129,34 @@ impl DashboardState {
                 episodes.remove(id);
                 continue;
             }
+            let forms: std::collections::BTreeSet<String> = self
+                .session_details
+                .get(id)
+                .map(|detail| {
+                    detail
+                        .pending_elicitations
+                        .iter()
+                        .map(|request| request.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
             let episode = episodes.entry(id.clone()).or_insert(AttentionEpisode {
                 level,
+                forms: Default::default(),
                 since_ms: now_ms,
                 reported: false,
             });
-            if episode.level != level {
+            if episode.level != level || !forms.is_subset(&episode.forms) {
                 *episode = AttentionEpisode {
                     level,
+                    forms,
                     since_ms: now_ms,
                     reported: false,
                 };
+            } else {
+                // Forget answered forms, so a harness that reuses an id
+                // later still starts a new episode.
+                episode.forms = forms;
             }
             if episode.reported {
                 continue;
@@ -158,14 +178,18 @@ impl DashboardState {
             };
             let body = match (parent, self.session_details.get(id)) {
                 (Some(_), Some(detail)) => format!(
-                    "Sub-agent \"{}\": {}",
+                    "{} \"{}\": {}",
+                    match self.state.subagents.get(id).map(|relation| relation.kind) {
+                        Some(mj_core::subagent::SubagentKind::Reviewer) => "Reviewer",
+                        _ => "Sub-agent",
+                    },
                     self.state
                         .sessions
                         .get(id)
                         .map_or(id.as_str(), |child| child.listed_title()),
                     detail
                         .pending_elicitations
-                        .first()
+                        .last()
                         .map_or("", |request| request.message.as_str())
                 ),
                 _ => self.notification_body(id, level),
@@ -187,7 +211,7 @@ impl DashboardState {
         let detail = self.session_details.get(session_id);
         let text = match level {
             AttentionLevel::Waiting => detail
-                .and_then(|detail| detail.pending_elicitations.first())
+                .and_then(|detail| detail.pending_elicitations.last())
                 .map(|request| request.message.clone())
                 .or_else(|| {
                     self.session_review(session_id)

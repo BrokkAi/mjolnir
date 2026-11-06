@@ -8613,6 +8613,9 @@ function renderConversationHeader(session) {
       ? `${total} retained agents; ${waiting} waiting for your answer`
       : `${total} retained agents`;
     button.classList.toggle('alert', waiting > 0);
+    button.setAttribute('aria-label', waiting
+      ? `Open sub-agent workspace; ${waiting} waiting for your answer`
+      : 'Open sub-agent workspace');
     button.classList.toggle(
       'hidden',
       total === 0 || Boolean(route.subagentParentId),

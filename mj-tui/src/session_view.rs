@@ -179,6 +179,10 @@ impl SessionFacts {
         }
     }
 
+    pub(crate) fn waiting_child(&self, parent_id: &str) -> Option<&str> {
+        self.waiting_child.get(parent_id).map(String::as_str)
+    }
+
     pub(crate) fn listed(&self) -> &[String] {
         &self.listed
     }

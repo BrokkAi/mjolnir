@@ -899,6 +899,29 @@ impl DashboardState {
         self.session_facts().own_attention_level(session_id)
     }
 
+    /// The child whose open form makes `parent_id` read as waiting when the
+    /// parent itself is not, so a person is taken to that form.
+    pub(crate) fn waiting_child_of(&self, parent_id: &str) -> Option<String> {
+        if self.own_attention_level(parent_id) >= AttentionLevel::Waiting {
+            return None;
+        }
+        self.session_facts()
+            .waiting_child(parent_id)
+            .map(str::to_owned)
+    }
+
+    /// What kind of child [`Self::waiting_child_of`] names, for its label.
+    pub(crate) fn waiting_child_kind(
+        &self,
+        parent_id: &str,
+    ) -> Option<mj_core::subagent::SubagentKind> {
+        let child = self.waiting_child_of(parent_id)?;
+        self.state
+            .subagents
+            .get(&child)
+            .map(|relation| relation.kind)
+    }
+
     /// Whether the session's own turn is running. Turn controls ask this,
     /// not [`Self::attention_level`], which reads as waiting while a child
     /// waits on a person even though the parent's turn still runs.
@@ -1043,6 +1066,11 @@ impl DashboardState {
             None if delta < 0 => queue[queue.len() - 1].clone(),
             None => queue[0].clone(),
         };
+        // A parent waiting only on a child leads to the child's form, in the
+        // Sub-agents or Reviewers workspace where that child is listed.
+        if let Some(child) = self.waiting_child_of(&target.session_id) {
+            return self.focus_session_from_cpu_report(&child);
+        }
         self.focus_session_anywhere(&target.workspace_id, &target.session_id)
     }
 
