@@ -25,7 +25,6 @@ pub(super) async fn serve_session(
     native_session_used: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
     grok_usage: &grok_usage::Collector,
-    policy_updates: &mut mpsc::UnboundedReceiver<SessionUpdate>,
 ) -> Result<Option<SessionRestart>> {
     let mut meta = serde_json::Map::new();
     meta.insert("terminal_output".into(), serde_json::Value::Bool(true));
@@ -573,21 +572,6 @@ pub(super) async fn serve_session(
         )
         .await?;
     }
-    // Reports the bridge sent while opening are settled, not dropped: one that
-    // follows the last answer is newer than it. The session publishes its
-    // configuration below, so nothing is published here.
-    settle_policy_updates(
-        None,
-        policy_updates,
-        connection,
-        &session_id,
-        spec.harness,
-        enforcement,
-        &mut config_options,
-        &mut modes,
-        events,
-    )
-    .await?;
     let memory = if spec.clear_context_request.is_some() && spec.harness != HarnessKind::Claude {
         if let Some(memory) = spec.project_memory.clone() {
             Some(
@@ -744,21 +728,6 @@ pub(super) async fn serve_session(
             && config_recovery.is_none()
             && goal_question.is_none();
         let request = tokio::select! {
-            Some(update) = policy_updates.recv() => {
-                apply_pending_policy_updates(
-                    Some(update),
-                    policy_updates,
-                    connection,
-                    &session_id,
-                    spec.harness,
-                    enforcement,
-                    &mut config_options,
-                    &mut modes,
-                    events,
-                )
-                .await?;
-                continue;
-            }
             event = goal_controls.next(), if !goal_controls.is_empty() => {
                 emit_runtime_event(events, event).await?;
                 continue;
@@ -778,19 +747,6 @@ pub(super) async fn serve_session(
             }
             request = requests.recv() => match request { Some(request) => request, None => break },
         };
-        // Reports that arrived with the request are settled before it runs.
-        apply_pending_policy_updates(
-            None,
-            policy_updates,
-            connection,
-            &session_id,
-            spec.harness,
-            enforcement,
-            &mut config_options,
-            &mut modes,
-            events,
-        )
-        .await?;
         let request = match request {
             CommandRequest::PromptAttachments {
                 request_id,
@@ -917,20 +873,6 @@ pub(super) async fn serve_session(
                 if first_use {
                     emit_runtime_event(events, RuntimeEvent::NativeSessionUsed).await?;
                 }
-                // Admission: settled after every await that prepares the
-                // prompt, and nothing below awaits before `session/prompt`.
-                apply_pending_policy_updates(
-                    None,
-                    policy_updates,
-                    connection,
-                    &session_id,
-                    spec.harness,
-                    enforcement,
-                    &mut config_options,
-                    &mut modes,
-                    events,
-                )
-                .await?;
                 let prompt_text = prompt
                     .iter()
                     .filter_map(|block| match block {
@@ -993,12 +935,6 @@ pub(super) async fn serve_session(
                                 if matches!(&response, Ok(response) if matches!(response.stop_reason, StopReason::EndTurn | StopReason::Cancelled)) {
                                     prompt_running = false;
                                     let implementation = approved_plan.take().expect("approved plan is present");
-                                    // The restoration below asks for the policy whatever the
-                                    // cache says, so reports from the planning turn only
-                                    // need to reach the cache first.
-                                    while let Ok(update) = policy_updates.try_recv() {
-                                        apply_policy_update(update, &mut config_options, &mut modes);
-                                    }
                                     mode_restoration = Some(Box::pin(restore_plan_execution_mode(connection, session_id.clone(), RestoredPlanMode {
                                         config_options: config_options.clone(), modes: modes.clone(), plan: implementation.plan, warning: None,
                                     }, implementation.permission_sent, enforcement)));
@@ -1469,8 +1405,6 @@ pub(super) async fn serve_session(
                                     }
                                     emit_runtime_event(events, RuntimeEvent::SessionConfigured { config_options: config_options.clone() }).await?;
                                     emit_runtime_event(events, RuntimeEvent::SessionModesConfigured { modes: modes.clone() }).await?;
-                                    // The continuation is a prompt like any other.
-                                    apply_pending_policy_updates(None, policy_updates, connection, &session_id, spec.harness, enforcement, &mut config_options, &mut modes, events).await?;
                                     let plan = state.plan;
                                     let continuation = format!("The user approved the following plan. Implement it now; the preceding permission cancellation was mj's mode-transition handling.\n\n{plan}");
                                     updates_before = agent_output_count.get();
@@ -1510,7 +1444,19 @@ pub(super) async fn serve_session(
                 key,
                 value,
             } => {
-                let previous_policy = policy_configuration(&config_options, &modes, enforcement);
+                if !policy_permits(enforcement, &config_options, Some(&key), &value) {
+                    emit_runtime_event(
+                        events,
+                        RuntimeEvent::CommandRejected {
+                            reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
+                            request_id,
+                            message: POLICY_OWNED_MODE.into(),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
+                let previous_model = session_model(&config_options);
                 let grok_model_change = grok_models.is_some() && grok::handles_config_key(&key);
                 let applied = apply_session_selector(
                     connection,
@@ -1524,9 +1470,9 @@ pub(super) async fn serve_session(
                 .await;
                 match applied {
                     Ok(value) => {
-                        if previous_policy
-                            != policy_configuration(&config_options, &modes, enforcement)
-                        {
+                        // The model decides whether the bridge allows the
+                        // policy mode; the response just read is current.
+                        if previous_model != session_model(&config_options) {
                             reconcile_execution_policy(
                                 connection,
                                 &session_id,
@@ -1631,6 +1577,18 @@ pub(super) async fn serve_session(
                 request_id,
                 mode_id,
             } => {
+                if !policy_permits(enforcement, &config_options, None, &mode_id) {
+                    emit_runtime_event(
+                        events,
+                        RuntimeEvent::CommandRejected {
+                            reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
+                            request_id,
+                            message: POLICY_OWNED_MODE.into(),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
                 let advertised = modes.as_ref().is_some_and(|state| {
                     state
                         .available_modes
@@ -1654,27 +1612,9 @@ pub(super) async fn serve_session(
                 };
                 match applied {
                     Ok(()) => {
-                        apply_policy_update(
-                            SessionUpdate::CurrentModeUpdate(
-                                agent_client_protocol::v1::schema::CurrentModeUpdate::new(
-                                    mode_id.clone(),
-                                ),
-                            ),
-                            &mut config_options,
-                            &mut modes,
-                        );
-                        reconcile_execution_policy(
-                            connection,
-                            &session_id,
-                            spec.harness,
-                            enforcement,
-                            &mut config_options,
-                            &mut modes,
-                            events,
-                        )
-                        .await?;
-                        let mode_id =
-                            current_session_mode(&config_options, &modes).unwrap_or(mode_id);
+                        if let Some(state) = modes.as_mut() {
+                            state.current_mode_id = mode_id.clone().into();
+                        }
                         emit_runtime_event(
                             events,
                             RuntimeEvent::SessionModeApplied {
@@ -1740,8 +1680,7 @@ pub(super) async fn serve_session(
                 let outcome = if let Some(outcome) = goal_outcome {
                     outcome
                 } else {
-                    let previous_policy =
-                        policy_configuration(&config_options, &modes, enforcement);
+                    let previous_model = session_model(&config_options);
                     let recovered = resolve_session_config_recovery(
                         connection,
                         &session_id,
@@ -1756,8 +1695,7 @@ pub(super) async fn serve_session(
                     )
                     .await?;
                     // The answer can change the model like SetConfig does.
-                    if previous_policy != policy_configuration(&config_options, &modes, enforcement)
-                    {
+                    if previous_model != session_model(&config_options) {
                         reconcile_execution_policy(
                             connection,
                             &session_id,

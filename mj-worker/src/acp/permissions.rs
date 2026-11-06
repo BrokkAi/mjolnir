@@ -154,8 +154,9 @@ pub(super) struct PermissionAnswers {
 /// Claude's own plan approval (claude-agent-acp 0.84 `exit-plan-*` options,
 /// which reach this form when Claude wrote no plan file) must not change the
 /// session's execution policy. The option that continues under that policy
-/// becomes a plain "Yes"; an option that would raise a Guardian session to
-/// bypassPermissions is not offered at all. Lower modes stay available.
+/// becomes a plain "Yes", and no option for another mode is offered. When
+/// Claude does not offer the policy's mode, lower modes stay so the plan can
+/// still be approved; bypassPermissions is never offered to a Guardian session.
 pub(super) fn permission_choices(
     request: &RequestPermissionRequest,
     harness: HarnessKind,
@@ -205,6 +206,10 @@ fn offered_permission_choices(
         }
         let mode = claude_plan_option_mode(&option.option_id.to_string());
         let title = match mode {
+            // The policy owns the mode: with its own option on offer, no other
+            // mode is. Without it, lower modes stay so the plan can still be
+            // approved.
+            Some((mode, _)) if yes.is_some() && mode != policy_mode => continue,
             Some(("bypassPermissions", _)) if policy_mode != "bypassPermissions" => continue,
             Some((mode, true)) if mode == policy_mode => "Yes, clear context".to_owned(),
             _ => option.name.clone(),

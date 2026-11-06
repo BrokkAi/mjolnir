@@ -866,160 +866,55 @@ pub(super) async fn reconcile_execution_policy(
     emit_runtime_event(events, RuntimeEvent::Warning { message }).await
 }
 
-/// Reconciliation rounds a command waits for before the harness counts as
-/// unable to settle its mode. Each round needs a new report that moved the
-/// mode again after Mjolnir restored it.
-const POLICY_SETTLE_ROUNDS: usize = 4;
-
-/// Apply the mode and configuration reports the harness sent since the last
-/// decision, starting with `first` when the caller already received it, and
-/// reconcile the policy if they moved it. Reports are applied, never dropped:
-/// one older than the cached answer only costs a redundant request, whose
-/// answer is authoritative. Reports that arrive while the policy is restored
-/// are applied in the next round, until a round finds none that move it.
-/// Returns whether the policy was reconciled.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn settle_policy_updates(
-    mut first: Option<SessionUpdate>,
-    policy_updates: &mut mpsc::UnboundedReceiver<SessionUpdate>,
-    connection: &ConnectionTo<Agent>,
-    session_id: &SessionId,
-    harness: HarnessKind,
-    enforcement: Option<ExecutionEnforcement>,
-    config_options: &mut Vec<SessionConfigOption>,
-    modes: &mut Option<SessionModeState>,
-    events: &mpsc::Sender<RuntimeEvent>,
-) -> Result<bool> {
-    let mut reconciled = false;
-    for _ in 0..POLICY_SETTLE_ROUNDS {
-        let previous = policy_configuration(config_options, modes, enforcement);
-        let mut received = false;
-        for update in first
-            .take()
-            .into_iter()
-            .chain(std::iter::from_fn(|| policy_updates.try_recv().ok()))
-        {
-            apply_policy_update(update, config_options, modes);
-            received = true;
-        }
-        if !received || previous == policy_configuration(config_options, modes, enforcement) {
-            return Ok(reconciled);
-        }
-        reconcile_execution_policy(
-            connection,
-            session_id,
-            harness,
-            enforcement,
-            config_options,
-            modes,
-            events,
-        )
-        .await?;
-        reconciled = true;
-    }
-    bail!(
-        "{} kept changing its permission mode while Mjolnir restored the target's policy",
-        harness.display_name()
-    )
-}
-
-/// Settle the pending reports and publish the result. The command loop runs
-/// this before it handles any command, and the plan continuation before it
-/// starts, so no prompt starts in a mode reported while the previous turn
-/// ran. Publishing awaits, so reports that arrive meanwhile are settled too
-/// before this returns.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn apply_pending_policy_updates(
-    mut first: Option<SessionUpdate>,
-    policy_updates: &mut mpsc::UnboundedReceiver<SessionUpdate>,
-    connection: &ConnectionTo<Agent>,
-    session_id: &SessionId,
-    harness: HarnessKind,
-    enforcement: Option<ExecutionEnforcement>,
-    config_options: &mut Vec<SessionConfigOption>,
-    modes: &mut Option<SessionModeState>,
-    events: &mpsc::Sender<RuntimeEvent>,
-) -> Result<()> {
-    for _ in 0..POLICY_SETTLE_ROUNDS {
-        if !settle_policy_updates(
-            first.take(),
-            policy_updates,
-            connection,
-            session_id,
-            harness,
-            enforcement,
-            config_options,
-            modes,
-            events,
-        )
-        .await?
-        {
-            return Ok(());
-        }
-        emit_runtime_event(
-            events,
-            RuntimeEvent::SessionConfigured {
-                config_options: config_options.clone(),
-            },
-        )
-        .await?;
-        emit_runtime_event(
-            events,
-            RuntimeEvent::SessionModesConfigured {
-                modes: modes.clone(),
-            },
-        )
-        .await?;
-        if policy_updates.is_empty() {
-            return Ok(());
-        }
-    }
-    bail!(
-        "{} kept changing its permission mode while Mjolnir restored the target's policy",
-        harness.display_name()
-    )
-}
-
-pub(super) fn policy_configuration(
-    options: &[SessionConfigOption],
-    modes: &Option<SessionModeState>,
-    enforcement: Option<ExecutionEnforcement>,
-) -> (Option<String>, Option<String>, Option<String>) {
-    let mode = enforcement
-        .and_then(|policy| policy.acp_mode_selector())
-        .and_then(|key| surface::config_current_value(options, key))
-        .or_else(|| current_session_mode(options, modes));
-    let setting = enforcement
-        .and_then(ExecutionEnforcement::acp_setting)
-        .and_then(|(key, _)| surface::config_current_value(options, key));
-    let model = options
+/// The model the session reports, which decides whether the bridge allows
+/// the policy mode (Claude's Auto).
+pub(super) fn session_model(options: &[SessionConfigOption]) -> Option<String> {
+    options
         .iter()
         .find(|option| option.category == Some(SessionConfigOptionCategory::Model))
         .and_then(|option| surface::config_current_value(options, &option.id.to_string()))
-        .or_else(|| surface::config_current_value(options, "model"));
-    (mode, setting, model)
+        .or_else(|| surface::config_current_value(options, "model"))
 }
 
-pub(super) fn apply_policy_update(
-    update: SessionUpdate,
-    options: &mut Vec<SessionConfigOption>,
-    modes: &mut Option<SessionModeState>,
-) {
-    match update {
-        SessionUpdate::ConfigOptionUpdate(update) => *options = update.config_options,
-        SessionUpdate::CurrentModeUpdate(update) => {
-            if let Some(modes) = modes.as_mut() {
-                modes.current_mode_id = update.current_mode_id.clone();
-            }
-            for option in options {
-                if (option.category == Some(SessionConfigOptionCategory::Mode)
-                    || option.id.to_string() == "mode")
-                    && let SessionConfigKind::Select(select) = &mut option.kind
-                {
-                    select.current_value = update.current_mode_id.to_string().into();
-                }
-            }
+/// Whether a mode change from outside the worker may select `value` on the
+/// selector `key` (`None` for the legacy session-mode list). The policy owns
+/// its selectors: only Plan and the policy's own values pass, so no caller,
+/// an older controller included, can move a session off its policy.
+pub(super) fn policy_permits(
+    enforcement: Option<ExecutionEnforcement>,
+    options: &[SessionConfigOption],
+    key: Option<&str>,
+    value: &str,
+) -> bool {
+    let Some(enforcement) = enforcement else {
+        return true;
+    };
+    let policy_mode = |value: &str| value == "plan" || enforcement.acp_mode() == Some(value);
+    match key {
+        None => {
+            enforcement.acp_mode().is_none()
+                || enforcement.acp_mode_selector().is_some()
+                || policy_mode(value)
         }
-        _ => {}
+        Some(key)
+            if enforcement
+                .acp_setting()
+                .is_some_and(|(setting, _)| setting == key) =>
+        {
+            enforcement.acp_setting() == Some((key, value))
+        }
+        Some(key)
+            if enforcement
+                .owned_config_keys(options)
+                .iter()
+                .any(|owned| owned == key) =>
+        {
+            policy_mode(value)
+        }
+        Some(_) => true,
     }
 }
+
+/// Refusal for a mode change `policy_permits` turns down.
+pub(super) const POLICY_OWNED_MODE: &str =
+    "The target's permission policy sets this setting. Use plan mode to enter or leave Plan.";

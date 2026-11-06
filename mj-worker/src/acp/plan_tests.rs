@@ -209,111 +209,45 @@ async fn claude_plan_mode_stays_active_and_exit_restores_the_policy_mode() {
     }
 }
 
+/// The worker owns the mode it enforces: a caller outside it, such as an
+/// older controller, cannot select another mode, and nothing reaches Claude.
+/// Plan stays available.
+// Hard-won: 9249142: a Guardian session put in bypassPermissions stayed there when Claude refused Auto
 #[tokio::test]
-async fn a_legacy_config_caller_cannot_leave_a_policy_owned_mode_changed() {
+async fn a_caller_outside_the_worker_cannot_move_a_policy_owned_mode() {
     let mut probe = PlanProbe::with_config(ExecutionPolicy::ConfiguredApprovals, true).await;
-    probe
-        .commands
-        .send(CommandRequest::SetConfig {
-            request_id: "old-controller".into(),
-            key: "mode".into(),
-            value: "acceptEdits".into(),
-        })
-        .await
-        .unwrap();
-    let request = probe.message().await;
-    probe
-        .result(
-            &request,
-            json!({"configOptions": mode_config("acceptEdits")}),
-        )
-        .await;
-    let restoring = probe.message().await;
-    assert_eq!(restoring["params"]["value"], "auto");
-    probe
-        .result(&restoring, json!({"configOptions": mode_config("auto")}))
-        .await;
-    loop {
-        if let RuntimeEvent::ConfigApplied { value, .. } = probe.event().await {
-            assert_eq!(value, "auto");
-            break;
+    for (request_id, value) in [
+        ("accept-edits", "acceptEdits"),
+        ("bypass", "bypassPermissions"),
+    ] {
+        probe
+            .commands
+            .send(CommandRequest::SetConfig {
+                request_id: request_id.into(),
+                key: "mode".into(),
+                value: value.into(),
+            })
+            .await
+            .unwrap();
+        loop {
+            match probe.event().await {
+                RuntimeEvent::CommandRejected {
+                    request_id: rejected,
+                    message,
+                    ..
+                } => {
+                    assert_eq!(rejected, request_id);
+                    assert!(message.contains("permission policy"), "{message}");
+                    break;
+                }
+                RuntimeEvent::ConfigApplied { .. } => panic!("{value} must be refused"),
+                _ => {}
+            }
         }
+        probe.no_message().await;
     }
-    probe.no_message().await;
+    set_claude_config_mode(&mut probe, "enter-plan", "plan").await;
     probe.close().await;
-}
-
-#[tokio::test]
-async fn guardian_defers_an_announced_mode_change_until_the_turn_finishes() {
-    for announced in ["acceptEdits", "plan"] {
-        let mut probe = PlanProbe::with_config(ExecutionPolicy::ConfiguredApprovals, true).await;
-        loop {
-            if matches!(probe.event().await, RuntimeEvent::SessionConfigured { .. }) {
-                break;
-            }
-        }
-        probe
-            .commands
-            .send(CommandRequest::Prompt {
-                request_id: "active-turn".into(),
-                prompt: vec![ContentBlock::Text(TextContent::new("Continue"))],
-            })
-            .await
-            .unwrap();
-        let prompt = probe.message().await;
-        assert_eq!(prompt["method"], "session/prompt");
-        probe
-            .send(json!({
-                "jsonrpc": "2.0", "method": "session/update",
-                "params": {"sessionId": "plan-session", "update": {
-                    "sessionUpdate": "current_mode_update", "currentModeId": announced
-                }}
-            }))
-            .await;
-        probe.no_message().await;
-        probe
-            .result(&prompt, json!({"stopReason": "end_turn"}))
-            .await;
-        loop {
-            if matches!(probe.event().await, RuntimeEvent::PromptFinished { .. }) {
-                break;
-            }
-        }
-        // The next prompt is ready alongside the deferred report; the mode is
-        // settled before that prompt reaches the bridge.
-        probe
-            .commands
-            .send(CommandRequest::Prompt {
-                request_id: "next-turn".into(),
-                prompt: vec![ContentBlock::Text(TextContent::new("Next"))],
-            })
-            .await
-            .unwrap();
-        if announced != "plan" {
-            let restoring = probe.message().await;
-            assert_eq!(restoring["method"], "session/set_config_option");
-            assert_eq!(restoring["params"]["value"], "auto");
-            probe
-                .result(&restoring, json!({"configOptions": mode_config("auto")}))
-                .await;
-        }
-        let next_prompt = probe.message().await;
-        assert_eq!(next_prompt["method"], "session/prompt");
-        probe
-            .result(&next_prompt, json!({"stopReason": "end_turn"}))
-            .await;
-        loop {
-            if let RuntimeEvent::SessionConfigured { config_options } = probe.event().await {
-                assert_eq!(
-                    surface::config_current_value(&config_options, "mode").as_deref(),
-                    Some(if announced == "plan" { "plan" } else { "auto" })
-                );
-                break;
-            }
-        }
-        probe.no_message().await;
-        probe.close().await;
-    }
 }
 
 // Hard-won: 734385a: a refused approval mode skipped Muse's guardian auto-review
@@ -1799,52 +1733,37 @@ fn claude_plan_approval_offers_yes_under_the_session_policy_and_no_bypass_in_gua
     assert!(!is_plan_permission(
         &serde_json::from_value(bridge_exit_plan_request(guardian, false)).unwrap()
     ));
+    // The policy owns the mode, so approving a plan offers only the policy's
+    // own option, with and without clearing the context.
     assert_eq!(
         offered(&bridge_exit_plan_request(guardian, false), guardian),
-        pairs(&[
-            ("exit-plan-auto", "Yes"),
-            ("exit-plan-default", "Yes, manually approve edits"),
-            ("reject", "No, keep planning"),
-        ])
+        pairs(&[("exit-plan-auto", "Yes"), ("reject", "No, keep planning")])
     );
     assert_eq!(
         offered(&bridge_exit_plan_request(guardian, true), guardian),
         pairs(&[
             ("exit-plan-auto", "Yes"),
-            ("exit-plan-default", "Yes, manually approve edits"),
             ("exit-plan-clear-auto", "Yes, clear context"),
             ("reject", "No, keep planning"),
         ])
     );
-    // A YOLO session keeps Auto as a deliberate step down.
     assert_eq!(
         offered(&bridge_exit_plan_request(yolo, false), yolo),
-        pairs(&[
-            ("exit-plan-bypass", "Yes"),
-            ("exit-plan-default", "Yes, manually approve edits"),
-            ("exit-plan-auto", "Yes, and use auto mode"),
-            ("reject", "No, keep planning"),
-        ])
+        pairs(&[("exit-plan-bypass", "Yes"), ("reject", "No, keep planning")])
     );
     assert_eq!(
         offered(&bridge_exit_plan_request(yolo, true), yolo),
         pairs(&[
             ("exit-plan-bypass", "Yes"),
-            ("exit-plan-default", "Yes, manually approve edits"),
             ("exit-plan-clear-bypass", "Yes, clear context"),
-            ("exit-plan-auto", "Yes, and use auto mode"),
             ("reject", "No, keep planning"),
         ])
     );
-    // A Guardian session whose bridge led with bypass (Plan entered from a
-    // mode set by hand) still gets no option above its policy.
+    // A Guardian session whose bridge led with bypass still gets no option
+    // above its policy.
     assert_eq!(
         offered(&bridge_exit_plan_request(yolo, true), guardian),
-        pairs(&[
-            ("exit-plan-auto", "Yes"),
-            ("exit-plan-default", "Yes, manually approve edits"),
-            ("reject", "No, keep planning"),
-        ])
+        pairs(&[("exit-plan-auto", "Yes"), ("reject", "No, keep planning")])
     );
 }
 
