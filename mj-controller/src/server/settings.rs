@@ -35,6 +35,7 @@ pub(super) struct SettingsPageResponse {
     /// The draft's discovered sub-agent choices, which the page refreshes
     /// while they are still being discovered.
     subagent_options: Value,
+    reviewer_options: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,10 +140,17 @@ fn discover(
             backend.warm_profile_capabilities(&config);
         }
         let unreachable = discovery::fill_subagent_options(&mut real, capabilities).ok()?;
-        Some((real["_subagent_options"].take(), unreachable))
+        discovery::fill_reviewer_options(&mut real, capabilities).ok()?;
+        Some((
+            real["_subagent_options"].take(),
+            real["_reviewer_options"].take(),
+            unreachable,
+        ))
     })();
-    let (options, unreachable) = discovered.unwrap_or((Value::Null, None));
+    let (options, reviewer_options, unreachable) =
+        discovered.unwrap_or((Value::Null, Value::Null, None));
     draft["_subagent_options"] = options;
+    draft["_reviewer_options"] = reviewer_options;
     unreachable
 }
 
@@ -187,6 +195,7 @@ pub(super) async fn render_settings_page(
         Ok(SettingsPageResponse {
             page,
             subagent_options: draft["_subagent_options"].take(),
+            reviewer_options: draft["_reviewer_options"].take(),
         })
     })
     .await
@@ -288,6 +297,14 @@ async fn save_draft_settings(
         };
         let updated =
             draft::config_from_draft(draft).map_err(|error| refused(anyhow::Error::new(error)))?;
+        if !updated.review.legacy_auto
+            && updated.review.trigger != mj_core::config::ReviewTrigger::Off
+            && updated.review.reviewers.is_empty()
+        {
+            return Err(ApiError::bad_request(
+                "Add reviewer on Settings › Code Review before enabling automatic review.",
+            ));
+        }
         let updated = serde_json::to_string(&updated).map_err(|error| refused(error.into()))?;
         let sessions = crate::database::load_state().map_err(|error| {
             ApiError::new(

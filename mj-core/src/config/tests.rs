@@ -2320,6 +2320,18 @@ fn legacy_review_keys_and_session_records_preserve_partial_overrides() {
             .iter()
             .all(|reviewer| reviewer.model == "other")
     );
+    assert!(
+        legacy
+            .for_session(Some(&model_only))
+            .reviewers
+            .iter()
+            .all(|reviewer| reviewer.effort.is_none())
+    );
+    let mut auto_config = ReviewConfig::legacy_default();
+    auto_config.trigger = ReviewTrigger::Turn;
+    let effective = auto_config.for_session(Some(&model_only));
+    assert!(!effective.legacy_auto);
+    assert_eq!(effective.reviewers.len(), 1);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&count_only).unwrap())
             .unwrap(),
@@ -2363,7 +2375,42 @@ fn empty_config_uses_clean_v1_defaults() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     fs::write(&path, "\n\t").unwrap();
-    assert_eq!(Config::load_from(&path).unwrap(), Config::default());
+    let loaded = Config::load_from(&path).unwrap();
+    assert!(loaded.review.legacy_auto);
+    assert!(!Config::default().review.legacy_auto);
+}
+
+#[test]
+fn legacy_auto_survives_unrelated_saves_and_json_drafts() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!("version = {}\n[review]\ntrigger = 'turn'\n", CONFIG_VERSION),
+    )
+    .unwrap();
+    let mut config = Config::load_from(&path).unwrap();
+    assert!(config.review.legacy_auto);
+    config.phone.enabled = false;
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("reviewers"), "{saved}");
+    let json = serde_json::to_string(&config).unwrap();
+    assert!(!json.contains("reviewers"), "{json}");
+    assert!(
+        serde_json::from_str::<Config>(&json)
+            .unwrap()
+            .review
+            .legacy_auto
+    );
+    config.review.legacy_auto = false;
+    config.save_to(&path).unwrap();
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("reviewers = []")
+    );
+    assert!(!Config::load_from(&path).unwrap().review.legacy_auto);
 }
 
 #[test]
@@ -3159,7 +3206,7 @@ fn review_trigger_loads_legacy_settings_and_saves_only_the_trigger() {
                 .is_none_or(|review| review.get("enabled").is_none())
         );
         if expected == ReviewTrigger::Off {
-            assert!(saved.get("review").is_none());
+            assert_eq!(saved["review"]["trigger"].as_str(), Some("off"));
         } else {
             assert_eq!(
                 saved["review"]["trigger"].as_str(),

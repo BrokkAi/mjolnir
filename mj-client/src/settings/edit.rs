@@ -137,6 +137,10 @@ pub fn apply_value(
     if changed && path.len() == 3 && path[0] == "subagents" && key == "model" {
         draft["subagents"][&path[1]]["effort"] = Value::Null;
     }
+    if changed && path.len() == 4 && path[0] == "review" && path[1] == "reviewers" && key == "model"
+    {
+        draft["review"]["reviewers"][path[2].parse::<usize>().unwrap()]["effort"] = Value::Null;
+    }
     Ok(rewritten)
 }
 
@@ -254,13 +258,16 @@ pub fn add_entry(
         .ok_or_else(|| "This list no longer exists.".to_owned())?;
     let mut path = collection.to_vec();
     if let Some(array) = value.as_array_mut() {
-        array.push(
-            if collection.last().is_some_and(|key| key == "repositories") {
-                schema::repository_default()
-            } else {
-                Value::String(String::new())
-            },
-        );
+        if collection == ["review", "reviewers"] && array.len() >= mj_core::config::MAX_REVIEWERS {
+            return Err("At most three reviewers are allowed.".into());
+        }
+        array.push(if collection == ["review", "reviewers"] {
+            json!({"model":"", "effort":null})
+        } else if collection.last().is_some_and(|key| key == "repositories") {
+            schema::repository_default()
+        } else {
+            Value::String(String::new())
+        });
         path.push((array.len() - 1).to_string());
         return Ok(path);
     }

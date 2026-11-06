@@ -150,7 +150,7 @@ are not importable yet either.
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
 | `--review <off\|turn\|push>` | Set the imported session's review trigger, overriding `[review]`. |
-| `--reviewer MODEL[:EFFORT]` | Add a reviewer choice; repeat up to three times. The final colon is an effort separator only when followed by ASCII letters (for example, `x:0:high` uses model `x:0` and effort `high`). |
+| `--reviewer MODEL[:EFFORT]` | Add a reviewer choice; repeat up to three times. The final colon is an effort separator only for `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (for example, `x:0:high` uses model `x:0` and effort `high`). A trailing colon means no effort and removes that colon, so `foo:high:` selects model `foo:high`. Other suffixes, such as `:free` or `:latest`, remain part of the model ID. |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
 Import leaves the source checkout and the harness's source transcript unchanged. The imported session starts suspended and is available through `prefix+g`.

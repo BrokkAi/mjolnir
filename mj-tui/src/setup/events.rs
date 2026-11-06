@@ -230,6 +230,30 @@ impl DashboardState {
         }
     }
 
+    /// The one-second UI clock completes an Autoconfigure wait even if discovery
+    /// never publishes another snapshot.
+    pub fn tick_review_autoconfigure(&mut self) -> bool {
+        let Mode::Setup(dialog) = &mut self.mode else {
+            return false;
+        };
+        let Some(review) = dialog.review_editor.as_mut() else {
+            return false;
+        };
+        if !review.checking_efforts() {
+            return false;
+        }
+        let Ok(config) = config_from_draft(dialog.draft.clone()) else {
+            return false;
+        };
+        review.update_choices(&config, &self.profile_capabilities);
+        let changed = !review.checking_efforts();
+        if changed {
+            let review = review.as_ref().clone();
+            dialog.sync_review_validation(&review);
+        }
+        changed
+    }
+
     pub(crate) fn take_setup_subagent_choices(&mut self) -> Option<DashboardAction> {
         let Mode::Setup(dialog) = &mut self.mode else {
             return None;
@@ -285,7 +309,9 @@ impl DashboardState {
                 }
                 return action;
             }
-            let (mut action, outcome) = review.handle_event(self, event);
+            let review_config =
+                config_from_draft(dialog.draft.clone()).unwrap_or_else(|_| self.config.clone());
+            let (mut action, outcome) = review.handle_event(self, &review_config, event);
             match outcome {
                 ReviewSettingsOutcome::Continue => {
                     dialog.sync_review_validation(&review);

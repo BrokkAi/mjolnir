@@ -21,7 +21,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
         }
         "review" => {
-            json!({"trigger":"off","reviewers":[]})
+            json!({"trigger":"off"})
         }
         "continuation" => json!({"enabled":true}),
         "github" if path.len() == 1 => json!({"watch":{}}),
@@ -504,7 +504,7 @@ pub fn section_summary(
             };
             let reviewers = section["reviewers"].as_array().map_or(0, Vec::len);
             if reviewers == 0 {
-                format!("{trigger} · autoconfigured")
+                format!("{trigger} · no reviewers")
             } else {
                 format!(
                     "{trigger} · {reviewers} reviewer{}",
@@ -705,10 +705,24 @@ pub fn build_cache_gigabytes_label(size: &str) -> String {
 
 pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
     let key = path.last().map(String::as_str).unwrap_or("");
-    if path.len() == 3 && path[0] == "subagents" && matches!(key, "model" | "effort") {
-        let mut choices = vec![Value::Null];
-        if let Some(values) = draft["_subagent_options"][&path[1]]
-            [if key == "model" { "models" } else { "efforts" }]
+    if ((path.len() == 3 && path[0] == "subagents")
+        || (path.len() == 4 && path[0] == "review" && path[1] == "reviewers"))
+        && matches!(key, "model" | "effort")
+    {
+        let mut choices = if path[0] == "review" && key == "model" {
+            Vec::new()
+        } else {
+            vec![Value::Null]
+        };
+        if let Some(values) = draft[if path[0] == "review" {
+            "_reviewer_options"
+        } else {
+            "_subagent_options"
+        }][if path[0] == "review" {
+            &path[2]
+        } else {
+            &path[1]
+        }][if key == "model" { "models" } else { "efforts" }]
         .as_array()
         {
             choices.extend(
@@ -1056,12 +1070,9 @@ mod review_tests {
     use super::*;
 
     #[test]
-    fn review_defaults_hold_only_the_trigger_and_reviewer_list() {
+    fn legacy_review_defaults_do_not_insert_reviewers() {
         let path = ["review".to_owned()];
-        assert_eq!(
-            defaults(&path, &json!({})),
-            json!({"trigger": "off", "reviewers": []})
-        );
+        assert_eq!(defaults(&path, &json!({})), json!({"trigger": "off"}));
     }
 
     #[test]
@@ -1076,7 +1087,7 @@ mod review_tests {
         );
         assert_eq!(
             summary(json!({"trigger": "turn", "reviewers": []})).as_deref(),
-            Some("Every turn · autoconfigured")
+            Some("Every turn · no reviewers")
         );
         assert_eq!(
             summary(json!({"trigger": "push", "reviewers": [reviewer]})).as_deref(),

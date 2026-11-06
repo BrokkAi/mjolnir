@@ -147,8 +147,14 @@ fn read_only(path: &[String], draft: &Value) -> bool {
         // The terminal inspects the machine's mbx installation first, which
         // may own these budgets itself.
         [section, _, page, ..] if section == "machines" && page == "build_cache" => true,
-        // Reviewers are configured in terminal Settings.
-        [section, key, ..] if section == "review" && key == "reviewers" => true,
+        [section, list, index, key]
+            if section == "review"
+                && list == "reviewers"
+                && matches!(key.as_str(), "model" | "effort")
+                && draft["_reviewer_options"][index.as_str()].is_null() =>
+        {
+            true
+        }
         [section, task, key]
             if section == "subagents"
                 && matches!(key.as_str(), "model" | "effort")
@@ -176,7 +182,7 @@ fn notices(path: &[String]) -> Vec<String> {
             "Build cache settings change in the terminal Settings, which inspects this machine's mbx installation first.".to_owned(),
         ],
         ["review"] => vec![
-            "Reviewers and Autoconfigure are in the terminal Settings › Code Review.".to_owned(),
+            "Add reviewer to choose up to three reviewers. Automatic review needs at least one reviewer.".to_owned(),
         ],
         _ => Vec::new(),
     }
@@ -301,9 +307,22 @@ pub fn render_page(draft: &Value, path: &[String]) -> Result<SettingsPage, Strin
             rows: vec![single],
         });
     }
-    let add = page::is_collection(path, current).then(|| AddEntry {
-        label: if path == ["bundles"] { "Create" } else { "Add" }.to_owned(),
-        named: current.is_object(),
+    let add = ((page::is_collection(path, current)
+        && !(path == ["review", "reviewers"]
+            && current
+                .as_array()
+                .is_some_and(|rows| rows.len() >= mj_core::config::MAX_REVIEWERS)))
+        || path == ["review"] && draft["review"].get("reviewers").is_none())
+    .then(|| AddEntry {
+        label: if path == ["bundles"] {
+            "Create"
+        } else if path == ["review"] || path == ["review", "reviewers"] {
+            "Add reviewer"
+        } else {
+            "Add"
+        }
+        .to_owned(),
+        named: current.is_object() && path != ["review"],
     });
     Ok(SettingsPage {
         path: path.to_vec(),
@@ -314,7 +333,13 @@ pub fn render_page(draft: &Value, path: &[String]) -> Result<SettingsPage, Strin
         groups,
         add,
         removable: edit::removable(draft, path),
-        notices: notices(path),
+        notices: {
+            let mut notices = notices(path);
+            if path == ["review"] && draft["review"].get("reviewers").is_none() {
+                notices.push("Reviewers will be configured automatically after profile discovery. Choose Add reviewer to set them now.".into());
+            }
+            notices
+        },
     })
 }
 
@@ -373,7 +398,13 @@ pub fn apply(
             if path != page || rendered.add.is_none() {
                 return Err("Entries cannot be added here.".into());
             }
-            let page = edit::add_entry(draft, &path, name.as_deref())?;
+            let collection = if path == ["review"] {
+                draft["review"]["reviewers"] = serde_json::json!([]);
+                vec!["review".to_owned(), "reviewers".to_owned()]
+            } else {
+                path.clone()
+            };
+            let page = edit::add_entry(draft, &collection, name.as_deref())?;
             Ok(EditResult { page, notice: None })
         }
         SettingsEdit::Remove { path } => {
@@ -395,16 +426,16 @@ mod review_tests {
     use serde_json::json;
 
     #[test]
-    fn reviewers_are_read_only_and_the_trigger_is_editable() {
-        let draft = json!({"review": {"trigger": "push", "reviewers": [{"model": "gpt-6-terra"}]}});
+    fn reviewers_can_be_edited_and_trigger_is_editable() {
+        let draft = json!({"review": {"trigger": "push", "reviewers": [{"model": "gpt-6-terra"}]}, "_reviewer_options": {"0": {"models": [{"value": "gpt-6-terra", "label": "Terra"}], "efforts": []}}});
         let path = |parts: &[&str]| {
             parts
                 .iter()
                 .map(|part| (*part).to_owned())
                 .collect::<Vec<_>>()
         };
-        assert!(read_only(&path(&["review", "reviewers"]), &draft));
-        assert!(read_only(
+        assert!(!read_only(&path(&["review", "reviewers"]), &draft));
+        assert!(!read_only(
             &path(&["review", "reviewers", "0", "model"]),
             &draft
         ));

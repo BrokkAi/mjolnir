@@ -81,7 +81,7 @@ pub(crate) struct NativeImportArgs {
     /// Proceed after acknowledging edited non-Git or scratch directories will be omitted.
     #[arg(long)]
     allow_omitted_non_git: bool,
-    /// Reviewer model and optional effort; final colon suffix is effort only when ASCII letters. Repeat up to three times.
+    /// Reviewer model and optional effort; final colon suffix is effort only for known efforts (minimal, low, medium, high, xhigh, max); trailing colon escapes it. Repeat up to three times.
     #[arg(long = "reviewer", value_name = "MODEL[:EFFORT]")]
     reviewers: Vec<String>,
     /// Review trigger for the imported session, overriding `[review]`.

@@ -224,7 +224,8 @@ impl DashboardContext {
     /// task can write it through the shared slot without waking this loop, so
     /// the slot is compared with what the frame on screen was drawn from.
     pub(super) fn clock_tick_redraws(&mut self) -> bool {
-        self.dashboard.clock_changed()
+        self.dashboard.tick_review_autoconfigure()
+            || self.dashboard.clock_changed()
             || self.notices.generation() != self.drawn_notice_generation
             || self.visible_chat().is_some_and(|chat| chat.clock_changed())
     }

@@ -48,3 +48,37 @@ pub fn fill_subagent_options(
     }
     Ok(unreachable)
 }
+
+/// Fill reviewer choices from the same profile catalog as subagent choices.
+pub fn fill_reviewer_options(
+    draft: &mut Value,
+    capabilities: &ProfileCapabilitiesSnapshot,
+) -> Result<(), serde_json::Error> {
+    let config = super::draft::config_from_draft(draft.clone())?;
+    let Some(reviewers) = draft["review"]["reviewers"].as_array() else {
+        return Ok(());
+    };
+    let models = capabilities.options(&config, None);
+    let mut options = serde_json::Map::new();
+    for (index, reviewer) in reviewers.iter().enumerate() {
+        let model = reviewer["model"].as_str().filter(|model| !model.is_empty());
+        let mut current = models.clone();
+        if let Some(current) = &mut current {
+            match capabilities.options(&config, model) {
+                Some(efforts) => current.efforts = efforts.efforts,
+                None => {
+                    let mut value = serde_json::to_value(current).expect("options serialize");
+                    value[EFFORTS_PENDING] = Value::Bool(true);
+                    options.insert(index.to_string(), value);
+                    continue;
+                }
+            }
+        }
+        options.insert(
+            index.to_string(),
+            serde_json::to_value(current).expect("options serialize"),
+        );
+    }
+    draft["_reviewer_options"] = Value::Object(options);
+    Ok(())
+}

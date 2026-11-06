@@ -60,7 +60,13 @@ async fn configured_choices(
 ) -> Result<(Vec<SubagentChoice>, bool)> {
     let autoconfigured = settings.legacy_auto;
     let choices = if autoconfigured {
-        let candidates = await_or_cancel(cancelled, backend.reviewer_candidates()).await??;
+        let ready =
+            await_or_cancel(cancelled, backend.reviewer_ready_candidates(String::new())).await??;
+        let candidates = if ready.offered.is_empty() {
+            await_or_cancel(cancelled, backend.reviewer_candidates()).await??
+        } else {
+            ready
+        };
         let available = candidates
             .offered
             .into_iter()

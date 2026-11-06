@@ -134,13 +134,10 @@ impl PhoneConfig {
 
 /// Automatic review trigger and ordered reviewer choices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "ReviewConfigInput")]
+#[serde(from = "ReviewConfigInput", into = "ReviewConfigOutput")]
 pub struct ReviewConfig {
-    #[serde(skip)]
     pub legacy_auto: bool,
-    #[serde(default)]
     pub trigger: ReviewTrigger,
-    #[serde(default)]
     pub reviewers: Vec<SubagentChoice>,
 }
 
@@ -152,6 +149,32 @@ impl Default for ReviewConfig {
             legacy_auto: false,
             trigger: ReviewTrigger::Off,
             reviewers: Vec::new(),
+        }
+    }
+}
+
+impl ReviewConfig {
+    /// The old default represented Auto when the review table was absent.
+    pub fn legacy_default() -> Self {
+        Self {
+            legacy_auto: true,
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ReviewConfigOutput {
+    trigger: ReviewTrigger,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reviewers: Option<Vec<SubagentChoice>>,
+}
+
+impl From<ReviewConfig> for ReviewConfigOutput {
+    fn from(value: ReviewConfig) -> Self {
+        Self {
+            trigger: value.trigger,
+            reviewers: (!value.legacy_auto).then_some(value.reviewers),
         }
     }
 }
@@ -474,16 +497,16 @@ impl ReviewConfig {
                 } = choice
                 {
                     if let Some(model) = model {
-                        if config.reviewers.is_empty() {
-                            config.reviewers.push(SubagentChoice {
+                        let count = count.map_or(config.reviewers.len(), |count| count.get());
+                        config.reviewers = vec![
+                            SubagentChoice {
                                 model: model.clone(),
-                                effort: None,
-                            });
-                        } else {
-                            for reviewer in &mut config.reviewers {
-                                reviewer.model.clone_from(model);
-                            }
-                        }
+                                effort: effort.clone(),
+                            };
+                            count.clamp(1, MAX_REVIEWERS)
+                        ];
+                        config.legacy_auto = false;
+                        return config;
                     }
                     if let Some(effort) = effort {
                         for reviewer in &mut config.reviewers {
@@ -507,6 +530,7 @@ impl ReviewConfig {
                 };
                 if let Some(reviewers) = reviewers {
                     config.reviewers.clone_from(reviewers);
+                    config.legacy_auto = false;
                 }
             }
         }
@@ -559,10 +583,6 @@ const fn is_false(value: &bool) -> bool {
 }
 
 impl ReviewConfig {
-    fn is_default(&self) -> bool {
-        self.trigger == ReviewTrigger::Off && self.reviewers.is_empty()
-    }
-
     fn validate(&self, _profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {
         if self.reviewers.len() > MAX_REVIEWERS {
             bail!("[review] supports at most {MAX_REVIEWERS} reviewers");
@@ -1007,7 +1027,7 @@ struct StoredConfig {
     daemon: DaemonConfig,
     #[serde(default, skip_serializing_if = "GithubConfig::is_default")]
     github: GithubConfig,
-    #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
+    #[serde(default = "ReviewConfig::legacy_default")]
     review: ReviewConfig,
     #[serde(
         default = "crate::continuation::ContinuationConfig::enabled",
@@ -1704,7 +1724,7 @@ impl Config {
     }
 
     /// Read the config from `path`, returning [`Config::default`] when the
-    /// file is missing or empty and an error when it is malformed or was
+    /// file is missing and an error when it is malformed or was
     /// written by a newer Mjolnir.
     pub fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
@@ -1713,7 +1733,10 @@ impl Config {
         let contents = fs::read_to_string(path)
             .with_context(|| format!("read Mjolnir config {}", path.display()))?;
         if contents.trim().is_empty() {
-            return Ok(Self::default());
+            return Ok(Self {
+                review: ReviewConfig::legacy_default(),
+                ..Self::default()
+            });
         }
         let mut document: toml::Value = contents
             .parse()

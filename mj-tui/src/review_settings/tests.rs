@@ -322,3 +322,107 @@ fn golden_review_settings() {
         rendered.trim_end(),
     );
 }
+
+#[test]
+fn autoconfigure_waits_for_efforts_then_uses_harness_default_for_unsupported_effort() {
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let mut snapshot = catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]);
+    for entry in snapshot.profiles.values_mut() {
+        entry.efforts.clear();
+    }
+    dashboard.set_profile_capabilities(snapshot.clone());
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    setup
+        .review_editor
+        .as_mut()
+        .unwrap()
+        .form
+        .get_mut()
+        .focus(ReviewSettingsFocus::Autoconfigure);
+    let action = dashboard.handle_key(key(KeyCode::Enter));
+    assert!(matches!(
+        action,
+        DashboardAction::WarmProfileCapabilities { .. }
+    ));
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    let editor = setup.review_editor.as_ref().unwrap();
+    assert!(editor.pending_autoconfigure.is_some());
+    assert!(editor.review.reviewers.is_empty());
+    assert!(!editor.can_save());
+    for entry in snapshot.profiles.values_mut() {
+        entry
+            .efforts
+            .insert("gpt-6-terra".into(), CapabilityState::Ready(vec![]));
+        entry.efforts.insert(
+            "gpt-6-sol".into(),
+            CapabilityState::Ready(vec![choice("medium")]),
+        );
+    }
+    dashboard.set_profile_capabilities(snapshot.clone());
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    let editor = setup.review_editor.as_mut().unwrap();
+    editor.update_choices(&dashboard.config, &snapshot);
+    assert!(editor.pending_autoconfigure.is_none());
+    assert_eq!(editor.review.reviewers[0].effort, None);
+    assert_eq!(editor.review.reviewers[1].effort.as_deref(), Some("medium"));
+}
+
+#[test]
+fn autoconfigure_timeout_finishes_on_clock_tick_without_a_catalog_update() {
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let mut snapshot = catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]);
+    for entry in snapshot.profiles.values_mut() {
+        entry.efforts.clear();
+    }
+    dashboard.set_profile_capabilities(snapshot);
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    setup
+        .review_editor
+        .as_mut()
+        .unwrap()
+        .form
+        .get_mut()
+        .focus(ReviewSettingsFocus::Autoconfigure);
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    setup
+        .review_editor
+        .as_mut()
+        .unwrap()
+        .pending_autoconfigure
+        .as_mut()
+        .unwrap()
+        .1 = Instant::now() - Duration::from_secs(21);
+    assert!(dashboard.tick_review_autoconfigure());
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    let editor = setup.review_editor.as_ref().unwrap();
+    assert!(!editor.checking_efforts());
+    assert_eq!(editor.review.reviewers.len(), 2);
+    assert!(
+        editor
+            .review
+            .reviewers
+            .iter()
+            .all(|choice| choice.effort.is_none())
+    );
+    assert_eq!(
+        editor.effort_notice.as_deref(),
+        Some("Some reviewer efforts could not be checked; using defaults.")
+    );
+}

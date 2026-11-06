@@ -517,6 +517,7 @@ const settingsState = {
   /// The draft's discovered sub-agent choices as last rendered, the pending
   /// re-render while they are still being discovered, and when that gives up.
   subagentOptions: null,
+  reviewerOptions: null,
   discoveryTimer: null,
   discoveryUntil: 0,
 };
@@ -568,9 +569,11 @@ function enqueueSettings(work) {
 /// whose models are not known yet, or a selected model whose efforts are not.
 function settingsDiscovering() {
   const options = settingsState.subagentOptions;
-  if (!options || typeof options !== 'object') return false;
-  return ['straightforward', 'subtle']
+  const subagentsPending = options && typeof options === 'object' && ['straightforward', 'subtle']
     .some(task => options[task] === null || options[task]?.efforts_pending === true);
+  const reviewersPending = Object.values(settingsState.reviewerOptions || {})
+    .some(choice => choice === null || choice?.efforts_pending === true);
+  return subagentsPending || reviewersPending;
 }
 
 /// The daemon discovers a model's efforts once it is selected, so render the
@@ -588,6 +591,7 @@ function scheduleSettingsDiscovery() {
       });
       settingsState.page = reply.page;
       settingsState.subagentOptions = reply.subagent_options ?? null;
+      settingsState.reviewerOptions = reply.reviewer_options ?? null;
     });
   }, SETTINGS_DISCOVERY_POLL_MS);
 }
@@ -597,6 +601,7 @@ function adoptSettingsDocument(document) {
   settingsState.draft = document.draft;
   settingsState.page = document.page;
   settingsState.subagentOptions = document.draft?._subagent_options ?? null;
+  settingsState.reviewerOptions = document.draft?._reviewer_options ?? null;
   settingsState.discoveryUntil = Date.now() + SETTINGS_DISCOVERY_WAIT_MS;
   settingsState.dirty = false;
   settingsState.refused.clear();
@@ -609,6 +614,7 @@ function forgetSettings() {
   settingsState.draft = null;
   settingsState.page = null;
   settingsState.subagentOptions = null;
+  settingsState.reviewerOptions = null;
   settingsState.dirty = false;
   settingsState.refused.clear();
   settingsState.status = '';
@@ -631,6 +637,7 @@ function syncSettingsRoute() {
     });
     settingsState.page = reply.page;
     settingsState.subagentOptions = reply.subagent_options ?? null;
+      settingsState.reviewerOptions = reply.reviewer_options ?? null;
     settingsState.discoveryUntil = Date.now() + SETTINGS_DISCOVERY_WAIT_MS;
     settingsState.error = '';
   });
@@ -646,6 +653,7 @@ function editSettings(pagePath, edit) {
     settingsState.draft = reply.draft;
     settingsState.page = reply.page;
     settingsState.subagentOptions = reply.draft?._subagent_options ?? null;
+    settingsState.reviewerOptions = reply.draft?._reviewer_options ?? null;
     settingsState.discoveryUntil = Date.now() + SETTINGS_DISCOVERY_WAIT_MS;
     const fieldEdit = edit.kind === 'set' || edit.kind === 'toggle';
     if (reply.error) {

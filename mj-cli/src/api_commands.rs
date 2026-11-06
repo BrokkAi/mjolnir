@@ -164,7 +164,7 @@ pub(crate) struct NewArgs {
     /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_effort: Option<String>,
-    /// Reviewer model and optional effort; final colon suffix is effort only when ASCII letters. Repeat up to three times.
+    /// Reviewer model and optional effort; final colon suffix is effort only when a known effort (minimal, low, medium, high, xhigh, max); trailing colon escapes it. Repeat up to three times.
     #[arg(long = "reviewer", value_name = "MODEL[:EFFORT]")]
     reviewers: Vec<String>,
     /// Review trigger for this session, overriding `[review]`.
@@ -1150,10 +1150,13 @@ pub(crate) fn session_review(
                 value
                     .rsplit_once(':')
                     .map_or((value.as_str(), None), |(model, suffix)| {
-                        if !suffix.is_empty()
-                            && suffix.bytes().all(|byte| byte.is_ascii_alphabetic())
-                        {
+                        if matches!(
+                            suffix,
+                            "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+                        ) {
                             (model, Some(suffix))
+                        } else if suffix.is_empty() {
+                            (model, None)
                         } else {
                             (value.as_str(), None)
                         }
@@ -3093,6 +3096,23 @@ mod tests {
             .is_err()
         );
         assert!(parse(&["--reviewer", ":high"]).unwrap().is_err());
+        for (input, model, effort) in [
+            ("openai/gpt-oss-120b:free", "openai/gpt-oss-120b:free", None),
+            ("qwen:latest", "qwen:latest", None),
+            ("x:0:high", "x:0", Some("high")),
+            ("foo:high:", "foo:high", None),
+        ] {
+            let parsed = parse(&["--reviewer", input]).unwrap().unwrap().unwrap();
+            let SessionReview::Inherit {
+                reviewers: Some(reviewers),
+            } = parsed
+            else {
+                panic!("review override expected")
+            };
+            assert_eq!(reviewers[0].model, model);
+            assert_eq!(reviewers[0].effort.as_deref(), effort);
+        }
+
         let parsed = parse(&[
             "--reviewer",
             "anthropic.claude-haiku:0",

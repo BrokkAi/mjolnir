@@ -2,6 +2,7 @@
 //! published catalog; the editor never performs discovery on the event loop.
 
 use std::cell::RefCell;
+use std::time::{Duration, Instant};
 
 use crossterm::event::Event;
 use mj_chat::components::{ComboBox, ComboBoxState, ControlKind, Dialog, Interaction, PopupSide};
@@ -58,6 +59,8 @@ pub(crate) struct ReviewSettingsDialog {
     models_known: bool,
     efforts_known: Vec<bool>,
     suggested: Option<Vec<SubagentChoice>>,
+    pending_autoconfigure: Option<(Vec<SubagentChoice>, Instant)>,
+    effort_notice: Option<String>,
     pub(crate) saving: bool,
     pub(crate) save_error: Option<String>,
 }
@@ -74,6 +77,8 @@ impl ReviewSettingsDialog {
             models_known: false,
             efforts_known: Vec::new(),
             suggested: None,
+            pending_autoconfigure: None,
+            effort_notice: None,
             saving: false,
             save_error: None,
         };
@@ -114,6 +119,32 @@ impl ReviewSettingsDialog {
             self.models.clear();
             self.suggested = None;
         }
+        if let Some((draft, started)) = &self.pending_autoconfigure {
+            let ready = draft
+                .iter()
+                .all(|choice| snapshot.options(config, Some(&choice.model)).is_some());
+            if ready || started.elapsed() >= Duration::from_secs(20) {
+                let mut resolved = draft.clone();
+                for choice in &mut resolved {
+                    if let Some(effort) = choice.effort.as_deref() {
+                        let offered = snapshot.options(config, Some(&choice.model));
+                        if offered.as_ref().is_none_or(|options| {
+                            !options.efforts.iter().any(|item| item.value == effort)
+                        }) {
+                            choice.effort = None;
+                            if offered.is_none() {
+                                self.effort_notice = Some(
+                                    "Some reviewer efforts could not be checked; using defaults."
+                                        .into(),
+                                );
+                            }
+                        }
+                    }
+                }
+                self.review.reviewers = resolved;
+                self.pending_autoconfigure = None;
+            }
+        }
         self.efforts.clear();
         self.efforts_known.clear();
         for reviewer in &self.review.reviewers {
@@ -131,6 +162,10 @@ impl ReviewSettingsDialog {
         self.prepare();
     }
 
+    pub(crate) fn checking_efforts(&self) -> bool {
+        self.pending_autoconfigure.is_some()
+    }
+
     fn suggested(&self) -> Option<Vec<SubagentChoice>> {
         self.suggested.clone()
     }
@@ -144,7 +179,10 @@ impl ReviewSettingsDialog {
     }
 
     pub(crate) fn can_save(&self) -> bool {
-        if self.saving || self.review.reviewers.len() > MAX_REVIEWERS {
+        if self.saving
+            || self.pending_autoconfigure.is_some()
+            || self.review.reviewers.len() > MAX_REVIEWERS
+        {
             return false;
         }
         if self.review.trigger != ReviewTrigger::Off && self.review.reviewers.is_empty() {
@@ -288,21 +326,28 @@ impl ReviewSettingsDialog {
                     selected: self.combo.selection(id, selected),
                     expanded: self.combo.is_open(id),
                 },
-                !self.saving,
+                !self.saving && self.pending_autoconfigure.is_none(),
             );
             if let Effort(i) = id {
-                form.declare_with_enabled(Remove(i), ControlKind::Button, !self.saving);
+                form.declare_with_enabled(
+                    Remove(i),
+                    ControlKind::Button,
+                    !self.saving && self.pending_autoconfigure.is_none(),
+                );
             }
         }
         form.declare_with_enabled(
             Add,
             ControlKind::Button,
-            !self.saving && self.review.reviewers.len() < MAX_REVIEWERS && !self.models.is_empty(),
+            !self.saving
+                && self.pending_autoconfigure.is_none()
+                && self.review.reviewers.len() < MAX_REVIEWERS
+                && !self.models.is_empty(),
         );
         form.declare_with_enabled(
             Autoconfigure,
             ControlKind::Button,
-            !self.saving && self.suggested().is_some(),
+            !self.saving && self.pending_autoconfigure.is_none() && self.suggested().is_some(),
         );
         form.declare_with_enabled(Back, ControlKind::Button, true);
         form.declare_with_enabled(Cancel, ControlKind::Button, true);
@@ -313,12 +358,14 @@ impl ReviewSettingsDialog {
     pub(crate) fn handle_event(
         &mut self,
         dashboard: &mut DashboardState,
+        config: &Config,
         event: Event,
     ) -> (DashboardAction, ReviewSettingsOutcome) {
         use ReviewSettingsFocus::*;
         let result = self.form.get_mut().handle(&event);
         dashboard.last_event_consumed.set(result.consumed);
         let interaction = self.combo.route(result.action);
+        let mut action = DashboardAction::None;
         let outcome = match &interaction {
             Some(Interaction::Cancel | Interaction::Activate(Back)) => ReviewSettingsOutcome::Back,
             Some(Interaction::Activate(Cancel)) => ReviewSettingsOutcome::CancelSetup,
@@ -334,7 +381,7 @@ impl ReviewSettingsDialog {
                 if let Some(value) = self.choices(Model(i)).0.get(index).cloned() {
                     self.review.reviewers[i].model = value;
                     self.review.reviewers[i].effort = None;
-                    self.update_choices(&dashboard.config, &dashboard.profile_capabilities);
+                    self.update_choices(config, &dashboard.profile_capabilities);
                 }
             }
             Some(Interaction::ComboBoxCommit(Effort(i), index)) => {
@@ -348,17 +395,40 @@ impl ReviewSettingsDialog {
                         model: model.value.clone(),
                         effort: None,
                     });
-                    self.update_choices(&dashboard.config, &dashboard.profile_capabilities);
+                    self.update_choices(config, &dashboard.profile_capabilities);
                 }
             }
             Some(Interaction::Activate(Remove(i))) if i < self.review.reviewers.len() => {
                 self.review.reviewers.remove(i);
-                self.update_choices(&dashboard.config, &dashboard.profile_capabilities);
+                self.update_choices(config, &dashboard.profile_capabilities);
             }
             Some(Interaction::Activate(Autoconfigure)) => {
                 if let Some(reviewers) = self.suggested() {
-                    self.review.reviewers = reviewers;
-                    self.update_choices(&dashboard.config, &dashboard.profile_capabilities);
+                    self.effort_notice = None;
+                    let mut config = config.clone();
+                    config.review.reviewers = reviewers.clone();
+                    config.review.legacy_auto = false;
+                    let unknown = reviewers.iter().any(|choice| {
+                        dashboard
+                            .profile_capabilities
+                            .options(&config, Some(&choice.model))
+                            .is_none()
+                    });
+                    if unknown {
+                        let key = config.capability_demand_key();
+                        dashboard.profile_hydration_sent = Some(key.clone());
+                        dashboard
+                            .profile_hydration_requests
+                            .insert(key.clone(), Default::default());
+                        action = DashboardAction::WarmProfileCapabilities {
+                            key,
+                            config: serde_json::to_string(&config).expect("config serializes"),
+                        };
+                        self.pending_autoconfigure = Some((reviewers, Instant::now()));
+                    } else {
+                        self.review.reviewers = reviewers;
+                    }
+                    self.update_choices(&config, &dashboard.profile_capabilities);
                 }
             }
             Some(Interaction::Activate(id @ (Trigger | Model(_) | Effort(_)))) => {
@@ -369,7 +439,7 @@ impl ReviewSettingsDialog {
         }
         self.save_error = None;
         self.prepare();
-        (DashboardAction::None, outcome)
+        (action, outcome)
     }
 }
 
@@ -398,7 +468,11 @@ pub(crate) fn render_review_settings(
         inner.height.saturating_sub(2),
     );
     let selectors = dialog.selectors();
-    let notes = if !dialog.models_known {
+    let notes = if dialog.pending_autoconfigure.is_some() {
+        "Checking reviewer efforts…"
+    } else if let Some(notice) = &dialog.effort_notice {
+        notice.as_str()
+    } else if !dialog.models_known {
         "Loading review models…"
     } else if dialog.suggested().is_none() {
         "Autoconfigure unavailable: no supported models"
