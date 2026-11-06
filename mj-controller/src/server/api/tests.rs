@@ -2047,6 +2047,7 @@ fn model_candidate_with_efforts(
             observed_at: 1,
         },
         quota: crate::server::api::CandidateQuota::Subscription {
+            refreshed_at_epoch_seconds: 0,
             paid_credits: None,
             windows: vec![crate::quota::QuotaWindow {
                 label: "Week".into(),

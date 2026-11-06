@@ -1468,6 +1468,7 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
                 "api" => CandidateQuota::UsagePriced,
                 "unknown" => CandidateQuota::Unknown,
                 _ => CandidateQuota::Subscription {
+                    refreshed_at_epoch_seconds: 0,
                     paid_credits: if matches!(id, "paid" | "unhealthy") {
                         mj_client::quota::PaidCredits::limited(75.0)
                     } else {
