@@ -436,6 +436,7 @@ pub(super) fn project_observation(
                         .as_ref()
                         .filter(|turn| turn.belongs_to(command_id));
                     mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                        answered_through: None,
                         diagnostic: diagnostic.clone(),
                         usage: usage.clone(),
                         command_id: command_id.clone(),
@@ -561,6 +562,7 @@ pub(super) fn project_observation(
                     .filter(|turn| turn.belongs_to(command_id));
                 let outcome_text = message.clone();
                 mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                    answered_through: None,
                     diagnostic: None,
                     usage: None,
                     command_id: command_id.clone(),
@@ -835,13 +837,38 @@ pub(super) fn project_observation(
             });
         }
         RelayObservation::HarnessTurnSettled {
-            prompt_in_flight, ..
+            prompt_in_flight,
+            autonomous,
+            ..
         } => {
             // A prompt dispatched mid-turn is still running when the turn the
             // harness started on its own settles. The relay keeps the session
             // Running for it, and so does this: the prompt's own result closes
             // the streams and stops the clock.
             if !prompt_in_flight {
+                if let Some(turn) = autonomous {
+                    let start = turn.start_ordinal;
+                    let command_id = mj_core::continuation::harness_turn_id(start);
+                    if !current
+                        .last_turn_outcome
+                        .as_ref()
+                        .is_some_and(|turn| turn.command_id == command_id)
+                    {
+                        mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                            answered_through: None,
+                            command_id,
+                            accepted_ordinal: None,
+                            turn_start_position: Some(start),
+                            completed_ordinal: event.ordinal,
+                            completed_at_ms: event.recorded_at_ms,
+                            outcome: TurnOutcomeKind::Completed {
+                                stop_reason: turn.stop_reason.clone(),
+                            },
+                            diagnostic: None,
+                            usage: None,
+                        });
+                    }
+                }
                 close_streams(index, mutation, event.recorded_at_ms);
                 mutation.execution = Some(MaterializedExecutionState::Idle);
             }
@@ -890,7 +917,59 @@ pub(super) fn project_observation(
         | RelayObservation::TurnAssessmentUpdated { .. }
         | RelayObservation::RetryAssessmentResolved { .. } => {}
     }
+    if let Some(outcome) = &mut mutation.last_turn_outcome {
+        outcome.answered_through = answered_through(current, event, &outcome.command_id);
+    }
     Ok(())
+}
+
+/// The projection alone decides which accepted prompts a completion answers:
+/// every prompt accepted before it, unless one is still queued or running,
+/// and never fewer than the previous outcome answered.
+///
+/// One number records this, so a prompt settled out of order (a queued prompt
+/// rejected or removed while an earlier one still runs or waits) is answered
+/// by its own outcome, and by later outcomes only once the prompts ahead of it
+/// have ended. A wait for it can therefore end late, but never early.
+///
+/// While another turn runs, its own prompt is still owed and every earlier
+/// prompt settled before it started, so the outcome adds nothing. The running
+/// turn's ordinal is never read: steering replaces it with the steered
+/// prompt's (#1450 review). The answer is always recorded, `0` meaning none,
+/// so a reader never falls back to the outcome's own acceptance ordinal.
+fn answered_through(
+    current: &MaterializedSession,
+    event: &RelayEvent,
+    ending: &str,
+) -> Option<u64> {
+    let another_running = current
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| !turn.belongs_to(ending));
+    let own = if another_running {
+        None
+    } else {
+        match current
+            .queued_prompts
+            .iter()
+            // A queued configuration change answers no prompt and ends in no
+            // turn outcome, so it never holds the answer back.
+            .filter(|queued| queued.kind.is_prompt() && queued.command_id != ending)
+            .filter_map(|prompt| prompt.accepted_ordinal)
+            .min()
+        {
+            Some(first) => first.checked_sub(1).map(|cap| cap.min(event.ordinal)),
+            None => Some(event.ordinal),
+        }
+    };
+    Some(
+        current
+            .last_turn_outcome
+            .as_ref()
+            .and_then(|turn| turn.answered_ordinal())
+            .max(own)
+            .unwrap_or(0),
+    )
 }
 
 /// The row that lists one delivery's external events, such as GitHub activity.
@@ -1011,6 +1090,18 @@ fn delivered_messages(
 /// running, so no prompt completion will carry the cancellation: give the turn
 /// the same "Interrupted" row and cancelled outcome an ordinary turn gets
 /// (I2-8). A stop that lands on a prompt of ours, or on nothing, adds neither.
+fn harness_turn_start(current: &MaterializedSession) -> Option<u64> {
+    current
+        .transcript
+        .iter()
+        .rev()
+        .find(|item| {
+            item.stable_id
+                .starts_with(mj_core::transcript::HARNESS_TURN_ITEM_PREFIX)
+        })
+        .map(|item| item.position)
+}
+
 fn end_cancelled_harness_turn(
     current: &MaterializedSession,
     event: &RelayEvent,
@@ -1025,16 +1116,7 @@ fn end_cancelled_harness_turn(
     {
         return;
     }
-    let Some(start_position) = current
-        .transcript
-        .iter()
-        .rev()
-        .find(|item| {
-            item.stable_id
-                .starts_with(mj_core::transcript::HARNESS_TURN_ITEM_PREFIX)
-        })
-        .map(|item| item.position)
-    else {
+    let Some(start_position) = harness_turn_start(current) else {
         return;
     };
     let turn_id = mj_core::continuation::harness_turn_id(start_position);
@@ -1056,6 +1138,7 @@ fn end_cancelled_harness_turn(
         mj_core::transcript::TURN_INTERRUPTED_TEXT,
     );
     mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: turn_id,

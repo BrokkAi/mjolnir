@@ -761,6 +761,7 @@ mod tests {
         .enumerate()
         {
             let turn = MaterializedTurnOutcome {
+                answered_through: None,
                 diagnostic: Some(mj_core::diagnostic::TurnDiagnostic {
                     message: "Usage limit exceeded".into(),
                     code: Some("provider.auth_error".into()),

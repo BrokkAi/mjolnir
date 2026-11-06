@@ -99,7 +99,9 @@ pub const RELAY_DISMISS_QUESTION_PROTOCOL: u32 = 48;
 pub const RELAY_WORKTREE_REVIEW_PROTOCOL: u32 = 49;
 /// 50 carries a warning when merged-work review is skipped on old Git.
 pub const RELAY_MERGED_REVIEW_WARNING_PROTOCOL: u32 = 50;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_MERGED_REVIEW_WARNING_PROTOCOL;
+/// Settlements identify autonomous turns and their stop reasons.
+pub const RELAY_AUTONOMOUS_TURN_OUTCOME_PROTOCOL: u32 = 51;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_AUTONOMOUS_TURN_OUTCOME_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
