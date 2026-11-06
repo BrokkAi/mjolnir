@@ -891,13 +891,10 @@ impl SubagentEndpoint {
     ) -> Result<(bool, Option<SubagentToolResult>, u64)> {
         // One owner selects the originating turn and keeps it selected until
         // the request is durable; a later daemon never reconstructs this fact.
-        let relay = self
+        let mut relay = self
             .relay
             .as_ref()
             .map(|relay| relay.lock().expect("relay lock poisoned"));
-        if let Some(relay) = &relay {
-            request.originating_command_id = relay.originating_command_id();
-        }
         let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
         let mark = state.collections.count;
         if let Some(result) = self.read_result(&state, &request.request_id)? {
@@ -930,6 +927,20 @@ impl SubagentEndpoint {
                 is_error: true,
                 message: "Sub-agent request was not accepted: this session is replacing its harness (Move). Retry after the Move finishes.".into(),
             }), mark));
+        }
+        if let Some(relay) = &mut relay {
+            // A report is harness work, like output or an autonomous spawn.
+            // The MCP socket can deliver it before the adapter's tool-call
+            // update, so it opens the turn itself (#1450). Only an admitted
+            // request opens one: a retry or a refusal must not.
+            if matches!(
+                request.action,
+                mj_core::subagent::SubagentToolAction::Handback { .. }
+            ) && relay.uses_claude_harness_turns()
+            {
+                relay.open_harness_turn_if_allowed()?;
+            }
+            request.originating_command_id = relay.originating_command_id();
         }
         let mut next = state.clone();
         next.requests
@@ -2256,6 +2267,43 @@ enabled = false
             pending[0].originating_command_id.as_deref(),
             Some("original-turn")
         );
+    }
+
+    // Hard-won: #1450: a handback from a Monitor-woken turn was refused for lack of a turn id.
+    #[test]
+    fn handback_admission_owns_the_harness_turn_in_either_order() {
+        for opened in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let relay = Arc::new(Mutex::new(
+                crate::relay::DurableRelay::open(root.path(), "session-123", "test").unwrap(),
+            ));
+            {
+                let mut owner = relay.lock().unwrap();
+                owner.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
+                owner
+                    .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+                        config_options: vec![],
+                    })
+                    .unwrap();
+                if opened {
+                    owner.open_harness_turn_if_allowed().unwrap();
+                }
+            }
+            let mut endpoint = SubagentEndpoint::open(root.path()).unwrap();
+            endpoint.relay = Some(relay.clone());
+            let mut report = request("harness-handback");
+            report.action = SubagentToolAction::Handback {
+                message: "report".into(),
+            };
+            endpoint.enqueue(report).unwrap();
+            let owner = relay.lock().unwrap();
+            let expected = owner.originating_command_id().unwrap();
+            assert!(mj_core::continuation::is_harness_turn_id(&expected));
+            assert_eq!(
+                endpoint.snapshot().0[0].originating_command_id.as_deref(),
+                Some(expected.as_str())
+            );
+        }
     }
 
     #[test]

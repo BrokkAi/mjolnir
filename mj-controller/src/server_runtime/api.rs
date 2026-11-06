@@ -2054,7 +2054,15 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
             mj_core::clock::epoch_millis(),
         ),
         awaited_ordinal: recorded.awaited_ordinal,
-        answered_ordinal: last.and_then(mj_core::subagent::answered_ordinal),
+        answered_ordinal: last
+            .filter(|_| {
+                !mj_core::subagent::prompt_is_queued(
+                    recorded.awaited_ordinal,
+                    turn.into_iter()
+                        .flat_map(|turn| turn.queued_ordinals.iter().copied()),
+                )
+            })
+            .and_then(mj_core::state::MaterializedTurnOutcome::answered_ordinal),
         failed_turn: last.and_then(|last| {
             mj_core::subagent::failed_turn(
                 last,
@@ -2086,6 +2094,7 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         return Ok(child_progress(&committed, child_id));
     }
     let subagent = crate::database::load_subagent(child_id)?;
+    let queued = crate::database::load_materialized_session_queued_prompts(child_id)?;
     let handback_tool = subagent.as_ref().is_some_and(|record| record.handback_tool);
     let recorded = crate::database::load_subagent_report(child_id)?;
     let (active, last) = crate::database::load_materialized_turn_outcome(child_id)?
@@ -2123,7 +2132,15 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         last_completed_ordinal: last.as_ref().map(|turn| turn.completed_ordinal),
         report,
         awaited_ordinal: recorded.awaited_ordinal,
-        answered_ordinal: last.as_ref().and_then(mj_core::subagent::answered_ordinal),
+        answered_ordinal: last
+            .as_ref()
+            .filter(|_| {
+                !mj_core::subagent::prompt_is_queued(
+                    recorded.awaited_ordinal,
+                    queued.iter().map(|prompt| prompt.accepted_ordinal),
+                )
+            })
+            .and_then(mj_core::state::MaterializedTurnOutcome::answered_ordinal),
         failed_turn,
         login_failure,
         provider_failure: last.as_ref().and_then(provider_failure),

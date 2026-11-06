@@ -1327,6 +1327,13 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         RelayObservation::HarnessTurnSettled {
             prompt_in_flight, ..
         } => {
+            if !*prompt_in_flight && let Some(turn) = &snapshot.harness_turn {
+                snapshot.turn_completion = Some(crate::activity::verdict::TurnCompletion {
+                    command_id: crate::continuation::harness_turn_id(turn.first_ordinal),
+                    completed_ordinal: event.ordinal,
+                    decision: crate::activity::verdict::Decision::KeepCurrent,
+                });
+            }
             let started = snapshot.continuation.autonomous_turn_started.take();
             if let Some(turn) = &snapshot.harness_turn
                 && !*prompt_in_flight

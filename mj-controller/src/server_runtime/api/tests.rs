@@ -32,6 +32,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
     committed.turns.insert_shared(
         "child".into(),
         crate::database::CommittedTurn {
+            queued_ordinals: vec![],
             state: (MaterializedExecutionState::Idle, None, Some(turn)),
             failed_message: Some("owned failure details".into()),
         },
@@ -56,6 +57,18 @@ fn child_progress_uses_the_published_turn_and_report_together() {
         Some("interrupted")
     );
     assert_eq!(progress.report_dir.as_deref(), Some("/reports/child"));
+    let mut harness = committed.turns.get("child").unwrap().clone();
+    let outcome = harness.state.2.as_mut().unwrap();
+    outcome.command_id = "harness-turn-20".into();
+    outcome.accepted_ordinal = None;
+    outcome.turn_start_position = Some(20);
+    committed
+        .turns
+        .insert_shared("child".into(), harness.clone());
+    assert!(!child_progress(&committed, "child").awaiting_prompt(None));
+    harness.queued_ordinals.push(Some(15));
+    committed.turns.insert_shared("child".into(), harness);
+    assert!(child_progress(&committed, "child").awaiting_prompt(None));
     assert_eq!(child_progress(&committed, "other").failed_turn, None);
 }
 
@@ -4061,6 +4074,62 @@ async fn delayed_handback_uses_worker_origin_instead_of_current_turn() {
     assert!(!result.result.is_error, "{}", result.result.message);
     let report = crate::database::load_subagent_report("child-1").unwrap();
     assert_eq!(report.handback.unwrap().command_id, "original-turn");
+}
+
+#[tokio::test]
+async fn harness_handback_uses_worker_turn_identity() {
+    if !isolated_parked_test("harness_handback_uses_worker_turn_identity") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut view = ready_view("model");
+    view.snapshot.as_mut().unwrap().materialized.active_turn =
+        Some(mj_core::state::MaterializedTurn {
+            command_id: "newer-turn".into(),
+            accepted_ordinal: Some(10),
+            turn_start_position: 11,
+            started_at_ms: 10,
+            steered_into: None,
+        });
+    let (submitted, _) = mpsc::unbounded_channel();
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 12,
+            submitted,
+            view: Some(view),
+        })),
+        running_states(),
+        ParkingExports::new(SessionState::Running, None),
+    ));
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: Some("harness-turn-7".into()),
+        request_id: "delayed-report".into(),
+        created_at_ms: 1,
+        action: mj_core::subagent::SubagentToolAction::Handback {
+            message: "original report".into(),
+        },
+    };
+    let result = backend
+        .execute_subagent_tool_durable("child-1".into(), request)
+        .await
+        .unwrap();
+    assert!(!result.result.is_error, "{}", result.result.message);
+    let report = crate::database::load_subagent_report("child-1").unwrap();
+    assert_eq!(report.handback.unwrap().command_id, "harness-turn-7");
+    let mut session = mj_core::state::MaterializedSession::empty("child-1");
+    session.applied_event_ordinal = 9;
+    session.applied_event_digest = format!("{:064x}", 9);
+    let mut outcome = finished_turn("harness-turn-7");
+    outcome.accepted_ordinal = None;
+    outcome.turn_start_position = Some(7);
+    outcome.completed_ordinal = 9;
+    session.last_turn_outcome = Some(outcome);
+    crate::database::save_materialized_session(&session).unwrap();
+    let progress = load_child_progress("child-1").unwrap();
+    assert!(matches!(progress.report, ReportState::Delivered(_)));
+    assert_eq!(progress.finished_span, Some((7, 9)));
 }
 
 /// The prompts that reached the child's relay, by text.

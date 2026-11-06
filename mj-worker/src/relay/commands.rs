@@ -806,7 +806,7 @@ impl DurableRelay {
                 || self
                     .snapshot
                     .latest_prompt_accepted_ordinal
-                    .is_none_or(|ordinal| ordinal >= *completed_ordinal)
+                    .is_some_and(|ordinal| ordinal >= *completed_ordinal)
                 || self
                     .snapshot
                     .last_harness_turn_started_ordinal

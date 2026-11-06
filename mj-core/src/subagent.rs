@@ -1134,6 +1134,14 @@ pub fn prompt_unanswered(awaited_ordinal: Option<u64>, answered_ordinal: Option<
         .is_some_and(|awaited| answered_ordinal.is_none_or(|answered| answered < awaited))
 }
 
+/// A queued prompt remains unanswered regardless of the latest completion.
+pub fn prompt_is_queued(
+    awaited: Option<u64>,
+    queued: impl IntoIterator<Item = Option<u64>>,
+) -> bool {
+    awaited.is_some() && queued.into_iter().any(|ordinal| ordinal == awaited)
+}
+
 /// The newest prompt a finished turn answers, by acceptance ordinal.
 ///
 /// A prompt's turn answers the prompt accepted at its own ordinal. A handback
@@ -1144,7 +1152,7 @@ pub fn prompt_unanswered(awaited_ordinal: Option<u64>, answered_ordinal: Option<
 /// still owed.
 #[must_use]
 pub fn answered_ordinal(turn: &crate::state::MaterializedTurnOutcome) -> Option<u64> {
-    reminded_turn_ordinal(&turn.command_id).or(turn.accepted_ordinal)
+    turn.answered_ordinal()
 }
 
 /// How a child's last finished turn failed, if it did: `interrupted` for a
@@ -2480,6 +2488,13 @@ mod tests {
             Some(&reminder_turn),
             0
         ));
+        let harness_turn = crate::state::MaterializedTurnOutcome {
+            command_id: crate::continuation::harness_turn_id(103),
+            turn_start_position: Some(103),
+            ..reminder_turn.clone()
+        };
+        assert!(!awaiting_prompt(Some(84), Some(&harness_turn)));
+        assert!(awaiting_prompt(Some(110), Some(&harness_turn)));
         // A prompt accepted after the reminded turn ended is still owed.
         assert!(awaiting_prompt(Some(110), Some(&reminder_turn)));
     }

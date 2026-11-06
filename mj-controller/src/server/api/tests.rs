@@ -6505,3 +6505,24 @@ async fn session_review_api_accepts_inherit_and_forwards_its_settings() {
         StatusCode::CONFLICT
     );
 }
+
+// Hard-won: #1450: a harness completion without an accepted ordinal reopened the first prompt wait.
+#[test]
+fn harness_completion_answers_started_prompts_but_not_queued_prompts() {
+    let mut outcome = completed(20, "end_turn");
+    outcome.command_id = mj_core::continuation::harness_turn_id(15);
+    outcome.accepted_ordinal = None;
+    outcome.turn_start_position = Some(15);
+    let mut observation = idle(Some(outcome));
+    observation.activity = mj_core::activity::ActivityState::Idle { since_ms: None };
+    observation.start_status = Some(StartStatus::Submitted { turn_id: 7 });
+    assert!(resolve_wait(&observation, &WaitRequest::default()).is_some());
+    let request = WaitRequest {
+        turn_id: Some(7),
+        ..Default::default()
+    };
+    assert!(resolve_wait(&observation, &request).is_some());
+    observation.queued.push("queued-prompt".into());
+    observation.queued_ordinals.push(Some(7));
+    assert!(resolve_wait(&observation, &request).is_none());
+}

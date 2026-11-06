@@ -750,6 +750,12 @@ impl DurableRelay {
             .active_prompt
             .as_ref()
             .map(|prompt| prompt.command_id.clone())
+            .or_else(|| {
+                self.snapshot
+                    .harness_turn
+                    .as_ref()
+                    .map(|turn| mj_core::continuation::harness_turn_id(turn.first_ordinal))
+            })
     }
 
     pub fn operational_state(&self) -> RelayOperationalState {
@@ -958,6 +964,10 @@ impl DurableRelay {
     /// Choose whether agent output with no prompt in flight opens a turn.
     pub fn set_harness_turn_policy(&mut self, policy: HarnessTurnPolicy) {
         self.harness_turns = policy;
+    }
+
+    pub(crate) fn uses_claude_harness_turns(&self) -> bool {
+        self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
     }
 
     /// Whether a `Continue` verdict may be parked for the daemon to act on.
@@ -1376,7 +1386,7 @@ impl DurableRelay {
     }
 
     /// Open the one durable boundary shared by output and turn announcements.
-    fn open_harness_turn_if_allowed(&mut self) -> Result<()> {
+    pub(crate) fn open_harness_turn_if_allowed(&mut self) -> Result<()> {
         if !self.can_open_harness_turn() {
             return Ok(());
         }

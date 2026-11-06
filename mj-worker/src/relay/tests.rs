@@ -7777,3 +7777,43 @@ fn push_review_requests_require_protocol_43_and_old_turn_captures_still_decode()
         .supported_at(42)
     );
 }
+
+// Hard-won: #1450: a settled harness turn could not admit its handback reminder.
+#[test]
+fn settled_harness_turn_admits_only_its_current_reminder() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    relay.open_harness_turn_if_allowed().unwrap();
+    let id = relay.originating_command_id().unwrap();
+    relay
+        .record_observation(RelayObservation::HarnessTurnSettled {
+            origin: None,
+            prompt_in_flight: false,
+        })
+        .unwrap();
+    let completion = relay.operational_state().turn_completion.unwrap();
+    assert_eq!(completion.command_id, id);
+    let stale = relay
+        .submit_command(
+            "stale-reminder",
+            RelayCommand::HandbackReminder {
+                completed_command_id: "harness-turn-0".into(),
+                completed_ordinal: completion.completed_ordinal,
+            },
+        )
+        .unwrap();
+    assert!(stale.is_err());
+    submit_relay(
+        &mut relay,
+        "current-reminder",
+        RelayCommand::HandbackReminder {
+            completed_command_id: id,
+            completed_ordinal: completion.completed_ordinal,
+        },
+    );
+}

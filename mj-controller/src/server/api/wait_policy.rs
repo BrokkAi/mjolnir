@@ -60,6 +60,7 @@ pub struct WaitObservation {
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
     /// Command ids of the prompts queued behind the active turn.
     pub queued: Vec<String>,
+    pub queued_ordinals: Vec<Option<u64>>,
     pub capacity_retry: Option<CapacityRetry>,
     pub retry_assessment_pending: bool,
     pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
@@ -91,6 +92,12 @@ impl WaitObservation {
             .queued_prompts
             .iter()
             .map(|prompt| prompt.command_id.clone())
+            .collect();
+        self.queued_ordinals = snapshot
+            .materialized
+            .queued_prompts
+            .iter()
+            .map(|prompt| prompt.accepted_ordinal)
             .collect();
         self.capacity_retry = snapshot.operational.capacity_retry.clone();
         self.retry_assessment_pending = snapshot.operational.retry_assessment_pending;
@@ -193,7 +200,7 @@ impl WaitObservation {
             Some(StartStatus::Submitted { turn_id }) => self
                 .last_turn_outcome
                 .as_ref()
-                .and_then(|outcome| outcome.accepted_ordinal)
+                .and_then(MaterializedTurnOutcome::answered_ordinal)
                 .is_none_or(|ordinal| ordinal < *turn_id),
             _ => false,
         };
@@ -429,8 +436,11 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
             .last_turn_outcome
             .as_ref()
             .filter(|outcome| {
-                outcome
-                    .accepted_ordinal
+                !mj_core::subagent::prompt_is_queued(
+                    Some(target),
+                    observation.queued_ordinals.iter().copied(),
+                ) && outcome
+                    .answered_ordinal()
                     .is_some_and(|ordinal| ordinal >= target)
             })
             .and_then(|outcome| observation.turn_end(outcome));

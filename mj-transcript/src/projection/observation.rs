@@ -842,6 +842,27 @@ pub(super) fn project_observation(
             // Running for it, and so does this: the prompt's own result closes
             // the streams and stops the clock.
             if !prompt_in_flight {
+                if let Some(start) = harness_turn_start(current) {
+                    let command_id = mj_core::continuation::harness_turn_id(start);
+                    if !current
+                        .last_turn_outcome
+                        .as_ref()
+                        .is_some_and(|turn| turn.command_id == command_id)
+                    {
+                        mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                            command_id,
+                            accepted_ordinal: None,
+                            turn_start_position: Some(start),
+                            completed_ordinal: event.ordinal,
+                            completed_at_ms: event.recorded_at_ms,
+                            outcome: TurnOutcomeKind::Completed {
+                                stop_reason: "end_turn".into(),
+                            },
+                            diagnostic: None,
+                            usage: None,
+                        });
+                    }
+                }
                 close_streams(index, mutation, event.recorded_at_ms);
                 mutation.execution = Some(MaterializedExecutionState::Idle);
             }
@@ -1011,6 +1032,18 @@ fn delivered_messages(
 /// running, so no prompt completion will carry the cancellation: give the turn
 /// the same "Interrupted" row and cancelled outcome an ordinary turn gets
 /// (I2-8). A stop that lands on a prompt of ours, or on nothing, adds neither.
+fn harness_turn_start(current: &MaterializedSession) -> Option<u64> {
+    current
+        .transcript
+        .iter()
+        .rev()
+        .find(|item| {
+            item.stable_id
+                .starts_with(mj_core::transcript::HARNESS_TURN_ITEM_PREFIX)
+        })
+        .map(|item| item.position)
+}
+
 fn end_cancelled_harness_turn(
     current: &MaterializedSession,
     event: &RelayEvent,
@@ -1025,16 +1058,7 @@ fn end_cancelled_harness_turn(
     {
         return;
     }
-    let Some(start_position) = current
-        .transcript
-        .iter()
-        .rev()
-        .find(|item| {
-            item.stable_id
-                .starts_with(mj_core::transcript::HARNESS_TURN_ITEM_PREFIX)
-        })
-        .map(|item| item.position)
-    else {
+    let Some(start_position) = harness_turn_start(current) else {
         return;
     };
     let turn_id = mj_core::continuation::harness_turn_id(start_position);

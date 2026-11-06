@@ -1544,14 +1544,29 @@ fn a_harness_turn_runs_the_session_and_marks_where_it_began() {
         "output inside the turn streams into a fresh item"
     );
 
-    apply_observation(
-        &mut session,
+    let settled = event(
+        &session,
         RelayObservation::HarnessTurnSettled {
             origin: Some("task-notification".into()),
             prompt_in_flight: false,
         },
     );
+    let projected = project_relay_event(&session, &settled).unwrap();
+    assert!(
+        projected
+            .mutation
+            .api_events
+            .iter()
+            .any(|event| matches!(event, mj_core::storage::ApiEventData::TurnEnded { .. }))
+    );
+    apply_committed_projection_event(&mut session, &settled, projected.mutation).unwrap();
 
+    let outcome = session.last_turn_outcome.as_ref().unwrap();
+    assert_eq!(outcome.command_id, "harness-turn-1");
+    assert_eq!(outcome.turn_start_position, Some(1));
+    assert!(
+        matches!(&outcome.outcome, TurnOutcomeKind::Completed { stop_reason } if stop_reason == "end_turn")
+    );
     assert_eq!(session.execution, MaterializedExecutionState::Idle);
     assert!(
         !session.transcript.iter().any(|item| matches!(
@@ -1972,6 +1987,16 @@ fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
         outcome.command_id,
         mj_core::continuation::harness_turn_id(started_at)
     );
+
+    let cancelled = session.last_turn_outcome.clone();
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            origin: None,
+            prompt_in_flight: false,
+        },
+    );
+    assert_eq!(session.last_turn_outcome, cancelled);
 
     // Nothing running: nothing to interrupt.
     let mut idle = MaterializedSession::empty("session");

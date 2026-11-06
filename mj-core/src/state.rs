@@ -325,6 +325,17 @@ pub struct MaterializedTurnOutcome {
 }
 
 impl MaterializedTurnOutcome {
+    /// The newest prompt acceptance this finished turn can answer.
+    pub fn answered_ordinal(&self) -> Option<u64> {
+        if let Some(ordinal) = crate::subagent::reminded_turn_ordinal(&self.command_id) {
+            Some(ordinal)
+        } else if crate::continuation::is_harness_turn_id(&self.command_id) {
+            self.turn_start_position
+        } else {
+            self.accepted_ordinal
+        }
+    }
+
     /// Only work that actually started can have been interrupted.
     pub fn interruption_ordinal(&self) -> Option<u64> {
         (self.turn_start_position.is_some()

@@ -470,7 +470,7 @@ pub(super) fn load_github_session_turn_windows_from(
 }
 
 /// A turn the harness starts on its own, such as work a finished background
-/// command woke, records no turn events. Its "Agent continued on its own"
+/// command woke, records a turn completion but no prompt turn start. Its "Agent continued on its own"
 /// marker starts it. The agent's last message, thought or tool call before
 /// the next turn or restart ends it. A running session with no active prompt
 /// is still in the last such turn.
