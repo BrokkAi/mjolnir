@@ -1291,11 +1291,7 @@ async fn in_process_reviewer_forwarding_stops_when_the_caller_goes_away() {
         RemoteSessionRequest::Reviewer {
             session_id: "session-1".into(),
             role: None,
-            action: crate::session_manager::ReviewerAction::CaptureDelta {
-                repositories: None,
-                scope: Default::default(),
-                baselines: Default::default(),
-            },
+            action: crate::session_manager::ReviewerAction::CaptureDelta { repositories: None },
             reply,
         },
         manager.control.clone(),
@@ -8198,8 +8194,6 @@ async fn exercise_child_close_with_a_nested_workspace(
             TurnReviewSeed {
                 task: "review the changes".into(),
                 user_messages: Vec::new(),
-                baselines: Default::default(),
-                through_ordinal: 1,
                 declined: Vec::new(),
             },
             "failed-start".into(),
@@ -8216,12 +8210,9 @@ async fn exercise_child_close_with_a_nested_workspace(
         crate::database::save_turn_review_state(
             parent_id,
             &crate::database::TurnReviewState {
-                pending_followup: false,
-                forward_attempts: 0,
                 active_group: Some(mj_core::storage::ActiveReviewGroup {
                     driver: driver.snapshot(),
                     reviewers: vec![Default::default()],
-                    scope: Default::default(),
                     registrations: vec![mj_core::storage::ReviewerRegistration {
                         role: "reviewer-1".into(),
                         request_key: relation.request_key.clone(),
@@ -8305,8 +8296,8 @@ async fn exercise_child_close_with_a_nested_workspace(
         assert!(
             crate::database::turn_review_state(parent_id)
                 .unwrap()
-                .baselines
-                .is_empty()
+                .push_findings
+                .is_none()
         );
         state.review_host.shutdown().await.unwrap();
     } else {

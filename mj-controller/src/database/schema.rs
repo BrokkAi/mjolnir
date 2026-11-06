@@ -2021,6 +2021,25 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Compatible: retire obsolete turn orchestration without changing columns
+    // or the push-group format. Older readers can still read and write rows.
+    if version < 112 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE turn_review_state
+             SET active_group = NULL, active = NULL, pending_forward = NULL,
+                 child_session_id = NULL, pending_followup = 0, forward_attempts = 0
+             WHERE pending_forward IS NOT NULL
+                OR (active_group IS NOT NULL
+                    AND coalesce(json_extract(active_group, '$.scope'), 'turn_delta') <> 'pushable_commits');
+             UPDATE turn_review_state SET pending_followup = 0;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (112, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 112;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

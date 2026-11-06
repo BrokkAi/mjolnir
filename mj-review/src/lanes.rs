@@ -16,7 +16,7 @@ pub struct RepositoryCapture {
     /// Commits of other history the reviewed work merged, pulled or switched to, whose
     /// changes the baseline already holds.
     pub merged_in: Vec<String>,
-    /// Why the diff may hold changes the turn did not write.
+    /// Why the diff may hold changes outside the reviewed commits.
     pub unattributed: Option<String>,
 }
 
@@ -122,7 +122,7 @@ pub fn review_prompt(job: &ReviewJob) -> String {
                 .as_ref()
                 .map(|reason| {
                     format!(
-                        "\nThe review could not tell this turn's commits from other history here ({reason}), so the diff may include changes the turn pulled, merged or switched to without writing them. Before reporting a finding, confirm with `git -C {} log` that this turn made the change.",
+                        "\nThe review could not tell the reviewed commits from other history here ({reason}), so the diff may include changes pulled, merged or switched to outside the reviewed commits. Before reporting a finding, confirm with `git -C {} log` that the reviewed commits made the change.",
                         shell_quote(&root)
                     )
                 })
@@ -229,7 +229,7 @@ mod tests {
         unattributed.repositories[0].unattributed = Some("the reflog is gone".into());
         let prompt = review_prompt(&unattributed);
         assert!(prompt.contains(
-            "capture456`\nThe review could not tell this turn's commits from other history here (the reflog is gone)"
+            "capture456`\nThe review could not tell the reviewed commits from other history here (the reflog is gone)"
         ));
         assert!(prompt.contains("confirm with `git -C /workspace/app log`"));
     }

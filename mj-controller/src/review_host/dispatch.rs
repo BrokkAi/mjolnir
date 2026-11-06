@@ -20,10 +20,6 @@ impl HostState {
                     let _ = reply.send(Err(StartRefusal(reason.clone())));
                     return false;
                 }
-                HostEvent::Start { reply, .. } => {
-                    answer(reply, Err(StartRefusal(reason.clone())));
-                    return false;
-                }
                 HostEvent::ReviewerFinished { reply, .. } | HostEvent::Resolve { reply, .. } => {
                     let _ = reply.send(Err(reason.clone()));
                     return false;
@@ -45,7 +41,6 @@ impl HostState {
                 HostEvent::StartPush { .. }
                     | HostEvent::OverridePush { .. }
                     | HostEvent::SetPushBase { .. }
-                    | HostEvent::Start { .. }
                     | HostEvent::Resolve { .. }
                     | HostEvent::QuestionTarget { .. }
             )
@@ -57,8 +52,7 @@ impl HostState {
             HostEvent::View {
                 session_id,
                 snapshot,
-                prompt_driven,
-            } => self.observe(session_id, snapshot, prompt_driven).await,
+            } => self.observe(session_id, snapshot).await,
             HostEvent::Retain { live } => self.retain_sessions(&live),
             HostEvent::StartPush {
                 session_id,
@@ -80,21 +74,11 @@ impl HostState {
                 self.override_validated(&session_id, permit)
             }
             HostEvent::OverrideFinished { session_id } => self.override_finished(&session_id),
-            HostEvent::Start {
-                session_id,
-                manual,
-                reply,
-            } => self.begin(session_id, manual, reply),
             HostEvent::Prepared {
                 session_id,
-                manual,
                 reply,
                 prepared,
-            } => self.prepared(session_id, manual, reply, prepared),
-            HostEvent::RecoveryPrepared {
-                session_id,
-                prepared,
-            } => self.recovery_prepared(session_id, prepared),
+            } => self.prepared(session_id, reply, *prepared),
             HostEvent::StateSaved {
                 session_id,
                 completion,
@@ -120,39 +104,17 @@ impl HostState {
                 reason,
             ),
             HostEvent::RetryPushDelivery { session_id, epoch } => {
-                if self.reviews.get(&session_id).is_some_and(|slot| {
-                    slot.epoch == epoch && slot.push.as_ref().is_some_and(|push| !push.finishing)
-                }) {
+                if self
+                    .reviews
+                    .get(&session_id)
+                    .is_some_and(|slot| slot.epoch == epoch && !slot.finishing)
+                {
                     let requests = self
                         .reviews
                         .get_mut(&session_id)
                         .map(|slot| slot.driver.recovery_requests())
                         .unwrap_or_default();
                     self.run(&session_id, requests);
-                }
-            }
-            HostEvent::RetryForward { session_id, epoch } => {
-                if self
-                    .reviews
-                    .get(&session_id)
-                    .is_some_and(|slot| slot.epoch == epoch && slot.driver.can_forward())
-                    && let Err(error) = self.resolve(&session_id, Resolution::Forwarded)
-                {
-                    self.forward_failed(&session_id, error);
-                }
-            }
-            HostEvent::RetryFollowUp { session_id } => {
-                if self.followups.contains(&session_id)
-                    && self.followup_saving.insert(session_id.clone())
-                    && self.persistence.as_ref().is_none_or(|lane| {
-                        lane.send(PersistenceRequest::MarkFollowUp {
-                            session_id: session_id.clone(),
-                        })
-                        .is_err()
-                    })
-                {
-                    self.followup_saving.remove(&session_id);
-                    tracing::warn!(%session_id, "could not retry pending follow-up persistence: lane stopped");
                 }
             }
             HostEvent::ReviewerOutcomeSaved {
@@ -203,23 +165,7 @@ impl HostState {
                 resolution,
                 reply,
             } => {
-                // Keep the serialized action readable during terminal
-                // handoff, but ordinary turn reviews no longer accept a
-                // person's resolution. Before-push cancellation is separate.
-                let answer = if resolution == Resolution::Cancelled
-                    && (self
-                        .reviews
-                        .get(&session_id)
-                        .is_some_and(|slot| slot.push.is_some())
-                        || matches!(
-                            self.preparing.get(&session_id),
-                            Some(PreparingOperation::Review { push: true, .. })
-                        )) {
-                    self.resolve(&session_id, resolution)
-                } else {
-                    Err("turn reviews resolve automatically".to_owned())
-                };
-                let _ = reply.send(answer);
+                let _ = reply.send(self.resolve(&session_id, resolution));
             }
             HostEvent::Step {
                 session_id,
@@ -228,20 +174,14 @@ impl HostState {
             } => self.step(session_id, epoch, step),
             HostEvent::Interrupted { interrupted } => {
                 for session_id in interrupted {
-                    self.recovery_candidates.insert(session_id.clone());
-                    if self.sessions.get(&session_id).is_some_and(|watch| {
-                        matches!(watch.execution, MaterializedExecutionState::Idle)
-                    }) {
-                        self.begin_recovery(&session_id);
-                    }
+                    self.record_notice(
+                        &session_id,
+                        "Review was cancelled when Mjolnir restarted; request review again.".into(),
+                    );
                 }
             }
             HostEvent::RestoreGroups {
                 groups,
-                // A follow-up marks a turn that ended during a review. Turns no
-                // longer start reviews, so a stored mark is not acted on; the
-                // next save of the row clears it.
-                pending_followups: _,
                 abandoned_children,
             } => {
                 for (session_id, state) in groups {
@@ -255,10 +195,6 @@ impl HostState {
                     self.close_child(child);
                 }
                 self.startup_ready = true;
-                let followups: Vec<_> = self.followups.iter().cloned().collect();
-                for session_id in followups {
-                    self.begin_followup(&session_id);
-                }
                 for (session_id, handback) in std::mem::take(&mut self.deferred_handbacks) {
                     self.reviewer_finished(
                         session_id,
@@ -288,12 +224,6 @@ impl HostState {
                                 "review startup recovery failed: {error}"
                             ))));
                         }
-                        HostEvent::Start { reply, .. } => answer(
-                            reply,
-                            Err(StartRefusal(format!(
-                                "review startup recovery failed: {error}"
-                            ))),
-                        ),
                         HostEvent::Resolve { reply, .. } => {
                             let _ =
                                 reply.send(Err(format!("review startup recovery failed: {error}")));
@@ -326,6 +256,7 @@ impl HostState {
                 Ok(state) => {
                     if let Some(slot) = self.reviews.get_mut(&session_id) {
                         slot.state = *state;
+                        slot.driver.complete();
                     }
                     self.close_reviewer_child(&session_id);
                     self.run_one(&session_id, ReviewRequest::Close);
@@ -341,7 +272,7 @@ impl HostState {
                         .reviews
                         .get_mut(&session_id)
                         .map(|slot| {
-                            if slot.push.is_some() && mj_review::delta::trees_unchanged(&deltas) {
+                            if mj_review::delta::trees_unchanged(&deltas) {
                                 slot.driver.empty_push_delta_captured(deltas)
                             } else {
                                 slot.driver.delta_captured(deltas)
@@ -372,31 +303,6 @@ impl HostState {
                         self.fail(&session_id, error);
                     }
                 }
-            }
-            ReviewStep::PrimaryPrompted(result) => {
-                if let Err(error) = result {
-                    self.forward_failed(&session_id, error);
-                    return;
-                }
-                let requests = self
-                    .reviews
-                    .get_mut(&session_id)
-                    .map(|slot| {
-                        slot.state.forward_attempts = 0;
-                        slot.driver.forward_succeeded()
-                    })
-                    .unwrap_or_default();
-                let state = self.reviews.get_mut(&session_id).map(|slot| {
-                    slot.sync_group();
-                    slot.state.clone()
-                });
-                if requests.is_empty()
-                    && let Some(state) = state
-                    && let Err(error) = self.persist(session_id.clone(), state, None)
-                {
-                    tracing::warn!(%session_id, %error, "could not save review handoff retry state");
-                }
-                self.run(&session_id, requests);
             }
         }
     }

@@ -1392,21 +1392,11 @@ pub(super) async fn drive_reviewer(
 ) -> Result<ReviewerOutcome> {
     let role = role.as_deref();
     Ok(match action {
-        ReviewerAction::CaptureDelta {
-            baselines,
-            scope,
-            repositories,
-        } => ReviewerOutcome::Delta {
-            repositories: client
-                .capture_review_delta(role, baselines, scope, repositories)
-                .await?,
+        ReviewerAction::CaptureDelta { repositories } => ReviewerOutcome::Delta {
+            repositories: client.capture_review_delta(role, repositories).await?,
         },
         ReviewerAction::RecordReviewed { trees } => {
             client.record_reviewed(role, trees).await?;
-            ReviewerOutcome::BaselineAdvanced
-        }
-        ReviewerAction::AdvanceBaseline { trees } => {
-            client.advance_review_baseline(role, trees).await?;
             ReviewerOutcome::BaselineAdvanced
         }
         ReviewerAction::RecordOverridden { trees } => {

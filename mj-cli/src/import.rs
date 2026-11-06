@@ -1169,7 +1169,7 @@ mod tests {
             })
         );
         for (global_reviewers, trigger) in [
-            (Vec::new(), ReviewTrigger::Off),
+            (Vec::new(), ReviewTrigger::Push),
             (vec![choice.clone()], ReviewTrigger::Push),
         ] {
             let global = ReviewConfig {

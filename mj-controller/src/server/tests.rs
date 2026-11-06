@@ -3037,7 +3037,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
 #[test]
 fn a_running_review_projects_to_the_phone() {
     use crate::review_host::{RuntimeReviewView, VerdictKind, VerdictView};
-    use mj_core::review::driver::{Resolution, RoleState, RoleStatus, TurnReviewPhase};
+    use mj_core::review::driver::{RoleState, RoleStatus, TurnReviewPhase};
 
     let review = RuntimeReviewView {
         child_session_id: None,
@@ -3065,11 +3065,7 @@ fn a_running_review_projects_to_the_phone() {
         verdict: Some(VerdictView {
             kind: VerdictKind::Findings,
             text: "[P1] src/lib.rs:1 -- unbounded retry".into(),
-            allowed: vec![
-                Resolution::Forwarded,
-                Resolution::Dismissed,
-                Resolution::Cancelled,
-            ],
+            allowed: Vec::new(),
         }),
     };
 

@@ -199,24 +199,9 @@ pub struct TranscriptRetention {
     pub remaining: bool,
 }
 
-/// How far this session has been reviewed.
-///
-/// `baselines` are Git tree ids by repository root: the working tree as of the
-/// last completed review. They advance only when a review resolves, which is
-/// what makes a cancelled review lossless -- the next one covers both turns.
+/// Durable review work, findings and declined findings for this session.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnReviewState {
-    /// A prompted turn ended while a review was open. The host starts one
-    /// follow-up from the current baseline after the open review closes.
-    #[serde(default)]
-    pub pending_followup: bool,
-    /// Number of rejected corrective submissions for the current command.
-    #[serde(default)]
-    pub forward_attempts: u8,
-    #[serde(default)]
-    pub child_session_id: Option<String>,
-    pub baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
-    pub reviewed_through_ordinal: u64,
     /// Findings the author declined to fix with `override_review`, newest last.
     /// Every before-push review of this session tells its reviewers not to
     /// report them again. A baseline move clears them. Bounded to `DECLINED_FINDINGS_BYTES`.
@@ -225,11 +210,6 @@ pub struct TurnReviewState {
     /// A review that was running when the daemon stopped. On recovery it is
     /// cleared without advancing the baseline.
     pub active: Option<String>,
-    /// A corrective prompt that was submitted while its relay acceptance was
-    /// still ambiguous. It survives a daemon restart so the exact command can
-    /// be retried and reconciled without losing the findings.
-    #[serde(default)]
-    pub pending_forward: Option<crate::review::driver::PendingForward>,
     /// The exact trees covered by the last before-push findings verdict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_findings: Option<PushFindingsRecord>,
@@ -262,12 +242,11 @@ impl TurnReviewState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(from = "ActiveReviewGroupInput")]
 pub struct ActiveReviewGroup {
     pub driver: crate::review::driver::ReviewDriverSnapshot,
     pub reviewers: Vec<crate::review::settings::ResolvedReviewSettings>,
-    pub scope: crate::relay::CaptureScope,
     pub registrations: Vec<ReviewerRegistration>,
 }
 
@@ -278,7 +257,6 @@ struct ActiveReviewGroupInput {
     reviewers: Vec<crate::review::settings::ResolvedReviewSettings>,
     #[serde(default)]
     reviewer: Option<crate::review::settings::ResolvedReviewSettings>,
-    scope: crate::relay::CaptureScope,
     registrations: Vec<ReviewerRegistration>,
 }
 impl From<ActiveReviewGroupInput> for ActiveReviewGroup {
@@ -294,7 +272,6 @@ impl From<ActiveReviewGroupInput> for ActiveReviewGroup {
         Self {
             driver: input.driver,
             reviewers,
-            scope: input.scope,
             registrations: input.registrations,
         }
     }
@@ -535,6 +512,19 @@ pub struct ApiEventPage {
     pub events: Vec<ApiEvent>,
     pub next_after_seq: u64,
     pub latest_seq: u64,
+}
+
+// Scope is a persisted compatibility field, never an orchestration decision.
+impl serde::Serialize for ActiveReviewGroup {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut value = serializer.serialize_struct("ActiveReviewGroup", 4)?;
+        value.serialize_field("driver", &self.driver)?;
+        value.serialize_field("reviewers", &self.reviewers)?;
+        value.serialize_field("registrations", &self.registrations)?;
+        value.serialize_field("scope", "pushable_commits")?;
+        value.end()
+    }
 }
 
 #[cfg(test)]

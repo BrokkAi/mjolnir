@@ -810,7 +810,7 @@ impl ChatState {
                     self.clear_input();
                     let review = self.review_config();
                     return match args.trim().to_ascii_lowercase().as_str() {
-                        // Bare `/review` reviews the turn that just finished,
+                        // Bare `/review` reviews committed work,
                         // whether or not automatic review is armed.
                         "" => ChatAction::StartTurnReview,
                         // Arming is configuration, not a session gesture: a

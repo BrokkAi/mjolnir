@@ -3,14 +3,10 @@ use super::*;
 impl HostState {
     pub(super) fn run_one(&mut self, session_id: &str, request: ReviewRequest) {
         match request {
-            ReviewRequest::CaptureDelta { baselines } => {
+            ReviewRequest::CaptureDelta => {
                 self.review_step(
                     session_id,
-                    ReviewerAction::CaptureDelta {
-                        repositories: None,
-                        baselines,
-                        scope: Default::default(),
-                    },
+                    ReviewerAction::CaptureDelta { repositories: None },
                     |outcome| {
                         ReviewStep::Delta(match outcome {
                             Ok(ReviewerOutcome::Delta { repositories }) => Ok(repositories),
@@ -24,57 +20,9 @@ impl HostState {
                 command_id: _,
                 prompt,
             } => self.register_reviewer_child(session_id, role, prompt),
-            ReviewRequest::PromptPrimary { command_id, prompt } => {
-                // The worker queues this behind any primary turn in progress.
-                self.prompt_primary(session_id, command_id, prompt);
-            }
             ReviewRequest::CloseReviewer { role } => {
                 self.close_reviewer_role(session_id, &role);
             }
-            ReviewRequest::AdvanceBaseline {
-                trees,
-                reviewed_through_ordinal,
-            } => {
-                if let Some(slot) = self.reviews.get_mut(session_id) {
-                    slot.state.baselines = trees.clone();
-                    slot.state.reviewed_through_ordinal = reviewed_through_ordinal;
-                    // Clear an accepted handoff in the same durable state
-                    // write as its baseline. Until this point
-                    // shutdown/restart must retain it for command id
-                    // reconciliation.
-                    slot.state.pending_forward = None;
-                    let state = slot.state.clone();
-                    if let Err(error) = self.persist(session_id.to_owned(), state, None) {
-                        tracing::warn!(session_id, %error, "could not queue review baseline persistence");
-                    }
-                }
-                let session_id = session_id.to_owned();
-                self.spawn_reviewer(
-                    session_id.clone(),
-                    None,
-                    ReviewerAction::AdvanceBaseline { trees },
-                    move |outcome| {
-                        if let Err(error) = outcome {
-                            // The controller's copy is what the next capture is
-                            // taken against; the worker-side ref is only a gc
-                            // pin, so a failure here costs nothing but the pin.
-                            tracing::debug!(
-                                session_id = %session_id,
-                                %error,
-                                "the review baseline ref could not be pinned"
-                            );
-                        }
-                        None
-                    },
-                );
-            }
-            ReviewRequest::ClearPendingForward => {
-                if let Some(slot) = self.reviews.get_mut(session_id) {
-                    slot.state.pending_forward = None;
-                }
-            }
-            // Retired requests from a snapshot an older daemon wrote.
-            ReviewRequest::RecordPriorReview {} | ReviewRequest::ClearPriorReview => {}
             ReviewRequest::Close => {
                 if self.closing.contains(session_id) {
                     return;
@@ -93,22 +41,8 @@ impl HostState {
                     answer(slot.start_reply.take(), outcome);
                     slot.state.active = None;
                     slot.state.active_group = None;
-                    if matches!(
-                        slot.driver.phase(),
-                        TurnReviewPhase::Resolved(Resolution::Cancelled)
-                    ) {
-                        // A user explicitly cancelled a rejected handoff, so
-                        // discard its retry record along with the held pane.
-                        // An in-flight or accepted handoff never reaches this
-                        // branch before its durable reconciliation sequence.
-                        slot.state.pending_forward = None;
-                    }
                     let state = slot.state.clone();
                     self.closing.insert(session_id.to_owned());
-                    // The primary handoff has already returned a durable
-                    // acceptance before Close can be requested. Releasing now
-                    // lets later user prompts queue behind that accepted
-                    // corrective turn; no held prompt can overtake it.
                     if let Err(error) = self.persist(
                         session_id.to_owned(),
                         state,
@@ -121,35 +55,5 @@ impl HostState {
                 }
             }
         }
-    }
-
-    /// Sends the review's corrective prompt through the primary's normal
-    /// queue. The stable command id makes an ambiguous acceptance retry safe.
-    pub(super) fn prompt_primary(&mut self, session_id: &str, command_id: String, prompt: String) {
-        let Some(epoch) = self.reviews.get(session_id).map(|slot| slot.epoch) else {
-            return;
-        };
-        let control = self.control.clone();
-        let events = self.events.clone();
-        let session_id = session_id.to_owned();
-        tokio::spawn(async move {
-            let submitted = async {
-                let handle = control
-                    .session(session_id.clone())
-                    .await
-                    .map_err(|error| format!("{error:#}"))?;
-                handle
-                    .submit(command_id, prompt_command(prompt))
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| format!("{error:#}"))
-            }
-            .await;
-            let _ = events.send(HostEvent::Step {
-                session_id,
-                epoch,
-                step: ReviewStep::PrimaryPrompted(submitted),
-            });
-        });
     }
 }

@@ -3341,10 +3341,10 @@ fn session_choice_decides_whether_review_runs() {
         on.for_session(Some(&inherit)).trigger(),
         ReviewTrigger::Push
     );
-    // Reviewers alone do not switch review on for a session that inherits.
+    // A session reviewer choice enables review even without global reviewers.
     assert_eq!(
         off.for_session(Some(&inherit)).trigger(),
-        ReviewTrigger::Off
+        ReviewTrigger::Push
     );
     assert_eq!(
         off.for_session(Some(&SessionReview::Push {
