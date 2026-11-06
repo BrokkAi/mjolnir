@@ -1160,6 +1160,7 @@ async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
         .unwrap();
     let (updates, mut receiver) = crate::session_manager::coalesced_update_channel();
     updates.send(crate::session_manager::SessionManagerUpdate {
+        raw_observation: None,
         session_id: "completed-turn".into(),
         view: ManagedSessionView::default(),
     });
@@ -5672,6 +5673,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            models: Default::default(),
             legacy_subagents: None,
         },
     );
@@ -7076,6 +7078,7 @@ fn seed_live_session(directory: &Path, relay_root: &Path) {
                 home: profile_home,
                 environment: Default::default(),
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
@@ -11127,6 +11130,7 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
                 home: project.path().join("codex-home"),
                 environment: Default::default(),
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,

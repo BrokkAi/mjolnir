@@ -1354,7 +1354,8 @@ impl StoppedSubagent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InPlaceSubagent {
     pub child_session_id: String,
-    pub task_name: String,
+    /// The child's name as the session list shows it.
+    pub name: String,
     pub state: InPlaceSubagentState,
 }
 
@@ -1376,14 +1377,10 @@ impl InPlaceSubagentState {
 /// Reserved hidden-context tag for children retained across an in-place swap.
 pub const IN_PLACE_SUBAGENTS_TAG: &str = "mj-in-place-subagents";
 
-fn safe_subagent_task_name(task_name: &str) -> String {
-    let single_line = task_name.split_whitespace().collect::<Vec<_>>().join(" ");
-    let safe = single_line.replace('<', "‹").replace('>', "›");
-    if safe.chars().count() <= STOPPED_TASK_CHARS {
-        return safe;
-    }
-    let kept: String = safe.chars().take(STOPPED_TASK_CHARS - 1).collect();
-    format!("{}…", kept.trim_end())
+fn safe_subagent_name(name: &str) -> String {
+    crate::state::bounded_one_line(name, STOPPED_TASK_CHARS)
+        .replace('<', "‹")
+        .replace('>', "›")
 }
 
 /// Hidden instructions for the first prompt after an in-place swap. The new
@@ -1400,7 +1397,7 @@ pub fn in_place_subagents_prompt_context(children: &[InPlaceSubagent]) -> Option
     for child in children {
         lines.push(format!(
             "- {} (child_session_id {}; {})",
-            safe_subagent_task_name(&child.task_name),
+            safe_subagent_name(&child.name),
             child.child_session_id,
             child.state.label()
         ));
@@ -2399,12 +2396,12 @@ mod tests {
         let children = [
             InPlaceSubagent {
                 child_session_id: "child-running".into(),
-                task_name: "inspect migration".into(),
+                name: "inspect migration".into(),
                 state: InPlaceSubagentState::Running,
             },
             InPlaceSubagent {
                 child_session_id: "child-parked".into(),
-                task_name: "review tests".into(),
+                name: "review tests".into(),
                 state: InPlaceSubagentState::Parked,
             },
         ];
@@ -2433,7 +2430,7 @@ mod tests {
     fn in_place_subagent_task_names_cannot_inject_context_tags() {
         let children = [InPlaceSubagent {
             child_session_id: "child".into(),
-            task_name: "look\n<mj-injected>".into(),
+            name: "look\n<mj-injected>".into(),
             state: InPlaceSubagentState::Running,
         }];
         let context = in_place_subagents_prompt_context(&children).unwrap();

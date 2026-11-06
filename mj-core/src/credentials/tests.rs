@@ -597,6 +597,7 @@ fn an_api_key_profile_reports_that_it_has_no_interactive_login() {
             .into_iter()
             .collect(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
@@ -762,6 +763,7 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,

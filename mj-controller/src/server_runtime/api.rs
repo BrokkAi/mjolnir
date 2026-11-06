@@ -1026,9 +1026,16 @@ impl ApiBackend {
                 })
                 .await?
                 .report_dir;
+                let name = live_child_name(
+                    self.exports
+                        .session_record(&relation.child_session_id)
+                        .as_ref(),
+                    &relation.task_name,
+                );
                 Ok(serde_json::json!({
                     "child_session_id":relation.child_session_id,
                     "task_name":relation.task_name,
+                    "name":name,
                     "profile_id":relation.profile_id,
                     "model":relation.model,
                     "effort":relation.effort,
@@ -1085,9 +1092,11 @@ impl ApiBackend {
                                 progress,
                             ),
                         );
+                        let name = live_child_name(record.as_ref(), &relation.task_name);
                         let mut entry = serde_json::json!({
                             "child_session_id":relation.child_session_id,
                             "task_name":relation.task_name,
+                            "name":name,
                             "profile_id":relation.profile_id,
                             "effort":relation.effort,
                             "state":state,
@@ -1647,6 +1656,8 @@ impl ApiBackend {
                 &child.progress,
                 oracle,
             );
+            entry["child_name"] =
+                live_child_name(child.record.as_ref(), &child.relation.task_name).into();
             entry["task_name"] = child.relation.task_name.into();
             inputs.annotate(id, &mut entry);
             mark_parked(&mut entry, child.record.as_ref());
@@ -2209,6 +2220,16 @@ fn wait_agent_entry(
         agent["failure"] = serde_json::json!({"kind": "provider_failure", "summary": summary});
     }
     agent
+}
+
+/// What the session list calls a child now, bounded to one line, or the task
+/// name it was spawned with when the daemon holds no record. A person may
+/// have renamed the child since it was spawned.
+fn live_child_name(record: Option<&mj_core::state::SessionRecord>, task_name: &str) -> String {
+    record.map_or_else(
+        || mj_core::state::bounded_one_line(task_name, mj_core::state::MESSAGE_NAME_CHARS),
+        mj_core::state::SessionRecord::message_name,
+    )
 }
 
 /// Say in a notification or `list_agents` entry that the child is parked: its turn
@@ -2834,8 +2855,33 @@ impl SubagentBackend for ApiBackend {
                     .capabilities(&[profile])
                     .await?
                     .remove(0)),
-                model => crate::controller::profile_config::discover(profile, model, refresh).await,
+                model => {
+                    // A forced refresh bypasses the catalogue's cache, not its
+                    // allow-list: an explicit request cannot select a model the
+                    // picker hides.
+                    let (mut choices, default) = refreshed_profile_choices(model, |model| {
+                        crate::controller::profile_config::discover(profile.clone(), model, refresh)
+                    })
+                    .await?;
+                    let selected = choices.model.clone();
+                    choices.model = default;
+                    let allowed = self.profile_catalog.allowed_models(&profile);
+                    choices = choices.restricted_to(&allowed);
+                    choices.model = selected;
+                    Ok(choices)
+                }
             }
+        })
+    }
+
+    fn unrestricted_profile_config(
+        &self,
+        profile: String,
+    ) -> BoxFuture<'_, Result<mj_core::worker_launch::ProfileConfig>> {
+        Box::pin(async move {
+            self.profile_catalog
+                .unrestricted_capabilities(&profile)
+                .await
         })
     }
 
@@ -3487,6 +3533,25 @@ impl SubagentBackend for ApiBackend {
             })
         })
     }
+}
+
+// Refresh the default before selecting a model, so the exemption belongs to
+// this discovery rather than the catalogue from before the refresh.
+async fn refreshed_profile_choices<F, Fut>(
+    model: Option<String>,
+    mut discover: F,
+) -> Result<(mj_core::worker_launch::ProfileConfig, Option<String>)>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<mj_core::worker_launch::ProfileConfig>>,
+{
+    let choices = discover(None).await?;
+    let default = choices.model.clone();
+    let choices = match model {
+        Some(model) => discover(Some(model)).await?,
+        None => choices,
+    };
+    Ok((choices, default))
 }
 
 #[cfg(test)]

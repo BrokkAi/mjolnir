@@ -138,7 +138,7 @@ impl ApiBackend {
                     )));
                 }
             }
-            Ok((target_id, own_child, managed_child, sender.title.clone()))
+            Ok((target_id, own_child, managed_child, sender.message_name()))
         })
         .await?;
 
@@ -634,7 +634,7 @@ pub(super) fn resolve_session_target(
         _ => {
             let candidates = permitted_matches
                 .iter()
-                .map(|(id, record)| format!("{id} ({:?})", record.title))
+                .map(|(id, record)| format!("{id} ({:?})", record.message_name()))
                 .collect::<Vec<_>>()
                 .join(", ");
             Err(mj_core::refusal::Refusal::unusable(format!(

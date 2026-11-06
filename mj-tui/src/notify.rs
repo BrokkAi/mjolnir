@@ -285,18 +285,15 @@ impl DashboardState {
         ));
     }
 
+    /// "Session" and the shared notice name, cut to fit a notice. See
+    /// [`mj_core::state::State::session_notice_name`].
     pub(crate) fn session_notice_name(&self, session_id: &str) -> String {
-        self.state.sessions.get(session_id).map_or_else(
-            || format!("Session {}", &session_id[..session_id.len().min(8)]),
-            |session| {
-                format!(
-                    "Session {}",
-                    crate::fit_session_name(
-                        crate::render::session_name(session),
-                        crate::NOTICE_NAME_CELLS
-                    )
-                )
-            },
+        format!(
+            "Session {}",
+            crate::fit_session_name(
+                &self.state.session_notice_name(session_id),
+                crate::NOTICE_NAME_CELLS
+            )
         )
     }
 
@@ -481,7 +478,7 @@ mod tests {
     #[test]
     fn an_unreachable_worker_is_reported_plainly_and_withdrawn_on_recovery() {
         let mut dashboard = dashboard();
-        let title = dashboard.state.sessions["done"].display_title().to_owned();
+        let title = dashboard.state.sessions["done"].listed_title().to_owned();
         dashboard.report_session_unreachable("done");
         let notice = dashboard.notice().unwrap();
         assert_eq!(

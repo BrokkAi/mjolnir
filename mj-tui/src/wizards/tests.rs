@@ -1596,6 +1596,7 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
             HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 muse_auto_review: None,
@@ -1674,6 +1675,7 @@ fn a_missing_profile_is_left_out_of_the_profile_step_and_named() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             muse_auto_review: None,
@@ -1713,6 +1715,7 @@ fn new_session_profile_step_aligns_its_columns() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             muse_auto_review: None,
@@ -1842,6 +1845,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             muse_auto_review: None,
@@ -2965,6 +2969,7 @@ fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             muse_auto_review: None,

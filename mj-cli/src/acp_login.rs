@@ -905,6 +905,7 @@ mod tests {
             guardian_review_model: None,
             muse_auto_review: None,
             codex_profile: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
         };
         std::fs::create_dir_all(&profile.home).unwrap();
@@ -963,6 +964,7 @@ mod tests {
             guardian_review_model: None,
             muse_auto_review: None,
             codex_profile: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
         };
         profile

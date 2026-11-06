@@ -323,6 +323,17 @@
                 "value": "",
                 "placeholder": "262144 (256 KiB)",
                 "number": true
+              },
+              {
+                "path": [
+                  "profiles",
+                  "claude",
+                  "models"
+                ],
+                "label": "Offered models",
+                "help": "Optional. Offer only these models from this profile, one exact model name per entry. Leave empty to offer everything the profile advertises. The profile's current model is always offered.",
+                "control": "page",
+                "summary": "0 entries"
               }
             ]
           }

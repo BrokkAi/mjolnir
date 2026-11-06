@@ -1136,7 +1136,9 @@ resuming do, and [security boundaries](/security/) for what the token reaches.
 `GET /api/v1/profiles/{profile_id}/config` returns `model`, `models`, `efforts`,
 and `observed_at` (Unix seconds). Each choice contains its exact `value`, display
 `name`, and optional `description`. Add `?model=<value>` to discover effort
-choices for that model. An empty cache is populated automatically with a
+choices for that model. The list contains only what the profile's `models`
+allow-list lets through (its current model is always listed); add
+`?unrestricted=true` for everything the harness advertises. An empty cache is populated automatically with a
 prompt-free harness probe; no project session or container is created. The
 first lookup may install the managed harness on the controller and take several
 minutes. Discovery currently requires a Unix controller with the harness's

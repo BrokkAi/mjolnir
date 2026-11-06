@@ -123,6 +123,13 @@ impl ApiClient {
         }
     }
 
+    /// Connect to the daemon only if one is already running. Read-only
+    /// diagnostics use this so they never start or replace a daemon.
+    pub(crate) async fn connect_running() -> Result<Self> {
+        let mut client = mj_client::daemon::connect_existing().await?;
+        Self::connect_to(&mut client).await
+    }
+
     async fn connect_to(client: &mut daemon::DaemonClient) -> Result<Self> {
         let access = daemon::wait_for_web_access(client).await?;
         let mj_client::web::WebViewerAccess::Ready {
@@ -394,6 +401,7 @@ impl ApiClient {
         &self,
         profile: &str,
         model: Option<String>,
+        unrestricted: bool,
     ) -> Result<mj_core::worker_launch::ProfileConfig> {
         let mut request = self
             .http
@@ -401,6 +409,9 @@ impl ApiClient {
             .timeout(Duration::from_secs(330));
         if let Some(model) = model {
             request = request.query(&[("model", model)]);
+        }
+        if unrestricted {
+            request = request.query(&[("unrestricted", "true")]);
         }
         decode(self.send(request).await?).await
     }

@@ -44,7 +44,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             json!({"model":null,"effort":null})
         }
         "profiles" if path.len() == 2 => {
-            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null,"codex_profile":null})
+            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null,"codex_profile":null,"models":[]})
         }
         "machines" if path.len() == 2 => machine_defaults(value["kind"].as_str().unwrap_or("ssh")),
         // The build cache is its own page, and the saved file keeps only the
@@ -293,6 +293,7 @@ pub fn label(key: &str) -> String {
         "context_window_bytes" => "Context budget (bytes)",
         "guardian_review_model" => "Guardian review model",
         "codex_profile" => "Codex profile",
+        "models" => "Offered models",
         "bind" => "Listen address and port",
         "tailscale_detect" => "Detect Tailscale",
         "tls_cert" => "TLS certificate file",
@@ -1024,6 +1025,9 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         }
         "guardian_review_model" => {
             "Codex with a custom provider: newest-flash, session (the session's model), or a model name. Blank: newest-flash."
+        }
+        "models" => {
+            "Optional. Offer only these models from this profile, one exact model name per entry. Leave empty to offer everything the profile advertises. The profile's current model is always offered."
         }
         "codex_profile" => {
             "Codex only: the name of a profile file in the account directory, such as ds for ds.config.toml, layered over config.toml like codex -p ds."

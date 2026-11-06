@@ -99,6 +99,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
         home: home.to_path_buf(),
         environment: environment.into(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
@@ -130,6 +131,7 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
         home: home.to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
@@ -257,6 +259,7 @@ fn a_bedrock_codex_profile_uses_the_aws_chain_without_an_api_key_or_login_file()
         home: home.path().to_path_buf(),
         environment: BTreeMap::new().into(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
@@ -302,6 +305,7 @@ fn an_inline_token_codex_profile_is_authenticated_without_a_login_file() {
         home: home.path().to_path_buf(),
         environment: BTreeMap::new().into(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
@@ -854,6 +858,7 @@ fn sample_config() -> Config {
                 kind: HarnessKind::Codex,
                 home: PathBuf::from("/home/test/.codex-one"),
                 environment: BTreeMap::from([("RUST_LOG".into(), "info".into())]).into(),
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 muse_auto_review: None,
@@ -3211,6 +3216,7 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
         home: home.to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
@@ -3323,6 +3329,7 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
             home,
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             muse_auto_review: None,
@@ -3348,4 +3355,36 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
         );
         assert_eq!(configured.profiles["claude"].home, configured_home);
     }
+}
+
+/// `models` is optional: a profile without it loads unchanged and saves
+/// without the key, and a list survives a save and reload.
+#[test]
+fn a_profile_models_allow_list_round_trips_and_is_omitted_when_empty() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("opencode");
+    fs::create_dir(&home).unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n[profiles.ds8bit]\nkind = \"open-code\"\nhome = {:?}\n",
+            home.display().to_string()
+        ),
+    )
+    .unwrap();
+
+    let mut config = Config::load_from(&path).unwrap();
+    assert!(config.profiles["ds8bit"].models.is_empty());
+    config.save_to(&path).unwrap();
+    assert!(!fs::read_to_string(&path).unwrap().contains("models"));
+
+    let listed = "openrouter/deepseek/deepseek-v4.1-flash-1017".to_owned();
+    config.profiles.get_mut("ds8bit").unwrap().models = vec![listed.clone()];
+    config.save_to(&path).unwrap();
+    assert!(fs::read_to_string(&path).unwrap().contains(&listed));
+    assert_eq!(
+        Config::load_from(&path).unwrap().profiles["ds8bit"].models,
+        [listed]
+    );
 }

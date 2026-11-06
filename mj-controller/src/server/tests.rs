@@ -95,6 +95,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
             HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
@@ -791,6 +792,69 @@ fn target_snapshot_uses_each_raw_host_project_history_and_leaves_managed_empty()
         vec!["/srv/builder"]
     );
     assert!(target("podman").recent_project_directories.is_empty());
+}
+
+#[test]
+fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
+    let (config, mut state) = sample_config_state();
+    let parent = state.sessions["session-1"].clone();
+    for (id, kind) in [
+        ("worker", mj_core::subagent::SubagentKind::Worker),
+        ("reviewer", mj_core::subagent::SubagentKind::Reviewer),
+    ] {
+        let mut child = parent.clone();
+        child.id = id.into();
+        child.state = if id == "reviewer" {
+            mj_core::state::SessionState::Error
+        } else {
+            mj_core::state::SessionState::Stopped
+        };
+        state.sessions.insert(id.into(), child);
+        state.subagents.insert(
+            id.into(),
+            mj_core::subagent::SubagentRecord {
+                kind,
+                reviewer_launch: None,
+                child_session_id: id.into(),
+                parent_session_id: "session-1".into(),
+                task_name: id.into(),
+                profile_id: "codex-1".into(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                initial_prompt: String::new(),
+                request_key: id.into(),
+                created_at: "now".into(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            }
+            .into(),
+        );
+    }
+
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let row = |id: &str| snapshot.sessions.0.get(id).unwrap();
+    assert_eq!(
+        row("session-1").subagent_session_ids,
+        ["reviewer", "worker"]
+    );
+    assert_eq!(row("session-1").reviewer_session_ids, ["reviewer"]);
+    assert!(row("worker").reviewer_session_ids.is_empty());
+    assert!(row("reviewer").active);
+    assert!(!row("worker").active);
+
+    // The summary rows a compact client sees carry both lists, so Reviewers
+    // and Subagents never wait for a child's own record.
+    let mut stopped = state.clone();
+    stopped.sessions.get_mut("session-1").unwrap().state = mj_core::state::SessionState::Stopped;
+    let snapshot = ViewerSnapshot::from_config_state(&config, &stopped, 1);
+    let wire = viewer_wire::row(snapshot.sessions.0.get("session-1").unwrap()).unwrap();
+    assert_eq!(wire.row["detail"], false);
+    assert_eq!(
+        wire.row["reviewer_session_ids"],
+        serde_json::json!(["reviewer"])
+    );
 }
 
 #[test]
@@ -2986,6 +3050,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,

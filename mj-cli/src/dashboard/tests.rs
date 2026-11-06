@@ -80,6 +80,7 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
             mj_core::config::HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 muse_auto_review: None,
@@ -754,6 +755,7 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
     let mut materialized = mj_core::state::MaterializedSession::empty(session_id);
     materialized.session_title = Some("r5 suspend probe".into());
     let update = crate::pollers::WorkerPollUpdate {
+        raw_observation: None,
         session_id: session_id.to_owned(),
         view: mj_controller::session_manager::ManagedSessionView {
             snapshot: Some(mj_core::state::ManagedSessionSnapshot {
@@ -805,6 +807,7 @@ fn missing_target_poll_preserves_the_daemon_notice() {
     let mut dashboard = populated_dashboard();
     dashboard.set_notice("The daemon found the target missing.");
     let update = crate::pollers::WorkerPollUpdate {
+        raw_observation: None,
         session_id: "missing-target".into(),
         view: mj_controller::session_manager::ManagedSessionView {
             snapshot: None,
@@ -1107,6 +1110,7 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
     let projection = crate::pollers::apply_worker_poll_update(
         &mut dashboard,
         crate::pollers::WorkerPollUpdate {
+            raw_observation: None,
             session_id: "session-1".into(),
             view: mj_controller::session_manager::ManagedSessionView {
                 snapshot: Some(snapshot),

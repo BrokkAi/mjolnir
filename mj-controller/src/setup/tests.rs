@@ -17,6 +17,7 @@ fn an_api_key_codex_profile_is_authenticated_by_its_configuration_file() {
             .into_iter()
             .collect(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,

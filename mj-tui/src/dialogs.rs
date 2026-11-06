@@ -1252,15 +1252,8 @@ impl DashboardState {
         self.mode = Mode::Rename(RenameEditor {
             session_id: session.id.clone(),
             session_name: crate::render::session_name(session).to_owned(),
-            title: TextInput::from_value(
-                session
-                    .session_title_override
-                    .as_ref()
-                    .or(session.acp_session_title.as_ref())
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-            .with_max_chars(64),
+            title: TextInput::from_value(session.given_name().unwrap_or_default().to_owned())
+                .with_max_chars(64),
             form: dialog_form(
                 &[
                     DialogControl::Field,

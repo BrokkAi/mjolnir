@@ -729,6 +729,7 @@ mod tests {
                     CandidateQuota::Subscription {
                         windows: Vec::new(),
                         paid_credits: None,
+                        refreshed_at_epoch_seconds: 0,
                     },
                 ),
             ],

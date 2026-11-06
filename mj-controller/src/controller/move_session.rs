@@ -2731,7 +2731,7 @@ pub(in crate::controller) fn move_children(
             };
             Some(mj_core::subagent::InPlaceSubagent {
                 child_session_id: relation.child_session_id.clone(),
-                task_name: relation.task_name.clone(),
+                name: child.message_name(),
                 state,
             })
         })
@@ -2745,7 +2745,7 @@ fn live_move_children(state: &mj_core::state::State, parent_session_id: &str) ->
         .map(|child| {
             format!(
                 "{} (child_session_id {})",
-                child.task_name, child.child_session_id
+                child.name, child.child_session_id
             )
         })
         .collect()

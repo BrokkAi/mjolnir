@@ -139,12 +139,24 @@ where
         let model = model.clone();
         async move {
             let result = async {
-                let mut choices = probe(id.clone(), None).await?;
+                // Both probes apply the profile's `models` list, so a hidden
+                // model is never offered or accepted for delegation. The
+                // model-specific probe runs only for a model the list allows.
+                let allowed = &config.profiles[&id].models;
+                let mut choices = probe(id.clone(), None).await?.restricted_to(allowed);
                 if let Some(model) = model
                     .as_ref()
                     .filter(|model| choices.models.iter().any(|choice| &choice.value == *model))
                 {
-                    choices = probe(id.clone(), Some(model.clone())).await?;
+                    // That probe switches to the requested model, so restrict
+                    // its list with the default as the kept model, as the
+                    // default probe did.
+                    let default = choices.model.clone();
+                    let mut specific = probe(id.clone(), Some(model.clone())).await?;
+                    let selected = std::mem::replace(&mut specific.model, default);
+                    specific = specific.restricted_to(allowed);
+                    specific.model = selected;
+                    choices = specific;
                 }
                 Ok::<_, anyhow::Error>(choices)
             }
@@ -673,6 +685,54 @@ mod tests {
     use mj_core::refusal::Refusal;
     use std::cell::{Cell, RefCell};
 
+    /// A profile's `models` list hides a model from delegation as well as
+    /// from pickers: session creation must not accept a sub-agent model that
+    /// later selection cannot find.
+    #[tokio::test]
+    async fn subagent_options_offer_only_models_the_profile_list_allows() {
+        let mut config = crate::server_runtime::profile_catalog::test_config(&[(
+            "gateway",
+            mj_core::config::HarnessKind::Codex,
+        )]);
+        config.profiles.get_mut("gateway").unwrap().models = vec!["allowed".into()];
+        let choice = |value: &str| mj_core::acp::SessionConfigChoice {
+            value: value.into(),
+            name: value.into(),
+            description: None,
+        };
+        let probe = |_id: String, model: Option<String>| {
+            let choices = ProfileConfig {
+                model: Some(model.unwrap_or_else(|| "default".into())),
+                models: vec![choice("default"), choice("allowed"), choice("hidden")],
+                efforts: vec![choice("high")],
+                observed_at: 0,
+            };
+            async move { Ok(choices) }
+        };
+        let values = |options: &mj_core::subagent::SubagentOptions| {
+            options
+                .models
+                .iter()
+                .map(|choice| choice.value.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let hidden = subagent_options_with(&config, "gateway", Some("hidden".into()), probe)
+            .await
+            .unwrap();
+        assert_eq!(values(&hidden), ["default", "allowed"]);
+        assert!(
+            hidden.efforts.is_empty(),
+            "a hidden model offers no efforts"
+        );
+
+        let allowed = subagent_options_with(&config, "gateway", Some("allowed".into()), probe)
+            .await
+            .unwrap();
+        assert_eq!(values(&allowed), ["default", "allowed"]);
+        assert_eq!(allowed.efforts.len(), 1);
+    }
+
     // Hard-won: #1284: discovery staged Muse credentials outside its XDG home.
     #[test]
     #[ignore = "requires MJ_MUSE_TEST_HOME with a Muse login and MJ_WORKER_BINARY pointing to the current mj-worker build; discovers models without a provider turn"]
@@ -701,6 +761,7 @@ mod tests {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            models: Default::default(),
             legacy_subagents: None,
         };
         let choices = probe_profile(
@@ -767,6 +828,7 @@ mod tests {
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                models: Default::default(),
                 legacy_subagents: None,
             };
             let choices = probe_profile(
@@ -818,6 +880,7 @@ mod tests {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            models: Default::default(),
             legacy_subagents: None,
         };
         let key = fingerprint(&profile);
@@ -930,6 +993,7 @@ mod tests {
             home: home.path().into(),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
@@ -975,6 +1039,7 @@ mod tests {
             home: home.path().into(),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
@@ -1003,6 +1068,7 @@ mod tests {
             home: root.path().into(),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
@@ -1328,6 +1394,7 @@ mod tests {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            models: Default::default(),
             legacy_subagents: None,
         };
         let mut config = Config::default();
@@ -1482,6 +1549,7 @@ mod tests {
                     guardian_review_model: None,
                     codex_profile: None,
                     muse_auto_review: None,
+                    models: Default::default(),
                     legacy_subagents: None,
                 },
             );

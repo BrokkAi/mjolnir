@@ -1951,6 +1951,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
@@ -2695,6 +2696,87 @@ async fn send_message_to_peer_queues_typed_event_with_the_calling_session_as_sen
     assert!(rendered.contains("Message from session \"parent\" (parent-1):"));
     assert!(rendered.contains("session_id parent-1"));
     assert!(rendered.contains("Please check the retry path."));
+}
+
+/// The sender of a peer message is named as the session list names it: a name
+/// a person typed first, then the harness's, then the title it was created
+/// with, which is cut to one bounded line.
+#[tokio::test]
+async fn send_message_names_the_sender_as_the_session_list_does() {
+    if !isolated_parked_test("send_message_names_the_sender_as_the_session_list_does") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut peer = parent_record("peer-1", "peer");
+    peer.no_github_events = true;
+    crate::database::save_session(&peer).unwrap();
+    let exports = ParkingExports::with_modern_worker(SessionState::Running, None, true);
+    let (backend, _) = message_backend_for_session(
+        "peer-1",
+        exports,
+        &[],
+        Arc::new(|| {}),
+        mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL,
+    );
+    let sender_name = |request_id: &'static str| {
+        let backend = backend.clone();
+        async move {
+            let request = mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: request_id.into(),
+                created_at_ms: mj_core::clock::epoch_millis(),
+                action: mj_core::subagent::SubagentToolAction::SendMessage {
+                    child_session_id: "peer-1".into(),
+                    message: "hello".into(),
+                },
+            };
+            let answer = backend
+                .execute_subagent_tool("parent-1".into(), request)
+                .await;
+            assert!(!answer.is_error, "{}", answer.message);
+            let key = format!("session-message-{request_id}");
+            let pending = crate::database::pending_mailbox_events(10).unwrap();
+            let row = pending
+                .iter()
+                .find(|row| {
+                    serde_json::from_str::<mj_core::mailbox::MailboxEvent>(&row.event_json)
+                        .is_ok_and(|event| event.key == key)
+                })
+                .expect("the message was queued");
+            let event: mj_core::mailbox::MailboxEvent =
+                serde_json::from_str(&row.event_json).unwrap();
+            let mj_core::mailbox::MailboxEventBody::SessionMessage {
+                from: mj_core::mailbox::Sender::Session { id, title },
+                ..
+            } = event.body
+            else {
+                panic!("a session message names its sender");
+            };
+            assert_eq!(id, "parent-1");
+            title
+        }
+    };
+
+    let mut parent = parent_record("parent-1", "parent");
+    parent.title = format!(
+        "Fix the parser\n\n{}",
+        "The prompt goes on for paragraphs. ".repeat(20)
+    );
+    crate::database::save_session(&parent).unwrap();
+    let created_with = sender_name("sender-created-with").await;
+    assert!(!created_with.contains('\n'), "{created_with:?}");
+    assert!(created_with.starts_with("Fix the parser The prompt goes on"));
+    assert!(created_with.ends_with('…'));
+    assert!(created_with.chars().count() <= mj_core::state::MESSAGE_NAME_CHARS);
+
+    parent.acp_session_title = Some("Harness name".into());
+    crate::database::save_session(&parent).unwrap();
+    assert_eq!(sender_name("sender-harness").await, "Harness name");
+
+    parent.session_title_override = Some("Typed name".into());
+    crate::database::save_session(&parent).unwrap();
+    assert_eq!(sender_name("sender-typed").await, "Typed name");
 }
 
 #[tokio::test]
@@ -4422,6 +4504,61 @@ async fn report_reconcile_fails_while_the_parent_queue_connects_and_a_retry_reco
     );
 }
 
+/// A person may rename a child after the parent spawned it. The parent's
+/// listing and the child's report show the name the session list shows, beside
+/// the task name and the id the parent acts on.
+#[tokio::test]
+async fn child_listings_and_reports_carry_the_childs_live_name() {
+    if !isolated_parked_test("child_listings_and_reports_carry_the_childs_live_name") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    record_finished_child("child-1", "task-1", "all done", 3, 9, 7);
+    let (backend, exports) = report_backend(active_parent_view("working"));
+    exports
+        .records
+        .lock()
+        .unwrap()
+        .get_mut("child-1")
+        .unwrap()
+        .session_title_override = Some("Renamed child".into());
+
+    let answer = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "observe".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::ListAgents,
+            },
+        )
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    let listing: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+    assert_eq!(listing["agents"][0]["name"], "Renamed child");
+    assert_eq!(listing["agents"][0]["task_name"], "audit deps");
+    assert_eq!(listing["agents"][0]["child_session_id"], "child-1");
+
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&pending[0].event_json).unwrap();
+    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = &event.body else {
+        panic!("wrong event: {event:?}")
+    };
+    assert_eq!(report.child_name.as_deref(), Some("Renamed child"));
+    assert_eq!(report.task_name, "audit deps");
+    let rendered = mj_core::mailbox::render_mailbox_event(&event);
+    assert!(
+        rendered.contains("child task Renamed child finished (child-1)."),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("audit deps"), "{rendered}");
+}
+
 #[tokio::test]
 async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_out() {
     if !isolated_parked_test(
@@ -4866,6 +5003,43 @@ async fn provider_failed_child_report_names_its_turn_profile_and_backoff() {
     assert!(
         mj_core::mailbox::render_mailbox_event(&event).contains(&format!("Failure: {expected}"))
     );
+}
+
+// Hard-won: 193e758af: refresh exempted the old default instead of the new one.
+#[tokio::test]
+async fn forced_refresh_uses_the_new_default_for_the_allowlist() {
+    for selected in [None, Some("allowed".to_owned())] {
+        let mut calls = Vec::new();
+        let (mut choices, default) = refreshed_profile_choices(selected.clone(), |model| {
+            calls.push(model.clone());
+            std::future::ready(Ok(mj_core::worker_launch::ProfileConfig {
+                model: model.or(Some("new-default".into())),
+                models: ["old-default", "new-default", "allowed"]
+                    .map(|value| mj_core::acp::SessionConfigChoice {
+                        value: value.into(),
+                        name: value.into(),
+                        description: None,
+                    })
+                    .to_vec(),
+                efforts: Vec::new(),
+                observed_at: 0,
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.first(), Some(&None));
+        assert_eq!(choices.model, selected.or(Some("new-default".into())));
+        choices.model = default;
+        let choices = choices.restricted_to(&["allowed".into()]);
+        assert_eq!(
+            choices
+                .models
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            ["new-default", "allowed"]
+        );
+    }
 }
 
 /// The daemon side of a primary and its oracles: it registers each requested

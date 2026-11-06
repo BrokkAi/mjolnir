@@ -251,6 +251,7 @@ pub(crate) fn config() -> Config {
                 HarnessProfile {
                     enabled: true,
                     context_window_bytes: None,
+                    models: Default::default(),
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
                     muse_auto_review: None,
@@ -265,6 +266,7 @@ pub(crate) fn config() -> Config {
                 HarnessProfile {
                     enabled: true,
                     context_window_bytes: None,
+                    models: Default::default(),
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
                     muse_auto_review: None,
@@ -279,6 +281,7 @@ pub(crate) fn config() -> Config {
                 HarnessProfile {
                     enabled: true,
                     context_window_bytes: None,
+                    models: Default::default(),
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
                     muse_auto_review: None,

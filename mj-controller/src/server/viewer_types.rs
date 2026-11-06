@@ -142,8 +142,12 @@ impl std::ops::IndexMut<usize> for ViewerSessions {
     }
 }
 
-pub(crate) type ViewerChildren =
-    mj_core::snapshot_map::SnapshotMap<String, mj_core::snapshot_map::SnapshotMap<String, ()>>;
+/// Each parent's direct children with their durable kind, so the projection
+/// can tell reviewers from workers without loading the child records.
+pub(crate) type ViewerChildren = mj_core::snapshot_map::SnapshotMap<
+    String,
+    mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentKind>,
+>;
 
 /// Carries the launch failure's reason so a client can show why a session
 /// never came up. The reason is the provisioning error chain, the same text
@@ -174,7 +178,7 @@ impl ViewerSnapshot {
             children
                 .entry(relation.parent_session_id.clone())
                 .or_insert_with(Default::default)
-                .insert(relation.child_session_id.clone(), ());
+                .insert(relation.child_session_id.clone(), relation.kind);
         }
         Self::from_config_records(config, state, revision, state.sessions.values(), &children)
     }
@@ -216,6 +220,16 @@ impl ViewerSnapshot {
                     .get(&session.id)
                     .map(|children| children.keys().cloned().collect())
                     .unwrap_or_default();
+                let reviewer_session_ids = children
+                    .get(&session.id)
+                    .map(|children| {
+                        children
+                            .iter()
+                            .filter(|(_, kind)| **kind == mj_core::subagent::SubagentKind::Reviewer)
+                            .map(|(id, _)| id.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let start = session.start_selection();
                 let review = config.review.for_session(session.review.as_ref());
                 ViewerSession {
@@ -242,10 +256,12 @@ impl ViewerSnapshot {
                     publication_state: session.publication_state(),
                     managed_checkout_kind: checkout.managed_worktree().map(|owned| owned.kind),
                     workspace_id: session.workspace_id.clone(),
-                    title: public_title(session),
+                    title: session.listed_title().to_owned(),
+                    given_title: session.given_name().map(str::to_owned),
                     subagent_parent_id: subagent.map(|child| child.parent_session_id.clone()),
                     subagent_task_name: subagent.map(|child| child.task_name.clone()),
                     subagent_session_ids,
+                    reviewer_session_ids,
                     harness_kind: session.harness_kind.id().into(),
                     profile_id: session.last_profile.clone(),
                     bundle_id: session.bundle_id.clone(),
@@ -256,6 +272,7 @@ impl ViewerSnapshot {
                         _ => session.state.as_str(),
                     }
                     .into(),
+                    active: session.state.is_active(),
                     created_at: session.created_at.clone(),
                     updated_at: session.updated_at.clone(),
                     has_error: session.last_error.is_some()
@@ -333,6 +350,7 @@ impl ViewerSnapshot {
                     capabilities: ViewerSessionCapabilities {
                         clear_context: false,
                         open: false,
+                        read_history: false,
                         prompt: false,
                         run_shell: false,
                         interrupt_turn: false,
@@ -542,20 +560,34 @@ pub struct ViewerSession {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub workspace_id: String,
     pub title: String,
+    /// The name a person or the harness gave the session, which a rename
+    /// prompt starts from. Absent while the listed `title` is only the title
+    /// the session was created with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub given_title: Option<String>,
     /// Parent ownership for a borrowed-target child session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_parent_id: Option<String>,
     /// The stable task label chosen by the parent when it spawned this child.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_task_name: Option<String>,
-    /// Direct children of this parent. Children are deliberately never nested.
+    /// Direct children of this parent, workers and reviewers alike. Children
+    /// are deliberately never nested.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subagent_session_ids: Vec<String>,
+    /// The children in `subagent_session_ids` that are reviewers. The rest are
+    /// workers, so a client lists each kind from this one field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewer_session_ids: Vec<String>,
     pub harness_kind: String,
     pub profile_id: String,
     pub bundle_id: String,
     pub target_id: String,
     pub state: String,
+    /// `SessionState::is_active`: the one definition of an open session, which
+    /// the terminal also uses for its reviewer count.
+    #[serde(default)]
+    pub active: bool,
     pub created_at: String,
     pub updated_at: String,
     pub has_error: bool,
@@ -1193,6 +1225,10 @@ pub struct ViewerSessionCapabilities {
     #[serde(default)]
     pub clear_context: bool,
     pub open: bool,
+    /// A stopped sub-agent whose stored conversation can be read but not
+    /// opened live. `open` still gates the live conversation and composer.
+    #[serde(default)]
+    pub read_history: bool,
     pub prompt: bool,
     pub run_shell: bool,
     /// Cancel the turn the agent is working on now, leaving the session alive.
@@ -1247,14 +1283,6 @@ pub enum ViewerLifecycleCategory {
 /// start is still connecting its worker. Its record says disconnected, which
 /// reads as a fault while it is only launching (F-12).
 pub const LAUNCHING_STATE: &str = "launching";
-
-/// The name a published session goes by. It is the display title, except
-/// that a session the harness has not named yet and nobody renamed would
-/// otherwise be named by its id, which every listing already prints beside
-/// it (F-12); the title it was created with says more.
-fn public_title(session: &mj_core::state::SessionRecord) -> String {
-    session.listed_title().to_owned()
-}
 
 impl ViewerLifecycleCategory {
     pub const fn of(state: SessionState) -> Self {

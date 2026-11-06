@@ -103,6 +103,8 @@ const bootStatus = document.querySelector('#boot-status'),
   promptSettings = document.querySelector('#prompt-settings'),
   subagentsButton = document.querySelector('#subagents-button'),
   subagentsDesktopButton = document.querySelector('#subagents-button-desktop'),
+  reviewersButton = document.querySelector('#reviewers-button'),
+  reviewersDesktopButton = document.querySelector('#reviewers-button-desktop'),
   promptText = document.querySelector('#prompt-text'),
   promptForm = document.querySelector('#prompt-form'),
   attachments = document.querySelector('#attachments'),
@@ -260,6 +262,8 @@ const ID = '[A-Za-z0-9_-]+';
 const ROUTE_PATTERNS = [
   [new RegExp(`^#subagents/(${ID})/(${ID})$`), ([parentId, sessionId]) => ({ name: 'conversation', sessionId, subagentParentId: parentId })],
   [new RegExp(`^#subagents/(${ID})$`), ([parentId]) => ({ name: 'dashboard', subagentParentId: parentId })],
+  [new RegExp(`^#reviewers/(${ID})/(${ID})$`), ([parentId, sessionId]) => ({ name: 'conversation', sessionId, subagentParentId: parentId, childKind: 'reviewer' })],
+  [new RegExp(`^#reviewers/(${ID})$`), ([parentId]) => ({ name: 'dashboard', subagentParentId: parentId, childKind: 'reviewer' })],
   [new RegExp(`^#workspace/(${ID})/new$`), ([id]) => ({ name: 'new', workspaceId: id })],
   [new RegExp(`^#workspace/(${ID})/resume/archive/(${ID})$`), ([workspaceId, wikiId]) => ({ name: 'resume', workspaceId, wikiId })],
   [new RegExp(`^#workspace/(${ID})/resume/(${ID})$`), ([workspaceId, sessionId]) => ({ name: 'resume', workspaceId, sessionId })],
@@ -290,11 +294,30 @@ function parseRoute(hash) {
   return { name: 'dashboard' };
 }
 
+/// The virtual workspace of one parent's children. A route carries the child
+/// kind with the parent, so a conversation opened from the Reviewers list
+/// returns to that list and never to the Subagents one.
+function childWorkspaceRoute(parentId, childKind) {
+  return childKind === 'reviewer'
+    ? { name: 'dashboard', subagentParentId: parentId, childKind }
+    : { name: 'dashboard', subagentParentId: parentId };
+}
+
+/// The parent's children of one kind. Reviewers are named by the parent's own
+/// projection and workers are the other children, so the two lists share no
+/// session and no list needs the child's record to be loaded.
+function childSessionIds(parent, childKind) {
+  const reviewers = new Set(parent?.reviewer_session_ids || []);
+  const wantReviewers = childKind === 'reviewer';
+  return (parent?.subagent_session_ids || []).filter(id => reviewers.has(id) === wantReviewers);
+}
+
 function routeHash(next) {
   if (next.subagentParentId) {
+    const prefix = next.childKind === 'reviewer' ? 'reviewers' : 'subagents';
     return next.name === 'conversation'
-      ? `#subagents/${next.subagentParentId}/${next.sessionId}`
-      : `#subagents/${next.subagentParentId}`;
+      ? `#${prefix}/${next.subagentParentId}/${next.sessionId}`
+      : `#${prefix}/${next.subagentParentId}`;
   }
   switch (next.name) {
     case 'new':
@@ -380,13 +403,13 @@ function applyRoute() {
       ? sessionById(route.subagentParentId)
       : null;
     if (!session
-      || (route.subagentParentId && !virtualParent?.subagent_session_ids?.includes(session.id))
+      || (route.subagentParentId && !childSessionIds(virtualParent, route.childKind).includes(session.id))
       || (session.detail !== false
         && !session.capabilities?.open
         && !isTransitioningSession(session)
         && !isLoadingConversationSession(session))) {
       navigate(route.subagentParentId
-        ? { name: 'dashboard', subagentParentId: route.subagentParentId }
+        ? childWorkspaceRoute(route.subagentParentId, route.childKind)
         : { name: 'dashboard', workspaceId: selectedWorkspaceId() });
       return;
     }
@@ -956,11 +979,13 @@ function renderWorkspaces() {
   subagentWorkspace.classList.toggle('hidden', !parentId);
   if (parentId) {
     const parent = sessionById(parentId);
+    const reviewers = route.childKind === 'reviewer';
     const close = el('button', 'virtual-workspace-close', '×');
     close.type = 'button';
-    close.setAttribute('aria-label', `Close ${parent?.title || 'session'} sub-agent workspace`);
+    close.setAttribute('aria-label', `Close ${parent?.title || 'session'} ${reviewers ? 'reviewers' : 'sub-agent'} workspace`);
     close.onclick = () => navigate({ name: 'conversation', sessionId: parentId });
-    subagentWorkspace.replaceChildren(el('span', '', parent?.title || parentId), close);
+    const title = parent?.title || parentId;
+    subagentWorkspace.replaceChildren(el('span', '', reviewers ? `Reviewers · ${title}` : title), close);
     return;
   }
   // Every snapshot re-renders the route. Rebuilding the options only when the
@@ -1092,7 +1117,7 @@ function isSubagentSession(session) {
 function liveSessions() {
   if (route.subagentParentId) {
     const parent = sessionById(route.subagentParentId);
-    return (parent?.subagent_session_ids || []).map(sessionById).filter(Boolean);
+    return childSessionIds(parent, route.childKind).map(sessionById).filter(Boolean);
   }
   return [...(viewerState.live.get(selectedWorkspaceId())?.values() || [])];
 }
@@ -1101,6 +1126,9 @@ function renderSessions() {
   const allSessions = liveSessions();
   const parent = sessionById(route.subagentParentId);
   const subagentView = Boolean(route.subagentParentId);
+  // Native sub-agents belong to the Subagents list; reviewers are always sessions.
+  const reviewerView = route.childKind === 'reviewer';
+  const noun = reviewerView ? 'reviewer' : 'sub-agent';
   const hiddenSessions = subagentView && !showIdleSubagents
     ? allSessions.filter(isIdleSubagentSession)
     : [];
@@ -1111,7 +1139,7 @@ function renderSessions() {
   let nativeGroups;
   if (route.subagentParentId && parent?.detail === false) {
     const group = el('section', 'project');
-    group.append(el('h2', '', 'Sub-agent history'));
+    group.append(el('h2', '', reviewerView ? 'Reviewer history' : 'Sub-agent history'));
     const failure = subagentDetailFailures.get(parent);
     if (failure) {
       const error = el('p', 'error', `Could not load session details: ${failure.message}`);
@@ -1140,9 +1168,9 @@ function renderSessions() {
     }
     nativeGroups = [group];
   } else {
-    nativeGroups = renderNativeSubagents(parent, showIdleSubagents);
+    nativeGroups = reviewerView ? [] : renderNativeSubagents(parent, showIdleSubagents);
   }
-  const hiddenNativeCount = subagentView && !showIdleSubagents
+  const hiddenNativeCount = subagentView && !reviewerView && !showIdleSubagents
     ? (parent?.native_subagents || []).filter(isIdleNativeSubagent).length
     : 0;
   const controls = [];
@@ -1157,7 +1185,7 @@ function renderSessions() {
     };
     control.append(toggle);
     if (hiddenSessions.length + hiddenNativeCount) {
-      control.append(el('span', 'dim', `${hiddenSessions.length + hiddenNativeCount} idle sub-agent${hiddenSessions.length + hiddenNativeCount === 1 ? '' : 's'} hidden`));
+      control.append(el('span', 'dim', `${hiddenSessions.length + hiddenNativeCount} idle ${noun}${hiddenSessions.length + hiddenNativeCount === 1 ? '' : 's'} hidden`));
     }
     controls.push(control);
   }
@@ -1167,8 +1195,8 @@ function renderSessions() {
       'dim',
       route.subagentParentId
         ? hiddenSessions.length + hiddenNativeCount
-          ? `All ${hiddenSessions.length + hiddenNativeCount} sub-agents are idle. Show idle to view them.`
-          : 'No sub-agents have been started for this session.'
+          ? `All ${hiddenSessions.length + hiddenNativeCount} ${noun}s are idle. Show idle to view them.`
+          : `No ${noun}s have been started for this session.`
         : 'No live sessions or operations in this workspace.',
     ));
     if (controls.length) sessions.prepend(...controls);
@@ -1357,16 +1385,20 @@ async function openNativeHistory(owner, agent) {
 
 document.querySelector('#earlier-messages').onclick = () => openConversationHistory(currentSession);
 
-function openConversationHistory(sessionId) {
+/// Page through a session's stored messages, newest page first. Opened for
+/// the current conversation it shows the pages before the feed and closes if
+/// the conversation changes; with `title` it reads a stopped sub-agent chosen
+/// from a list, which no conversation owns.
+function openConversationHistory(sessionId, { title = null } = {}) {
   if (!sessionId) return;
   const generation = conversationGeneration;
   const modal = el('dialog', 'native-agent-history');
-  modal.setAttribute('aria-label', 'Earlier messages');
+  modal.setAttribute('aria-label', title ? `Conversation: ${title}` : 'Earlier messages');
   const close = button('Close');
   const earlier = button('Load earlier page');
   const status = el('p'); status.setAttribute('role', 'status');
   const content = el('div');
-  modal.append(el('h2', '', 'Earlier messages'), close, earlier, status, content);
+  modal.append(el('h2', '', title || 'Earlier messages'), close, earlier, status, content);
   document.body.append(modal);
   const controller = new AbortController();
   let before = null;
@@ -1383,6 +1415,7 @@ function openConversationHistory(sessionId) {
   async function load() {
     if (loading) return;
     loading = true; earlier.disabled = true; status.textContent = 'Loading earlier messages…';
+    const firstPage = before === null;
     try {
       const query = new URLSearchParams();
       if (before) {
@@ -1393,7 +1426,7 @@ function openConversationHistory(sessionId) {
       const page = await request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/history${suffix}`, {
         signal: controller.signal,
       });
-      if (!modal.open || currentSession !== sessionId || conversationGeneration !== generation) {
+      if (!modal.open || (!title && (currentSession !== sessionId || conversationGeneration !== generation))) {
         if (modal.open) modal.close();
         return;
       }
@@ -1401,7 +1434,9 @@ function openConversationHistory(sessionId) {
       before = page.before;
       earlier.textContent = 'Load earlier page';
       earlier.hidden = !before;
-      status.textContent = before ? 'Showing an earlier page.' : 'Beginning of conversation.';
+      status.textContent = before
+        ? (title && firstPage ? 'Showing the latest messages.' : 'Showing an earlier page.')
+        : 'Beginning of conversation.';
       if (!page.items.length) status.textContent = 'No recorded messages.';
       modal.scrollTop = 0;
     } catch (error) {
@@ -1500,8 +1535,12 @@ function updateSessionCard(card, session) {
   card._session = session;
   const can = session.capabilities || {};
   const openable = can.open === true || isTransitioningSession(session);
+  // A stopped sub-agent has no live conversation to open; the controller says
+  // its stored one can be read.
+  const readable = !openable && can.read_history === true;
   card.dataset.openable = String(openable);
-  if (openable) {
+  card.dataset.readHistory = String(readable);
+  if (openable || readable) {
     card.setAttribute('role', 'link');
     card.setAttribute('tabindex', '0');
   } else {
@@ -1512,7 +1551,7 @@ function updateSessionCard(card, session) {
   const attentionText = attention.map(([, label]) => label.toLowerCase()).join(', ');
   card.setAttribute(
     'aria-label',
-    `${can.open === true ? 'Open session' : openable ? 'View session status' : 'Session'} ${session.title || session.id}${attentionText ? `; needs attention: ${attentionText}` : ''}`,
+    `${can.open === true ? 'Open session' : openable ? 'View session status' : readable ? 'Read conversation of' : 'Session'} ${session.title || session.id}${attentionText ? `; needs attention: ${attentionText}` : ''}`,
   );
   renderSessionTitle(card._heading, session);
   card._attention.replaceChildren(
@@ -1846,7 +1885,7 @@ function sessionCardFromEvent(event) {
   const target = event.target;
   if (!target || target.closest('button')) return null;
   const card = target.closest('.session[data-session-id]');
-  return card?.dataset.openable === 'true' ? card : null;
+  return card?.dataset.openable === 'true' || card?.dataset.readHistory === 'true' ? card : null;
 }
 
 function openSessionCard(event) {
@@ -1858,10 +1897,16 @@ function openSessionCard(event) {
     return false;
   }
   closeSessionMenu(false);
+  if (card.dataset.readHistory === 'true') {
+    const session = sessionById(card.dataset.sessionId);
+    openConversationHistory(card.dataset.sessionId, { title: session?.title || card.dataset.sessionId });
+    return true;
+  }
   navigate({
     name: 'conversation',
     sessionId: card.dataset.sessionId,
     subagentParentId: typeof route === 'undefined' ? undefined : route.subagentParentId,
+    childKind: typeof route === 'undefined' ? undefined : route.childKind,
   });
   return true;
 }
@@ -6356,9 +6401,8 @@ function renderQueue(session) {
 
 function syncConversationStatus() {
   if (typeof conversationStatus === 'undefined' || !conversationStatus) return;
-  const subagentsVisible = typeof subagentsButton !== 'undefined'
-    && subagentsButton
-    && !subagentsButton.classList.contains('hidden');
+  const childButtons = typeof subagentsButton === 'undefined' ? [] : [subagentsButton, reviewersButton];
+  const subagentsVisible = childButtons.some(button => button && !button.classList.contains('hidden'));
   const detailsVisible = typeof conversationSide !== 'undefined'
     && conversationSide
     && !conversationSide.hidden;
@@ -8288,7 +8332,7 @@ async function openConversation(id) {
   if (!session) return;
   if (!session.capabilities?.open && !isTransitioningSession(session)) {
     navigate(route.subagentParentId
-      ? { name: 'dashboard', subagentParentId: route.subagentParentId }
+      ? childWorkspaceRoute(route.subagentParentId, route.childKind)
       : { name: 'dashboard', workspaceId: selectedWorkspaceId() });
     return;
   }
@@ -8617,7 +8661,7 @@ function renderConversationHeader(session) {
   renderSessionTitle(document.querySelector('#conversation-title'), session);
   renderPromptSettings(session);
   renderModelSelect(session);
-  const children = session?.subagent_session_ids || [];
+  const children = childSessionIds(session, 'worker');
   const native = session?.native_subagents || [];
   const working = children.filter(id => sessionById(id)?.chat_phase === 'running').length
     + new Set(native.filter(a => a.state === 'running').map(a => a.stable_id || a.session_id)).size;
@@ -8629,6 +8673,19 @@ function renderConversationHeader(session) {
     button.classList.toggle(
       'hidden',
       total === 0 || Boolean(route.subagentParentId),
+    );
+  }
+  // Reviewers stay reachable once any exist, so a finished review's
+  // conversations can still be read; the count is the ones still open.
+  const reviewers = childSessionIds(session, 'reviewer');
+  const reviewersOpen = reviewers.filter(id => sessionById(id)?.active === true).length;
+  for (const button of [reviewersButton, reviewersDesktopButton]) {
+    if (!button) continue;
+    button.textContent = `Reviewers · ${reviewersOpen}`;
+    button.title = `${reviewers.length} reviewer${reviewers.length === 1 ? '' : 's'}`;
+    button.classList.toggle(
+      'hidden',
+      reviewers.length === 0 || Boolean(route.subagentParentId),
     );
   }
   syncConversationStatus();
@@ -8659,13 +8716,18 @@ function renderConversationHeader(session) {
   }
 }
 
-function openSubagentWorkspace() {
+function openChildWorkspace(childKind) {
   const session = activeSession();
-  if (!session?.subagent_session_ids?.length && !session?.native_subagents?.length) return;
-  navigate({ name: 'dashboard', subagentParentId: session.id });
+  const any = childKind === 'reviewer'
+    ? childSessionIds(session, 'reviewer').length
+    : childSessionIds(session, 'worker').length || session?.native_subagents?.length;
+  if (!any) return;
+  navigate(childWorkspaceRoute(session.id, childKind));
 }
-subagentsButton.onclick = openSubagentWorkspace;
-if (subagentsDesktopButton) subagentsDesktopButton.onclick = openSubagentWorkspace;
+subagentsButton.onclick = () => openChildWorkspace('worker');
+if (subagentsDesktopButton) subagentsDesktopButton.onclick = () => openChildWorkspace('worker');
+reviewersButton.onclick = () => openChildWorkspace('reviewer');
+if (reviewersDesktopButton) reviewersDesktopButton.onclick = () => openChildWorkspace('reviewer');
 
 /// Drop everything the conversation view was holding.
 ///
@@ -8890,7 +8952,7 @@ backButton.onclick = () => {
     return;
   }
   if (route.subagentParentId) {
-    navigate({ name: 'dashboard', subagentParentId: route.subagentParentId });
+    navigate(childWorkspaceRoute(route.subagentParentId, route.childKind));
     return;
   }
   navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
@@ -9078,7 +9140,7 @@ async function runSessionAction(dataset, errorNode, extra) {
   const body = { action: dataset.action, session_id: dataset.id, ...extra };
   if (dataset.action === 'rename') {
     const session = sessionById(dataset.id);
-    const title = prompt('New session name', session?.title || '');
+    const title = prompt('New session name', session?.given_title || '');
     if (title === null || !title.trim()) return;
     body.title = title.trim();
   }
