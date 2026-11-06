@@ -141,6 +141,7 @@ impl HostState {
                         .map(|_| (child_session_id, question_id));
                 let _ = reply.send(target);
             }
+            HostEvent::CloseChild { child_session_id } => self.close_child(child_session_id),
             HostEvent::ReviewerFinished {
                 session_id,
                 child_session_id,

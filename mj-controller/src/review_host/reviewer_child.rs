@@ -2,6 +2,36 @@ use super::*;
 
 const HANDBACK_INSTRUCTION: &str = "\n\nReturn your plain-text findings, or exactly `No findings.` when there are none, as the complete text of a single handback call. Do not edit files or push. After calling handback, stop.";
 
+/// First retry delay after a reviewer child close fails.
+const CLOSE_RETRY_BASE: std::time::Duration = std::time::Duration::from_secs(1);
+/// A close that keeps failing is retried this rarely. Every attempt can queue a
+/// worker restart behind the target's other lifecycle work (#1456), so a dead
+/// child must not be resubmitted every few seconds.
+const CLOSE_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// What the closer has learned about one child's close: how many attempts in a
+/// row failed and the last failure it reported.
+#[derive(Default)]
+pub(super) struct CloseAttempts {
+    failures: u32,
+    last_failure: Option<String>,
+}
+
+impl CloseAttempts {
+    /// Records one failed attempt. Returns the wait before the next attempt and
+    /// whether the failure is news (the first one, or a different cause), so a
+    /// persistent failure is warned about once rather than at every retry.
+    fn failed(&mut self, failure: String) -> (std::time::Duration, bool) {
+        self.failures = self.failures.saturating_add(1);
+        let report = self.last_failure.as_ref() != Some(&failure);
+        self.last_failure = Some(failure);
+        (
+            crate::recovery::backoff_delay(CLOSE_RETRY_BASE, CLOSE_RETRY_CAP, self.failures),
+            report,
+        )
+    }
+}
+
 impl HostState {
     pub(super) fn register_reviewer_child(
         &mut self,
@@ -193,17 +223,23 @@ impl HostState {
         {
             return;
         }
-        self.spawn_child_close(child, std::time::Duration::ZERO);
+        self.spawn_child_close(child, std::time::Duration::ZERO, CloseAttempts::default());
     }
 
-    fn spawn_child_close(&mut self, child: String, delay: std::time::Duration) {
+    fn spawn_child_close(
+        &mut self,
+        child: String,
+        delay: std::time::Duration,
+        attempts: CloseAttempts,
+    ) {
         let environment = self.environment.clone();
         let closing = child.clone();
         let task = self.child_closures.spawn(async move {
             tokio::time::sleep(delay).await;
             environment.close_child(&closing).await
         });
-        self.child_closure_owners.insert(task.id(), (child, delay));
+        self.child_closure_owners
+            .insert(task.id(), (child, attempts));
     }
 
     pub(super) fn child_closed(
@@ -214,21 +250,29 @@ impl HostState {
             Ok((id, _)) => *id,
             Err(error) => error.id(),
         };
-        let (child, delay) = self
+        let (child, mut attempts) = self
             .child_closure_owners
             .remove(&id)
             .expect("a supervised child close has an owner");
         let failure = match result {
-            Ok((_, Ok(()))) => return,
+            Ok((_, Ok(()))) => {
+                if attempts.failures > 0 {
+                    tracing::info!(%child, failed_attempts = attempts.failures, "reviewer child closed after earlier failures");
+                }
+                return;
+            }
             Ok((_, Err(error))) => error,
             Err(error) => format!("reviewer cleanup task stopped: {error}"),
         };
-        let delay = (delay * 2)
-            .max(std::time::Duration::from_secs(1))
-            .min(std::time::Duration::from_secs(30));
-        tracing::warn!(%child, error = %failure, retry_in_seconds = delay.as_secs(),
-            "could not close reviewer child; its borrowed target remains owned and cleanup will retry");
-        self.spawn_child_close(child, delay);
+        let (delay, report) = attempts.failed(failure.clone());
+        if report {
+            tracing::warn!(%child, error = %failure, retry_in_seconds = delay.as_secs(),
+                "could not close reviewer child; its borrowed target remains owned and cleanup will keep retrying with backoff");
+        } else {
+            tracing::debug!(%child, error = %failure, retry_in_seconds = delay.as_secs(),
+                "reviewer child close failed again");
+        }
+        self.spawn_child_close(child, delay, attempts);
     }
 
     pub(super) fn role_failed(
