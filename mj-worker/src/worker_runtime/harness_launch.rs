@@ -402,15 +402,15 @@ pub(super) fn primary_supervisor_spec(
 pub(super) fn prepare_review_gate(
     launch: &mj_core::worker_launch::WorkerLaunchConfig,
 ) -> Result<Vec<String>> {
-    if launch.review_trigger != mj_core::config::ReviewTrigger::Push
-        || launch.is_managed_subagent()
-        || launch.handback_tool
-        || launch.reviewer_launch.is_some()
-    {
+    if launch.is_managed_subagent() || launch.handback_tool || launch.reviewer_launch.is_some() {
         return Ok(Vec::new());
     }
+    let push_review = launch.review_trigger == mj_core::config::ReviewTrigger::Push;
+    let gate = launch.review_gate();
     let mut notices = Vec::new();
-    if launch.review_gate() {
+    // A manual review can run even when review is off, so every primary
+    // records where its work starts before the harness can commit.
+    if launch.harness.supports_delegation_tools() {
         let git = crate::review::capture::BoundedGit::new(
             crate::review::capture::WORKSPACE_STATE_TIMEOUT,
         );
@@ -423,6 +423,9 @@ pub(super) fn prepare_review_gate(
                 &repository,
                 &launch.session_id,
             )?;
+            if !gate {
+                continue;
+            }
             use crate::review::hook::{HookInstall, install_pre_push_hook};
             let reason = match install_pre_push_hook(&git, &repository) {
                 Ok(HookInstall::Installed | HookInstall::Rewritten) => None,
@@ -442,7 +445,8 @@ pub(super) fn prepare_review_gate(
                 ));
             }
         }
-    } else {
+    }
+    if push_review && !gate {
         notices.push(format!(
             "Before-push review is not available for {}; this session runs without review.",
             launch.harness.display_name()

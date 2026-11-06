@@ -7937,6 +7937,30 @@ fn push_gate_startup_and_environment_follow_harness_and_primary_ownership() {
     }
 }
 
+// Hard-won: f92186373: a manual review with review off had no session start
+// and reported its first commits as already reviewed.
+#[test]
+fn a_primary_without_push_review_still_records_where_its_work_starts() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = git_repository(&temp);
+    let mut launch = launch_config("/test/profile");
+    launch.cwd = repository.clone();
+    launch.harness = HarnessKind::Codex;
+    launch.review_trigger = mj_core::config::ReviewTrigger::Off;
+    let notices = super::harness_launch::prepare_review_gate(&launch).unwrap();
+    assert!(notices.is_empty());
+    assert!(!repository.join(".git/hooks/pre-push").exists());
+    assert!(
+        crate::review::capture::session_start_head(
+            &mj_checkpoint::archive::SystemGit,
+            &repository,
+            &launch.session_id
+        )
+        .unwrap()
+        .is_some()
+    );
+}
+
 #[test]
 fn push_gate_startup_reports_a_refused_hook_install_once() {
     let temp = tempfile::tempdir().unwrap();

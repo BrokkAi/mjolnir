@@ -1682,11 +1682,7 @@ async fn prepare_and_start_harness(
         .await?;
     }
 
-    if config.review_trigger == mj_core::config::ReviewTrigger::Push
-        && !config.is_managed_subagent()
-        && !config.handback_tool
-        && config.reviewer_launch.is_none()
-    {
+    if !config.is_managed_subagent() && !config.handback_tool && config.reviewer_launch.is_none() {
         let budget = preparation_step(
             root,
             status,
