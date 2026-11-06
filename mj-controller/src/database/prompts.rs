@@ -250,6 +250,10 @@ fn fulltext_phrase(query: &str) -> Option<String> {
         .then(|| format!("\"{}\"", query.replace('"', "\"\"")))
 }
 
+/// Rows read per query at least, so a run of repeated prompts past a full
+/// page takes a few queries rather than one per row.
+const MIN_PAGE_ROWS: usize = 16;
+
 /// The one prompt search behind the terminal composer and the web viewer.
 ///
 /// Tiers are read in order from the cursor, and the search stops as soon as
@@ -286,18 +290,26 @@ pub(super) fn search_prompt_page_from(
             i64::MAX
         };
         loop {
-            let wanted = limit.saturating_sub(entries.len());
-            // One row past what is still needed shows whether more exist.
+            // Read one row past what is still needed: a further match that
+            // repeats no listed text is what shows that more exist.
+            let count = limit
+                .saturating_sub(entries.len())
+                .saturating_add(1)
+                .max(MIN_PAGE_ROWS);
             let rows = tier.page(
                 &connection,
                 &phrase,
                 session_id,
                 &canonical_bundle,
                 before,
-                wanted.saturating_add(1),
+                count,
             )?;
-            let exhausted = rows.len() <= wanted;
+            let exhausted = rows.len() < count;
             for entry in rows {
+                if seen.contains(&entry.text) {
+                    before = entry.id;
+                    continue;
+                }
                 if entries.len() == limit {
                     return Ok(PromptHistoryPage {
                         entries,
@@ -308,9 +320,8 @@ pub(super) fn search_prompt_page_from(
                     });
                 }
                 before = entry.id;
-                if seen.insert(entry.text.clone()) {
-                    entries.push(entry);
-                }
+                seen.insert(entry.text.clone());
+                entries.push(entry);
             }
             if exhausted {
                 break;

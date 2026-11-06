@@ -63,6 +63,9 @@ impl ActiveChat {
             self.apply_session_view(view);
         }
         self.publish_conversation_notices();
+        // Applying a history page can queue the next one; every wakeup ends
+        // here, so a refill never waits for a key press.
+        dispatch_history_search_request(self.session.clone(), &mut self.state);
     }
 
     pub(super) fn publish_conversation_notices(&mut self) {
@@ -182,7 +185,6 @@ impl ActiveChat {
         if let PrefixRebuild::Needed { attempt } = apply_chat_io_update(&mut self.state, update) {
             self.rebuild_transcript_prefix(attempt);
         }
-        dispatch_history_search_request(self.session.clone(), &mut self.state);
         dispatch_diffstat_requests(
             &mut self.state,
             &self.chat_io_tx,

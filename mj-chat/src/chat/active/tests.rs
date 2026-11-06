@@ -3395,6 +3395,14 @@ async fn late_prompt_refusal_from_a_parked_worker_view_reaches_the_live_composer
     assert!(standby.pending_submissions.is_empty());
 }
 
+/// One history page request a test answers: where it resumes, how many
+/// matches it wants, and where the page goes.
+type HistoryPageCall = (
+    Option<mj_core::storage::HistoryCursor>,
+    usize,
+    tokio::sync::oneshot::Sender<anyhow::Result<mj_core::storage::PromptHistoryPage>>,
+);
+
 #[derive(Clone)]
 struct DelayedNativeSession {
     delegate: mj_client::session::SessionHandle,
@@ -3402,6 +3410,8 @@ struct DelayedNativeSession {
         mj_core::relay::RelayCommand,
         tokio::sync::oneshot::Sender<anyhow::Result<u64>>,
     )>,
+    /// When set, history searches go to the test instead of the delegate.
+    history: Option<tokio::sync::mpsc::UnboundedSender<HistoryPageCall>>,
 }
 impl mj_client::session::SessionHandleBackend for DelayedNativeSession {
     fn clone_box(&self) -> Box<dyn mj_client::session::SessionHandleBackend> {
@@ -3434,6 +3444,15 @@ impl mj_client::session::SessionHandleBackend for DelayedNativeSession {
         limit: usize,
     ) -> mj_client::session::BoxFuture<'_, anyhow::Result<mj_core::storage::PromptHistoryPage>>
     {
+        if let Some(history) = &self.history {
+            let (reply, page) = tokio::sync::oneshot::channel();
+            let sent = history.send((after, limit, reply));
+            return Box::pin(async move {
+                sent.map_err(|_| anyhow::anyhow!("test history closed"))?;
+                page.await
+                    .map_err(|_| anyhow::anyhow!("test history reply dropped"))?
+            });
+        }
         Box::pin(
             self.delegate
                 .search_prompts(bundle, scope, query, after, limit),
@@ -3524,8 +3543,11 @@ async fn native_acknowledgements_survive_dropping_the_view_that_submitted_them()
                 .await
                 .unwrap();
             let (replies, mut observed) = tokio::sync::mpsc::unbounded_channel();
-            let session =
-                mj_client::session::SessionHandle::new(DelayedNativeSession { delegate, replies });
+            let session = mj_client::session::SessionHandle::new(DelayedNativeSession {
+                delegate,
+                replies,
+                history: None,
+            });
             let mut source = ActiveChat::open(
                 session,
                 "bundle",
@@ -3737,4 +3759,92 @@ async fn deferred_move_prompts_keep_their_original_operation_through_attach_and_
     unresolved.settle_deferred_move_origin(5, Some("cancelled-original"), false);
     assert!(unresolved.drain_composer().is_none());
     assert_eq!(unresolved.draft(), "do not rebind this deferred prompt");
+}
+
+// Hard-won: a58ad7eb8: a refill queued while a page was applied waited for the next key press
+#[tokio::test]
+async fn a_history_page_of_repeats_fetches_the_next_page_without_a_key_press() {
+    use mj_core::storage::{HistoryCursor, PromptHistoryEntry, PromptHistoryPage};
+    let fixture = mj_client::session::replacement_session_test_fixture("history-refill", 1);
+    fixture
+        .replacement_view
+        .send_replace(managed_view(MaterializedSession::empty("history-refill")));
+    let delegate = fixture.control.session("history-refill").await.unwrap();
+    let (replies, _observed) = tokio::sync::mpsc::unbounded_channel();
+    let (history, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let session = mj_client::session::SessionHandle::new(DelayedNativeSession {
+        delegate,
+        replies,
+        history: Some(history),
+    });
+    let mut chat = ActiveChat::open(
+        session,
+        "bundle-1",
+        None,
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+    let page = |texts: &[String], next| PromptHistoryPage {
+        entries: texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| PromptHistoryEntry {
+                id: index as i64,
+                session_id: "history-refill".into(),
+                text: text.clone(),
+            })
+            .collect(),
+        next,
+    };
+    async fn next_request(
+        requests: &mut tokio::sync::mpsc::UnboundedReceiver<HistoryPageCall>,
+    ) -> HistoryPageCall {
+        tokio::time::timeout(Duration::from_secs(2), requests.recv())
+            .await
+            .expect("a history page was requested")
+            .unwrap()
+    }
+    async fn apply_reply(chat: &mut ActiveChat) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !chat.state.has_composer_updates() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the history page arrived");
+        chat.drain().await;
+    }
+
+    chat.handle_event_result(Event::Key(ctrl('r')));
+    for character in "fix".chars() {
+        chat.handle_event_result(Event::Key(key(KeyCode::Char(character))));
+    }
+    let first_cursor = HistoryCursor {
+        tier: 0,
+        before: 50,
+    };
+    let (after, limit, reply) = next_request(&mut requests).await;
+    assert_eq!((after, limit), (None, 9));
+    let first: Vec<String> = (0..9).map(|index| format!("fix {index}")).collect();
+    reply.send(Ok(page(&first, Some(first_cursor)))).unwrap();
+    apply_reply(&mut chat).await;
+    assert_eq!(chat.state.input, "fix 0");
+
+    // Stepping leaves seven queued, so the key press asks for one more.
+    chat.handle_event_result(Event::Key(ctrl('r')));
+    let (after, limit, reply) = next_request(&mut requests).await;
+    assert_eq!((after, limit), (Some(first_cursor), 1));
+    let later = HistoryCursor {
+        tier: 1,
+        before: 20,
+    };
+    // The page repeats a listed prompt, so the queue is still short.
+    reply
+        .send(Ok(page(&["fix 3".into()], Some(later))))
+        .unwrap();
+    apply_reply(&mut chat).await;
+    let (after, limit, _reply) = next_request(&mut requests).await;
+    assert_eq!((after, limit), (Some(later), 1));
 }

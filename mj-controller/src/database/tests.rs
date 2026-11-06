@@ -39,6 +39,7 @@ fn a_bounded_prompt_search_reports_that_it_stopped_early() {
     // many, and will present a partial answer as a whole one.
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(&database, &[("session-1", "bundle-1")]);
     for index in 0..50 {
         record_prompt_to(
             &database,
@@ -82,6 +83,34 @@ fn a_bounded_prompt_search_reports_that_it_stopped_early() {
         all.next.is_none(),
         "a complete answer reported itself partial"
     );
+
+    // Ten distinct prompts, each sent twice: the older copies add no match.
+    for round in 0..2 {
+        for index in 0..10 {
+            record_prompt_to(
+                &database,
+                "session-1",
+                "bundle-1",
+                100 + round * 10 + index,
+                Some("2026-01-01T00:00:00Z"),
+                &format!("repeat {index}"),
+            )
+            .unwrap();
+        }
+    }
+    // Hard-won: a58ad7eb8: a full page followed only by repeats claimed more matches existed
+    let repeats = search_prompt_page_from(
+        &database,
+        "session-1",
+        "bundle-1",
+        HistoryScope::Session,
+        "repeat",
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(repeats.entries.len(), 10);
+    assert!(repeats.next.is_none(), "repeated text is not another match");
 }
 
 /// The eviction the daemon performs depends on the typed cause reaching the
@@ -464,6 +493,14 @@ fn database_writer_reports_a_fatal_job_panic_without_hanging_shutdown() {
 
 fn event_digest(value: u64) -> String {
     format!("{value:064x}")
+}
+
+/// Prompt history keeps only sessions that exist, so a test that records
+/// prompts saves its sessions first.
+fn live_sessions(database: &Path, sessions: &[(&str, &str)]) {
+    for (id, bundle) in sessions {
+        save_session_to(database, &session(id, bundle)).unwrap();
+    }
 }
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
@@ -3339,6 +3376,14 @@ fn context_rejects_reassigning_a_session_to_another_project() {
 fn history_search_scopes_by_project_session_and_all_projects() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(
+        &database,
+        &[
+            ("session-1", "project-1"),
+            ("session-2", "project-1"),
+            ("session-3", "project-2"),
+        ],
+    );
     for (session, bundle, sequence, text) in [
         ("session-1", "project-1", 1, "fix parser"),
         ("session-2", "project-1", 1, "fix renderer"),
@@ -3395,6 +3440,14 @@ fn history_search_scopes_by_project_session_and_all_projects() {
 fn wider_history_scopes_list_smaller_scopes_first_and_dedupe_at_the_smallest() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(
+        &database,
+        &[
+            ("session-1", "project-1"),
+            ("session-2", "project-1"),
+            ("session-3", "project-2"),
+        ],
+    );
     // Oldest to newest. Date order alone would put "alpha elsewhere" and
     // "alpha project" ahead of this session's older prompt.
     for (ordinal, (session, bundle, text)) in [
@@ -3484,6 +3537,10 @@ fn wider_history_scopes_list_smaller_scopes_first_and_dedupe_at_the_smallest() {
 fn abandoned_prompts_are_searchable_in_session_and_project_history() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(
+        &database,
+        &[("session-1", "project-1"), ("session-2", "project-1")],
+    );
     record_abandoned_prompt_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
     record_prompt_to(
         &database,
@@ -3547,6 +3604,10 @@ fn abandoned_prompts_are_searchable_in_session_and_project_history() {
 fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(
+        &database,
+        &[("session-1", "project-1"), ("session-2", "project-1")],
+    );
     record_prompt_to(
         &database,
         "session-1",
@@ -3602,6 +3663,7 @@ fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe
 fn rebinding_a_session_moves_its_prompt_history_to_the_new_bundle() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(&database, &[("session-1", "project-1")]);
     record_prompt_to(
         &database,
         "session-1",
@@ -3667,6 +3729,7 @@ fn rebinding_a_session_moves_its_prompt_history_to_the_new_bundle() {
 fn prompt_recording_is_idempotent_by_session_event_ordinal() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(&database, &[("session-1", "project-1")]);
     for _ in 0..2 {
         record_prompt_to(
             &database,

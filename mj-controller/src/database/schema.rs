@@ -2009,8 +2009,11 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     // that still exist, and adds a full-text index over it. The migration
     // deletes the spawn instructions recorded for sub-agent children and the
     // prompts of destroyed sessions. Triggers then keep both rules for every
-    // writer: a child's prompt is never stored, registering a child removes
-    // what was stored for it, and destroying a session removes its prompts.
+    // writer: a prompt is stored only while its session exists and is not a
+    // child, registering a child removes what was stored for it, and
+    // destroying a session removes its prompts. Writers are serialized, so a
+    // prompt racing a destroy lands either before it, and is removed, or
+    // after it, and is ignored.
     // Older readers ignore the index. Older writers' inserts, deletes and
     // destroys fire the same triggers, so the table and the index follow their
     // writes; every shipped build links a bundled SQLite compiled with FTS5, so
@@ -2027,7 +2030,8 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
                     OR session_id NOT IN (SELECT session_id FROM sessions);
              CREATE TRIGGER IF NOT EXISTS prompt_history_top_level_only
                  BEFORE INSERT ON prompt_history
-                 WHEN EXISTS (SELECT 1 FROM subagent_sessions
+                 WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = new.session_id)
+                   OR EXISTS (SELECT 1 FROM subagent_sessions
                               WHERE child_session_id = new.session_id)
                  BEGIN SELECT RAISE(IGNORE); END;
              CREATE TRIGGER IF NOT EXISTS prompt_history_child_registered
@@ -4076,6 +4080,15 @@ mod reader_tests {
             .unwrap();
         assert_eq!(matching("\"parser\""), ["parser follow-up"]);
         assert_eq!(stored(), 2);
+        // Hard-won: a58ad7eb8: a stale chat's abandoned prompt was stored after its session was destroyed
+        connection
+            .execute_batch(&format!(
+                "{}{}",
+                prompt("other", 2, "parser prompt after destroy"),
+                prompt("destroyed", 2, "parser prompt with only a context"),
+            ))
+            .unwrap();
+        assert_eq!(stored(), 2, "a destroyed session's prompt is not stored");
         connection
             .execute(
                 "INSERT INTO prompt_history_text(prompt_history_text) VALUES ('integrity-check')",
