@@ -935,9 +935,21 @@ impl HarnessKind {
     /// Whether this harness receives Mjolnir's delegation tools: a parent's
     /// `spawn` and related tools, and a child's `handback`. Such a harness
     /// gets the subagent choice in the wizards. Claude reads the tools from
-    /// its staged profile; Codex and DSH take them over ACP, and DSH reads
-    /// the delegation policy from its staged `AGENTS.md`.
+    /// its staged profile; Codex, DSH and OpenCode take them over ACP, and
+    /// DSH and OpenCode read the delegation policy from their staged
+    /// `AGENTS.md`.
     pub const fn supports_delegation_tools(self) -> bool {
+        matches!(
+            self,
+            Self::Claude | Self::Codex | Self::Dsh | Self::OpenCode
+        )
+    }
+
+    /// Whether a primary session on this harness can be held to push review:
+    /// the `--review-gate` flag on its `mj-agents` server, the push hook and
+    /// `MJ_REVIEW_GATE`. Separate from `supports_delegation_tools`, which
+    /// OpenCode satisfies without having the gate.
+    pub const fn supports_review_gate(self) -> bool {
         matches!(self, Self::Claude | Self::Codex | Self::Dsh)
     }
 

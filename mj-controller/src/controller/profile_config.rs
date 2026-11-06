@@ -72,7 +72,7 @@ pub async fn validate_session_subagent_policy(
         .kind;
     if !kind.supports_delegation_tools() && !policy.is_native() {
         return Err(refuse(format!(
-            "{} sessions use their harness's own delegation; Mjolnir sub-agents and the None choice need a Claude, Codex, or DSH profile",
+            "{} sessions use their harness's own delegation; Mjolnir sub-agents and the None choice need a Claude, Codex, DSH, or OpenCode profile",
             kind.display_name()
         )));
     }
@@ -1501,6 +1501,7 @@ mod tests {
         for kind in [
             mj_core::config::HarnessKind::Codex,
             mj_core::config::HarnessKind::Dsh,
+            mj_core::config::HarnessKind::OpenCode,
             mj_core::config::HarnessKind::Grok,
         ] {
             let mut config = Config::default();
@@ -1537,7 +1538,11 @@ mod tests {
                 assert!(refusal.message().contains("[subagents.straightforward]"));
                 assert!(refusal.message().contains("--subagent-straightforward"));
             } else {
-                assert!(refusal.message().contains("Claude, Codex, or DSH"));
+                assert!(
+                    refusal
+                        .message()
+                        .contains("Claude, Codex, DSH, or OpenCode")
+                );
             }
             // Native keeps a harness's own sub-agents; DSH has none, so an
             // explicit Native is refused with the two choices it offers.

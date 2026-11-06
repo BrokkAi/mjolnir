@@ -517,8 +517,10 @@ command-line tool must match the version Mjolnir links.
 
 ## Sub-agents `[subagents]`
 
-A Claude, Codex, or DSH session can use Mjolnir's `spawn` tool. Create and Move offer
-Native or Mjolnir. Native uses the harness's own delegation. DSH has none, so
+A Claude, Codex, DSH, or OpenCode session can use Mjolnir's `spawn` tool. Create and Move offer
+Native or Mjolnir. Native uses the harness's own delegation. OpenCode gets the tools
+as `mj-agents_spawn` and so on, learns of finished children at the end of its turn (it has
+no steering), and loses its own `subagent` tool unless the choice is Native. DSH has none, so
 for a DSH profile they offer Mjolnir or None, starting on Mjolnir only when the
 last choice was Mjolnir and it is configured; a DSH session's None does not
 change the remembered choice that Claude and Codex sessions start from. Mjolnir needs a
@@ -571,7 +573,7 @@ optional effort must be offered by an enabled profile. Each effort flag requires
 its matching model flag; `adaptive` and combining an override with `native` or
 `none` are rejected. Omitted effort uses the harness default. The retired
 `--subagent-model` and `--subagent-effort` flags fail with guidance to use the
-four per-type flags. `none` (CLI only) gives a Claude, Codex, or DSH session no
+four per-type flags. `none` (CLI only) gives a Claude, Codex, DSH, or OpenCode session no
 delegation tools.
 
 `mj new` and `mj move` take `--oracle enabled|disabled` and `--subagent-oracle M`

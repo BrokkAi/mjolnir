@@ -535,32 +535,44 @@ fn gh_script(script: &str) -> bool {
 }
 
 /// Calls to Mjolnir's own MCP servers, for a harness that cannot be told to
-/// trust them. Under configured approvals DSH asks before every MCP tool call
-/// and has no per-server rule, so the worker allows calls to the servers this
-/// launch registered itself, as Claude's allowed tools and Codex's server
-/// approval mode do for those harnesses. Every other request still reaches a
-/// person.
+/// trust them. Under configured approvals DSH and OpenCode ask before every
+/// MCP tool call (OpenCode when its configuration says `ask`) and have no
+/// per-server rule, so the worker allows calls to the servers this launch
+/// registered itself, as Claude's allowed tools and Codex's server approval
+/// mode do for those harnesses. Every other request still reaches a person.
 #[derive(Debug, Clone, Default)]
 pub(super) struct OwnedMcpApprovals {
     /// The start of the permission title of each owned server's tool calls.
     title_prefixes: Vec<String>,
+    /// Whether the harness marks an MCP call's kind `other`. OpenCode titles a
+    /// shell command or file edit with its text, so only the kind tells such
+    /// a request from an MCP call.
+    requires_other_kind: bool,
 }
 
 impl OwnedMcpApprovals {
     pub(super) fn for_launch(spec: &LaunchSpec) -> Self {
-        if spec.harness != HarnessKind::Dsh
-            || spec.execution_policy != ExecutionPolicy::ConfiguredApprovals
-        {
+        if spec.execution_policy != ExecutionPolicy::ConfiguredApprovals {
             return Self::default();
         }
-        // dsh-acp names an MCP tool `mcp__<server>__<tool>` and titles its
-        // call with that name, underscores shown as spaces, then any `path`
-        // argument.
+        let (title_prefix, requires_other_kind): (fn(&str) -> String, bool) = match spec.harness {
+            // dsh-acp names an MCP tool `mcp__<server>__<tool>` and titles
+            // its call with that name, underscores shown as spaces, then any
+            // `path` argument.
+            HarnessKind::Dsh => (|server| format!("mcp__{server}__").replace('_', " "), false),
+            // OpenCode 2.2.1, with its `execute` code tool denied, offers an
+            // MCP tool as `<server>_<tool>` and titles its call with that name.
+            HarnessKind::OpenCode => (|server| format!("{server}_"), true),
+            _ => return Self::default(),
+        };
         let title_prefixes = owned_acp_mcp_server_names(spec)
-            .into_iter()
-            .map(|server| format!("mcp__{server}__").replace('_', " "))
+            .iter()
+            .map(|server| title_prefix(server))
             .collect();
-        Self { title_prefixes }
+        Self {
+            title_prefixes,
+            requires_other_kind,
+        }
     }
 
     /// The allowing answer when `request` is a call to an owned server.
@@ -569,10 +581,16 @@ impl OwnedMcpApprovals {
         request: &RequestPermissionRequest,
     ) -> Option<RequestPermissionResponse> {
         let title = request.tool_call.fields.title.as_deref()?;
+        if self.requires_other_kind
+            && request.tool_call.fields.kind
+                != Some(agent_client_protocol::v1::schema::ToolKind::Other)
+        {
+            return None;
+        }
         let owned = self.title_prefixes.iter().any(|prefix| {
             // No owned tool name starts with an underscore, so a space here
-            // means a longer server name, such as `mj-agents_`, that merely
-            // begins with an owned one.
+            // means a longer DSH server name, such as `mj-agents_`, that
+            // merely begins with an owned one.
             title
                 .strip_prefix(prefix.as_str())
                 .is_some_and(|tool| !tool.is_empty() && !tool.starts_with(' '))

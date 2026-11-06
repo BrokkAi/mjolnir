@@ -2431,7 +2431,7 @@ function selectNewProfile(draft, profileId) {
 // Mirrors HarnessKind::supports_delegation_tools.
 function subagentChoiceApplies(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind === 'claude' || kind === 'codex' || kind === 'dsh';
+  return kind === 'claude' || kind === 'codex' || kind === 'dsh' || kind === 'open-code';
 }
 
 // Every top-level session's message-only server carries ask_oracle, whatever its harness.

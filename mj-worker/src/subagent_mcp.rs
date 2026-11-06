@@ -1,4 +1,4 @@
-//! Mjolnir-owned delegation tools for Claude, Codex, and DSH sessions.
+//! Mjolnir-owned delegation tools for Claude, Codex, DSH, and OpenCode sessions.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
