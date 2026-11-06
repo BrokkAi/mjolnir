@@ -436,9 +436,12 @@ impl ApiBackend {
                     }
                     // The wake was accepted and the child is starting under
                     // its durable boot intent; slow readiness is not a failed
-                    // delivery. Wait for it within the delivery deadline.
+                    // delivery. Wait for it within the delivery deadline. A
+                    // reattach can fail at once, so pause before asking again
+                    // rather than restarting the worker in a tight loop.
                     Err(error) if error.downcast_ref::<super::WakeNotReady>().is_some() => {
                         tracing::debug!(child, %error, "accepted child wake is not ready yet; retaining queued input");
+                        tokio::time::sleep(INPUT_POLL).await;
                     }
                     result => {
                         result?;
