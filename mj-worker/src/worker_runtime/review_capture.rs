@@ -115,11 +115,7 @@ impl ReviewCapture {
                             origin,
                             &session_id,
                         )?,
-                        None => crate::review::capture::ensure_session_start_head(
-                            git,
-                            root,
-                            &session_id,
-                        )?,
+                        None => crate::review::capture::review_start_head(git, root, &session_id)?,
                     }
                     .ok_or_else(|| anyhow::anyhow!("the repository has no HEAD commit"))?;
                     let capture =

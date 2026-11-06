@@ -402,15 +402,15 @@ pub(super) fn primary_supervisor_spec(
 pub(super) fn prepare_review_gate(
     launch: &mj_core::worker_launch::WorkerLaunchConfig,
 ) -> Result<Vec<String>> {
-    if launch.is_managed_subagent() || launch.handback_tool || launch.reviewer_launch.is_some() {
+    if launch.review_trigger != mj_core::config::ReviewTrigger::Push
+        || launch.is_managed_subagent()
+        || launch.handback_tool
+        || launch.reviewer_launch.is_some()
+    {
         return Ok(Vec::new());
     }
-    let push_review = launch.review_trigger == mj_core::config::ReviewTrigger::Push;
-    let gate = launch.review_gate();
     let mut notices = Vec::new();
-    // A manual review can run in any primary, even with review off, so every
-    // primary records where its work starts before the harness can commit.
-    {
+    if launch.review_gate() {
         let git = crate::review::capture::BoundedGit::new(
             crate::review::capture::WORKSPACE_STATE_TIMEOUT,
         );
@@ -418,23 +418,11 @@ pub(super) fn prepare_review_gate(
         let mut roots = vec![launch.cwd.clone()];
         roots.extend(super::reviewer_workspace_directories(launch));
         for repository in crate::review::capture::discover_repositories(&git, &roots) {
-            let start = crate::review::capture::ensure_session_start_head(
+            crate::review::capture::ensure_session_start_head(
                 &git,
                 &repository,
                 &launch.session_id,
-            );
-            if !gate {
-                // Without the gate the start only serves a later manual review,
-                // so an unwritable checkout must not stop the session.
-                if let Err(error) = start {
-                    notices.push(format!(
-                        "Could not record where this session's work starts in {}: {error:#}. A manual review there may treat earlier commits as reviewed.",
-                        repository.display()
-                    ));
-                }
-                continue;
-            }
-            start?;
+            )?;
             use crate::review::hook::{HookInstall, install_pre_push_hook};
             let reason = match install_pre_push_hook(&git, &repository) {
                 Ok(HookInstall::Installed | HookInstall::Rewritten) => None,
@@ -454,8 +442,7 @@ pub(super) fn prepare_review_gate(
                 ));
             }
         }
-    }
-    if push_review && !gate {
+    } else {
         notices.push(format!(
             "Before-push review is not available for {}; this session runs without review.",
             launch.harness.display_name()

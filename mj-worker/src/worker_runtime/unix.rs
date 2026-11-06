@@ -1700,7 +1700,11 @@ async fn prepare_and_start_harness(
         .await?;
     }
 
-    if !config.is_managed_subagent() && !config.handback_tool && config.reviewer_launch.is_none() {
+    if config.review_trigger == mj_core::config::ReviewTrigger::Push
+        && !config.is_managed_subagent()
+        && !config.handback_tool
+        && config.reviewer_launch.is_none()
+    {
         let budget = preparation_step(
             root,
             status,
@@ -1711,7 +1715,7 @@ async fn prepare_and_start_harness(
         .await?;
         let launch = config.clone();
         let journal = relay.clone();
-        let prepared = bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
+        bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
             if step_cancel.is_cancelled() {
                 bail!("review gate preparation cancelled");
             }
@@ -1722,22 +1726,7 @@ async fn prepare_and_start_harness(
             }
             Ok(())
         })
-        .await;
-        // Without the gate this step only serves a later manual review, so a
-        // slow or failed Git operation must not stop the session.
-        if let Err(error) = prepared {
-            if config.review_gate() || cancel.is_cancelled() {
-                return Err(error);
-            }
-            relay
-                .lock()
-                .expect("relay state lock poisoned")
-                .record_observation(RelayObservation::Warning {
-                    message: format!(
-                        "Could not record where this session's work starts: {error:#}. A manual review may treat earlier commits as reviewed."
-                    ),
-                })?;
-        }
+        .await?;
     }
 
     let harness_budget = preparation_step(

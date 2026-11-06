@@ -695,6 +695,36 @@ pub fn linked_worktree_start(
     ))
 }
 
+/// Where a review's coverage starts. A recorded session start wins. Without
+/// one, the merge base with the default branch bounds the session's work when
+/// HEAD has moved past it. Otherwise nothing tells the session's commits from
+/// older history: the current HEAD is recorded as the start so later commits
+/// can be reviewed, and this review is refused instead of reporting the
+/// session's earlier commits as reviewed.
+pub fn review_start_head(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    session: &str,
+) -> Result<Option<String>> {
+    if let Some(start) = session_start_head(runner, root, session)? {
+        return Ok(Some(start));
+    }
+    let Some(head) = resolve_head(runner, root)? else {
+        return Ok(None);
+    };
+    if let Some(branch) = default_branch(runner, root)?
+        && let Some(base) = merge_base(runner, root, &head, &branch)?
+        && base != head
+    {
+        return Ok(Some(base));
+    }
+    ensure_session_start_head(runner, root, session)?;
+    anyhow::bail!(
+        "No starting point was recorded for this session's work in {}, so its commits cannot be told apart from earlier history. Mjolnir now records the current commit as the start; a later review covers the commits made after it.",
+        root.display()
+    )
+}
+
 /// Preserves a recorded start, or starts coverage at the current HEAD when
 /// an older session or a restored checkout has no start ref.
 pub fn ensure_session_start_head(
@@ -1430,6 +1460,40 @@ pub(super) mod push_tests {
         let files: Vec<_> = captured.delta.files.iter().map(|file| &file.path).collect();
         assert_eq!(files, ["vendored"], "{}", captured.delta.patch);
         assert!(captured.delta.patch.contains("Subproject commit"));
+    }
+
+    // Hard-won: f92186373: a first manual review with no recorded start
+    // pinned the current HEAD and reported the session's commits as reviewed.
+    #[test]
+    fn a_review_without_a_recorded_start_never_reports_earlier_commits_as_reviewed() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let main = git(&root, &["rev-parse", "HEAD"]);
+        commit(&root, "on main");
+        git(&root, &["push", "-q", "origin", "main"]);
+        let error = review_start_head(&SystemGit, &root, "unpinned").unwrap_err();
+        assert!(
+            error.to_string().contains("No starting point was recorded"),
+            "{error:#}"
+        );
+        let head = git(&root, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            session_start_head(&SystemGit, &root, "unpinned").unwrap(),
+            Some(head),
+            "later reviews start at the commit recorded now"
+        );
+
+        git(&root, &["checkout", "-qb", "feature", &main]);
+        commit(&root, "on a branch");
+        assert_eq!(
+            review_start_head(&SystemGit, &root, "branch").unwrap(),
+            Some(main),
+            "a branch is bounded by its merge base with the default branch"
+        );
+        assert_eq!(
+            session_start_head(&SystemGit, &root, "branch").unwrap(),
+            None
+        );
     }
 
     #[test]
