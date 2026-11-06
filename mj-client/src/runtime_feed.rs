@@ -106,9 +106,12 @@ impl RuntimeProjection {
             operations.contains(id)
                 || (!record.archived && (live || in_family || ancestors.contains(id)))
         });
-        result
-            .subagents
-            .retain(|id, _| self.records.get(id).is_some_and(|record| !record.archived));
+        // A lifecycle can retain an archived row. Keep its relationship too,
+        // so clients still recognize it as a child throughout cleanup.
+        result.subagents.retain(|id, _| {
+            result.records.contains_key(id)
+                || self.records.get(id).is_some_and(|record| !record.archived)
+        });
         result
             .sessions
             .retain(|id, _| result.records.contains_key(id));
