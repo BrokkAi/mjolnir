@@ -851,10 +851,9 @@ pub(super) async fn leave_plan_for_policy(
 /// refuses the policy mode keeps its own mode with a warning, as at startup:
 /// the session stays usable instead of ending.
 ///
-/// The cached mode is trusted only when the configuration answer just read
-/// reports it on a config option. A bridge with only the legacy mode list
-/// answers a model change without its mode, so the policy is requested
-/// outright, unless Plan, which only a Plan control selects, is on.
+/// A model change can move the bridge's mode, and its answer need not say
+/// so (a legacy mode list, or an empty catalogue the worker keeps its own
+/// copy over), so the policy is requested outright unless Plan is on.
 pub(super) async fn reconcile_execution_policy(
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
@@ -864,20 +863,7 @@ pub(super) async fn reconcile_execution_policy(
     modes: &mut Option<SessionModeState>,
     events: &mpsc::Sender<RuntimeEvent>,
 ) -> Result<()> {
-    let answered = enforcement
-        .and_then(|policy| {
-            policy.acp_mode().map(|desired| {
-                mj_core::acp::execution_mode_option(
-                    config_options,
-                    policy.acp_mode_selector(),
-                    desired,
-                )
-            })
-        })
-        .flatten()
-        .is_some();
-    let in_plan = current_session_mode(config_options, modes).as_deref() == Some("plan");
-    let sync = if answered || in_plan {
+    let sync = if current_session_mode(config_options, modes).as_deref() == Some("plan") {
         PolicySync::IfDrifted
     } else {
         PolicySync::Always
