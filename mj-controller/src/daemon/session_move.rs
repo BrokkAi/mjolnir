@@ -225,29 +225,31 @@ impl RuntimeState {
         let state = self.clone();
         tokio::spawn(async move {
             let channel = result.clone();
+            // The error, and what the Move record says to do next when it has one.
             let failure = match Self::wait_lifecycle_result(result).await {
                 Ok(DaemonLifecycleResult::Move(outcome)) if outcome.outcome == "completed" => None,
                 Ok(DaemonLifecycleResult::Move(outcome)) => {
                     tracing::warn!(%session_id, %operation_id, outcome = %outcome.outcome,
                         error = ?outcome.error, "quota profile Move did not complete");
-                    Some(
+                    Some((
                         outcome
                             .error
                             .unwrap_or_else(|| format!("Move {}", outcome.outcome)),
-                    )
+                        outcome.recovery,
+                    ))
                 }
                 Ok(_) => {
                     tracing::error!(%session_id, %operation_id,
                         "quota profile Move returned an unrelated lifecycle result");
-                    Some("Move returned an unrelated lifecycle result".into())
+                    Some(("Move returned an unrelated lifecycle result".into(), None))
                 }
                 Err(error) => {
                     tracing::warn!(%session_id, %operation_id, error = %format!("{error:#}"),
                     "quota profile Move failed");
-                    Some(format!("{error:#}"))
+                    Some((format!("{error:#}"), None))
                 }
             };
-            if let Some(error) = failure {
+            if let Some((error, recovery)) = failure {
                 let current_profile = state
                     .owner()
                     .controller()
@@ -256,8 +258,11 @@ impl RuntimeState {
                     .get(&session_id)
                     .map(|session| session.last_profile.clone())
                     .unwrap_or(source_profile);
+                // A Move that stopped the source leaves no worker to retry the
+                // quota stop; the recovery text is how the user gets it back.
+                let next = recovery.map(|text| format!(" {text}")).unwrap_or_default();
                 state.push_notice(&session_id, format!(
-                    "The automatic switch to profile {destination_profile} after the quota stop failed: {error}. The session is on profile {current_profile}."
+                    "The automatic switch to profile {destination_profile} after the quota stop failed: {error}. The session is on profile {current_profile}.{next}"
                 ));
             }
             state.remove_completed_lifecycle(&channel);

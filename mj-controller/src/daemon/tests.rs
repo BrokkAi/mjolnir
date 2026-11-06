@@ -2521,7 +2521,7 @@ fn create_cancellation_and_commit_have_one_winner() {
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                control.request_cancel()
+                control.request_cancel("test cancellation")
             })
         };
         barrier.wait();
@@ -2530,9 +2530,23 @@ fn create_cancellation_and_commit_have_one_winner() {
         assert_ne!(committed, cancelled);
         assert_eq!(control.cancelled.load(Ordering::Acquire), cancelled);
         assert!(!control.is_cancellable());
-        assert!(!control.request_cancel());
+        assert!(!control.request_cancel("test cancellation"));
         assert!(!control.grant_commit());
     }
+}
+
+#[test]
+fn lifecycle_cancel_cause_is_recorded_only_for_accepted_cancel() {
+    let control = LifecycleControl::default();
+    assert!(control.request_cancel("person cancellation"));
+    assert_eq!(control.cancel_cause(), Some("person cancellation"));
+    assert!(!control.request_cancel("shutdown"));
+    assert_eq!(control.cancel_cause(), Some("person cancellation"));
+
+    let committed = LifecycleControl::default();
+    assert!(committed.grant_commit());
+    assert!(!committed.request_cancel("late cancellation"));
+    assert_eq!(committed.cancel_cause(), None);
 }
 
 /// A child launch that an explicit daemon stop cancelled reported only
@@ -2570,7 +2584,7 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
 
     let control = LifecycleControl::default();
     let mut cancelled = operation(LifecycleKind::Create, control.clone());
-    assert!(cancelled.request_cancel());
+    assert!(cancelled.request_cancel("test-session", "person cancellation"));
     assert!(!cancelled.interrupt_for_shutdown());
     assert!(control.cancelled.load(Ordering::Acquire));
     assert!(!control.stopped_for_shutdown());
@@ -8812,7 +8826,7 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
         .lifecycle
         .get_mut("moving")
         .unwrap()
-        .request_cancel();
+        .request_cancel("moving", "test cancellation");
     assert!(state.owner().worker_is_owned("moving"));
     state.owner().lifecycle.get_mut("moving").unwrap().phase =
         LifecyclePhase::Completed(Ok(DaemonLifecycleResult::Done));
@@ -10641,7 +10655,7 @@ async fn startup_delivery_reservation_wait_does_not_prevent_move_cancellation() 
         state.active_lifecycles()[0].move_operation_id.as_deref(),
         Some("pre-reservation-origin")
     );
-    assert!(control.request_cancel());
+    assert!(control.request_cancel("test cancellation"));
     tokio::time::timeout(
         Duration::from_secs(2),
         RuntimeState::wait_lifecycle_result(watch),
@@ -11033,7 +11047,7 @@ async fn startup_without_move_origin_ignores_historical_failed_move_after_resume
         "old durable failure overrode the matching current Move owner"
     );
     assert_eq!(session_draft_input(&state), "");
-    assert!(control.request_cancel());
+    assert!(control.request_cancel("test cancellation"));
     release.notify_one();
     assert!(RuntimeState::wait_lifecycle_result(watch).await.is_err());
     assert_eq!(session_draft_input(&state), "matching active retry");
