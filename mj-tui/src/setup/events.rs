@@ -200,6 +200,9 @@ impl DashboardState {
             && let Some(choices) = review.pending_autoconfigure_choices()
         {
             config.review.reviewers = choices.to_vec();
+            // A legacy review serializes without its reviewer list, so the
+            // newly selected models would not be warmed.
+            config.review.clear_legacy();
         }
         // A selected model's efforts are discovered only once it is selected,
         // so a draft choosing another model is warmed like a new profile.

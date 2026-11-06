@@ -106,9 +106,13 @@ pub trait SubagentBackend: Send + Sync {
     fn reviewer_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
         Box::pin(async { anyhow::bail!("reviewer profiles are unavailable") })
     }
+    /// Waits for a profile not in `tried` to report that it offers `model`,
+    /// then returns the ready candidates that were not tried. It fails when
+    /// no further profile does.
     fn reviewer_candidates_for_model(
         &self,
         _model: String,
+        _tried: Vec<String>,
     ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
         self.reviewer_candidates()
     }

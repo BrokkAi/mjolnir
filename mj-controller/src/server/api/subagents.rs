@@ -211,15 +211,49 @@ pub(crate) async fn resolve_reviewer_model_profile_selection(
         {
             return Ok(selected);
         }
-        resolve_model_profile_selection_matching(
-            backend,
-            None,
-            model,
-            requirement,
-            None,
-            ModelProfileCandidateSource::Reviewers,
-        )
-        .await
+        // A profile that offers the model but cannot serve this slot does not
+        // end the search: later-discovered profiles may.
+        let mut tried = Vec::new();
+        let mut last_error = None;
+        loop {
+            let candidates = match backend
+                .reviewer_candidates_for_model(model.to_owned(), tried.clone())
+                .await
+            {
+                Ok(candidates) => candidates,
+                Err(error) => return Err(last_error.unwrap_or_else(|| error.into())),
+            };
+            let before = tried.len();
+            for id in candidates
+                .offered
+                .iter()
+                .map(|candidate| &candidate.profile_id)
+                .chain(candidates.unavailable.iter().map(|(id, _)| id))
+            {
+                if !tried.contains(id) {
+                    tried.push(id.clone());
+                }
+            }
+            if tried.len() == before {
+                return Err(last_error.unwrap_or_else(|| {
+                    ApiFailure::unavailable(format!("no reviewer profile offers model {model:?}"))
+                }));
+            }
+            match resolve_model_profile_selection_from(
+                backend,
+                candidates,
+                None,
+                model,
+                requirement,
+                None,
+                ModelProfileCandidateSource::Reviewers,
+            )
+            .await
+            {
+                Ok(selected) => return Ok(selected),
+                Err(error) => last_error = Some(error),
+            }
+        }
     })
     .await
     .map_err(|_| {
@@ -270,7 +304,7 @@ async fn resolve_model_profile_selection_matching(
         ModelProfileCandidateSource::Session { .. } => backend.session_profile_candidates().await?,
         ModelProfileCandidateSource::Reviewers => {
             backend
-                .reviewer_candidates_for_model(model.to_owned())
+                .reviewer_candidates_for_model(model.to_owned(), Vec::new())
                 .await?
         }
         ModelProfileCandidateSource::ReviewersReady => {
@@ -282,6 +316,27 @@ async fn resolve_model_profile_selection_matching(
                 .await?
         }
     };
+    resolve_model_profile_selection_from(
+        backend,
+        candidates,
+        profile_id,
+        model,
+        requirement,
+        inherited_effort,
+        source,
+    )
+    .await
+}
+
+async fn resolve_model_profile_selection_from(
+    backend: &Arc<dyn SubagentBackend>,
+    candidates: SubagentCandidates,
+    profile_id: Option<&str>,
+    model: &str,
+    requirement: EffortRequirement<'_>,
+    inherited_effort: Option<&str>,
+    source: ModelProfileCandidateSource<'_>,
+) -> Result<SubagentSelection, ApiFailure> {
     if matches!(requirement, EffortRequirement::Any) {
         let chosen = choose_model_profile(candidates, profile_id, model, source)?;
         let efforts = model_efforts(backend, &chosen, model).await?;
@@ -1022,6 +1077,7 @@ mod tests {
             .collect::<Vec<_>>();
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
+            staged: None,
             discovery_fails: false,
             config: Default::default(),
             candidates: SubagentCandidates {
@@ -1269,6 +1325,9 @@ mod tests {
     /// nothing and the parent's real model is never consulted).
     struct FakeSelectionBackend {
         ready_first: bool,
+        /// Profiles that become ready one by one, each after the given
+        /// seconds, for the cold-start fallback; none is ready before that.
+        staged: Option<Vec<(u64, SubagentCandidates)>>,
         discovery_fails: bool,
         config: mj_core::config::SubagentConfig,
         candidates: SubagentCandidates,
@@ -1333,10 +1392,38 @@ mod tests {
             let candidates = self.candidates.clone();
             Box::pin(async move { Ok(candidates) })
         }
+        fn reviewer_candidates_for_model(
+            &self,
+            _model: String,
+            tried: Vec<String>,
+        ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+            let Some(stages) = self.staged.clone() else {
+                return self.reviewer_candidates();
+            };
+            Box::pin(async move {
+                let mut elapsed = 0;
+                for (at, candidates) in stages {
+                    tokio::time::sleep(std::time::Duration::from_secs(at.saturating_sub(elapsed)))
+                        .await;
+                    elapsed = at;
+                    if candidates
+                        .offered
+                        .iter()
+                        .any(|candidate| !tried.contains(&candidate.profile_id))
+                    {
+                        return Ok(candidates);
+                    }
+                }
+                anyhow::bail!("no further profile offers the model")
+            })
+        }
         fn reviewer_ready_candidates(
             &self,
             _model: String,
         ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+            if self.staged.is_some() {
+                return Box::pin(async { Ok(SubagentCandidates::default()) });
+            }
             let candidates = self.candidates.clone();
             Box::pin(async move { Ok(candidates) })
         }
@@ -1476,6 +1563,7 @@ mod tests {
         };
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
+            staged: None,
             discovery_fails: true,
             config: SubagentConfig {
                 straightforward: Some(choice.clone()),
@@ -1517,6 +1605,7 @@ mod tests {
     async fn reviewer_uses_ready_profile_without_waiting_for_pending_discovery() {
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: true,
+            staged: None,
             discovery_fails: false,
             config: Default::default(),
             candidates: SubagentCandidates {
@@ -1538,6 +1627,7 @@ mod tests {
     async fn legacy_pinned_reviewer_keeps_its_profile_when_another_offers_the_model() {
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
+            staged: None,
             discovery_fails: false,
             config: Default::default(),
             candidates: SubagentCandidates {
@@ -1569,6 +1659,7 @@ mod tests {
         }];
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
+            staged: None,
             discovery_fails: false,
             config: Default::default(),
             candidates: SubagentCandidates {
@@ -1600,6 +1691,7 @@ mod tests {
         }];
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
+            staged: None,
             discovery_fails: false,
             config: Default::default(),
             candidates: SubagentCandidates {
@@ -1636,6 +1728,7 @@ mod tests {
         }];
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
+            staged: None,
             discovery_fails: false,
             config: Default::default(),
             candidates: SubagentCandidates {
@@ -1668,6 +1761,7 @@ mod tests {
     async fn reviewer_later_probe_completion_starts_grace_after_probe_finishes() {
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
+            staged: None,
             discovery_fails: false,
             config: Default::default(),
             candidates: SubagentCandidates {
@@ -1700,6 +1794,7 @@ mod tests {
     async fn reviewer_default_effort_skips_stalled_model_effort_probe() {
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
+            staged: None,
             discovery_fails: false,
             config: Default::default(),
             candidates: SubagentCandidates {
@@ -1723,9 +1818,60 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn reviewer_cold_start_keeps_waiting_past_a_profile_that_cannot_serve_the_slot() {
+        // Only the model-specific probe of "fixed" offers high; this profile
+        // reports no effort for the model, so it cannot serve a high slot.
+        let first = candidate("full-but-wrong-effort", Some(90), &["fixed"]);
+        let second = candidate("second", Some(50), &["fixed"]);
+        let staged = |ids: &[&SubagentCandidate]| SubagentCandidates {
+            offered: ids.iter().map(|candidate| (*candidate).clone()).collect(),
+            unavailable: Vec::new(),
+        };
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
+            staged: Some(vec![
+                (1, staged(&[&first])),
+                (8, staged(&[&first, &second])),
+            ]),
+            discovery_fails: false,
+            config: Default::default(),
+            candidates: staged(&[&first, &second]),
+        });
+        let start = tokio::time::Instant::now();
+        let selected = resolve_reviewer_model_profile_selection(&backend, "fixed", Some("high"))
+            .await
+            .unwrap();
+        assert_eq!(selected.profile_id, "second");
+        let waited = tokio::time::Instant::now().duration_since(start);
+        assert!(waited >= std::time::Duration::from_secs(8), "{waited:?}");
+        assert!(waited < std::time::Duration::from_secs(20), "{waited:?}");
+
+        // When no later profile can serve it, the deadline still ends the wait.
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
+            staged: Some(vec![
+                (1, staged(&[&first])),
+                (30, staged(&[&first, &second])),
+            ]),
+            discovery_fails: false,
+            config: Default::default(),
+            candidates: staged(&[&first, &second]),
+        });
+        let start = tokio::time::Instant::now();
+        let error = resolve_reviewer_model_profile_selection(&backend, "fixed", Some("high"))
+            .await
+            .unwrap_err();
+        assert!(
+            tokio::time::Instant::now().duration_since(start) <= std::time::Duration::from_secs(20)
+        );
+        assert!(error.message.contains("timed out"), "{}", error.message);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn reviewer_stalled_probes_share_one_deadline() {
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
+            staged: None,
             discovery_fails: false,
             config: Default::default(),
             candidates: SubagentCandidates {
@@ -1756,6 +1902,7 @@ mod tests {
     async fn reviewer_selection_shares_spawn_effort_health_and_draw_rules() {
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
+            staged: None,
             discovery_fails: false,
             config: Default::default(),
             candidates: SubagentCandidates {
@@ -1822,6 +1969,7 @@ mod tests {
         };
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
+            staged: None,
             discovery_fails: false,
             config: config.clone(),
             candidates: candidates.clone(),
@@ -1871,6 +2019,7 @@ mod tests {
             }
             Arc::new(FakeSelectionBackend {
                 ready_first: false,
+                staged: None,
                 discovery_fails: false,
                 config: config.clone(),
                 candidates,
@@ -1906,6 +2055,7 @@ mod tests {
         );
         let unconfigured: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
+            staged: None,
             discovery_fails: false,
             config: Default::default(),
             candidates,
@@ -1952,6 +2102,7 @@ mod tests {
         // type the parent can use.
         let straightforward_only: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
+            staged: None,
             discovery_fails: false,
             config: SubagentConfig {
                 straightforward: Some(SubagentChoice {

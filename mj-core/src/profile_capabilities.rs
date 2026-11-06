@@ -74,6 +74,38 @@ impl ProfileCapabilitiesSnapshot {
         completed.then_some(options)
     }
 
+    /// Why `model`'s efforts are not fully known: a profile that has not
+    /// finished discovery (it may offer the model), or one that offers the
+    /// model whose effort discovery is pending or failed. A profile whose own
+    /// discovery failed is not listed: nothing shows that it offers the model.
+    pub fn effort_blockers(&self, config: &Config, model: &str) -> Vec<String> {
+        let mut blockers = Vec::new();
+        for (id, profile) in config.enabled_profiles() {
+            let Some(entry) = self.profiles.get(&profile.capabilities_key(id)) else {
+                blockers.push(format!("{id}: discovery pending"));
+                continue;
+            };
+            match &entry.choices {
+                CapabilityState::Pending => blockers.push(format!("{id}: discovery pending")),
+                CapabilityState::Failed(_) => {}
+                CapabilityState::Ready(choices) => {
+                    if choices.models.iter().any(|choice| choice.value == model) {
+                        match entry.efforts.get(model) {
+                            None | Some(CapabilityState::Pending) => {
+                                blockers.push(format!("{id}: effort discovery pending"))
+                            }
+                            Some(CapabilityState::Ready(_)) => {}
+                            Some(CapabilityState::Failed(error)) => {
+                                blockers.push(format!("{id}: {error}"))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        blockers
+    }
+
     /// Limit a public projection to saved enabled profiles. Draft identities
     /// are controller-private; environment sources are never published.
     pub fn for_config(&self, config: &Config) -> Self {

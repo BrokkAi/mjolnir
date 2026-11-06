@@ -558,3 +558,99 @@ fn autoconfigure_warms_newly_selected_model_within_existing_wait() {
         Some(DashboardAction::WarmProfileCapabilities { .. })
     ));
 }
+
+#[test]
+fn legacy_draft_autoconfigure_warms_the_recomputed_models() {
+    let mut legacy = config();
+    legacy.review = mj_core::config::ReviewConfig::legacy_default();
+    let mut dashboard = DashboardState::new(legacy, Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    dashboard.set_profile_capabilities(catalog(&dashboard.config, &["claude-haiku-5-5"]));
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    setup.review_editor.as_mut().unwrap().pending_autoconfigure = Some((
+        vec![SubagentChoice {
+            model: "claude-haiku-5-5".into(),
+            effort: Some("xhigh".into()),
+        }],
+        Instant::now(),
+    ));
+    let mut revised = catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]);
+    for entry in revised.profiles.values_mut() {
+        entry.efforts.remove("gpt-6-terra");
+        entry.efforts.remove("gpt-6-sol");
+    }
+    dashboard.set_profile_capabilities(revised);
+    let Some(DashboardAction::WarmProfileCapabilities { config, .. }) =
+        dashboard.take_profile_hydration()
+    else {
+        panic!("expected a warm request")
+    };
+    let warmed: Config = serde_json::from_str(&config).unwrap();
+    assert!(!warmed.review.is_legacy());
+    assert!(
+        warmed
+            .review
+            .reviewers
+            .iter()
+            .any(|reviewer| reviewer.model == "gpt-6-terra"),
+        "{config}"
+    );
+}
+
+#[test]
+fn autoconfigure_ignores_a_failed_profile_that_does_not_offer_the_model() {
+    let mut config = config();
+    let mut snapshot = catalog(&config, &["gpt-6-terra", "gpt-6-sol"]);
+    // The models offer high but not xhigh.
+    for entry in snapshot.profiles.values_mut() {
+        for model in ["gpt-6-terra", "gpt-6-sol"] {
+            entry.efforts.insert(
+                model.into(),
+                CapabilityState::Ready(vec![choice("medium"), choice("high")]),
+            );
+        }
+    }
+    // An unrelated profile whose discovery failed.
+    let (id, profile) = config
+        .profiles
+        .iter()
+        .next()
+        .map(|(id, profile)| (id.clone(), profile.clone()))
+        .unwrap();
+    let mut failed = profile;
+    failed.home = "/profiles/failed".into();
+    let failed_id = format!("{id}-failed");
+    snapshot.profiles.insert(
+        failed.capabilities_key(&failed_id),
+        ProfileCapabilities {
+            choices: CapabilityState::Failed("login expired".into()),
+            efforts: Default::default(),
+        },
+    );
+    config.profiles.insert(failed_id, failed);
+    let mut dialog = ReviewSettingsDialog::new(&config);
+    dialog.pending_autoconfigure = Some((Vec::new(), Instant::now()));
+    dialog.update_choices(&config, &snapshot);
+    assert!(dialog.pending_autoconfigure.is_none());
+    assert!(!dialog.review.reviewers.is_empty());
+    for reviewer in &dialog.review.reviewers {
+        assert!(
+            matches!(reviewer.effort.as_deref(), Some("medium" | "high")),
+            "{reviewer:?}"
+        );
+    }
+    assert!(
+        dialog
+            .review
+            .reviewers
+            .iter()
+            .any(|reviewer| reviewer.effort.as_deref() == Some("high"))
+    );
+    let notice = dialog.effort_notice.as_deref().unwrap();
+    assert!(notice.contains("Adjusted reviewer efforts"), "{notice}");
+    assert!(!notice.contains("discovery failed"), "{notice}");
+    assert!(!notice.contains("timed out"), "{notice}");
+}

@@ -935,6 +935,28 @@ fn registration_records_a_plain_local_directory_as_its_project() {
         controller.state.sessions[&no_reviewers.id].review,
         Some(mj_core::config::SessionReview::Off)
     );
+
+    // The API shape `{"mode":"turn","reviewers":[]}` is an explicitly empty
+    // list; it gets the same treatment even with a global list present.
+    controller.config.review.reviewers = vec![mj_core::config::SubagentChoice {
+        model: "gpt-6-astra".into(),
+        effort: None,
+    }];
+    let mut options = launch_options(Vec::new());
+    options.project_directory = Some(workspace.path().to_owned());
+    options.review =
+        Some(serde_json::from_str(r#"{"mode":"turn","reviewers":[]}"#).expect("API review shape"));
+    let empty_list = controller
+        .register_session_reporting_review("codex", "project", "local", "plain", options)
+        .unwrap();
+    assert_eq!(
+        empty_list.review_notice,
+        Some(mj_core::review::settings::NO_REVIEWERS_REVIEW_OFF)
+    );
+    assert_eq!(
+        controller.state.sessions[&empty_list.id].review,
+        Some(mj_core::config::SessionReview::Off)
+    );
 }
 
 #[test]

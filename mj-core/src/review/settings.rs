@@ -120,20 +120,27 @@ pub const PLAIN_DIRECTORY_REVIEW_OFF: &str = "Code review is off for this sessio
 
 pub const NO_REVIEWERS_REVIEW_OFF: &str = "Review is off for this session: no reviewers are configured. Choose reviewers in Settings › Code Review, or pass --reviewer.";
 
-/// An explicit armed session trigger cannot run with an empty current
-/// reviewer list. Legacy Auto is resolved during review preparation.
+/// A session whose armed trigger would run with no reviewers is created with
+/// review off. An omitted list means the global list (empty and not legacy
+/// here), and an explicitly empty list means no reviewers whatever the global
+/// list is. Legacy Auto is resolved during review preparation.
 pub fn no_reviewers_turns_review_off(
     config: &crate::config::Config,
     session: Option<&crate::config::SessionReview>,
 ) -> bool {
-    matches!(
-        session,
-        Some(
-            crate::config::SessionReview::Turn { reviewers: None }
-                | crate::config::SessionReview::Push { reviewers: None }
-        )
-    ) && !config.review.is_legacy()
-        && config.review.reviewers.is_empty()
+    use crate::config::{ReviewTrigger, SessionReview};
+    match session {
+        Some(SessionReview::Turn { reviewers } | SessionReview::Push { reviewers }) => {
+            match reviewers {
+                Some(reviewers) => reviewers.is_empty(),
+                None => !config.review.is_legacy() && config.review.reviewers.is_empty(),
+            }
+        }
+        Some(SessionReview::Inherit {
+            reviewers: Some(reviewers),
+        }) => reviewers.is_empty() && config.review.trigger != ReviewTrigger::Off,
+        _ => false,
+    }
 }
 
 /// Whether a session created in a folder without a committed Git checkout
@@ -162,12 +169,40 @@ mod tests {
             Some(&SessionReview::Turn { reviewers: None })
         ));
         assert!(!no_reviewers_turns_review_off(&config, None));
-        assert!(!no_reviewers_turns_review_off(
+        assert!(no_reviewers_turns_review_off(
             &config,
             Some(&SessionReview::Turn {
                 reviewers: Some(vec![])
             })
         ));
+        assert!(!no_reviewers_turns_review_off(
+            &config,
+            Some(&SessionReview::Inherit {
+                reviewers: Some(vec![])
+            })
+        ));
+        config.review.trigger = ReviewTrigger::Push;
+        config.review.reviewers = vec![crate::config::SubagentChoice {
+            model: "gpt-6-astra".into(),
+            effort: None,
+        }];
+        assert!(no_reviewers_turns_review_off(
+            &config,
+            Some(&SessionReview::Push {
+                reviewers: Some(vec![])
+            })
+        ));
+        assert!(no_reviewers_turns_review_off(
+            &config,
+            Some(&SessionReview::Inherit {
+                reviewers: Some(vec![])
+            })
+        ));
+        assert!(!no_reviewers_turns_review_off(
+            &config,
+            Some(&SessionReview::Turn { reviewers: None })
+        ));
+        config.review.reviewers.clear();
         config.review = crate::config::ReviewConfig::legacy_default();
         assert!(!no_reviewers_turns_review_off(
             &config,

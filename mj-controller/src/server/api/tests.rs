@@ -6446,6 +6446,34 @@ async fn session_review_api_rejects_stored_legacy_fields() {
     assert!(actions.is_empty());
 }
 
+#[tokio::test]
+async fn session_review_api_forwards_an_explicitly_empty_reviewer_list() {
+    let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = tokio::spawn(app.oneshot(start_request(start_body(
+        r#", "review":{"mode":"turn","reviewers":[]}"#,
+    ))));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New { review, .. } = request.action else {
+        panic!("expected new-session action");
+    };
+    assert_eq!(
+        review,
+        Some(mj_core::config::SessionReview::Turn {
+            reviewers: Some(Vec::new()),
+        })
+    );
+    request
+        .reply
+        .send(ActionOutcome::Refused(
+            mj_core::refusal::Refusal::precondition("test complete"),
+        ))
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CONFLICT
+    );
+}
+
 // Hard-won: 06cfc1cfe: reviewer-only flags replaced before-push review with end-of-turn.
 #[tokio::test]
 async fn session_review_api_accepts_inherit_and_forwards_its_settings() {

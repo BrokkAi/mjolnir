@@ -2825,6 +2825,7 @@ impl SubagentBackend for ApiBackend {
     fn reviewer_candidates_for_model(
         &self,
         model: String,
+        tried: Vec<String>,
     ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
         Box::pin(async move {
             use futures::StreamExt;
@@ -2836,17 +2837,23 @@ impl SubagentBackend for ApiBackend {
                     (id, result)
                 });
             }
-            while let Some((_id, result)) = pending.next().await {
-                if let Ok(choices) = result
+            while let Some((id, result)) = pending.next().await {
+                if !tried.contains(&id)
+                    && let Ok(choices) = result
                     && choices
                         .iter()
                         .any(|choice| choice.models.iter().any(|item| item.value == model))
                 {
                     drop(pending);
-                    return self.reviewer_ready_candidates(model).await;
+                    let mut candidates = self.reviewer_ready_candidates(model).await?;
+                    candidates
+                        .offered
+                        .retain(|candidate| !tried.contains(&candidate.profile_id));
+                    candidates.unavailable.retain(|(id, _)| !tried.contains(id));
+                    return Ok(candidates);
                 }
             }
-            anyhow::bail!("no enabled reviewer profile offers model {model:?}")
+            anyhow::bail!("no further enabled reviewer profile offers model {model:?}")
         })
     }
 

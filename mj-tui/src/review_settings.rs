@@ -121,13 +121,7 @@ impl ReviewSettingsDialog {
             self.models_partial = !options.unavailable.is_empty();
             self.models = options.models;
             let configured = mj_core::review::autoconfigure::autoconfigure(&self.models, |model| {
-                snapshot.options(config, Some(model)).and_then(|options| {
-                    if options.unavailable.is_empty() {
-                        Some(options.efforts)
-                    } else {
-                        None
-                    }
-                })
+                known_efforts(snapshot, config, model)
             });
             self.suggested_adjustments = configured
                 .as_ref()
@@ -146,7 +140,7 @@ impl ReviewSettingsDialog {
                 snapshot
                     .options(config, Some(&choice.model))
                     .is_some_and(|options| {
-                        options.unavailable.is_empty()
+                        snapshot.effort_blockers(config, &choice.model).is_empty()
                             || choice.effort.as_deref().is_some_and(|effort| {
                                 options.efforts.iter().any(|item| item.value == effort)
                             })
@@ -155,13 +149,7 @@ impl ReviewSettingsDialog {
             if ready || started.elapsed() >= Duration::from_secs(20) {
                 let configured =
                     mj_core::review::autoconfigure::autoconfigure(&self.models, |model| {
-                        snapshot.options(config, Some(model)).and_then(|options| {
-                            if options.unavailable.is_empty() {
-                                Some(options.efforts)
-                            } else {
-                                None
-                            }
-                        })
+                        known_efforts(snapshot, config, model)
                     });
                 let mut resolved = configured
                     .as_ref()
@@ -187,15 +175,16 @@ impl ReviewSettingsDialog {
                 let mut failures = Vec::new();
                 for choice in &mut resolved {
                     let offered = snapshot.options(config, Some(&choice.model));
+                    let blockers = snapshot.effort_blockers(config, &choice.model);
                     let unknown = offered.as_ref().is_none_or(|options| {
-                        !options.unavailable.is_empty()
+                        !blockers.is_empty()
                             && choice.effort.as_deref().is_none_or(|effort| {
                                 !options.efforts.iter().any(|item| item.value == effort)
                             })
                     });
                     if unknown {
                         choice.effort = None;
-                        for reason in offered.into_iter().flat_map(|options| options.unavailable) {
+                        for reason in blockers {
                             let reason = if reason.contains("discovery pending") {
                                 format!(
                                     "{} (timed out)",
@@ -536,7 +525,10 @@ impl ReviewSettingsDialog {
                             .profile_capabilities
                             .options(&config, Some(&choice.model))
                             .is_none_or(|options| {
-                                !options.unavailable.is_empty()
+                                !dashboard
+                                    .profile_capabilities
+                                    .effort_blockers(&config, &choice.model)
+                                    .is_empty()
                                     && choice.effort.as_deref().is_some_and(|effort| {
                                         !options.efforts.iter().any(|item| item.value == effort)
                                     })
@@ -804,6 +796,21 @@ pub(crate) fn render_review_settings(
         );
     }
     form.end_frame(Trigger);
+}
+
+/// A model's offered efforts, or `None` while a profile that may offer the
+/// model has not reported them. Profiles that do not offer the model are
+/// irrelevant to this.
+fn known_efforts(
+    snapshot: &ProfileCapabilitiesSnapshot,
+    config: &Config,
+    model: &str,
+) -> Option<Vec<SessionConfigChoice>> {
+    let options = snapshot.options(config, Some(model))?;
+    snapshot
+        .effort_blockers(config, model)
+        .is_empty()
+        .then_some(options.efforts)
 }
 
 #[cfg(test)]
