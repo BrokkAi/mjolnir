@@ -43,6 +43,8 @@ pub(crate) struct ReviewSettingsValidation {
     reviewers: Vec<SubagentChoice>,
     models: Vec<SessionConfigChoice>,
     models_known: bool,
+    efforts: Vec<Vec<SessionConfigChoice>>,
+    efforts_known: Vec<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,8 +57,7 @@ pub(crate) struct ReviewSettingsDialog {
     efforts: Vec<Vec<SessionConfigChoice>>,
     models_known: bool,
     efforts_known: Vec<bool>,
-    /// Empty lists are filled only on the first terminal catalog publication.
-    initial_fill_done: bool,
+    suggested: Option<Vec<SubagentChoice>>,
     pub(crate) saving: bool,
     pub(crate) save_error: Option<String>,
 }
@@ -72,7 +73,7 @@ impl ReviewSettingsDialog {
             efforts: Vec::new(),
             models_known: false,
             efforts_known: Vec::new(),
-            initial_fill_done: !config.review.reviewers.is_empty(),
+            suggested: None,
             saving: false,
             save_error: None,
         };
@@ -104,17 +105,14 @@ impl ReviewSettingsDialog {
         self.models_known = models.is_some();
         if let Some(options) = models {
             self.models = options.models;
-            if !self.initial_fill_done && !self.models.is_empty() {
-                self.initial_fill_done = true;
-                if self.review.reviewers.is_empty()
-                    && let Some(reviewers) =
-                        mj_core::review::autoconfigure::autoconfigure(&self.models)
-                {
-                    self.review.reviewers = reviewers;
-                }
-            }
+            self.suggested = mj_core::review::autoconfigure::autoconfigure(&self.models, |model| {
+                snapshot
+                    .options(config, Some(model))
+                    .map(|options| options.efforts)
+            });
         } else {
             self.models.clear();
+            self.suggested = None;
         }
         self.efforts.clear();
         self.efforts_known.clear();
@@ -134,9 +132,15 @@ impl ReviewSettingsDialog {
     }
 
     fn suggested(&self) -> Option<Vec<SubagentChoice>> {
-        self.models_known
-            .then(|| mj_core::review::autoconfigure::autoconfigure(&self.models))
-            .flatten()
+        self.suggested.clone()
+    }
+
+    fn effort_unavailable(&self, i: usize) -> bool {
+        let Some(effort) = self.review.reviewers[i].effort.as_deref() else {
+            return false;
+        };
+        self.efforts_known.get(i) == Some(&true)
+            && !self.efforts[i].iter().any(|choice| choice.value == effort)
     }
 
     pub(crate) fn can_save(&self) -> bool {
@@ -146,14 +150,19 @@ impl ReviewSettingsDialog {
         if self.review.trigger != ReviewTrigger::Off && self.review.reviewers.is_empty() {
             return false;
         }
-        self.review.reviewers.iter().all(|reviewer| {
-            !reviewer.model.trim().is_empty()
-                && (!self.models_known
-                    || self
-                        .models
-                        .iter()
-                        .any(|choice| choice.value == reviewer.model))
-        })
+        self.review
+            .reviewers
+            .iter()
+            .enumerate()
+            .all(|(i, reviewer)| {
+                !reviewer.model.trim().is_empty()
+                    && (!self.models_known
+                        || self
+                            .models
+                            .iter()
+                            .any(|choice| choice.value == reviewer.model))
+                    && !self.effort_unavailable(i)
+            })
     }
 
     pub(crate) fn validation_snapshot(&self) -> ReviewSettingsValidation {
@@ -161,6 +170,8 @@ impl ReviewSettingsDialog {
             reviewers: self.review.reviewers.clone(),
             models: self.models.clone(),
             models_known: self.models_known,
+            efforts: self.efforts.clone(),
+            efforts_known: self.efforts_known.clone(),
         }
     }
 
@@ -185,6 +196,14 @@ impl ReviewSettingsDialog {
                         .any(|choice| choice.value == reviewer.model))
             {
                 return Some(format!("Reviewer {} model is unavailable.", i + 1));
+            }
+            if let Some(effort) = reviewer.effort.as_deref()
+                && snapshot.efforts_known.get(i) == Some(&true)
+                && !snapshot.efforts[i]
+                    .iter()
+                    .any(|choice| choice.value == effort)
+            {
+                return Some(format!("Reviewer {} effort is unavailable.", i + 1));
             }
         }
         None
@@ -391,7 +410,7 @@ pub(crate) fn render_review_settings(
     // A roomy dialog keeps each reviewer's three controls together. On a
     // narrow terminal, preserve the same focus order in three adjacent rows.
     let inline = body.width >= 64;
-    let reviewer_rows = if inline { 1 } else { 3 };
+    let reviewer_rows = if inline { 2 } else { 4 };
     let actions_row = 1 + reviewer_rows * dialog.review.reviewers.len() as u16;
     let content_height = actions_row + 3;
     let focus_row = match form.focused() {
@@ -498,6 +517,15 @@ pub(crate) fn render_review_settings(
                 &[(Remove(*i), label.as_str(), !dialog.saving)],
                 &mut form,
             );
+            if dialog.effort_unavailable(*i) {
+                frame.render_widget(
+                    Line::styled(
+                        "Effort unavailable for this model",
+                        Style::default().fg(theme::palette().warning),
+                    ),
+                    row(1 + reviewer_rows * *i as u16 + reviewer_rows - 1),
+                );
+            }
         }
     }
     let area = row(actions_row);

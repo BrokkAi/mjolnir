@@ -944,7 +944,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Set either a local repository directory or a GitHub source for each repository."
         }
         "review" => {
-            "Review triggers and reviewers. An empty reviewer list uses Autoconfigure at review time."
+            "Review triggers and reviewers. An empty reviewer list means no reviewers are configured."
         }
         "continuation" => {
             "Continue an unfinished request up to three times per message, and resume a session after its quota resets."

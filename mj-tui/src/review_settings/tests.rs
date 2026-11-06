@@ -51,7 +51,7 @@ fn catalog(config: &Config, models: &[&str]) -> ProfileCapabilitiesSnapshot {
 }
 
 #[test]
-fn autoconfigure_waits_for_models_and_fills_empty_draft_once() {
+fn autoconfigure_button_fills_rows_with_offered_efforts() {
     let config = config();
     let mut dialog = ReviewSettingsDialog::new(&config);
     assert!(
@@ -61,17 +61,18 @@ fn autoconfigure_waits_for_models_and_fills_empty_draft_once() {
             .is_enabled(ReviewSettingsFocus::Autoconfigure)
     );
     dialog.update_choices(&config, &catalog(&config, &["gpt-6-terra", "gpt-6-sol"]));
-    assert_eq!(dialog.review.reviewers.len(), 2);
-    assert_eq!(dialog.review.reviewers[0].model, "gpt-6-terra");
+    assert!(dialog.review.reviewers.is_empty());
+    let suggested = dialog.suggested().unwrap();
+    assert_eq!(suggested[0].model, "gpt-6-terra");
+    assert_eq!(suggested[0].effort.as_deref(), Some("xhigh"));
     assert!(
         dialog
             .form
             .borrow()
             .is_enabled(ReviewSettingsFocus::Autoconfigure)
     );
-    dialog.review.reviewers[0].model = "manual".into();
     dialog.update_choices(&config, &catalog(&config, &["gpt-6-terra", "gpt-6-sol"]));
-    assert_eq!(dialog.review.reviewers[0].model, "manual");
+    assert!(dialog.review.reviewers.is_empty());
 }
 
 #[test]
@@ -119,6 +120,8 @@ fn effort_choices_follow_the_selected_model() {
     }
     let mut dialog = ReviewSettingsDialog::new(&config);
     dialog.update_choices(&config, &catalog);
+    dialog.review.reviewers = dialog.suggested().unwrap();
+    dialog.update_choices(&config, &catalog);
     assert_eq!(
         dialog.choices(ReviewSettingsFocus::Effort(0)).0,
         ["Default", "xhigh"]
@@ -135,11 +138,14 @@ fn reviewer_rows_can_be_added_removed_and_reconfigured() {
     dashboard.begin_setup();
     dashboard.begin_setup_review();
     let snapshot = catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]);
-    dashboard.set_profile_capabilities(snapshot);
+    dashboard.set_profile_capabilities(snapshot.clone());
+    let config = dashboard.config.clone();
     let Mode::Setup(setup) = &mut dashboard.mode else {
         panic!("setup")
     };
     let editor = setup.review_editor.as_mut().unwrap();
+    editor.review.reviewers = editor.suggested().unwrap();
+    editor.update_choices(&config, &snapshot);
     assert_eq!(editor.review.reviewers.len(), 2);
     editor.form.get_mut().focus(ReviewSettingsFocus::Add);
     dashboard.handle_key(key(KeyCode::Enter));
@@ -223,21 +229,53 @@ fn save_validation_requires_rows_only_for_automatic_trigger() {
 }
 
 #[test]
+fn known_effort_choices_gate_save_but_pending_choices_do_not() {
+    let config = config();
+    let mut catalog = catalog(&config, &["gpt-6-terra"]);
+    let mut dialog = ReviewSettingsDialog::new(&config);
+    dialog.review.reviewers.push(SubagentChoice {
+        model: "gpt-6-terra".into(),
+        effort: Some("xhigh".into()),
+    });
+    for profile in catalog.profiles.values_mut() {
+        profile
+            .efforts
+            .insert("gpt-6-terra".into(), CapabilityState::Ready(vec![]));
+    }
+    dialog.update_choices(&config, &catalog);
+    assert!(!dialog.can_save());
+    assert_eq!(
+        ReviewSettingsDialog::validation_error(&dialog.validation_snapshot(), &dialog.review)
+            .as_deref(),
+        Some("Reviewer 1 effort is unavailable.")
+    );
+    dialog.review.reviewers[0].effort = None;
+    assert!(dialog.can_save());
+    dialog.review.reviewers[0].effort = Some("xhigh".into());
+    for profile in catalog.profiles.values_mut() {
+        profile
+            .efforts
+            .insert("gpt-6-terra".into(), CapabilityState::Pending);
+    }
+    dialog.update_choices(&config, &catalog);
+    assert!(dialog.can_save());
+}
+
+#[test]
 fn reviewer_focus_follows_model_effort_remove_order() {
     let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
     dashboard.begin_setup();
     dashboard.begin_setup_review();
-    dashboard.set_profile_capabilities(catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]));
+    let snapshot = catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]);
+    dashboard.set_profile_capabilities(snapshot.clone());
+    let config = dashboard.config.clone();
     let Mode::Setup(setup) = &mut dashboard.mode else {
         panic!("setup")
     };
-    setup
-        .review_editor
-        .as_mut()
-        .unwrap()
-        .form
-        .get_mut()
-        .focus(ReviewSettingsFocus::Model(0));
+    let editor = setup.review_editor.as_mut().unwrap();
+    editor.review.reviewers = editor.suggested().unwrap();
+    editor.update_choices(&config, &snapshot);
+    editor.form.get_mut().focus(ReviewSettingsFocus::Model(0));
     drawn(&mut dashboard, 100, 30);
     for expected in [
         ReviewSettingsFocus::Effort(0),

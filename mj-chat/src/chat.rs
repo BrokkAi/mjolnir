@@ -134,7 +134,7 @@ pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) ->
     };
     let count = review.reviewers.len();
     let armed = if count == 0 {
-        format!("{armed}; reviewers autoconfigured at review time")
+        format!("{armed}; no reviewers")
     } else {
         format!(
             "{armed}; {count} reviewer{}",

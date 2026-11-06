@@ -136,6 +136,8 @@ impl PhoneConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "ReviewConfigInput")]
 pub struct ReviewConfig {
+    #[serde(skip)]
+    pub legacy_auto: bool,
     #[serde(default)]
     pub trigger: ReviewTrigger,
     #[serde(default)]
@@ -147,6 +149,7 @@ pub const MAX_REVIEWERS: usize = 3;
 impl Default for ReviewConfig {
     fn default() -> Self {
         Self {
+            legacy_auto: false,
             trigger: ReviewTrigger::Off,
             reviewers: Vec::new(),
         }
@@ -209,7 +212,9 @@ impl From<ReviewConfigInput> for ReviewConfig {
             model,
             effort,
         } = input;
+        let legacy_auto = reviewers.is_none() && model.is_none();
         Self {
+            legacy_auto,
             trigger: trigger.unwrap_or(if enabled == Some(true) {
                 ReviewTrigger::Turn
             } else {
@@ -226,6 +231,12 @@ impl From<ReviewConfigInput> for ReviewConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "SessionReviewInput", into = "SessionReviewOutput")]
 pub enum SessionReview {
+    Legacy {
+        trigger: Option<ReviewTrigger>,
+        count: Option<std::num::NonZeroUsize>,
+        model: Option<String>,
+        effort: Option<String>,
+    },
     Inherit {
         reviewers: Option<Vec<SubagentChoice>>,
     },
@@ -272,6 +283,33 @@ enum SessionReviewInput {
 #[derive(Serialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
 enum SessionReviewOutput {
+    #[serde(rename = "inherit")]
+    LegacyInherit {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        count: Option<std::num::NonZeroUsize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+    },
+    #[serde(rename = "turn")]
+    LegacyTurn {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        count: Option<std::num::NonZeroUsize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+    },
+    #[serde(rename = "push")]
+    LegacyPush {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        count: Option<std::num::NonZeroUsize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+    },
     Inherit {
         #[serde(skip_serializing_if = "Option::is_none")]
         reviewers: Option<Vec<SubagentChoice>>,
@@ -312,9 +350,18 @@ impl From<SessionReviewInput> for SessionReview {
                 model,
                 effort,
                 tier: _,
-            } => Self::Inherit {
-                reviewers: legacy_reviewers(reviewers, count, model, effort),
-            },
+            } => {
+                if reviewers.is_none() && (count.is_some() || model.is_some() || effort.is_some()) {
+                    Self::Legacy {
+                        trigger: None,
+                        count,
+                        model,
+                        effort,
+                    }
+                } else {
+                    Self::Inherit { reviewers }
+                }
+            }
             SessionReviewInput::Off => Self::Off,
             SessionReviewInput::Turn {
                 reviewers,
@@ -322,24 +369,64 @@ impl From<SessionReviewInput> for SessionReview {
                 model,
                 effort,
                 tier: _,
-            } => Self::Turn {
-                reviewers: legacy_reviewers(reviewers, count, model, effort),
-            },
+            } => {
+                if reviewers.is_none() && (count.is_some() || model.is_some() || effort.is_some()) {
+                    Self::Legacy {
+                        trigger: Some(ReviewTrigger::Turn),
+                        count,
+                        model,
+                        effort,
+                    }
+                } else {
+                    Self::Turn { reviewers }
+                }
+            }
             SessionReviewInput::Push {
                 reviewers,
                 count,
                 model,
                 effort,
                 tier: _,
-            } => Self::Push {
-                reviewers: legacy_reviewers(reviewers, count, model, effort),
-            },
+            } => {
+                if reviewers.is_none() && (count.is_some() || model.is_some() || effort.is_some()) {
+                    Self::Legacy {
+                        trigger: Some(ReviewTrigger::Push),
+                        count,
+                        model,
+                        effort,
+                    }
+                } else {
+                    Self::Push { reviewers }
+                }
+            }
         }
     }
 }
 impl From<SessionReview> for SessionReviewOutput {
     fn from(input: SessionReview) -> Self {
         match input {
+            SessionReview::Legacy {
+                trigger,
+                count,
+                model,
+                effort,
+            } => match trigger {
+                None | Some(ReviewTrigger::Off) => Self::LegacyInherit {
+                    count,
+                    model,
+                    effort,
+                },
+                Some(ReviewTrigger::Turn) => Self::LegacyTurn {
+                    count,
+                    model,
+                    effort,
+                },
+                Some(ReviewTrigger::Push) => Self::LegacyPush {
+                    count,
+                    model,
+                    effort,
+                },
+            },
             SessionReview::Inherit { reviewers } => Self::Inherit { reviewers },
             SessionReview::Off => Self::Off,
             SessionReview::Turn { reviewers } => Self::Turn { reviewers },
@@ -350,6 +437,7 @@ impl From<SessionReview> for SessionReviewOutput {
 impl SessionReview {
     pub fn trigger(&self) -> Option<ReviewTrigger> {
         match self {
+            Self::Legacy { trigger, .. } => *trigger,
             Self::Inherit { .. } => None,
             Self::Off => Some(ReviewTrigger::Off),
             Self::Turn { .. } => Some(ReviewTrigger::Turn),
@@ -378,7 +466,40 @@ impl ReviewConfig {
                 if let Some(trigger) = choice.trigger() {
                     config.trigger = trigger;
                 }
+                if let SessionReview::Legacy {
+                    count,
+                    model,
+                    effort,
+                    ..
+                } = choice
+                {
+                    if let Some(model) = model {
+                        if config.reviewers.is_empty() {
+                            config.reviewers.push(SubagentChoice {
+                                model: model.clone(),
+                                effort: None,
+                            });
+                        } else {
+                            for reviewer in &mut config.reviewers {
+                                reviewer.model.clone_from(model);
+                            }
+                        }
+                    }
+                    if let Some(effort) = effort {
+                        for reviewer in &mut config.reviewers {
+                            reviewer.effort = Some(effort.clone());
+                        }
+                    }
+                    if let Some(count) = count {
+                        let count = count.get().min(MAX_REVIEWERS);
+                        if let Some(last) = config.reviewers.last().cloned() {
+                            config.reviewers.resize(count, last);
+                        }
+                    }
+                    return config;
+                }
                 let reviewers = match choice {
+                    SessionReview::Legacy { .. } => unreachable!(),
                     SessionReview::Inherit { reviewers }
                     | SessionReview::Turn { reviewers }
                     | SessionReview::Push { reviewers } => reviewers,
@@ -439,7 +560,7 @@ const fn is_false(value: &bool) -> bool {
 
 impl ReviewConfig {
     fn is_default(&self) -> bool {
-        self == &Self::default()
+        self.trigger == ReviewTrigger::Off && self.reviewers.is_empty()
     }
 
     fn validate(&self, _profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {

@@ -85,7 +85,6 @@ impl RuntimeState {
             },
             revisions.notifier(),
             Some(recovery_observer.gate.clone()),
-            Some(profile_catalog.clone()),
             reviewer_runtime.clone(),
         );
         let inactivity = auto_afk::Inactivity::new(controller.config.advanced.auto_afk_minutes);

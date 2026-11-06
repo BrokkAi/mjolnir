@@ -7554,7 +7554,7 @@ function reviewStatusLine(review, open) {
     : trigger === "turn" ? "Reviewing every completed turn"
       : "Automatic review is off; /review reviews one turn";
   const count = review?.count ?? review?.reviewers?.length ?? 0;
-  const status = count === 0 ? `${armed}; reviewers autoconfigured at review time`
+  const status = count === 0 ? `${armed}; no reviewers`
     : `${armed}; ${count} reviewer${count === 1 ? '' : 's'}`;
   return open ? `${status}. A review is open now.` : status;
 }

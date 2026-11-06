@@ -693,6 +693,7 @@ fn generated_code_and_cookie_attributes_are_phone_safe() {
 fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
+        legacy_auto: false,
         trigger: mj_core::config::ReviewTrigger::Turn,
         reviewers: vec![
             mj_core::config::SubagentChoice {
@@ -781,6 +782,7 @@ fn target_snapshot_uses_each_raw_host_project_history_and_leaves_managed_empty()
 fn public_snapshot_exposes_only_review_status_configuration() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
+        legacy_auto: false,
         trigger: mj_core::config::ReviewTrigger::Turn,
         reviewers: vec![
             mj_core::config::SubagentChoice {

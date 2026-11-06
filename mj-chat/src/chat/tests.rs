@@ -66,6 +66,7 @@ fn idle_background_work_and_working_review_keep_animation_independent() {
 #[test]
 fn review_status_omits_the_deprecated_tier() {
     let review = mj_core::config::ReviewConfig {
+        legacy_auto: false,
         trigger: mj_core::config::ReviewTrigger::Turn,
         reviewers: vec![
             mj_core::config::SubagentChoice {

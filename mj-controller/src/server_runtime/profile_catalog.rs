@@ -3,7 +3,11 @@
 //! Every reader joins the owner's attempt; only its supervisor retries failures.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc, Mutex, MutexGuard, PoisonError,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -33,6 +37,8 @@ const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// stages the profile and launches its harness, so a failure that persists,
 /// such as a full disk or a missing login, is retried rarely rather than
 /// every minute. A changed definition or a session's report starts sooner.
+const LEGACY_REVIEW_MAX_ATTEMPTS: usize = 12;
+
 const RETRY_DELAYS: [Duration; 6] = [
     Duration::from_secs(1),
     Duration::from_secs(5),
@@ -107,6 +113,8 @@ pub(crate) struct ProfileCatalog {
     inner: Mutex<Inner>,
     publisher: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     revisions: tokio::sync::watch::Sender<u64>,
+    legacy_review_upgrade_started: AtomicBool,
+    config_path: Option<PathBuf>,
     #[cfg(test)]
     probe: Option<(Arc<Probe>, Arc<ModelProbe>)>,
 }
@@ -117,9 +125,20 @@ impl ProfileCatalog {
             inner: Mutex::new(Inner::default()),
             publisher: Mutex::new(None),
             revisions: tokio::sync::watch::channel(0).0,
+            legacy_review_upgrade_started: AtomicBool::new(false),
+            config_path: None,
             #[cfg(test)]
             probe: None,
         })
+    }
+
+    pub(crate) fn new_with_config_path(
+        cancellation: CancellationToken,
+        config_path: PathBuf,
+    ) -> Arc<Self> {
+        let mut catalog = Self::new(cancellation);
+        Arc::get_mut(&mut catalog).unwrap().config_path = Some(config_path);
+        catalog
     }
 
     pub(crate) fn set_publisher(&self, publisher: Arc<dyn Fn() + Send + Sync>) {
@@ -213,10 +232,116 @@ impl ProfileCatalog {
         if first {
             self.start_refreshing();
         }
+        if config.review.legacy_auto
+            && self.config_path.is_some()
+            && !self
+                .legacy_review_upgrade_started
+                .swap(true, Ordering::AcqRel)
+        {
+            let catalog = Arc::clone(self);
+            tokio::spawn(async move {
+                for attempt in 1..=LEGACY_REVIEW_MAX_ATTEMPTS {
+                    let result = tokio::select! {
+                        _ = catalog.cancellation.cancelled() => return,
+                        result = catalog.upgrade_legacy_review(attempt) => result,
+                    };
+                    match result {
+                        Ok(()) => return,
+                        Err(error) => {
+                            tracing::warn!(attempt, %error, "legacy review autoconfiguration did not complete")
+                        }
+                    }
+                    tokio::select! {
+                        _ = catalog.cancellation.cancelled() => return,
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+                    }
+                }
+            });
+        }
         self.ensure(config);
         if changed {
             self.publish();
         }
+    }
+
+    async fn upgrade_legacy_review(self: &Arc<Self>, attempt: usize) -> Result<()> {
+        let ids = self
+            .candidates()?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        // Each profile has its own deadline so one stuck probe cannot hide
+        // results from profiles that answered. Partial results remain transient
+        // until all profiles answer or the retry budget is exhausted.
+        let choices = join_all(ids.iter().map(|id| async {
+            tokio::time::timeout(Duration::from_secs(30), self.live_capabilities(id, None)).await
+        }))
+        .await;
+        let mut omitted = Vec::new();
+        let available = ids.into_iter().zip(choices).filter_map(|(id, result)| {
+            match result {
+                Ok(Ok(choices)) => Some((id, choices)),
+                Ok(Err(error)) => {
+                    tracing::warn!(profile = %id, %error, "profile discovery failed during legacy review upgrade");
+                    omitted.push(id);
+                    None
+                }
+                Err(_) => {
+                    tracing::warn!(profile = %id, "profile discovery timed out during legacy review upgrade");
+                    omitted.push(id);
+                    None
+                }
+            }
+        }).collect::<Vec<_>>();
+        if !omitted.is_empty() && attempt < LEGACY_REVIEW_MAX_ATTEMPTS {
+            anyhow::bail!(
+                "legacy review upgrade waiting for profiles: {}",
+                omitted.join(", ")
+            );
+        }
+        if !omitted.is_empty() {
+            tracing::warn!(profiles = %omitted.join(", "), attempts = attempt,
+                "persisting legacy review preset without unavailable profiles");
+        }
+        let reviewers = crate::review_selection::autoconfigure_with_efforts(
+            &available,
+            |profile, model| {
+                let catalog = Arc::clone(self);
+                async move { catalog.model_capabilities(profile, model).await }
+            },
+            None,
+        )
+        .await?;
+        let count = reviewers.len();
+        let path = self
+            .config_path
+            .clone()
+            .context("catalog has no config path for review upgrade")?;
+        let wrote =
+            tokio::task::spawn_blocking(move || Self::persist_legacy_review_to(&path, reviewers))
+                .await??;
+        if wrote {
+            tracing::info!(
+                count,
+                "persisted legacy Auto review configuration to config.toml"
+            );
+        }
+        Ok(())
+    }
+
+    fn persist_legacy_review_to(
+        path: &Path,
+        reviewers: Vec<mj_core::config::SubagentChoice>,
+    ) -> Result<bool> {
+        let (_, wrote) = Config::update_to(path, |config| {
+            if !config.review.legacy_auto {
+                return Ok(false);
+            }
+            config.review.reviewers = reviewers;
+            config.review.legacy_auto = false;
+            Ok(true)
+        })?;
+        Ok(wrote)
     }
 
     /// Claim new definitions, default probes and the efforts of the models
@@ -758,6 +883,25 @@ impl ProfileCatalog {
         Ok(config
             .enabled_profiles()
             .map(|(id, profile)| (id.into(), profile.kind))
+            .collect())
+    }
+
+    pub(crate) fn ready_candidates(&self, model: &str) -> Result<Vec<(String, HarnessKind)>> {
+        let config = self.live()?;
+        let snapshot = self.snapshot();
+        Ok(config
+            .enabled_profiles()
+            .filter(|(id, profile)| {
+                snapshot
+                    .profiles
+                    .get(&profile.capabilities_key(id))
+                    .is_some_and(|entry| {
+                        matches!(&entry.choices, CapabilityState::Ready(choices)
+                        if choices.models.iter().any(|choice| choice.value == model))
+                            && matches!(entry.efforts.get(model), Some(CapabilityState::Ready(_)))
+                    })
+            })
+            .map(|(id, profile)| (id.to_owned(), profile.kind))
             .collect())
     }
 
@@ -1516,5 +1660,174 @@ mod tests {
                 "helper".to_owned()
             ]
         );
+    }
+    fn legacy_upgrade_fixture(
+        path: PathBuf,
+        codex_offline: Arc<AtomicBool>,
+    ) -> Arc<ProfileCatalog> {
+        let probe: Arc<Probe> = Arc::new(move |profile| {
+            let offline = codex_offline.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if profile == "codex" && offline {
+                    anyhow::bail!("codex profile is unavailable");
+                }
+                let models = if profile == "codex" {
+                    vec!["gpt-6-terra", "gpt-6-sol"]
+                } else {
+                    vec!["claude-haiku-4.5"]
+                };
+                Ok(ProfileConfig {
+                    model: Some(models[0].into()),
+                    models: models
+                        .into_iter()
+                        .map(|value| mj_core::acp::SessionConfigChoice {
+                            value: value.into(),
+                            name: value.into(),
+                            description: None,
+                        })
+                        .collect(),
+                    efforts: Vec::new(),
+                    observed_at: 1,
+                })
+            })
+        });
+        let mut catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            probe.clone(),
+            Arc::new(move |profile, _| probe(profile)),
+        );
+        Arc::get_mut(&mut catalog).unwrap().config_path = Some(path);
+        catalog.sync(&test_config(&[
+            ("codex", HarnessKind::Codex),
+            ("haiku", HarnessKind::Claude),
+        ]));
+        catalog
+    }
+
+    fn legacy_review_file(path: &Path) {
+        std::fs::write(
+            path,
+            format!(
+                "version = {}\n[review]\ntrigger = \"turn\"\n",
+                mj_core::config::CONFIG_VERSION
+            ),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn partial_legacy_discovery_retries_before_persisting_to_its_config_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("custom-config.toml");
+        legacy_review_file(&path);
+        let offline = Arc::new(AtomicBool::new(true));
+        let catalog = legacy_upgrade_fixture(path.clone(), offline.clone());
+        let error = catalog.upgrade_legacy_review(1).await.unwrap_err();
+        assert!(error.to_string().contains("codex"));
+        assert!(Config::load_from(&path).unwrap().review.legacy_auto);
+        offline.store(false, Ordering::SeqCst);
+        catalog.reread_failed("codex");
+        catalog.upgrade_legacy_review(2).await.unwrap();
+        let review = Config::load_from(&path).unwrap().review;
+        assert!(!review.legacy_auto);
+        assert_eq!(review.reviewers.len(), 3);
+        assert_eq!(review.reviewers[0].model, "gpt-6-terra");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stuck_profile_times_out_without_hiding_a_ready_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("custom-config.toml");
+        legacy_review_file(&path);
+        let probe: Arc<Probe> = Arc::new(|profile| {
+            Box::pin(async move {
+                if profile == "codex" {
+                    return std::future::pending::<Result<ProfileConfig>>().await;
+                }
+                Ok(ProfileConfig {
+                    model: Some("claude-haiku-4.5".into()),
+                    models: vec![mj_core::acp::SessionConfigChoice {
+                        value: "claude-haiku-4.5".into(),
+                        name: "Haiku".into(),
+                        description: None,
+                    }],
+                    efforts: Vec::new(),
+                    observed_at: 1,
+                })
+            })
+        });
+        let mut catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            probe.clone(),
+            Arc::new(move |profile, _| probe(profile)),
+        );
+        Arc::get_mut(&mut catalog).unwrap().config_path = Some(path.clone());
+        catalog.sync(&test_config(&[
+            ("codex", HarnessKind::Codex),
+            ("haiku", HarnessKind::Claude),
+        ]));
+        let task = tokio::spawn(async move {
+            catalog
+                .upgrade_legacy_review(LEGACY_REVIEW_MAX_ATTEMPTS)
+                .await
+        });
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(31)).await;
+        task.await.unwrap().unwrap();
+        let review = Config::load_from(&path).unwrap().review;
+        assert!(!review.legacy_auto);
+        assert_eq!(review.reviewers.len(), 2);
+        assert!(
+            review
+                .reviewers
+                .iter()
+                .all(|choice| choice.model == "claude-haiku-4.5")
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_legacy_discovery_persists_the_successful_subset() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("custom-config.toml");
+        legacy_review_file(&path);
+        let catalog = legacy_upgrade_fixture(path.clone(), Arc::new(AtomicBool::new(true)));
+        catalog
+            .upgrade_legacy_review(LEGACY_REVIEW_MAX_ATTEMPTS)
+            .await
+            .unwrap();
+        let review = Config::load_from(&path).unwrap().review;
+        assert!(!review.legacy_auto);
+        assert_eq!(review.reviewers.len(), 2);
+        assert!(
+            review
+                .reviewers
+                .iter()
+                .all(|choice| choice.model == "claude-haiku-4.5")
+        );
+    }
+
+    #[test]
+    fn legacy_auto_upgrade_persists_once_without_rewriting_other_sections() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, format!(
+            "# keep this comment\nversion = {}\n[review]\ntrigger = \"turn\"\n[phone]\nenabled = false\n",
+            mj_core::config::CONFIG_VERSION
+        )).unwrap();
+        let choice = mj_core::config::SubagentChoice {
+            model: "claude-haiku-4.5".into(),
+            effort: None,
+        };
+        assert!(ProfileCatalog::persist_legacy_review_to(&path, vec![choice.clone()]).unwrap());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# keep this comment"));
+        assert!(saved.contains("[phone]\nenabled = false"));
+        let loaded = Config::load_from(&path).unwrap();
+        assert!(!loaded.review.legacy_auto);
+        assert_eq!(loaded.review.reviewers, vec![choice]);
+        assert!(!ProfileCatalog::persist_legacy_review_to(&path, Vec::new()).unwrap());
+        assert_eq!(Config::load_from(&path).unwrap().review.reviewers.len(), 1);
     }
 }

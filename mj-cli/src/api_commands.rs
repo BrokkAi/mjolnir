@@ -164,7 +164,7 @@ pub(crate) struct NewArgs {
     /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_effort: Option<String>,
-    /// Reviewer model and optional effort; repeat for up to three reviewers.
+    /// Reviewer model and optional effort; final colon suffix is effort only when ASCII letters. Repeat up to three times.
     #[arg(long = "reviewer", value_name = "MODEL[:EFFORT]")]
     reviewers: Vec<String>,
     /// Review trigger for this session, overriding `[review]`.
@@ -1146,16 +1146,19 @@ pub(crate) fn session_review(
     let reviewers = choices
         .iter()
         .map(|value| {
-            let (model, effort) = value
-                .split_once(':')
-                .map_or((value.as_str(), None), |(model, effort)| {
-                    (model, Some(effort))
-                });
+            let (model, effort) =
+                value
+                    .rsplit_once(':')
+                    .map_or((value.as_str(), None), |(model, suffix)| {
+                        if !suffix.is_empty()
+                            && suffix.bytes().all(|byte| byte.is_ascii_alphabetic())
+                        {
+                            (model, Some(suffix))
+                        } else {
+                            (value.as_str(), None)
+                        }
+                    });
             ensure!(!model.trim().is_empty(), "reviewer model must not be empty");
-            ensure!(
-                !effort.is_some_and(str::is_empty),
-                "reviewer effort must not be empty"
-            );
             Ok(mj_core::config::SubagentChoice {
                 model: model.to_owned(),
                 effort: effort.map(str::to_owned),
@@ -3090,6 +3093,36 @@ mod tests {
             .is_err()
         );
         assert!(parse(&["--reviewer", ":high"]).unwrap().is_err());
+        let parsed = parse(&[
+            "--reviewer",
+            "anthropic.claude-haiku:0",
+            "--reviewer",
+            "x:0:high",
+            "--reviewer",
+            "m:high",
+        ])
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            parsed,
+            SessionReview::Inherit {
+                reviewers: Some(vec![
+                    SubagentChoice {
+                        model: "anthropic.claude-haiku:0".into(),
+                        effort: None
+                    },
+                    SubagentChoice {
+                        model: "x:0".into(),
+                        effort: Some("high".into())
+                    },
+                    SubagentChoice {
+                        model: "m".into(),
+                        effort: Some("high".into())
+                    },
+                ])
+            }
+        );
         assert!(parse(&["--review-count", "2"]).is_err());
     }
 

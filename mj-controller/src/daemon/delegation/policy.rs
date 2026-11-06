@@ -46,7 +46,10 @@ impl Policy {
         manager: &crate::session_manager::SessionManagerControl,
         stop: &CancellationToken,
     ) -> Self {
-        let catalog = ProfileCatalog::new(stop.child_token());
+        let catalog = ProfileCatalog::new_with_config_path(
+            stop.child_token(),
+            mj_core::config::config_path(),
+        );
         let weak_state = Arc::downgrade(&state);
         catalog.set_publisher(Arc::new(move || {
             if let Some(state) = weak_state.upgrade() {

@@ -150,7 +150,7 @@ are not importable yet either.
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
 | `--review <off\|turn\|push>` | Set the imported session's review trigger, overriding `[review]`. |
-| `--reviewer MODEL[:EFFORT]` | Add a reviewer choice; repeat up to three times. |
+| `--reviewer MODEL[:EFFORT]` | Add a reviewer choice; repeat up to three times. The final colon is an effort separator only when followed by ASCII letters (for example, `x:0:high` uses model `x:0` and effort `high`). |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
 Import leaves the source checkout and the harness's source transcript unchanged. The imported session starts suspended and is available through `prefix+g`.
@@ -386,7 +386,7 @@ mj new --workspace eval --bundle product --target builder \
 - `mj new --review off|turn|push` sets the session's trigger, overriding
   `[review]`. `mj import <harness>` takes the same option for the session it
   adopts. Repeat `--reviewer MODEL[:EFFORT]` up to three times to choose reviewers. See
-  [per-session settings](/turn-review/#per-session-settings).
+  [per-session settings](/turn-review/#per-session-settings). An empty global reviewer list means no reviewers; choose rows or press **Autoconfigure** in Settings → Code Review.
 - `mj new --no-project-memory` starts the session with no project memory:
   nothing from the workspace's project memory is put in the agent's startup
   context, and the harness is offered no memory directory to write to. Its

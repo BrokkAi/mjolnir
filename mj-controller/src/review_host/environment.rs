@@ -139,9 +139,6 @@ pub struct ControllerEnvironment {
     /// The daemon's gate for recovery copies and worker upgrades, which a
     /// review waits behind instead of racing for the session's lease.
     pub background: Option<Arc<crate::recovery_gate::RecoveryGate>>,
-    /// The daemon's profile catalog, once it is installed. A pinned review
-    /// model is matched against it before any profile is staged.
-    pub(crate) catalog: Option<SharedProfileCatalog>,
 }
 
 /// The daemon installs its profile catalog after the review host starts.
@@ -333,25 +330,26 @@ impl ReviewEnvironment for ControllerEnvironment {
         Result<Vec<mj_core::review::settings::ResolvedReviewSettings>, String>,
     > {
         Box::pin(async move {
-            let catalog = self
-                .catalog
-                .as_ref()
-                .and_then(|catalog| catalog.get())
-                .cloned();
-            let runtime = self.runtime().await?;
-            let backend = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                loop {
-                    if let Some(backend) = runtime.report_backend.get() {
-                        return backend
-                            .upgrade()
-                            .ok_or_else(|| "reviewer profile service stopped".to_owned());
+            let runtime = crate::review_selection::await_or_cancel(&cancelled, self.runtime())
+                .await
+                .map_err(|error| error.to_string())??;
+            let backend = crate::review_selection::await_or_cancel(
+                &cancelled,
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        if let Some(backend) = runtime.report_backend.get() {
+                            return backend
+                                .upgrade()
+                                .ok_or_else(|| "reviewer profile service stopped".to_owned());
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                }
-            })
+                }),
+            )
             .await
+            .map_err(|error| error.to_string())?
             .map_err(|_| "reviewer profile service did not start".to_owned())??;
-            crate::review_selection::resolve(handle, Some(config), cancelled, catalog, backend)
+            crate::review_selection::resolve(handle, Some(config), cancelled, backend)
                 .await
                 .map_err(|e| format!("{e:#}"))
         })

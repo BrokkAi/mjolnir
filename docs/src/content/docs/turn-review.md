@@ -22,9 +22,9 @@ model = "gpt-6.1-sol"
 effort = "medium"
 ```
 
-An empty list uses Autoconfigure at review time. It chooses the first available combination: Terra, Sol, and Haiku; Terra and Sol; two Haiku; two DeepSeek Flash; Grok; or Kimi K3.1 or newer. It uses the newest advertised model within each family. If no combination is available, choose reviewers in **Settings → Code Review**.
+An empty list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers. It chooses the first available combination: Terra, Sol, and Haiku; Terra and Sol; two Haiku; two DeepSeek Flash; Grok; or Kimi K3.1 or newer. It uses the newest advertised model within each family. If no combination is available, choose reviewers in **Settings → Code Review**.
 
-Old `count`, `profile`, `model`, `effort`, `tier`, and `enabled` config keys remain readable. Saving writes the new reviewer list and trigger.
+Old `count`, `profile`, `model`, `effort`, `tier`, and `enabled` config keys remain readable. The daemon upgrades an old Auto selection once after capability discovery and saves its chosen reviewer rows. Saving writes the new reviewer list and trigger.
 
 ### Per-session settings
 

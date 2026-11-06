@@ -169,6 +169,7 @@ enum ModelProfileCandidateSource<'a> {
     Session { ranking_anchor: Option<&'a str> },
     Subagents { parent_profile: &'a str },
     Reviewers,
+    ReviewersReady,
 }
 
 impl<'a> ModelProfileCandidateSource<'a> {
@@ -176,7 +177,7 @@ impl<'a> ModelProfileCandidateSource<'a> {
         match self {
             Self::Session { .. } => "configured",
             Self::Subagents { .. } => "enabled",
-            Self::Reviewers => "enabled",
+            Self::Reviewers | Self::ReviewersReady => "enabled",
         }
     }
 }
@@ -194,13 +195,26 @@ pub(crate) async fn resolve_reviewer_model_profile_selection(
     model: &str,
     effort: Option<&str>,
 ) -> Result<SubagentSelection, ApiFailure> {
+    let requirement = effort
+        .map(EffortRequirement::Exact)
+        .unwrap_or(EffortRequirement::Default);
+    if let Ok(selected) = resolve_model_profile_selection_matching(
+        backend,
+        None,
+        model,
+        requirement,
+        None,
+        ModelProfileCandidateSource::ReviewersReady,
+    )
+    .await
+    {
+        return Ok(selected);
+    }
     resolve_model_profile_selection_matching(
         backend,
         None,
         model,
-        effort
-            .map(EffortRequirement::Exact)
-            .unwrap_or(EffortRequirement::Default),
+        requirement,
         None,
         ModelProfileCandidateSource::Reviewers,
     )
@@ -218,6 +232,9 @@ async fn resolve_model_profile_selection_matching(
     let candidates = match source {
         ModelProfileCandidateSource::Session { .. } => backend.session_profile_candidates().await?,
         ModelProfileCandidateSource::Reviewers => backend.reviewer_candidates().await?,
+        ModelProfileCandidateSource::ReviewersReady => {
+            backend.reviewer_ready_candidates(model.to_owned()).await?
+        }
         ModelProfileCandidateSource::Subagents { parent_profile } => {
             backend
                 .subagent_candidates(parent_profile.to_owned())
@@ -250,7 +267,8 @@ async fn resolve_model_profile_selection_matching(
                 ModelProfileCandidateSource::Subagents { .. } => format!(
                     "profile {requested:?} is unavailable for sub-agent use from this session"
                 ),
-                ModelProfileCandidateSource::Reviewers => {
+                ModelProfileCandidateSource::Reviewers
+                | ModelProfileCandidateSource::ReviewersReady => {
                     format!("profile {requested:?} is unavailable for reviewer use")
                 }
             };
@@ -264,7 +282,8 @@ async fn resolve_model_profile_selection_matching(
                 model,
                 now_epoch_seconds(),
             )?,
-            ModelProfileCandidateSource::Reviewers => {
+            ModelProfileCandidateSource::Reviewers
+            | ModelProfileCandidateSource::ReviewersReady => {
                 draw_candidates(&mut offered, None, model, now_epoch_seconds())?
             }
             ModelProfileCandidateSource::Session { ranking_anchor } => {
@@ -399,7 +418,7 @@ fn choose_model_profile(
         ModelProfileCandidateSource::Subagents { parent_profile } => {
             choose_subagent_profile(candidates, requested_profile, parent_profile, model)
         }
-        ModelProfileCandidateSource::Reviewers => {
+        ModelProfileCandidateSource::Reviewers | ModelProfileCandidateSource::ReviewersReady => {
             let SubagentCandidates {
                 mut offered,
                 unavailable,
@@ -865,6 +884,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
             discovery_fails: false,
             config: Default::default(),
             candidates: SubagentCandidates {
@@ -1111,6 +1131,7 @@ mod tests {
     /// profile's candidates, and no live parent session (so effort inherits
     /// nothing and the parent's real model is never consulted).
     struct FakeSelectionBackend {
+        ready_first: bool,
         discovery_fails: bool,
         config: mj_core::config::SubagentConfig,
         candidates: SubagentCandidates,
@@ -1163,6 +1184,16 @@ mod tests {
             Box::pin(async move { Ok(candidates) })
         }
         fn reviewer_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+            if self.ready_first {
+                return Box::pin(std::future::pending());
+            }
+            let candidates = self.candidates.clone();
+            Box::pin(async move { Ok(candidates) })
+        }
+        fn reviewer_ready_candidates(
+            &self,
+            _model: String,
+        ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
             let candidates = self.candidates.clone();
             Box::pin(async move { Ok(candidates) })
         }
@@ -1301,6 +1332,7 @@ mod tests {
             effort: None,
         };
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
             discovery_fails: true,
             config: SubagentConfig {
                 straightforward: Some(choice.clone()),
@@ -1339,8 +1371,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reviewer_uses_ready_profile_without_waiting_for_pending_discovery() {
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: true,
+            discovery_fails: false,
+            config: Default::default(),
+            candidates: SubagentCandidates {
+                offered: vec![candidate("ready", Some(70), &["fixed"])],
+                unavailable: Vec::new(),
+            },
+        });
+        let selected = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            resolve_reviewer_model_profile_selection(&backend, "fixed", Some("high")),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.profile_id, "ready");
+    }
+
+    #[tokio::test]
     async fn reviewer_selection_shares_spawn_effort_health_and_draw_rules() {
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
             discovery_fails: false,
             config: Default::default(),
             candidates: SubagentCandidates {
@@ -1406,6 +1460,7 @@ mod tests {
             ..Default::default()
         };
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
             discovery_fails: false,
             config: config.clone(),
             candidates: candidates.clone(),
@@ -1454,6 +1509,7 @@ mod tests {
                 }
             }
             Arc::new(FakeSelectionBackend {
+                ready_first: false,
                 discovery_fails: false,
                 config: config.clone(),
                 candidates,
@@ -1488,6 +1544,7 @@ mod tests {
             refused.message
         );
         let unconfigured: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
             discovery_fails: false,
             config: Default::default(),
             candidates,
@@ -1533,6 +1590,7 @@ mod tests {
         // With only straightforward configured, a subtle request names the
         // type the parent can use.
         let straightforward_only: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
             discovery_fails: false,
             config: SubagentConfig {
                 straightforward: Some(SubagentChoice {

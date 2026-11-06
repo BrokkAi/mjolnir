@@ -2816,6 +2816,16 @@ impl SubagentBackend for ApiBackend {
         Box::pin(ApiBackend::reviewer_candidates(self))
     }
 
+    fn reviewer_ready_candidates(
+        &self,
+        model: String,
+    ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
+        Box::pin(async move {
+            let ids = self.profile_catalog.ready_candidates(&model)?;
+            self.discover_profile_candidates(ids, "reviewer").await
+        })
+    }
+
     fn session_profile_candidates(
         &self,
     ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {

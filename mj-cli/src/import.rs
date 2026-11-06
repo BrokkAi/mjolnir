@@ -81,7 +81,7 @@ pub(crate) struct NativeImportArgs {
     /// Proceed after acknowledging edited non-Git or scratch directories will be omitted.
     #[arg(long)]
     allow_omitted_non_git: bool,
-    /// Reviewer model and optional effort; repeat for up to three reviewers.
+    /// Reviewer model and optional effort; final colon suffix is effort only when ASCII letters. Repeat up to three times.
     #[arg(long = "reviewer", value_name = "MODEL[:EFFORT]")]
     reviewers: Vec<String>,
     /// Review trigger for the imported session, overriding `[review]`.
@@ -259,6 +259,7 @@ fn import_native(
     workspace_id: &str,
     config: &Config,
 ) -> Result<Option<String>> {
+    let review = crate::api_commands::session_review(args.review.as_deref(), &args.reviewers)?;
     let mut config = config.clone();
     let home = source.home.clone();
     let selection = match args.session {
@@ -315,7 +316,7 @@ fn import_native(
         .get_mut(&imported.session_id)
         .context("import did not add its session to controller state")?;
     session.workspace_id = workspace_id.to_owned();
-    session.review = crate::api_commands::session_review(args.review.as_deref(), &args.reviewers)?;
+    session.review = review;
     persist_imported_session(
         session,
         bundle.map(|bundle| crate::daemon::ImportedBundle {
@@ -1143,6 +1144,43 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn invalid_review_flags_stop_import_before_archive_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, args) = parse_import(&[
+            "mj",
+            "import",
+            "codex",
+            "--session",
+            "native-1",
+            "--reviewer",
+            "a",
+            "--reviewer",
+            "b",
+            "--reviewer",
+            "c",
+            "--reviewer",
+            "d",
+        ]);
+        let source = ImportSource {
+            profile_id: None,
+            home: temp.path().to_path_buf(),
+        };
+        let error = import_native(
+            HarnessKind::Codex,
+            args,
+            &source,
+            "workspace",
+            &Config::default(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("at most three --reviewer"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
     }
 
     #[test]

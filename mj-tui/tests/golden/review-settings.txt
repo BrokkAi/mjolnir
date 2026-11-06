@@ -3,10 +3,10 @@
 
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
   │Trigger     Off ▾                                                                             │
-  │Reviewer 1  gpt-6-terra ▾                                        xhigh ▾              Remove  │
-  │Reviewer 2  gpt-6-sol ▾                                          medium ▾             Remove  │
   │  Add reviewer     Autoconfigure                                                              │
   │Choose each reviewer’s model and effort.                                                      │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -34,14 +34,14 @@
 
   ╭ × Settings › Code Review ────────────────────────────╮
   │Trigger             Off ▾                             │
-  │Reviewer 1 model    gpt-6-terra ▾                     │
-  │Reviewer 1 effort   xhigh ▾                           │
-  │  Remove reviewer 1                                   │
-  │Reviewer 2 model    gpt-6-sol ▾                       │
-  │Reviewer 2 effort   medium ▾                          │
-  │  Remove reviewer 2                                   │
   │  Add reviewer     Autoconfigure                      │
   │Choose each reviewer’s model and effort.              │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
   │                                                      │
   │                                                      │
   │                                                      │

@@ -1483,6 +1483,7 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
     .unwrap();
 
     let review = ReviewConfig {
+        legacy_auto: false,
         trigger: ReviewTrigger::Turn,
         reviewers: vec![
             SubagentChoice {
@@ -2283,7 +2284,7 @@ fn a_disabled_profile_loads_instead_of_failing() {
 }
 
 #[test]
-fn legacy_review_keys_and_session_records_convert_without_saving_old_keys() {
+fn legacy_review_keys_and_session_records_preserve_partial_overrides() {
     let legacy: ReviewConfig = toml::from_str(
         "trigger = 'turn'\ncount = 4\nprofile = 'old'\nmodel = 'gpt-6-terra'\neffort = 'high'\n",
     )
@@ -2296,9 +2297,34 @@ fn legacy_review_keys_and_session_records_convert_without_saving_old_keys() {
     .unwrap();
     assert_eq!(legacy.for_session(Some(&session)).reviewers.len(), 3);
     let saved = serde_json::to_string(&session).unwrap();
-    assert!(saved.contains("reviewers"));
-    assert!(!saved.contains("count"));
+    assert!(!saved.contains("reviewers"));
+    assert!(saved.contains("count"));
     assert!(!saved.contains("tier"));
+    let count_only: SessionReview = serde_json::from_str(r#"{"mode":"turn","count":1}"#).unwrap();
+    assert_eq!(legacy.for_session(Some(&count_only)).reviewers.len(), 1);
+    let effort_only: SessionReview =
+        serde_json::from_str(r#"{"mode":"turn","effort":"low"}"#).unwrap();
+    assert!(
+        legacy
+            .for_session(Some(&effort_only))
+            .reviewers
+            .iter()
+            .all(|reviewer| reviewer.effort.as_deref() == Some("low"))
+    );
+    let model_only: SessionReview =
+        serde_json::from_str(r#"{"mode":"turn","model":"other"}"#).unwrap();
+    assert!(
+        legacy
+            .for_session(Some(&model_only))
+            .reviewers
+            .iter()
+            .all(|reviewer| reviewer.model == "other")
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&count_only).unwrap())
+            .unwrap(),
+        serde_json::json!({"mode":"turn","count":1})
+    );
     let auto: ReviewConfig = toml::from_str("enabled = true\ncount = 2\n").unwrap();
     assert!(auto.reviewers.is_empty());
 }

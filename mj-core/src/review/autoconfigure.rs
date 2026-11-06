@@ -4,7 +4,10 @@ use crate::config::SubagentChoice;
 use crate::review::settings::{ReviewModelFamily, model_version_cmp};
 
 /// Choose review slots from the union of enabled profiles' model choices.
-pub fn autoconfigure(models: &[SessionConfigChoice]) -> Option<Vec<SubagentChoice>> {
+pub fn autoconfigure(
+    models: &[SessionConfigChoice],
+    efforts: impl Fn(&str) -> Option<Vec<SessionConfigChoice>>,
+) -> Option<Vec<SubagentChoice>> {
     // Each family keeps its best (identity, advertised value) pair; identities
     // decide, values are what the reviewer is launched with.
     let mut selected: [Option<(String, String)>; 6] = Default::default();
@@ -35,9 +38,16 @@ pub fn autoconfigure(models: &[SessionConfigChoice]) -> Option<Vec<SubagentChoic
             *current = Some((id, choice.value.clone()));
         }
     }
-    let choice = |index: usize, effort: &str| SubagentChoice {
-        model: selected[index].as_ref().unwrap().1.clone(),
-        effort: Some(effort.into()),
+    let choice = |index: usize, effort: &str| {
+        let model = selected[index].as_ref().unwrap().1.clone();
+        let offered = efforts(&model);
+        SubagentChoice {
+            model,
+            effort: offered
+                .filter(|choices| !choices.iter().any(|choice| choice.value == effort))
+                .map(|_| None)
+                .unwrap_or_else(|| Some(effort.into())),
+        }
     };
     if selected[0].is_some() && selected[1].is_some() && selected[2].is_some() {
         Some(vec![
@@ -82,6 +92,19 @@ mod tests {
     }
 
     #[test]
+    fn known_empty_haiku_efforts_use_harness_default_but_unknown_keeps_table_effort() {
+        let models = choices(&["claude-haiku-4.5"]);
+        let known = autoconfigure(&models, |_| Some(Vec::new())).unwrap();
+        let unknown = autoconfigure(&models, |_| None).unwrap();
+        assert!(known.iter().all(|choice| choice.effort.is_none()));
+        assert!(
+            unknown
+                .iter()
+                .all(|choice| choice.effort.as_deref() == Some("xhigh"))
+        );
+    }
+
+    #[test]
     fn autoconfigure_uses_first_matching_row_and_newest_family_versions() {
         type Case = (
             &'static [&'static str],
@@ -122,7 +145,7 @@ mod tests {
             (&["unrelated-model", "kimi-k3"], &[]),
         ];
         for (ids, expected) in cases {
-            let got = models(autoconfigure(&choices(ids)));
+            let got = models(autoconfigure(&choices(ids), |_| None));
             let expected = expected
                 .iter()
                 .map(|(model, effort)| (model.to_string(), effort.to_string()))

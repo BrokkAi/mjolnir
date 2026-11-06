@@ -443,9 +443,25 @@ fn validate_action_against(
                     | mj_core::config::SessionReview::Push { reviewers } => {
                         reviewers.as_deref().unwrap_or_default()
                     }
-                    mj_core::config::SessionReview::Off => &[],
+                    mj_core::config::SessionReview::Off
+                    | mj_core::config::SessionReview::Legacy { .. } => &[],
                 };
-                if reviewers.len() > mj_core::config::MAX_REVIEWERS
+                let invalid_legacy = match review {
+                    mj_core::config::SessionReview::Legacy { model, effort, .. } => {
+                        model.as_ref().is_some_and(|value| {
+                            value.trim().is_empty()
+                                || value.len() > 256
+                                || value.chars().any(char::is_control)
+                        }) || effort.as_ref().is_some_and(|value| {
+                            value.trim().is_empty()
+                                || value.len() > 256
+                                || value.chars().any(char::is_control)
+                        })
+                    }
+                    _ => false,
+                };
+                if invalid_legacy
+                    || reviewers.len() > mj_core::config::MAX_REVIEWERS
                     || reviewers.iter().any(|choice| {
                         choice.model.trim().is_empty()
                             || choice.model.len() > 256

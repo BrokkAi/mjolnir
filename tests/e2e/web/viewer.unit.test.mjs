@@ -521,7 +521,7 @@ test('phone review status exactly mirrors the shared status sentences', () => {
   const session = { review_trigger: 'turn', review_count: 1 };
   assert.equal(status(context.sessionReviewStatusConfigForTest(snapshot, session), false), 'Reviewing every completed turn; 1 reviewer');
   assert.equal(status({ trigger: 'turn', reviewers: [{ model: 'terra' }, { model: 'sol' }] }, false), 'Reviewing every completed turn; 2 reviewers');
-  assert.equal(status({ trigger: 'turn', reviewers: [] }, false), 'Reviewing every completed turn; reviewers autoconfigured at review time');
+  assert.equal(status({ trigger: 'turn', reviewers: [] }, false), 'Reviewing every completed turn; no reviewers');
   assert.equal(status({ trigger: 'off', reviewers: [{ model: 'terra' }] }, true), 'Automatic review is off; /review reviews one turn; 1 reviewer. A review is open now.');
   assert.equal(status({ trigger: 'push', reviewers: [{ model: 'terra' }] }, false), 'Review trigger is before push; 1 reviewer');
 });

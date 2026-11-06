@@ -101,6 +101,12 @@ pub trait SubagentBackend: Send + Sync {
     fn reviewer_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
         Box::pin(async { anyhow::bail!("reviewer profiles are unavailable") })
     }
+    fn reviewer_ready_candidates(
+        &self,
+        _model: String,
+    ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        self.reviewer_candidates()
+    }
     /// Every enabled profile usable for a user-created session, with its
     /// discovered choices and remaining quota. This is independent of the
     /// enabled profile set available for sub-agent use.
