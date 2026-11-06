@@ -209,17 +209,6 @@ impl HostState {
         let deltas = push.deltas.clone();
         let epoch = slot.epoch;
         let review_id = slot.driver.snapshot().review_id;
-        if verdict.is_complete()
-            && let ReviewVerdict::Findings {
-                synthesis,
-                evidence,
-            } = &verdict
-        {
-            slot.state.prior_review = Some(mj_core::review::lanes::PriorReviewContext {
-                synthesis: synthesis.clone(),
-                evidence: evidence.clone(),
-            });
-        }
         let reviewed_through_ordinal = requests.iter().find_map(|request| match request {
             ReviewRequest::AdvanceBaseline {
                 reviewed_through_ordinal,
@@ -357,7 +346,7 @@ pub(super) async fn finish_push_delivery(
             // A review scoped to one worktree leaves the other repositories'
             // baselines where they were.
             state.baselines.extend(trees);
-            state.prior_review = None;
+            state.declined_findings.clear();
             state.push_findings = None;
         }
     }

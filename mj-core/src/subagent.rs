@@ -1667,6 +1667,30 @@ mod tests {
         );
     }
 
+    // A request queued by an older worker carries one whole-verdict reason.
+    #[test]
+    fn a_queued_override_with_one_reason_decodes_as_one_pair() {
+        let old = r#"{"action":"override_review","params":{"reason":"wrong premise"}}"#;
+        let action: SubagentToolAction = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            action,
+            SubagentToolAction::OverrideReview {
+                overrides: vec![ReviewOverride {
+                    finding: LEGACY_WHOLE_VERDICT_FINDING.into(),
+                    reason: "wrong premise".into(),
+                }],
+            }
+        );
+        let pairs =
+            r#"{"action":"override_review","params":{"overrides":[{"finding":"F","reason":"R"}]}}"#;
+        let action: SubagentToolAction = serde_json::from_str(pairs).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SubagentToolAction>(&serde_json::to_string(&action).unwrap())
+                .unwrap(),
+            action
+        );
+    }
+
     #[test]
     fn only_child_mutations_hold_an_in_place_move_drain() {
         let mutations = [

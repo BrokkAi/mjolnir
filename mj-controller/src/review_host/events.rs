@@ -22,7 +22,7 @@ pub(super) enum HostEvent {
     },
     OverridePush {
         session_id: String,
-        reason: String,
+        overrides: Vec<ReviewOverride>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     },
     OverrideValidated {

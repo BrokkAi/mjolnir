@@ -8,7 +8,7 @@ fn seed() -> TurnReviewSeed {
         user_messages: vec![UserMessage::prompt("add a retry")],
         baselines: BTreeMap::from([(PathBuf::from("/w/app"), "base-tree".to_string())]),
         through_ordinal: 12,
-        prior_review: None,
+        declined: Vec::new(),
     }
 }
 
@@ -351,7 +351,7 @@ fn a_rejected_forward_keeps_findings_and_retries_the_same_command() {
         driver
             .forward_succeeded()
             .iter()
-            .any(|request| matches!(request, ReviewRequest::RecordPriorReview { .. }))
+            .any(|request| matches!(request, ReviewRequest::AdvanceBaseline { .. }))
     );
 }
 
@@ -374,7 +374,7 @@ fn a_late_acceptance_after_rejection_still_resolves_the_same_handoff() {
     assert!(
         accepted
             .iter()
-            .any(|request| matches!(request, ReviewRequest::RecordPriorReview { .. }))
+            .any(|request| matches!(request, ReviewRequest::AdvanceBaseline { .. }))
     );
     assert!(driver.finished());
     assert_eq!(
@@ -464,12 +464,12 @@ fn a_request_failure_closes_without_advancing_coverage() {
 }
 
 #[test]
-fn a_verification_pass_consumes_the_prior_review_when_it_resolves() {
+fn the_reviewer_prompt_carries_the_seed_declined_findings_and_no_corrective_pass() {
     let mut seed = seed();
-    seed.prior_review = Some(PriorReviewContext {
-        synthesis: "[P1] src/lib.rs:1 -- no bound".to_string(),
-        evidence: ReviewPassEvidence::default(),
-    });
+    seed.declined = vec![mj_core::subagent::ReviewOverride {
+        finding: "[P1] src/lib.rs:1 -- no bound".to_string(),
+        reason: "The caller bounds it".to_string(),
+    }];
     let (mut driver, _) = TurnReviewDriver::start(
         seed,
         "review-test".to_owned(),
@@ -477,25 +477,14 @@ fn a_verification_pass_consumes_the_prior_review_when_it_resolves() {
     );
     let requests = driver.delta_captured(changed_delta());
     let prompt = prompt_text(&requests, "reviewer-1");
-    assert!(
-        prompt.contains("This is a corrective pass"),
-        "a review after a forward verifies the prior findings"
-    );
-    let command_id = prompted(&requests, "reviewer-1");
-    let requests = driver.role_turn_completed(&command_id, "child-1", "No findings.");
-    assert!(
-        requests.contains(&ReviewRequest::ClearPriorReview),
-        "a resolved verification pass consumes the prior review: {requests:?}"
-    );
+    assert!(!prompt.contains("corrective pass"));
+    assert!(prompt.contains("Finding: [P1] src/lib.rs:1 -- no bound"));
+    assert!(prompt.contains("Reason: The caller bounds it"));
 }
 
 #[test]
 fn out_of_order_reports_remain_in_launch_order_and_partial_findings_keep_coverage_open() {
-    let mut review_seed = seed();
-    review_seed.prior_review = Some(PriorReviewContext {
-        synthesis: "earlier issue".into(),
-        evidence: ReviewPassEvidence::default(),
-    });
+    let review_seed = seed();
     let (mut driver, _) =
         TurnReviewDriver::start(review_seed, "group-1".into(), NonZeroUsize::new(3).unwrap());
     let requests = driver.delta_captured(changed_delta());

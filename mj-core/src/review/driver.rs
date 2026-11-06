@@ -1,8 +1,9 @@
 //! Shared turn-review requests, status and recovery data.
 
-use super::lanes::{PriorReviewContext, UserMessage};
+use super::lanes::UserMessage;
 use super::verdict::{ReviewPassEvidence, ReviewVerdict};
 use crate::relay::RepoDelta;
+use crate::subagent::ReviewOverride;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -28,10 +29,10 @@ pub enum ReviewRequest {
         trees: BTreeMap<PathBuf, String>,
         reviewed_through_ordinal: u64,
     },
-    /// Keep this verdict as the prior review, so the corrective turn's review
-    /// verifies it rather than sweeping the code again.
-    RecordPriorReview { prior: PriorReviewContext },
-    /// Forget any prior review: this pass consumed it.
+    /// Retired: reviews no longer verify prior findings. Kept so a snapshot
+    /// written by an older daemon still decodes; the host ignores it.
+    RecordPriorReview {},
+    /// Retired with `RecordPriorReview`; ignored.
     ClearPriorReview,
     /// An incomplete findings handoff was accepted, but coverage must stay put.
     /// Clear its durable retry record when closing without advancing a baseline.
@@ -141,8 +142,10 @@ pub struct TurnReviewSeed {
     pub baselines: BTreeMap<PathBuf, String>,
     /// The transcript ordinal a completed review advances to.
     pub through_ordinal: u64,
-    /// A previous forwarded verdict, when this review follows a correction.
-    pub prior_review: Option<PriorReviewContext>,
+    /// Findings the author declined to fix, for the reviewer prompt. An older
+    /// snapshot has none.
+    #[serde(default)]
+    pub declined: Vec<ReviewOverride>,
 }
 
 /// One frozen reviewer slot. Its verdict is the only terminal-state fact.
@@ -215,6 +218,22 @@ impl FindingsProvenance {
 mod tests {
     use super::*;
     use crate::review::verdict::LaneOutcome;
+
+    // A snapshot written while reviews still verified prior findings holds the
+    // retired requests and the seed's `prior_review`.
+    #[test]
+    fn a_snapshot_from_the_corrective_pass_era_still_decodes() {
+        let request: ReviewRequest = serde_json::from_str(
+            r#"{"RecordPriorReview":{"prior":{"synthesis":"[P1] a.rs:1 -- broken"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(request, ReviewRequest::RecordPriorReview {});
+        let seed: TurnReviewSeed = serde_json::from_str(
+            r#"{"task":"t","user_messages":[],"baselines":{},"through_ordinal":3,"prior_review":{"synthesis":"old"}}"#,
+        )
+        .unwrap();
+        assert!(seed.declined.is_empty());
+    }
 
     /// A handoff persisted before provenance was recorded came from a
     /// supervisor or the removed validator, and retries with the vetted note.

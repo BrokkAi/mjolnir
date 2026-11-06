@@ -66,8 +66,8 @@ pub(super) fn turn_review_state_in(path: &Path, session_id: &str) -> Result<Turn
     let connection = open_reader(path)?;
     let row = connection
         .query_row(
-            "SELECT baselines, reviewed_through_ordinal, prior_review, active,
-                    pending_forward, child_session_id, push_findings, active_group, pending_followup, forward_attempts
+            "SELECT baselines, reviewed_through_ordinal, active,
+                    pending_forward, child_session_id, push_findings, active_group, pending_followup, forward_attempts, declined_findings
              FROM turn_review_state WHERE session_id = ?1",
             [session_id],
             |row| {
@@ -79,9 +79,9 @@ pub(super) fn turn_review_state_in(path: &Path, session_id: &str) -> Result<Turn
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, bool>(8)?,
-                    row.get::<_, u8>(9)?,
+                    row.get::<_, bool>(7)?,
+                    row.get::<_, u8>(8)?,
+                    row.get::<_, Option<String>>(9)?,
                 ))
             },
         )
@@ -89,7 +89,6 @@ pub(super) fn turn_review_state_in(path: &Path, session_id: &str) -> Result<Turn
     let Some((
         baselines,
         ordinal,
-        prior,
         active,
         pending_forward,
         child_session_id,
@@ -97,6 +96,7 @@ pub(super) fn turn_review_state_in(path: &Path, session_id: &str) -> Result<Turn
         active_group,
         pending_followup,
         forward_attempts,
+        declined_findings,
     )) = row
     else {
         return Ok(TurnReviewState::default());
@@ -107,10 +107,11 @@ pub(super) fn turn_review_state_in(path: &Path, session_id: &str) -> Result<Turn
         child_session_id,
         baselines: serde_json::from_str(&baselines).context("parse the stored review baselines")?,
         reviewed_through_ordinal: u64::try_from(ordinal).unwrap_or_default(),
-        prior_review: prior
-            .map(|prior| serde_json::from_str(&prior))
+        declined_findings: declined_findings
+            .map(|declined| serde_json::from_str(&declined))
             .transpose()
-            .context("parse the stored prior review")?,
+            .context("parse the stored declined review findings")?
+            .unwrap_or_default(),
         active,
         pending_forward: pending_forward
             .map(|pending| serde_json::from_str(&pending))
@@ -144,13 +145,13 @@ pub(super) fn save_turn_review_state_in(
     let connection = open(path)?;
     connection.execute(
         "INSERT INTO turn_review_state(
-             session_id, baselines, reviewed_through_ordinal, prior_review, active,
-             pending_forward, child_session_id, push_findings, active_group, pending_followup, forward_attempts
+             session_id, baselines, reviewed_through_ordinal, active,
+             pending_forward, child_session_id, push_findings, active_group, pending_followup, forward_attempts,
+             declined_findings
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(session_id) DO UPDATE SET
              baselines = excluded.baselines,
              reviewed_through_ordinal = excluded.reviewed_through_ordinal,
-             prior_review = excluded.prior_review,
              active = excluded.active,
              pending_forward = excluded.pending_forward,
              child_session_id = excluded.child_session_id,
@@ -161,16 +162,12 @@ pub(super) fn save_turn_review_state_in(
                  THEN excluded.pending_followup
                  ELSE MAX(turn_review_state.pending_followup, excluded.pending_followup)
              END,
-             forward_attempts = excluded.forward_attempts",
+             forward_attempts = excluded.forward_attempts,
+             declined_findings = excluded.declined_findings",
         params![
             session_id,
             serde_json::to_string(&state.baselines)?,
             i64::try_from(state.reviewed_through_ordinal).unwrap_or(i64::MAX),
-            state
-                .prior_review
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?,
             state.active,
             state
                 .pending_forward
@@ -190,6 +187,9 @@ pub(super) fn save_turn_review_state_in(
                 .transpose()?,
             state.pending_followup,
             state.forward_attempts,
+            (!state.declined_findings.is_empty())
+                .then(|| serde_json::to_string(&state.declined_findings))
+                .transpose()?,
         ],
     )?;
     Ok(())

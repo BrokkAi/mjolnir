@@ -4399,7 +4399,6 @@ fn detached_drafts_keep_source_pid_and_workspace_without_overwriting_each_other(
 #[test]
 fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
     use mj_core::review::driver::PendingForward;
-    use mj_core::review::lanes::PriorReviewContext;
 
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
@@ -4420,10 +4419,10 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
             "1234abcd".to_string(),
         )]),
         reviewed_through_ordinal: 42,
-        prior_review: Some(PriorReviewContext {
-            synthesis: "[P1] src/a.rs:1 -- broken".to_string(),
-            evidence: Default::default(),
-        }),
+        declined_findings: vec![mj_core::subagent::ReviewOverride {
+            finding: "[P2] src/a.rs:9 -- naming".to_string(),
+            reason: "matches the module's style".to_string(),
+        }],
         active: Some("{\"phase\":\"running\"}".to_string()),
         pending_forward: Some(PendingForward {
             synthesis: "[P1] src/a.rs:1 -- broken".to_string(),
@@ -4523,7 +4522,7 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
             child_session_id: Some("reviewer-child".into()),
             baselines: baselines.clone(),
             reviewed_through_ordinal: 42,
-            prior_review: None,
+            declined_findings: Vec::new(),
             active: Some("{\"opened_at_ordinal\":42}".to_string()),
             pending_forward: Some(PendingForward {
                 synthesis: "[P1] broken".to_string(),
@@ -4547,7 +4546,7 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
             child_session_id: Some("reviewer-child".into()),
             baselines: baselines.clone(),
             reviewed_through_ordinal: 7,
-            prior_review: None,
+            declined_findings: Vec::new(),
             active: None,
             pending_forward: None,
             push_findings: None,
@@ -4584,7 +4583,7 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         user_messages: Vec::new(),
         baselines: Default::default(),
         through_ordinal: 17,
-        prior_review: None,
+        declined: Vec::new(),
     };
     let (driver, _) = mj_review::driver::TurnReviewDriver::start(
         seed,

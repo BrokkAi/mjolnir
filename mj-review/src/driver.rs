@@ -27,7 +27,6 @@ use mj_core::relay::RepoDelta;
 use super::delta;
 use super::lanes::{RepositoryCapture, ReviewJob, review_prompt};
 use super::verdict::{ReviewPassEvidence, ReviewVerdict, ReviewerFailure, review_output_verdict};
-use mj_core::review::lanes::PriorReviewContext;
 
 pub use mj_core::review::driver::*;
 
@@ -396,7 +395,7 @@ impl TurnReviewDriver {
                 .collect(),
             changed_files: delta::changed_files_table(&self.deltas),
             changed_lines: delta::changed_line_count(&self.deltas),
-            prior_review: self.seed.prior_review.clone(),
+            declined: self.seed.declined.clone(),
         }
     }
 
@@ -691,32 +690,12 @@ impl TurnReviewDriver {
     }
 
     /// Records that the relay durably accepted the corrective prompt. Only
-    /// after this acknowledgment may the prior review and baseline advance.
+    /// after this acknowledgment may the baseline advance.
     pub fn forward_succeeded(&mut self) -> Vec<ReviewRequest> {
-        let TurnReviewPhase::Forwarding {
-            synthesis,
-            evidence,
-            ..
-        } = self.phase.clone()
-        else {
+        if !matches!(self.phase, TurnReviewPhase::Forwarding { .. }) {
             return Vec::new();
-        };
-        let complete = ReviewVerdict::Findings {
-            synthesis: synthesis.clone(),
-            evidence: evidence.clone(),
         }
-        .is_complete();
-        let mut requests = if complete {
-            vec![ReviewRequest::RecordPriorReview {
-                prior: PriorReviewContext {
-                    synthesis,
-                    evidence,
-                },
-            }]
-        } else {
-            Vec::new()
-        };
-        requests.extend(self.resolve(Resolution::Forwarded));
+        let requests = self.resolve(Resolution::Forwarded);
         self.emit(requests)
     }
 
@@ -804,8 +783,8 @@ impl TurnReviewDriver {
         self.emit(requests)
     }
 
-    /// Ends a review. Only complete coverage advances the baseline or consumes
-    /// a prior review; incomplete findings still close after delivery.
+    /// Ends a review. Only complete coverage advances the baseline; incomplete
+    /// findings still close after delivery.
     fn resolve(&mut self, resolution: Resolution) -> Vec<ReviewRequest> {
         let complete = self
             .last_verdict
@@ -818,12 +797,6 @@ impl TurnReviewDriver {
                 trees: self.captured_trees(),
                 reviewed_through_ordinal: self.seed.through_ordinal,
             });
-        }
-        if complete && self.seed.prior_review.is_some() && resolution != Resolution::Forwarded {
-            // This pass verified the prior findings and reached its own
-            // verdict, so the next review starts fresh rather than verifying
-            // the same findings a second time.
-            requests.push(ReviewRequest::ClearPriorReview);
         }
         if !complete && resolution == Resolution::Forwarded {
             requests.push(ReviewRequest::ClearPendingForward);

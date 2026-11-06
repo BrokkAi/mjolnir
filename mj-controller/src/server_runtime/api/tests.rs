@@ -136,16 +136,16 @@ fn models_probe(offers: &[(&str, &[&str])]) -> Arc<crate::server_runtime::profil
 struct RecordingExports {
     parent: SessionRecord,
     registered: std::sync::Mutex<Option<crate::controller::RegisterSubagentRequest>>,
-    override_call: std::sync::Mutex<Option<(String, String)>>,
+    override_call: std::sync::Mutex<Option<(String, Vec<mj_core::subagent::ReviewOverride>)>>,
 }
 
 impl ExportRuntime for RecordingExports {
     fn override_review(
         &self,
         session_id: String,
-        reason: String,
+        overrides: Vec<mj_core::subagent::ReviewOverride>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
-        *self.override_call.lock().unwrap() = Some((session_id, reason));
+        *self.override_call.lock().unwrap() = Some((session_id, overrides));
         Box::pin(async { Ok(serde_json::json!({"accepted": true})) })
     }
 
@@ -192,7 +192,7 @@ impl RecordingExports {
             .expect("the spawn reached registration")
     }
 
-    fn override_call(&self) -> Option<(String, String)> {
+    fn override_call(&self) -> Option<(String, Vec<mj_core::subagent::ReviewOverride>)> {
         self.override_call.lock().unwrap().clone()
     }
 }
@@ -351,7 +351,7 @@ async fn legacy_list_profiles_is_refused() {
 }
 
 #[tokio::test]
-async fn override_review_dispatch_forwards_parent_and_reason_to_export() {
+async fn override_review_dispatch_forwards_parent_and_pairs_to_export() {
     let (backend, exports) = selection_backend(SAME_MODELS, None).await;
     let result = backend
         .execute_subagent_tool(
@@ -372,7 +372,13 @@ async fn override_review_dispatch_forwards_parent_and_reason_to_export() {
     assert!(!result.is_error, "{}", result.message);
     assert_eq!(
         exports.override_call(),
-        Some(("parent-1".into(), "F: finding is unreasonable".into()))
+        Some((
+            "parent-1".into(),
+            vec![mj_core::subagent::ReviewOverride {
+                finding: "F".into(),
+                reason: "finding is unreasonable".into(),
+            }]
+        ))
     );
 }
 

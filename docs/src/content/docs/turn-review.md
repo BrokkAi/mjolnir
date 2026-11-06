@@ -84,7 +84,7 @@ git -C <root> diff --no-ext-diff --ignore-submodules=none <baseline_tree> <captu
 
 The reviewer runs that command itself with its harness's shell or read tools. The tree IDs keep the review scoped to the captured changes, even if files change later. Repository contents and tool output are treated as untrusted data, not instructions.
 
-The reviewer receives the user's messages as the source of intent; the primary agent's account of its own work is not included. On a corrective pass, it also receives the previous findings so it can check the changes made in response.
+The reviewer receives the user's messages as the source of intent; the primary agent's account of its own work is not included.
 
 ## Automatic review
 
@@ -102,7 +102,7 @@ Reviewing merged work requires Git 2.39.5 or newer. With older Git, Mjolnir reco
 
 The verdict arrives later as a message in the agent's conversation. The group is clean only when every reviewer finishes cleanly; a failed or missing reviewer keeps the gate blocked. A clean verdict records the reviewed tree in the Git ref `refs/mj/reviewed/<tree>`. A move keeps every ref under `refs/mj/`: these records, the session's start commit and the turn-review baseline. A managed checkout's checkpoint carries them with their objects. A raw session's checkpoint records their names and object IDs, and restoring it recreates each ref whose object the repository still has. A findings verdict tells the agent to fix the findings, commit the changes, and call `request_review` again. Push review does not hold prompts or send findings as a corrective prompt.
 
-If the agent judges the findings incorrect or unreasonable, it can call `override_review` with a reason. The override applies to the whole findings verdict and only to the same reviewed trees captured for that verdict. Before the reviewed refs are unlocked, Mjolnir records an “override requested” notice in the session transcript with the reason and findings, so that record remains visible even if a later operation fails. An override is refused while a review is running or when a reviewer failed and the group is incomplete.
+For each finding the agent will not fix, it calls `override_review` with a list of entries, each holding the finding and the agent's reason. It does this before committing any change. The override applies only to the same reviewed trees captured for that verdict. Before the reviewed refs are unlocked, Mjolnir records an “override requested” notice in the session transcript that lists each finding with its reason, so that record remains visible even if a later operation fails. The override records the reviewed trees, so the agent can push those exact commits, but it does not move the review baseline: the next review still covers the whole change. Mjolnir keeps the declined findings and their reasons for the session, within a size limit that drops the oldest first, and tells every later reviewer not to report them again or to restate them. A clean verdict moves the baseline and clears the list. An override is refused while a review is running or when a reviewer failed and the group is incomplete.
 
 Mjolnir installs a pre-push hook in the session checkout. For pushes made by the agent, the hook refuses any commit tree that has not passed review or been accepted through a recorded override, and prints `mj: <ref> (tree <short>) has not been reviewed.` The hook is enabled only in the harness environment, so pushes from your own terminal are not affected. If the repository already has a pre-push hook, Mjolnir keeps it as `pre-push.before-mj` and runs it after its own check. If `core.hooksPath` points to a directory inside the work tree that Git does not ignore, Mjolnir skips installing the gate and reports that in the transcript. The gate can be skipped with `git push --no-verify`; the agent must follow the request to call `request_review`.
 
@@ -139,7 +139,7 @@ mj review status --session <id>
 
 The parent conversation and its prompt remain available while reviewers work. A short status appears above the prompt. Open **Reviewers** to inspect reviewer sessions in the virtual workspace; close the workspace or press Escape in the Sessions list to return.
 
-A clean review advances the reviewed boundary automatically. Findings are sent to the primary agent as a corrective prompt, and a failed review reports its reason. `mj review status` shows the current state and verdict.
+A clean review advances the reviewed boundary automatically. Findings are sent to the primary agent as a corrective prompt, and a failed review reports its reason. The next review looks at the changed code afresh; it does not check the earlier findings. `mj review status` shows the current state and verdict.
 
 ## Lifecycle behavior
 

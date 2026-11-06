@@ -58,7 +58,7 @@ pub trait ExportRuntime: Send + Sync {
     fn override_review(
         &self,
         _session_id: String,
-        _reason: String,
+        _overrides: Vec<mj_core::subagent::ReviewOverride>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async { bail!("push review is unavailable") })
     }
@@ -242,11 +242,11 @@ impl ExportRuntime for RuntimeState {
     fn override_review(
         &self,
         session_id: String,
-        reason: String,
+        overrides: Vec<mj_core::subagent::ReviewOverride>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async move {
             self.review_host()
-                .override_push(&session_id, reason)
+                .override_push(&session_id, overrides)
                 .await
                 .map_err(|error| anyhow!("override_review refused: {}", error.0))
         })
@@ -910,15 +910,9 @@ impl ApiBackend {
                     .request_review(parent_session_id.to_owned(), path.clone())
                     .await
             }
-            // Transitional: per-finding overrides replace this joined reason.
             SubagentToolAction::OverrideReview { overrides } => {
-                let reason = overrides
-                    .iter()
-                    .map(|entry| format!("{}: {}", entry.finding, entry.reason))
-                    .collect::<Vec<_>>()
-                    .join("\n");
                 self.exports
-                    .override_review(parent_session_id.to_owned(), reason)
+                    .override_review(parent_session_id.to_owned(), overrides.clone())
                     .await
             }
             SubagentToolAction::SetReviewBaseline { .. } => {

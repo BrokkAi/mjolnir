@@ -507,6 +507,8 @@ pub(super) fn seed_from_session(
         user_messages,
         baselines: state.baselines.clone(),
         through_ordinal: session.applied_event_ordinal,
-        prior_review: state.prior_review.clone(),
+        // Only a before-push review is told about declined findings; the
+        // caller fills them in.
+        declined: Vec::new(),
     }
 }

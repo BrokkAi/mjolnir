@@ -8200,7 +8200,7 @@ async fn exercise_child_close_with_a_nested_workspace(
                 user_messages: Vec::new(),
                 baselines: Default::default(),
                 through_ordinal: 1,
-                prior_review: None,
+                declined: Vec::new(),
             },
             "failed-start".into(),
             std::num::NonZeroUsize::new(1).unwrap(),

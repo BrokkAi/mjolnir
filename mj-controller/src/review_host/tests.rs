@@ -57,7 +57,12 @@ fn seed_uses_the_latest_real_prompt_and_keeps_history_for_intent() {
         ..TurnReviewState::default()
     };
 
+    state.declined_findings = vec![declined("[P2] parser.rs:3 -- naming", "house style")];
     let seed = seed_from_session(&session, &state, "manual");
+    assert!(
+        seed.declined.is_empty(),
+        "only a before-push review is told about declined findings"
+    );
     assert_eq!(seed.task, "also finish the parser error path");
     assert_eq!(
         seed.user_messages
@@ -1674,7 +1679,6 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
     .expect("accepted handoff closes");
     let state = environment.state();
     assert!(state.pending_forward.is_none());
-    assert!(state.prior_review.is_some());
     assert_eq!(state.baselines[&PathBuf::from("/workspace/app")], "new");
     assert!(environment.children.lock().unwrap().is_empty());
     host.shutdown().await.unwrap();
@@ -2551,7 +2555,7 @@ async fn startup_restores_group_before_push_or_override_admission() {
         user_messages: Vec::new(),
         baselines: Default::default(),
         through_ordinal: 1,
-        prior_review: None,
+        declined: Vec::new(),
     };
     let (mut driver, _) = TurnReviewDriver::start(
         seed,
@@ -2598,7 +2602,10 @@ async fn startup_restores_group_before_push_or_override_admission() {
     let override_request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.override_push(&session, "old finding".into()).await })
+        tokio::spawn(async move {
+            host.override_push(&session, one_override("old finding"))
+                .await
+        })
     };
     tokio::task::yield_now().await;
     assert!(!push.is_finished() && !override_request.is_finished());
@@ -2644,7 +2651,7 @@ async fn startup_reaps_settled_and_orphaned_reviewers_but_preserves_their_busy_p
             user_messages: Vec::new(),
             baselines: Default::default(),
             through_ordinal: 1,
-            prior_review: None,
+            declined: Vec::new(),
         },
         "partly-failed-group".into(),
         std::num::NonZeroUsize::new(2).unwrap(),
@@ -3336,6 +3343,16 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
         });
         let host = TurnReviewHost::spawn_in(manager.control.clone(), config, environment.clone());
         let child = open_push(&mut manager, &host, &environment).await;
+        {
+            let children = environment.children.lock().unwrap();
+            let prompt = &children[0].2;
+            assert!(!prompt.contains("corrective pass"));
+            assert_eq!(
+                prompt.contains("<declined_findings>\n- Finding: [P3] old finding\n  Reason: old reason\n</declined_findings>"),
+                name == "pushclean",
+                "the declined findings reach the reviewer"
+            );
+        }
         assert_eq!(
             host.begin_push(&session, None).await.unwrap_err().0,
             "a review is already open"
@@ -3389,7 +3406,10 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
             // The review covered one repository; the other keeps its baseline.
             assert_eq!(state.baselines[&PathBuf::from("/workspace/lib")], "libtree");
         }
-        assert_eq!(state.prior_review.is_some(), name == "pushfindings");
+        assert!(
+            state.declined_findings.is_empty(),
+            "a clean verdict moves the baseline and clears the declined findings"
+        );
         assert_eq!(state.push_findings.is_some(), name == "pushfindings");
         if let Some(findings) = &state.push_findings {
             assert_eq!(
@@ -3419,7 +3439,8 @@ async fn incomplete_push_findings_clear_stale_override_without_advancing_coverag
     let mut manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
     pending_push_findings(&environment);
-    let original_prior = environment.state().prior_review;
+    let original_declined = environment.state().declined_findings;
+    assert!(!original_declined.is_empty());
     let host = TurnReviewHost::spawn_in(
         manager.control.clone(),
         push_config_count(2),
@@ -3445,7 +3466,7 @@ async fn incomplete_push_findings_clear_stale_override_without_advancing_coverag
     .unwrap();
     let state = environment.state();
     assert!(state.push_findings.is_none());
-    assert_eq!(state.prior_review, original_prior);
+    assert_eq!(state.declined_findings, original_declined);
     assert!(state.baselines.is_empty());
     {
         let mailbox = environment.mailbox.lock().unwrap();
@@ -3505,14 +3526,25 @@ async fn push_delivery_retries_same_mailbox_key_after_final_state_save_fails() {
     host.shutdown().await.unwrap();
 }
 
+fn declined(finding: &str, reason: &str) -> mj_core::subagent::ReviewOverride {
+    mj_core::subagent::ReviewOverride {
+        finding: finding.into(),
+        reason: reason.into(),
+    }
+}
+
+fn one_override(reason: &str) -> Vec<mj_core::subagent::ReviewOverride> {
+    vec![declined(
+        "[P1] src/lib.rs:7 -- retry loses the request",
+        reason,
+    )]
+}
+
 fn pending_push_findings(environment: &FakeEnvironment) {
     *environment.state.lock().unwrap() = TurnReviewState {
         pending_followup: false,
         forward_attempts: 0,
-        prior_review: Some(mj_core::review::lanes::PriorReviewContext {
-            synthesis: "fix the regression".into(),
-            evidence: Default::default(),
-        }),
+        declined_findings: vec![declined("[P3] old finding", "old reason")],
         push_findings: Some(mj_core::storage::PushFindingsRecord {
             review_id: "review-1".into(),
             trees: [(
@@ -3564,6 +3596,12 @@ async fn finish_override_worker_actions(manager: &mut FakeManager, expected_noti
             ..
         } => {
             assert!(text.contains(expected_notice), "{text}");
+            assert!(
+                text.contains(
+                    "- Finding: [P1] src/lib.rs:7 -- retry loses the request\n  Reason: "
+                ),
+                "{text}"
+            );
             assert!(text.contains("fix the regression"));
             assert!(text.len() <= mj_review::SYNTHESIS_LIMIT);
             reply.send(Ok(1)).unwrap();
@@ -3584,12 +3622,42 @@ async fn finish_override_worker_actions(manager: &mut FakeManager, expected_noti
         matches!(action, ReviewerAction::RecordReviewed { ref trees } if trees[&PathBuf::from("/workspace/app")] == ("newtree".into(), "bbbbbbb456".into()))
     );
     reply.send(answer_for(&action)).unwrap();
-    let (action, reply) = match manager.next().await {
-        RemoteSessionRequest::Reviewer { action, reply, .. } => (action, reply),
-        other => panic!("expected baseline pinning, got {}", other.session_id()),
-    };
-    assert!(matches!(action, ReviewerAction::AdvanceBaseline { .. }));
-    reply.send(answer_for(&action)).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), manager.requests.recv())
+            .await
+            .is_err(),
+        "an override pins no review baseline"
+    );
+}
+
+#[tokio::test]
+async fn push_override_rejects_empty_or_blank_entries_before_any_capture() {
+    let session = session_id("override-invalid");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    pending_push_findings(&environment);
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    for (overrides, expected) in [
+        (Vec::new(), "at least one finding"),
+        (vec![declined("  ", "reason")], "the finding it declines"),
+        (vec![declined("[P1] finding", " \n")], "needs a reason"),
+        (
+            (0..33).map(|n| declined(&format!("F{n}"), "R")).collect(),
+            "at most 32",
+        ),
+    ] {
+        let error = host.override_push(&session, overrides).await.unwrap_err();
+        assert!(error.0.contains(expected), "{}", error.0);
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), manager.requests.recv())
+            .await
+            .is_err(),
+        "a refused request touches nothing"
+    );
+    assert_eq!(environment.state().declined_findings.len(), 1);
+    host.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -3633,7 +3701,9 @@ async fn push_override_rejects_missing_or_changed_findings_without_unlocking_a_t
         let request = {
             let host = host.clone();
             let session = session.clone();
-            tokio::spawn(async move { host.override_push(&session, "disagree".into()).await })
+            tokio::spawn(
+                async move { host.override_push(&session, one_override("disagree")).await },
+            )
         };
         if pending {
             answer_override_capture(&mut manager, deltas).await;
@@ -3661,7 +3731,10 @@ async fn push_override_audit_refusal_keeps_findings_and_never_records_a_ref() {
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.override_push(&session, "🔥".repeat(4000)).await })
+        tokio::spawn(async move {
+            host.override_push(&session, one_override(&"🔥".repeat(4000)))
+                .await
+        })
     };
     answer_override_capture(&mut manager, vec![push_delta("/workspace/app", "newtree")]).await;
     match manager.next().await {
@@ -3706,13 +3779,16 @@ async fn push_override_keeps_reservation_during_save_and_drains_admitted_work_on
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.override_push(&session, "incorrect".into()).await })
+        tokio::spawn(async move {
+            host.override_push(&session, one_override("incorrect"))
+                .await
+        })
     };
     let (_, _, capture) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
         .await;
     assert!(
-        host.override_push(&session, "again".into())
+        host.override_push(&session, one_override("again"))
             .await
             .unwrap_err()
             .0
@@ -3735,7 +3811,7 @@ async fn push_override_keeps_reservation_during_save_and_drains_admitted_work_on
     gate.entered().await;
     assert!(!request.is_finished());
     assert!(
-        host.override_push(&session, "again".into())
+        host.override_push(&session, one_override("again"))
             .await
             .unwrap_err()
             .0
@@ -3775,7 +3851,10 @@ async fn push_override_retries_after_reviewed_ref_was_recorded_but_state_save_fa
         let request = {
             let host = host.clone();
             let session = session.clone();
-            tokio::spawn(async move { host.override_push(&session, "false positive".into()).await })
+            tokio::spawn(async move {
+                host.override_push(&session, one_override("false positive"))
+                    .await
+            })
         };
         answer_override_capture(&mut manager, vec![push_delta("/workspace/app", "newtree")]).await;
         finish_override_worker_actions(&mut manager, "false positive").await;
@@ -3789,15 +3868,26 @@ async fn push_override_retries_after_reviewed_ref_was_recorded_but_state_save_fa
         } else {
             assert_eq!(result.unwrap()["accepted"], true);
             assert!(environment.state().push_findings.is_none());
-            assert!(environment.state().prior_review.is_none());
+            // The override records the trees as reviewed but moves no baseline.
             assert_eq!(
-                environment.state().baselines[&PathBuf::from("/workspace/app")],
-                "newtree"
+                environment.state().baselines,
+                std::collections::BTreeMap::from([(
+                    PathBuf::from("/workspace/lib"),
+                    "libtree".to_string()
+                )])
             );
-            // The override covered one repository; the other keeps its baseline.
+            assert_eq!(environment.state().reviewed_through_ordinal, 0);
+            // The failed first save kept nothing, so the retry records each
+            // declined finding once, after the earlier one.
             assert_eq!(
-                environment.state().baselines[&PathBuf::from("/workspace/lib")],
-                "libtree"
+                environment.state().declined_findings,
+                vec![
+                    declined("[P3] old finding", "old reason"),
+                    declined(
+                        "[P1] src/lib.rs:7 -- retry loses the request",
+                        "false positive"
+                    ),
+                ]
             );
         }
     }
@@ -3849,7 +3939,10 @@ async fn push_override_load_waits_for_cancelled_review_open_clear_save() {
     let override_request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.override_push(&session, "incorrect".into()).await })
+        tokio::spawn(async move {
+            host.override_push(&session, one_override("incorrect"))
+                .await
+        })
     };
     clear_gate.entered().await;
     assert!(
@@ -3877,7 +3970,10 @@ async fn shutdown_cancels_unadmitted_push_override_without_marking_a_review_inte
     let request = {
         let host = host.clone();
         let session = session.clone();
-        tokio::spawn(async move { host.override_push(&session, "incorrect".into()).await })
+        tokio::spawn(async move {
+            host.override_push(&session, one_override("incorrect"))
+                .await
+        })
     };
     let (_, _, capture) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))

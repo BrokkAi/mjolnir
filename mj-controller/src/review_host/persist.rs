@@ -61,11 +61,14 @@ impl HostState {
                 return;
             }
         };
-        let seed = seed_from_session(
+        let mut seed = seed_from_session(
             &prepared.materialized,
             &prepared.state,
             if manual { "manual" } else { "automatic" },
         );
+        if prepared.scope == mj_core::relay::CaptureScope::PushableCommits {
+            seed.declined = prepared.state.declined_findings.clone();
+        }
         let (mut driver, mut requests) = if let Some(pending) = prepared.resume_forward.clone() {
             let command_id = pending.command_id.clone();
             let (mut driver, _) = TurnReviewDriver::resume_forward(seed, pending);

@@ -198,13 +198,13 @@ impl TurnReviewHost {
     pub async fn override_push(
         &self,
         session_id: &str,
-        reason: String,
+        overrides: Vec<ReviewOverride>,
     ) -> Result<serde_json::Value, StartRefusal> {
         let (reply, answer) = oneshot::channel();
         self.events
             .send(HostEvent::OverridePush {
                 session_id: session_id.to_owned(),
-                reason,
+                overrides,
                 reply,
             })
             .map_err(|_| StartRefusal("the review host stopped".into()))?;

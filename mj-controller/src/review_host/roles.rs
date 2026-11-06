@@ -39,9 +39,9 @@ impl HostState {
                     slot.state.baselines = trees.clone();
                     slot.state.reviewed_through_ordinal = reviewed_through_ordinal;
                     // Clear an accepted handoff in the same durable state
-                    // write as its prior-review record and baseline. Until
-                    // this point shutdown/restart must retain it for command
-                    // id reconciliation.
+                    // write as its baseline. Until this point
+                    // shutdown/restart must retain it for command id
+                    // reconciliation.
                     slot.state.pending_forward = None;
                     let state = slot.state.clone();
                     if let Err(error) = self.persist(session_id.to_owned(), state, None) {
@@ -68,25 +68,13 @@ impl HostState {
                     },
                 );
             }
-            ReviewRequest::RecordPriorReview { prior } => {
-                if let Some(slot) = self.reviews.get_mut(session_id) {
-                    slot.state.prior_review = Some(prior);
-                }
-            }
             ReviewRequest::ClearPendingForward => {
                 if let Some(slot) = self.reviews.get_mut(session_id) {
                     slot.state.pending_forward = None;
                 }
             }
-            ReviewRequest::ClearPriorReview => {
-                if let Some(slot) = self.reviews.get_mut(session_id) {
-                    slot.state.prior_review = None;
-                    let state = slot.state.clone();
-                    if let Err(error) = self.persist(session_id.to_owned(), state, None) {
-                        tracing::warn!(session_id, %error, "could not queue prior review cleanup");
-                    }
-                }
-            }
+            // Retired requests from a snapshot an older daemon wrote.
+            ReviewRequest::RecordPriorReview {} | ReviewRequest::ClearPriorReview => {}
             ReviewRequest::Close => {
                 if self.closing.contains(session_id) {
                     return;

@@ -64,9 +64,9 @@ impl HostState {
             } => self.begin_push(session_id, path, reply),
             HostEvent::OverridePush {
                 session_id,
-                reason,
+                overrides,
                 reply,
-            } => self.override_push(session_id, reason, reply),
+            } => self.override_push(session_id, overrides, reply),
             HostEvent::OverrideValidated { session_id, permit } => {
                 self.override_validated(&session_id, permit)
             }

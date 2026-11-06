@@ -2,14 +2,52 @@ use super::*;
 use futures::FutureExt;
 
 const OVERRIDE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// Most findings one `override_review` call may decline.
+const MAX_OVERRIDES: usize = 32;
+const FINDING_BYTES: usize = 2 * 1024;
+const REASON_BYTES: usize = 4 * 1024;
+/// The notice lists every override; keep the whole list bounded.
+const NOTICE_OVERRIDES_BYTES: usize = 24 * 1024;
+
+/// Trims and bounds an `override_review` request, or says how to fix it.
+fn validated_overrides(
+    overrides: Vec<ReviewOverride>,
+) -> Result<Vec<ReviewOverride>, &'static str> {
+    if overrides.is_empty() {
+        return Err("override_review needs at least one finding with a reason");
+    }
+    if overrides.len() > MAX_OVERRIDES {
+        return Err(
+            "override_review takes at most 32 findings; group related findings into one entry",
+        );
+    }
+    overrides
+        .into_iter()
+        .map(|entry| {
+            let finding = entry.finding.trim();
+            let reason = entry.reason.trim();
+            if finding.is_empty() {
+                Err("every override_review entry needs the finding it declines")
+            } else if reason.is_empty() {
+                Err("every override_review entry needs a reason")
+            } else {
+                Ok(ReviewOverride {
+                    finding: mj_review::bound_tail(finding, FINDING_BYTES, "finding"),
+                    reason: mj_review::bound_tail(reason, REASON_BYTES, "override reason"),
+                })
+            }
+        })
+        .collect()
+}
 
 impl HostState {
     pub(super) fn override_push(
         &mut self,
         session_id: String,
-        reason: String,
+        overrides: Vec<ReviewOverride>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     ) {
+        let overrides = validated_overrides(overrides);
         let refusal = if !(self.config)(&session_id).is_push() {
             Some("this session's review trigger is not push")
         } else if crate::controller::move_session::move_owns_session(&session_id) {
@@ -20,15 +58,16 @@ impl HostState {
             || self.recovery_in_flight.contains(&session_id)
         {
             Some("a review is open; wait for its verdict or cancel it")
-        } else if reason.trim().is_empty() {
-            Some("override_review needs a reason")
         } else {
-            None
+            overrides.as_ref().err().copied()
         };
         if let Some(refusal) = refusal {
             let _ = reply.send(Err(StartRefusal(refusal.into())));
             return;
         }
+        let Ok(overrides) = overrides else {
+            return;
+        };
         let control = self.control.clone();
         let persistence = self
             .persistence
@@ -44,7 +83,7 @@ impl HostState {
                 persistence,
                 events.clone(),
                 owner.clone(),
-                reason,
+                overrides,
             ))
             .catch_unwind()
             .await
@@ -109,7 +148,7 @@ async fn run_override(
     persistence: mpsc::UnboundedSender<PersistenceRequest>,
     events: mpsc::UnboundedSender<HostEvent>,
     session_id: String,
-    reason: String,
+    overrides: Vec<ReviewOverride>,
 ) -> Result<serde_json::Value, StartRefusal> {
     let (mut state, findings, deltas) = tokio::time::timeout(OVERRIDE_TIMEOUT, async {
         let (reply, loaded) = oneshot::channel();
@@ -186,10 +225,15 @@ async fn run_override(
         .await
         .map_err(|_| StartRefusal("the review host stopped".into()))??;
 
-    let reason = mj_review::bound_tail(reason.trim(), 4096, "override reason");
+    let declined = overrides
+        .iter()
+        .map(|entry| format!("- Finding: {}\n  Reason: {}", entry.finding, entry.reason))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let declined = mj_review::bound_tail(&declined, NOTICE_OVERRIDES_BYTES, "overrides");
     let synthesis = mj_review::bound_tail(&findings.synthesis, 16 * 1024, "overridden findings");
     let mut notice = format!(
-        "Before-push review override requested by the agent. Reason: {reason}\nOverridden findings (review {}):\n{synthesis}\nRepositories:\n",
+        "Before-push review override requested by the agent. The agent declined to fix these findings:\n{declined}\nOverridden synthesis (review {}):\n{synthesis}\nRepositories:\n",
         mj_review::bound_tail(&findings.review_id, 512, "review id")
     );
     let mut repositories = String::new();
@@ -240,26 +284,9 @@ async fn run_override(
     )
     .await
     .map_err(StartRefusal)?;
-    let trees: BTreeMap<_, _> = findings
-        .trees
-        .iter()
-        .map(|(root, (tree, _))| (root.clone(), tree.clone()))
-        .collect();
-    if let Err(error) = resolve::push_action(
-        &control,
-        &session_id,
-        ReviewerAction::AdvanceBaseline {
-            trees: trees.clone(),
-        },
-    )
-    .await
-    {
-        tracing::warn!(%session_id, %error, "could not pin the overridden push review baseline");
-    }
-    // An override of a review scoped to one worktree leaves the other
-    // repositories' baselines where they were.
-    state.baselines.extend(trees);
-    state.prior_review = None;
+    // The review baseline stays where it was: the next review still covers
+    // the whole change, and `set_review_baseline` moves it on request.
+    state.decline_findings(overrides);
     state.push_findings = None;
     let (reply, saved) = oneshot::channel();
     persistence
@@ -278,7 +305,10 @@ async fn run_override(
         })?
         .map_err(StartRefusal)?;
     let repositories: Vec<_> = findings.trees.iter().map(|(root, (tree, head_commit))| serde_json::json!({ "repository": root, "tree": tree, "head_commit": head_commit })).collect();
-    Ok(
-        serde_json::json!({ "accepted": true, "review_id": findings.review_id, "repositories": repositories }),
-    )
+    Ok(serde_json::json!({
+        "accepted": true,
+        "review_id": findings.review_id,
+        "repositories": repositories,
+        "message": "The findings are recorded as declined. You may push these commits. The review baseline is unchanged: later reviews still cover this change and are told not to report the declined findings again. Call set_review_baseline to move the baseline.",
+    }))
 }

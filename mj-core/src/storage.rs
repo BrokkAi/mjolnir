@@ -217,9 +217,11 @@ pub struct TurnReviewState {
     pub child_session_id: Option<String>,
     pub baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
     pub reviewed_through_ordinal: u64,
-    /// The last forwarded verdict, which turns the next review into a
-    /// verification pass. Cleared once that pass consumes it.
-    pub prior_review: Option<crate::review::lanes::PriorReviewContext>,
+    /// Findings the author declined to fix with `override_review`, newest last.
+    /// Every before-push review of this session tells its reviewers not to
+    /// report them again. A baseline move clears them. Bounded to `DECLINED_FINDINGS_BYTES`.
+    #[serde(default)]
+    pub declined_findings: Vec<crate::subagent::ReviewOverride>,
     /// A review that was running when the daemon stopped. On recovery it is
     /// cleared without advancing the baseline.
     pub active: Option<String>,
@@ -234,6 +236,30 @@ pub struct TurnReviewState {
     /// A reviewer group survives daemon handoff with its exact commands and children.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_group: Option<ActiveReviewGroup>,
+}
+
+/// How many bytes of declined findings and reasons a session keeps. The
+/// oldest entries go first.
+pub const DECLINED_FINDINGS_BYTES: usize = 24 * 1024;
+
+impl TurnReviewState {
+    /// Adds findings the author declined, then drops the oldest entries until
+    /// the list fits `DECLINED_FINDINGS_BYTES`.
+    pub fn decline_findings(
+        &mut self,
+        entries: impl IntoIterator<Item = crate::subagent::ReviewOverride>,
+    ) {
+        self.declined_findings.extend(entries);
+        let size =
+            |entry: &crate::subagent::ReviewOverride| entry.finding.len() + entry.reason.len();
+        let mut total: usize = self.declined_findings.iter().map(size).sum();
+        let mut drop = 0;
+        while total > DECLINED_FINDINGS_BYTES && drop < self.declined_findings.len() {
+            total -= size(&self.declined_findings[drop]);
+            drop += 1;
+        }
+        self.declined_findings.drain(..drop);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -479,4 +505,44 @@ pub struct ApiEventPage {
     pub events: Vec<ApiEvent>,
     pub next_after_seq: u64,
     pub latest_seq: u64,
+}
+
+#[cfg(test)]
+mod declined_findings_tests {
+    use super::*;
+    use crate::subagent::ReviewOverride;
+
+    fn entry(finding: &str, reason: &str) -> ReviewOverride {
+        ReviewOverride {
+            finding: finding.into(),
+            reason: reason.into(),
+        }
+    }
+
+    #[test]
+    fn the_declined_list_keeps_the_newest_entries_within_its_byte_budget() {
+        let mut state = TurnReviewState::default();
+        state.decline_findings([entry("first", "kept order")]);
+        state.decline_findings([entry("second", "kept order")]);
+        assert_eq!(
+            state.declined_findings.len(),
+            2,
+            "within budget nothing goes"
+        );
+
+        let half = DECLINED_FINDINGS_BYTES / 2 - 2;
+        state.decline_findings([entry(&"a".repeat(half), "x"), entry(&"b".repeat(half), "y")]);
+        let kept: Vec<_> = state
+            .declined_findings
+            .iter()
+            .map(|entry| entry.finding.chars().next().unwrap())
+            .collect();
+        assert_eq!(kept, vec!['a', 'b'], "the oldest entries are dropped first");
+        let size: usize = state
+            .declined_findings
+            .iter()
+            .map(|entry| entry.finding.len() + entry.reason.len())
+            .sum();
+        assert!(size <= DECLINED_FINDINGS_BYTES);
+    }
 }
