@@ -254,6 +254,7 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
          ALTER TABLE turn_review_state DROP COLUMN push_findings;
          ALTER TABLE turn_review_state DROP COLUMN pending_followup;
          ALTER TABLE turn_review_state DROP COLUMN forward_attempts;
+         ALTER TABLE turn_review_state DROP COLUMN declined_findings;
          ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;
          ALTER TABLE mailbox_outbox DROP COLUMN failure;
          DROP TABLE quota_reset_cache;
@@ -1413,7 +1414,7 @@ fn review_start_fails_with_the_reason_the_daemon_refused_it() {
     let (status, log) = run_client_with_deadline(&mut client, &storage.path().join("review.log"));
     assert!(!status.success(), "{log}");
     assert!(
-        log.contains("409 Conflict: this session is not connected"),
+        log.contains("409 Conflict: session stopped-session is not managed; resume the session before requesting review"),
         "{log}"
     );
     assert!(!log.contains("review started"), "{log}");

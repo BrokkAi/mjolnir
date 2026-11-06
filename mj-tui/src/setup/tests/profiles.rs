@@ -214,7 +214,6 @@ fn editing_a_profile_disables_sign_in_until_the_change_is_saved() {
 #[test]
 fn disabling_a_profile_keeps_model_based_reviewers() {
     let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.config.review.trigger = mj_core::config::ReviewTrigger::Turn;
     dashboard.config.review.reviewers = vec![mj_core::config::SubagentChoice {
         model: "review-model".into(),
         effort: Some("high".into()),
@@ -235,7 +234,7 @@ fn disabling_a_profile_keeps_model_based_reviewers() {
         panic!("settings");
     };
     assert_eq!(dialog.draft["profiles"]["codex-1"]["enabled"], false);
-    assert_eq!(dialog.draft["review"]["trigger"], "turn");
+    assert!(dialog.draft["review"].get("trigger").is_none());
     assert_eq!(
         dialog.draft["review"]["reviewers"][0]["model"],
         "review-model"

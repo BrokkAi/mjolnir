@@ -426,7 +426,7 @@ pub(super) async fn apply_phone_action(
             services
                 .daemon_runtime
                 .review_host()
-                .start(&session_id, true)
+                .start(&session_id)
                 .await
                 .map_err(|refusal| {
                     anyhow::Error::new(mj_core::refusal::Refusal::precondition(refusal.to_string()))

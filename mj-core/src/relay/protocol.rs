@@ -252,7 +252,6 @@ pub enum RelayRequest {
 #[serde(rename_all = "snake_case")]
 pub enum CaptureScope {
     #[default]
-    TurnDelta,
     PushableCommits,
 }
 
@@ -260,16 +259,8 @@ pub enum CaptureScope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", content = "params", rename_all = "snake_case")]
 pub enum ReviewerRequest {
-    /// Report what changed in every workspace repository since `baselines`.
-    ///
-    /// A baseline is the `current_tree` id an earlier capture reported, keyed
-    /// by repository root: a Git tag naming the captured tree and the HEAD it
-    /// was taken at, or a bare tree id from an earlier worker. Either is a
-    /// tree-ish. When that baseline is unavailable, the worker uses the
-    /// baseline pinned before its primary harness started. If neither tree is
-    /// available, coverage starts at this capture rather than presenting the
-    /// whole repository as this turn's work. Capture never touches the
-    /// repository's index or working tree.
+    /// Capture committed changes since the push review base. `scope` and
+    /// `baselines` remain on the wire for older workers.
     CaptureDelta {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repositories: Option<Vec<std::path::PathBuf>>,
@@ -282,8 +273,19 @@ pub enum ReviewerRequest {
     RecordReviewed {
         trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
     },
-    AdvanceBaseline {
-        trees: std::collections::BTreeMap<std::path::PathBuf, String>,
+    /// Record `trees` as overridden: a push of that tree is allowed, but unlike
+    /// `RecordReviewed` it does not become the base of the next push review.
+    RecordOverridden {
+        trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
+    },
+    /// Make `commit` the base of the next push review of one repository. The
+    /// worker resolves `path` like a scoped capture (the working directory when
+    /// absent) and `commit` as any revision, and refuses unless the commit's
+    /// tree was recorded as reviewed or overridden.
+    SetReviewBase {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<std::path::PathBuf>,
+        commit: String,
     },
 }
 
@@ -357,8 +359,9 @@ impl ReviewerRequest {
     pub const fn action_name(&self) -> &'static str {
         match self {
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
-            Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
             Self::RecordReviewed { .. } => "reviewer_record_reviewed",
+            Self::RecordOverridden { .. } => "reviewer_record_overridden",
+            Self::SetReviewBase { .. } => "reviewer_set_review_base",
         }
     }
 }
@@ -451,6 +454,11 @@ impl RelayRequest {
             } => super::RELAY_WORKTREE_REVIEW_PROTOCOL,
             Self::Reviewer {
                 request:
+                    ReviewerRequest::RecordOverridden { .. } | ReviewerRequest::SetReviewBase { .. },
+                ..
+            } => super::RELAY_REVIEW_BASE_PROTOCOL,
+            Self::Reviewer {
+                request:
                     ReviewerRequest::RecordReviewed { .. }
                     | ReviewerRequest::CaptureDelta {
                         scope: CaptureScope::PushableCommits,
@@ -459,7 +467,6 @@ impl RelayRequest {
                 ..
             } => super::RELAY_PUSH_REVIEW_PROTOCOL,
 
-            Self::Reviewer { .. } => 6,
             _ => RELAY_MIN_PROTOCOL_VERSION,
         }
     }
@@ -692,7 +699,16 @@ pub enum RelayResponsePayload {
         repositories: Vec<RepoDelta>,
     },
     /// The review baselines now name the trees the controller sent.
+    /// Acknowledges `RecordReviewed` and `RecordOverridden`.
     ReviewBaselineAdvanced,
+    /// The repository, commit and tree `SetReviewBase` made the review base.
+    ReviewBaseSet {
+        root: std::path::PathBuf,
+        commit: String,
+        tree: String,
+        #[serde(default = "review_base_changed_default")]
+        changed: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -835,6 +851,10 @@ pub fn read_bounded_line(
             return Ok((consumed_total, true));
         }
     }
+}
+
+fn review_base_changed_default() -> bool {
+    true
 }
 
 #[cfg(test)]

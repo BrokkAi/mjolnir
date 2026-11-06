@@ -101,7 +101,11 @@ pub const RELAY_WORKTREE_REVIEW_PROTOCOL: u32 = 49;
 pub const RELAY_MERGED_REVIEW_WARNING_PROTOCOL: u32 = 50;
 /// Settlements identify autonomous turns and their stop reasons.
 pub const RELAY_AUTONOMOUS_TURN_OUTCOME_PROTOCOL: u32 = 51;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_AUTONOMOUS_TURN_OUTCOME_PROTOCOL;
+/// 52 adds RecordOverridden and SetReviewBase: an override that allows a push
+/// without moving the review base, and an explicit move of that base.
+pub const RELAY_REVIEW_BASE_PROTOCOL: u32 = 52;
+/// 53 removes per-turn capture and baseline advancement; push review remains.
+pub const RELAY_PROTOCOL_VERSION: u32 = 53;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

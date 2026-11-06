@@ -515,14 +515,6 @@ async fn save_draft_settings(
         };
         let updated =
             draft::config_from_draft(draft).map_err(|error| refused(anyhow::Error::new(error)))?;
-        if !updated.review.is_legacy()
-            && updated.review.trigger != mj_core::config::ReviewTrigger::Off
-            && updated.review.reviewers.is_empty()
-        {
-            return Err(ApiError::bad_request(
-                "Add reviewer on Settings › Code Review before enabling automatic review.",
-            ));
-        }
         let updated = serde_json::to_string(&updated).map_err(|error| refused(error.into()))?;
         let sessions = crate::database::load_state().map_err(|error| {
             ApiError::new(

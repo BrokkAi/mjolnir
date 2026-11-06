@@ -89,7 +89,7 @@ The prompt surface also understands:
   turn queues with the other work.
 - `/model` and `/effort` to change the harness settings. A change submitted during a turn queues with the other work.
 - `/fast`, `/plan`, and `/implement` when the active harness exposes the corresponding mode.
-- `/review` for an independent review of the completed turn; see [turn review](/turn-review/).
+- `/review` for an push review of committed work; see [Code review](/turn-review/).
 - Agent-advertised slash commands, which appear in completion beside Mjolnir's local commands.
 
 Press `Esc` to cancel the active agent turn or shell command. This does not stop the worker, delete queued prompts, or detach the client. A prompt still waiting to join the running turn stays queued and runs next, so `Esc` is also how you stop waiting for a long tool call. Use `prefix+shift+c` only for a lifecycle operation such as launch, resume, or stop.
@@ -677,7 +677,7 @@ enabled = false
 
 Continuation also needs Jev: with `[jev] enabled = false` it does not run, whatever `[continuation]` says, and the Continuation row in Settings reads **Off · Jev is off (Privacy)**.
 
-The session shows **Checking continuation** while Jev checks the conversation. A continuation appears as **Continuing requested work automatically · 1 of 3**. The diagnostic logs contain the evidence and outcome. There are at most three automatic continuations between your messages. New input or interrupting the session cancels a pending check. Automatic turn review waits until the continuation chain settles.
+The session shows **Checking continuation** while Jev checks the conversation. A continuation appears as **Continuing requested work automatically · 1 of 3**. The diagnostic logs contain the evidence and outcome. There are at most three automatic continuations between your messages. New input or interrupting the session cancels a pending check. Push review runs when the agent requests it before pushing.
 
 Mjolnir checks every turn that ends, including a turn the agent starts on its own, for example when a background task it was waiting for finishes.
 

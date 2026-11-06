@@ -4,7 +4,6 @@ impl HostState {
     pub(super) fn prepared(
         &mut self,
         session_id: String,
-        manual: bool,
         reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
         prepared: Result<Prepared, StartRefusal>,
     ) {
@@ -18,17 +17,6 @@ impl HostState {
             Ok(prepared) => prepared,
             Err(refusal) => {
                 self.preparing.remove(&session_id);
-                if !manual
-                    && matches!(
-                        refusal.0.as_str(),
-                        "prompts are queued; the review waits for them"
-                            | "a review runs between turns; this one is still working"
-                    )
-                {
-                    self.mark_followup(&session_id);
-                } else if manual || refusal.0 != SUBAGENT_REFUSAL {
-                    self.record_notice(&session_id, start_refusal_notice(&refusal.0));
-                }
                 self.publish(&session_id);
                 answer(reply, Err(refusal));
                 return;
@@ -43,11 +31,6 @@ impl HostState {
         self.next_epoch = self.next_epoch.saturating_add(1);
         let epoch = self.next_epoch;
         let mut prepared = prepared;
-        prepared.state.pending_followup = self.followups.contains(&session_id);
-        if prepared.resume_forward.is_none() {
-            prepared.state.child_session_id = None;
-            prepared.state.forward_attempts = 0;
-        }
         let review_id = match new_command_id("review-group") {
             Ok(id) => id,
             Err(error) => {
@@ -61,34 +44,34 @@ impl HostState {
                 return;
             }
         };
-        let seed = seed_from_session(
-            &prepared.materialized,
-            &prepared.state,
-            if manual { "manual" } else { "automatic" },
+        let mut seed = prepared.seed.clone();
+        seed.declined = prepared
+            .state
+            .declined_findings
+            .iter()
+            .filter(|entry| {
+                prepared
+                    .captured
+                    .iter()
+                    .any(|delta| entry.covers(&delta.root))
+            })
+            .map(|entry| entry.entry.clone())
+            .collect();
+        let (mut driver, _) = TurnReviewDriver::start(
+            seed,
+            review_id.clone(),
+            std::num::NonZeroUsize::new(prepared.reviewers.len())
+                .unwrap_or(std::num::NonZeroUsize::MIN),
         );
-        let (mut driver, mut requests) = if let Some(pending) = prepared.resume_forward.clone() {
-            let command_id = pending.command_id.clone();
-            let (mut driver, _) = TurnReviewDriver::resume_forward(seed, pending);
-            let requests = driver.forward(command_id);
-            (driver, requests)
-        } else {
-            TurnReviewDriver::start(
-                seed,
-                review_id.clone(),
-                std::num::NonZeroUsize::new(prepared.reviewers.len())
-                    .unwrap_or(std::num::NonZeroUsize::MIN),
-            )
-        };
-        if let Some(deltas) = prepared.captured.clone() {
-            requests = if prepared.scope == mj_core::relay::CaptureScope::PushableCommits
-                && mj_review::delta::trees_unchanged(&deltas)
-            {
+        let requests = {
+            let deltas = prepared.captured.clone();
+            if mj_review::delta::trees_unchanged(&deltas) {
                 driver.empty_push_delta_captured(deltas)
             } else {
                 driver.delta_captured(deltas)
-            };
-        }
-        if prepared.resume_forward.is_none() {
+            }
+        };
+        {
             let mut registrations = Vec::new();
             for role in &driver.snapshot().roles {
                 let request_key = match new_command_id("reviewer-child") {
@@ -113,7 +96,6 @@ impl HostState {
             prepared.state.active_group = Some(mj_core::storage::ActiveReviewGroup {
                 driver: driver.snapshot(),
                 reviewers: prepared.reviewers.clone(),
-                scope: prepared.scope,
                 registrations,
             });
         }
@@ -136,12 +118,8 @@ impl HostState {
                 .pending_open
                 .remove(&session_id)
                 .expect("pending review was just inserted");
-            let retry_recovery = pending.prepared.resume_forward.is_some();
             self.preparing.remove(&session_id);
             self.publish(&session_id);
-            if retry_recovery {
-                self.recovery_candidates.insert(session_id.clone());
-            }
             answer(
                 pending.reply,
                 Err(StartRefusal(format!(
@@ -202,9 +180,6 @@ impl HostState {
                     return;
                 }
                 if let Err(error) = result {
-                    if pending.prepared.resume_forward.is_some() {
-                        self.recovery_candidates.insert(session_id.clone());
-                    }
                     self.publish(&session_id);
                     answer(
                         pending.reply,
@@ -214,13 +189,6 @@ impl HostState {
                     );
                     return;
                 }
-                let push = (pending.prepared.scope
-                    == mj_core::relay::CaptureScope::PushableCommits)
-                    .then(|| PushReview {
-                        deltas: pending.prepared.captured.clone().unwrap_or_default(),
-                        finishing: false,
-                        retry_delay: std::time::Duration::from_secs(1),
-                    });
                 self.reviews.insert(
                     session_id.clone(),
                     ReviewSlot {
@@ -229,42 +197,19 @@ impl HostState {
                         reviewers: pending.prepared.reviewers,
                         state: pending.prepared.state,
                         _background: pending.prepared.background,
-                        push,
+                        finishing: false,
+                        retry_delay: std::time::Duration::from_secs(1),
                         start_reply: pending.reply,
                         pending_outcome: None,
                         queued_outcomes: Vec::new(),
                     },
                 );
                 if let Some(slot) = self.reviews.get_mut(&session_id)
-                    && slot.push.is_some()
                     && slot.driver.last_verdict() == Some(&ReviewVerdict::Clean)
                 {
                     answer(slot.start_reply.take(), Ok(()));
                 }
                 self.run(&session_id, pending.requests);
-            }
-            PersistenceCompletion::Forward => {
-                let Some(requests) = self.awaiting_forward_persistence.remove(&session_id) else {
-                    return;
-                };
-                if let Err(error) = result {
-                    self.forward_failed(
-                        &session_id,
-                        format!("the handoff could not be recorded durably: {error}"),
-                    );
-                    return;
-                }
-                self.run(&session_id, requests);
-            }
-            PersistenceCompletion::ForwardRetry => {
-                if let Err(error) = result {
-                    self.stop_failed_forward(
-                        &session_id,
-                        format!("could not persist delivery retry: {error}"),
-                    );
-                    return;
-                }
-                self.schedule_forward_retry(&session_id);
             }
             PersistenceCompletion::Close => {
                 self.closing.remove(&session_id);
@@ -282,9 +227,7 @@ impl HostState {
                     .reviews
                     .get(&session_id)
                     .map(|slot| {
-                        if slot.push.is_some()
-                            && slot.driver.last_verdict() == Some(&ReviewVerdict::Clean)
-                        {
+                        if slot.driver.last_verdict() == Some(&ReviewVerdict::Clean) {
                             slot.driver
                                 .push_review_warnings()
                                 .map(str::to_owned)
@@ -302,20 +245,6 @@ impl HostState {
                     self.record_notice(&session_id, warning);
                 }
                 self.publish(&session_id);
-                self.begin_followup(&session_id);
-            }
-            PersistenceCompletion::FollowUp => {
-                self.followup_saving.remove(&session_id);
-                if let Err(error) = result {
-                    tracing::warn!(%session_id, %error, "could not persist pending follow-up review");
-                    let events = self.events.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        let _ = events.send(HostEvent::RetryFollowUp { session_id });
-                    });
-                    return;
-                }
-                self.begin_followup(&session_id);
             }
         }
     }

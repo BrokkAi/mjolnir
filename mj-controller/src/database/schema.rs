@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 113;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 114;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2087,6 +2087,41 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older daemons cannot decode durable per-finding
+    // `override_review` or `set_review_baseline` requests, and never clear the
+    // declined findings when a baseline moves, so a later daemon would tell
+    // reviewers to skip findings of a scope that no longer exists.
+    if version < 114 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE turn_review_state ADD COLUMN declined_findings TEXT;
+             UPDATE schema_compatibility SET minimum_compatible_version = 114 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (114, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 114;
+             COMMIT;",
+        )?;
+    }
+
+    // Compatible: retire obsolete turn orchestration without changing columns
+    // or the push-group format. Older readers can still read and write rows.
+    if version < 115 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE turn_review_state
+             SET active_group = NULL, active = NULL, pending_forward = NULL,
+                 child_session_id = NULL, pending_followup = 0, forward_attempts = 0
+             WHERE pending_forward IS NOT NULL
+                OR (active_group IS NOT NULL
+                    AND coalesce(json_extract(active_group, '$.scope'), 'turn_delta') <> 'pushable_commits');
+             UPDATE turn_review_state SET pending_followup = 0;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (115, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 115;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2561,6 +2596,14 @@ pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
 /// Historical fixtures must remove review columns introduced afterward.
 #[cfg(test)]
 pub(super) fn restore_review_state_schema(connection: &Connection, version: i64) {
+    if version < 114
+        && legacy_schema::table_has_column(connection, "turn_review_state", "declined_findings")
+            .unwrap()
+    {
+        connection
+            .execute_batch("ALTER TABLE turn_review_state DROP COLUMN declined_findings;")
+            .unwrap();
+    }
     if version < 109 {
         for column in ["pending_followup", "forward_attempts"] {
             if legacy_schema::table_has_column(connection, "turn_review_state", column).unwrap() {
@@ -2622,7 +2665,11 @@ mod reader_tests {
         ).unwrap();
         migrate_schema(&connection).unwrap();
         let state = read_schema_state(&connection).unwrap();
-        assert!(state.ensure_supported_by(SCHEMA_VERSION - 1).is_err());
+        assert!(
+            state
+                .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION - 1)
+                .is_err()
+        );
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         let revisions = connection
@@ -3639,6 +3686,7 @@ mod reader_tests {
                 "ALTER TABLE sessions DROP COLUMN oracle_choice;
              ALTER TABLE sessions DROP COLUMN oracle;
              DROP TABLE oracle_preference;
+             ALTER TABLE turn_review_state DROP COLUMN declined_findings;
              DELETE FROM schema_migrations WHERE version >= 111;
              UPDATE schema_compatibility SET minimum_compatible_version = 110 WHERE singleton = 1;
              PRAGMA user_version = 110;",
@@ -4299,8 +4347,8 @@ mod reader_tests {
         before_answers.ensure_supported_by(112).unwrap();
         migrate_schema(&connection).unwrap();
         let schema = read_schema_state(&connection).unwrap();
-        assert_eq!(schema.revision, 113);
-        assert_eq!(schema.minimum_compatible, Some(113));
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(matches!(
             schema
                 .ensure_supported_by(112)
@@ -4309,7 +4357,7 @@ mod reader_tests {
                 .unwrap()
                 .reason,
             StoreSchemaMismatchReason::Incompatible {
-                minimum_compatible: 113
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
             }
         ));
         let error = schema.ensure_supported_by(98).unwrap_err();

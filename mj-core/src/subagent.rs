@@ -374,6 +374,19 @@ pub struct FileSourceRanges {
     pub ranges: Vec<LineRange>,
 }
 
+/// One before-push review finding the agent declines to fix, in the agent's
+/// own words, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewOverride {
+    pub finding: String,
+    pub reason: String,
+}
+
+/// The finding recorded for a queued override from an older worker, which
+/// overrode the whole verdict with one reason.
+pub const LEGACY_WHOLE_VERDICT_FINDING: &str = "Every finding in the reviewed verdict";
+
 /// One MCP request created inside a parent worker and consumed by the
 /// controller. `request_id` is the idempotency identity across reconnects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -410,7 +423,13 @@ pub enum SubagentToolAction {
         message: String,
     },
     OverrideReview {
-        reason: String,
+        overrides: Vec<ReviewOverride>,
+    },
+    /// Mark commits through `commit` as reviewed, so later reviews start there.
+    SetReviewBaseline {
+        commit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     Spawn {
         task_name: String,
@@ -484,7 +503,17 @@ enum SubagentToolActionWire {
         message: String,
     },
     OverrideReview {
-        reason: String,
+        #[serde(default)]
+        overrides: Vec<ReviewOverride>,
+        /// A queued request from an older worker, which overrode the whole
+        /// verdict with one reason.
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    SetReviewBaseline {
+        commit: String,
+        #[serde(default)]
+        path: Option<String>,
     },
     Spawn {
         task_name: String,
@@ -543,6 +572,7 @@ impl SubagentToolAction {
                 | Self::RequestReview { .. }
                 | Self::AskOracle { .. }
                 | Self::OverrideReview { .. }
+                | Self::SetReviewBaseline { .. }
                 | Self::SendInput { .. }
                 | Self::SendMessage { .. }
                 | Self::LegacyInterruptAgent { .. }
@@ -595,7 +625,21 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
             SubagentToolActionWire::ListProfiles => Self::ListProfiles,
             SubagentToolActionWire::RequestReview { path } => Self::RequestReview { path },
             SubagentToolActionWire::AskOracle { message } => Self::AskOracle { message },
-            SubagentToolActionWire::OverrideReview { reason } => Self::OverrideReview { reason },
+            SubagentToolActionWire::OverrideReview {
+                mut overrides,
+                reason,
+            } => {
+                if let Some(reason) = reason {
+                    overrides.push(ReviewOverride {
+                        finding: LEGACY_WHOLE_VERDICT_FINDING.into(),
+                        reason,
+                    });
+                }
+                Self::OverrideReview { overrides }
+            }
+            SubagentToolActionWire::SetReviewBaseline { commit, path } => {
+                Self::SetReviewBaseline { commit, path }
+            }
             SubagentToolActionWire::Spawn {
                 task_name,
                 instructions,
@@ -903,10 +947,18 @@ impl SubagentRecord {
 /// harness, so its tools reach the model as `mcp__mj-agents__<tool>`.
 pub const SUBAGENT_MCP_SERVER: &str = "mj-agents";
 
+/// The name of the separate MCP server that offers the before-push review
+/// tools, so they reach the model as `mcp__mj-review__<tool>`. Claude loads
+/// its tools on demand because they are needed only when a push is near.
+pub const REVIEW_MCP_SERVER: &str = "mj-review";
+
+/// The tools the review server lists, in the order it lists them.
+pub const REVIEW_MCP_TOOLS: &[&str] = &["request_review", "override_review", "set_review_baseline"];
+
 /// Which tools a worker's `mj-agents` MCP server offers. A parent may delegate,
 /// a top-level session without Mjolnir delegation can message sessions, and a
-/// child also hands its report back. Messaging, fetch, and explicit reviews
-/// are common to every role.
+/// child also hands its report back. Messaging and fetch are common to every
+/// role. The review tools belong to the separate `mj-review` server.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentMcpRole {
@@ -924,6 +976,13 @@ impl SubagentMcpRole {
     #[must_use]
     pub fn supports_push_gate(self) -> bool {
         matches!(self, Self::Parent | Self::MessageOnly)
+    }
+
+    /// Whether a session in this role is offered the `mj-review` server: the
+    /// role enforces the push gate and the launch turned the gate on.
+    #[must_use]
+    pub fn offers_review_server(self, review_gate: bool) -> bool {
+        review_gate && self.supports_push_gate()
     }
 
     #[must_use]
@@ -947,12 +1006,11 @@ impl SubagentMcpRole {
                 "send_message",
                 "close",
                 "fetch",
-                "request_review",
                 "ask_oracle",
             ],
-            Self::MessageOnly => &["send_message", "fetch", "request_review", "ask_oracle"],
-            Self::FetchOnly => &["fetch", "send_message", "request_review", "ask_oracle"],
-            Self::Child => &["handback", "fetch", "send_message", "request_review"],
+            Self::MessageOnly => &["send_message", "fetch", "ask_oracle"],
+            Self::FetchOnly => &["fetch", "send_message", "ask_oracle"],
+            Self::Child => &["handback", "fetch", "send_message"],
         }
     }
 }
@@ -1689,6 +1747,30 @@ mod tests {
         );
     }
 
+    // A request queued by an older worker carries one whole-verdict reason.
+    #[test]
+    fn a_queued_override_with_one_reason_decodes_as_one_pair() {
+        let old = r#"{"action":"override_review","params":{"reason":"wrong premise"}}"#;
+        let action: SubagentToolAction = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            action,
+            SubagentToolAction::OverrideReview {
+                overrides: vec![ReviewOverride {
+                    finding: LEGACY_WHOLE_VERDICT_FINDING.into(),
+                    reason: "wrong premise".into(),
+                }],
+            }
+        );
+        let pairs =
+            r#"{"action":"override_review","params":{"overrides":[{"finding":"F","reason":"R"}]}}"#;
+        let action: SubagentToolAction = serde_json::from_str(pairs).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SubagentToolAction>(&serde_json::to_string(&action).unwrap())
+                .unwrap(),
+            action
+        );
+    }
+
     #[test]
     fn only_child_mutations_hold_an_in_place_move_drain() {
         let mutations = [
@@ -1716,7 +1798,14 @@ mod tests {
                 child_session_id: "child".into(),
             },
             SubagentToolAction::OverrideReview {
-                reason: "reason".into(),
+                overrides: vec![ReviewOverride {
+                    finding: "finding".into(),
+                    reason: "reason".into(),
+                }],
+            },
+            SubagentToolAction::SetReviewBaseline {
+                commit: "abc123".into(),
+                path: None,
             },
         ];
         assert!(
@@ -2182,6 +2271,30 @@ mod tests {
         assert_ne!(before, after);
         let encoded = serde_json::to_value(&old).unwrap();
         assert!(encoded.get("updated_at").is_none());
+    }
+
+    #[test]
+    fn review_tools_belong_to_the_review_server_for_gated_top_level_roles() {
+        assert_eq!(REVIEW_MCP_SERVER, "mj-review");
+        assert_eq!(
+            REVIEW_MCP_TOOLS,
+            ["request_review", "override_review", "set_review_baseline"]
+        );
+        for role in [
+            SubagentMcpRole::Parent,
+            SubagentMcpRole::MessageOnly,
+            SubagentMcpRole::FetchOnly,
+            SubagentMcpRole::Child,
+        ] {
+            for tool in REVIEW_MCP_TOOLS {
+                assert!(!role.tool_names().contains(tool), "{role} lists {tool}");
+            }
+            assert!(!role.offers_review_server(false));
+            assert_eq!(
+                role.offers_review_server(true),
+                matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly)
+            );
+        }
     }
 
     #[test]

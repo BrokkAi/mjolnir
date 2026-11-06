@@ -5,9 +5,6 @@ pub(super) enum HostEvent {
     View {
         session_id: String,
         snapshot: Option<Box<MaterializedSession>>,
-        /// Whether this view had a prompt of ours in flight. Only a turn that
-        /// answered a prompt arms an automatic review.
-        prompt_driven: bool,
     },
     /// Drop the retained last-view (with its full transcript) for every session
     /// no longer in the live set. Without this, `sessions` keeps a
@@ -22,7 +19,13 @@ pub(super) enum HostEvent {
     },
     OverridePush {
         session_id: String,
-        reason: String,
+        overrides: Vec<ReviewOverride>,
+        reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
+    },
+    SetPushBase {
+        session_id: String,
+        commit: String,
+        path: Option<String>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     },
     OverrideValidated {
@@ -32,20 +35,10 @@ pub(super) enum HostEvent {
     OverrideFinished {
         session_id: String,
     },
-    Start {
-        session_id: String,
-        manual: bool,
-        reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
-    },
     Prepared {
         session_id: String,
-        manual: bool,
         reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
-        prepared: Result<Prepared, StartRefusal>,
-    },
-    RecoveryPrepared {
-        session_id: String,
-        prepared: Result<Option<Prepared>, String>,
+        prepared: Box<Result<Prepared, StartRefusal>>,
     },
     StateSaved {
         session_id: String,
@@ -64,6 +57,12 @@ pub(super) enum HostEvent {
         session_id: String,
         epoch: u64,
         step: ReviewStep,
+    },
+    /// A finished reviewer child whose review no longer tracks it. The host
+    /// owns every reviewer child close, so the delegation loop hands it here
+    /// instead of closing it again itself.
+    CloseChild {
+        child_session_id: String,
     },
     ReviewerFinished {
         session_id: String,
@@ -94,13 +93,6 @@ pub(super) enum HostEvent {
         session_id: String,
         epoch: u64,
     },
-    RetryForward {
-        session_id: String,
-        epoch: u64,
-    },
-    RetryFollowUp {
-        session_id: String,
-    },
     QuestionTarget {
         session_id: String,
         child_session_id: String,
@@ -119,7 +111,6 @@ pub(super) enum HostEvent {
     },
     RestoreGroups {
         groups: Vec<(String, TurnReviewState)>,
-        pending_followups: Vec<String>,
         abandoned_children: Vec<String>,
     },
     StartupRecoveryFailed(String),
@@ -132,10 +123,7 @@ pub(super) enum HostEvent {
 pub(super) enum PersistenceCompletion {
     Open,
     Captured,
-    Forward,
-    ForwardRetry,
     Close,
-    FollowUp,
     LaunchChild { role: String },
 }
 
@@ -163,9 +151,6 @@ pub(super) enum PersistenceRequest {
         state: Box<TurnReviewState>,
         completion: Option<PersistenceCompletion>,
     },
-    MarkFollowUp {
-        session_id: String,
-    },
     /// Records that a review still preparing at shutdown was cut off, so the
     /// next daemon's startup sweep reports it like any other interrupted
     /// review. A preparing review has no state row of its own yet.
@@ -177,25 +162,16 @@ pub(super) enum PersistenceRequest {
 /// One asynchronous step's result, belonging to exactly one review.
 pub(super) enum ReviewStep {
     Delta(Result<Vec<mj_core::relay::RepoDelta>, String>),
-    PrimaryPrompted(Result<(), String>),
     PushDelivered(Result<Box<TurnReviewState>, String>),
 }
 
 /// Everything one blocking preparation gathered before a review can start.
 pub(super) struct Prepared {
-    pub(super) scope: mj_core::relay::CaptureScope,
+    pub seed: TurnReviewSeed,
     pub(super) state: TurnReviewState,
     pub(super) reviewers: Vec<ReviewerIdentity>,
-    /// Read from the live actor after the admission hold is installed and a
-    /// reviewer status command drains every actor command ahead of it.
-    pub(super) materialized: Box<MaterializedSession>,
-    /// Present only while startup reconciles an interrupted corrective
-    /// handoff. Such a review skips reviewer processes and retries the exact
-    /// primary command id.
-    pub(super) resume_forward: Option<PendingForward>,
-    /// What the turn changed, when preparation captured it before choosing a
-    /// reviewer. The review starts from this capture instead of asking again.
-    pub(super) captured: Option<Vec<mj_core::relay::RepoDelta>>,
+    /// Committed work captured before choosing reviewers.
+    pub(super) captured: Vec<mj_core::relay::RepoDelta>,
     /// Keeps recovery copies and worker upgrades off the session from
     /// preparation until the review closes; moved into the review's slot.
     pub(super) background: Option<BackgroundHold>,
@@ -227,7 +203,8 @@ pub(super) struct ReviewSlot {
     pub(super) state: TurnReviewState,
     /// Released when the slot is removed, which is how every review ends.
     pub(super) _background: Option<BackgroundHold>,
-    pub(super) push: Option<PushReview>,
+    pub(super) finishing: bool,
+    pub(super) retry_delay: std::time::Duration,
     pub(super) start_reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
     pub(super) pending_outcome: Option<TurnReviewState>,
     pub(super) queued_outcomes: Vec<ReviewerHandback>,
@@ -242,7 +219,8 @@ pub(super) struct HostState {
     pub(super) persistence: Option<mpsc::UnboundedSender<PersistenceRequest>>,
     pub(super) persistence_task: Option<tokio::task::JoinHandle<()>>,
     pub(super) child_closures: tokio::task::JoinSet<Result<(), String>>,
-    pub(super) child_closure_owners: BTreeMap<tokio::task::Id, (String, std::time::Duration)>,
+    pub(super) child_closure_owners:
+        BTreeMap<tokio::task::Id, (String, super::reviewer_child::CloseAttempts)>,
     pub(super) reviews: BTreeMap<String, ReviewSlot>,
     /// Sessions whose review is being prepared. Preparation is asynchronous,
     /// so without this an automatic trigger and a manual `/review` racing each
@@ -255,10 +233,6 @@ pub(super) struct HostState {
     /// Reviews whose durable active marker is being cleared. Their resolved
     /// view remains until the ordered write completes.
     pub(super) closing: BTreeSet<String>,
-    /// Primary handoff requests wait here until their durable pending record
-    /// has been written. This prevents an accepted relay command from racing
-    /// a failed SQLite write.
-    pub(super) awaiting_forward_persistence: BTreeMap<String, Vec<ReviewRequest>>,
     pub(super) awaiting_capture_persistence: BTreeMap<String, Vec<ReviewRequest>>,
     /// Distinguishes reviews. Every asynchronous step carries the epoch of the
     /// review that asked for it, so a late result cannot land on its
@@ -267,14 +241,6 @@ pub(super) struct HostState {
     /// The last view seen per session: its execution state, for the
     /// Running→Idle edge, and its materialized transcript, for the seed.
     pub(super) sessions: BTreeMap<String, SessionWatch>,
-    pub(super) followups: BTreeSet<String>,
-    pub(super) followup_saving: BTreeSet<String>,
-    /// Sessions already told that no reviewer is configured. One notice per
-    /// session, not one per turn.
-    /// Sessions whose durable handoff survived a restart and still needs the
-    /// primary relay's idempotent acknowledgement reconciled.
-    pub(super) recovery_candidates: BTreeSet<String>,
-    pub(super) recovery_in_flight: BTreeSet<String>,
     pub(super) startup_ready: bool,
     pub(super) startup_failure: Option<String>,
     pub(super) deferred_handbacks: Vec<(String, ReviewerHandback)>,
@@ -284,7 +250,6 @@ pub(super) struct HostState {
 pub(super) enum PreparingOperation {
     Review {
         cancelled: Arc<std::sync::atomic::AtomicBool>,
-        push: bool,
     },
     Override {
         task: tokio::task::JoinHandle<()>,
@@ -295,9 +260,6 @@ pub(super) enum PreparingOperation {
 }
 
 pub(super) struct SessionWatch {
-    pub(super) execution: MaterializedExecutionState,
-    /// Whether the view had a prompt of ours in flight.
-    pub(super) prompt_driven: bool,
     pub(super) materialized: Option<Box<MaterializedSession>>,
 }
 
@@ -351,19 +313,6 @@ pub(super) async fn persistence_loop(
             }
         };
         match request {
-            PersistenceRequest::MarkFollowUp { session_id } => {
-                let environment = environment.clone();
-                let owner = session_id.clone();
-                let result = tokio::task::spawn_blocking(move || environment.mark_followup(&owner))
-                    .await
-                    .map_err(|error| format!("follow-up marker task stopped: {error}"))
-                    .and_then(|result| result);
-                let _ = events.send(HostEvent::StateSaved {
-                    session_id,
-                    completion: PersistenceCompletion::FollowUp,
-                    result,
-                });
-            }
             PersistenceRequest::Load { session_id, reply } => {
                 let load = environment.clone();
                 let result = tokio::task::spawn_blocking(move || load.load_state(&session_id))
@@ -424,7 +373,6 @@ pub(super) async fn persistence_loop(
                 let sweep = environment.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let groups = sweep.active_groups()?;
-                    let pending_followups = sweep.pending_followups()?;
                     let mut retained = BTreeSet::new();
                     for (parent, state) in &groups {
                         let group = state
@@ -456,17 +404,16 @@ pub(super) async fn persistence_loop(
                         .collect();
                     sweep
                         .clear_interrupted()
-                        .map(|interrupted| (interrupted, children, groups, pending_followups))
+                        .map(|interrupted| (interrupted, children, groups))
                 })
                 .await;
                 match result {
-                    Ok(Ok((interrupted, children, groups, pending_followups))) => {
+                    Ok(Ok((interrupted, children, groups))) => {
                         if !interrupted.is_empty() {
                             let _ = events.send(HostEvent::Interrupted { interrupted });
                         }
                         let _ = events.send(HostEvent::RestoreGroups {
                             groups,
-                            pending_followups,
                             abandoned_children: children,
                         });
                     }
@@ -531,12 +478,6 @@ pub(super) async fn persistence_loop(
     }
 }
 
-pub(super) struct PushReview {
-    pub(super) deltas: Vec<mj_core::relay::RepoDelta>,
-    pub(super) finishing: bool,
-    pub(super) retry_delay: std::time::Duration,
-}
-
 pub(super) struct PushCompletion {
     pub(super) session_id: String,
     pub(super) epoch: u64,
@@ -546,5 +487,4 @@ pub(super) struct PushCompletion {
     pub(super) deltas: Vec<mj_core::relay::RepoDelta>,
     pub(super) verdict: ReviewVerdict,
     pub(super) _admission: crate::upgrade::Work,
-    pub(super) reviewed_through_ordinal: Option<u64>,
 }

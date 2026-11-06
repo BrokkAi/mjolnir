@@ -280,7 +280,8 @@ pub struct StartSessionRequest {
     pub oracle: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_choice: Option<mj_core::config::SubagentChoice>,
-    /// Turn review for this session. Omitted follows `[review]`.
+    /// Review for this session: `off`, `push` or `inherit`. Omitted follows
+    /// `[review]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "super::super::actions::deserialize_api_session_review")]
     pub review: Option<mj_core::config::SessionReview>,

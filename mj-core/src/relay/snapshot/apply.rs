@@ -370,6 +370,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         .active_prompt
                         .as_ref()
                         .map(|prompt| prompt.command_id.clone());
+                    // With no prompt of ours running, the stop is aimed at the
+                    // harness's own turn. A second stop of the same turn never
+                    // downgrades an acknowledged first one.
+                    if snapshot.active_prompt.is_none()
+                        && let Some(turn) = snapshot.autonomous_harness_turn()
+                        && snapshot
+                            .cancelling_harness_turn
+                            .is_none_or(|target| target.first_ordinal != turn.first_ordinal)
+                    {
+                        snapshot.cancelling_harness_turn = Some(HarnessTurnCancel {
+                            first_ordinal: turn.first_ordinal,
+                            applied: false,
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -844,11 +858,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     RelayCommandOutcome::NoticeRecorded,
                 ) => {}
                 (RelayCommand::GoalControl { .. }, RelayCommandOutcome::GoalControlled) => {}
-                (RelayCommand::Cancel, RelayCommandOutcome::Cancelled)
-                | (RelayCommand::CancelTurn, RelayCommandOutcome::Cancelled)
+                (
+                    RelayCommand::Cancel | RelayCommand::CancelTurn,
+                    RelayCommandOutcome::Cancelled,
+                ) => {
+                    if let Some(target) = snapshot.cancelling_harness_turn.as_mut() {
+                        target.applied = true;
+                    }
+                }
                 // A cancel acknowledgement does not end its originating
                 // prompt, and must never retarget cancellation to a later one.
-                | (RelayCommand::CancelTurnFor { .. } | RelayCommand::ApplyQueuedFor { .. }, RelayCommandOutcome::Cancelled) => {}
+                (
+                    RelayCommand::CancelTurnFor { .. } | RelayCommand::ApplyQueuedFor { .. },
+                    RelayCommandOutcome::Cancelled,
+                ) => {}
                 (
                     RelayCommand::ResolveSteering { steering_id },
                     RelayCommandOutcome::NoticeRecorded,
@@ -1168,6 +1191,15 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             if matches!(command, RelayCommand::Cancel | RelayCommand::CancelTurn) {
                 snapshot.cancelling_prompt_id = None;
+                // A refused stop leaves the turn running. Admission refuses a
+                // second stop while one is pending, so an acknowledged stop
+                // is the only one this can meet.
+                if snapshot
+                    .cancelling_harness_turn
+                    .is_some_and(|target| !target.applied)
+                {
+                    snapshot.cancelling_harness_turn = None;
+                }
             }
             snapshot
                 .dispatches
@@ -1691,6 +1723,15 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         .is_some_and(|id| snapshot.active_prompt.as_ref().map(|p| &p.command_id) != Some(id))
     {
         snapshot.cancelling_prompt_id = None;
+    }
+    // The stop belongs to the autonomous turn it named; once that turn is gone
+    // (settled, interrupted, or taken over by a prompt) nothing is left to stop.
+    if snapshot.cancelling_harness_turn.is_some_and(|target| {
+        snapshot
+            .autonomous_harness_turn()
+            .is_none_or(|turn| turn.first_ordinal != target.first_ordinal)
+    }) {
+        snapshot.cancelling_harness_turn = None;
     }
     apply_assessment_context(snapshot, event);
     snapshot.compact_terminal_commands()?;
