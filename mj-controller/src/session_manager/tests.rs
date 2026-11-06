@@ -4291,6 +4291,14 @@ async fn model_policy_refilters_the_same_actor_and_preserves_raw_observations() 
         values(&update.view.snapshot.unwrap().operational),
         ["current", "allowed"]
     );
+    // Hard-won: 193e758af: error republication replaced raw catalogue options.
+    let mut disconnected = handle.view();
+    disconnected.connected = false;
+    disconnected.error = Some(ViewError::Unreachable("test disconnect".into()));
+    let (watch, _) = watch::channel(handle.view());
+    let (sender, mut receiver) = coalesced_update_channel();
+    publish_view(LEASED_RELAY_SESSION, disconnected, &watch, &sender);
+    assert!(receiver.try_recv().unwrap().raw_observation.is_none());
     let raw = update.raw_observation.unwrap();
     assert_eq!(values(&raw), ["current", "allowed", "hidden"]);
     mj_core::config::Config::update(|config| {

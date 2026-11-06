@@ -1685,21 +1685,27 @@ pub(super) fn publish_view(
         "session view publication");
     // Capture cache input before projecting the single view shared by every reader.
     // StandaloneSession retains the untouched relay state for future policy edits.
-    let raw_observation = view.snapshot.as_ref().and_then(|snapshot| {
-        let state = &snapshot.operational;
-        if !state.native_session_is_ready() {
-            return None;
-        }
-        let mut previous = updates
-            .last_raw_options
-            .lock()
-            .expect("raw options poisoned");
-        if previous.as_ref() == Some(&state.config_options) {
-            return None;
-        }
-        *previous = Some(state.config_options.clone());
-        Some(state.clone())
-    });
+    // Disconnected/error views retain the already projected watch snapshot;
+    // republishing them must never turn that snapshot into harness input.
+    let raw_observation = view
+        .snapshot
+        .as_ref()
+        .filter(|_| view.connected && view.error.is_none())
+        .and_then(|snapshot| {
+            let state = &snapshot.operational;
+            if !state.native_session_is_ready() {
+                return None;
+            }
+            let mut previous = updates
+                .last_raw_options
+                .lock()
+                .expect("raw options poisoned");
+            if previous.as_ref() == Some(&state.config_options) {
+                return None;
+            }
+            *previous = Some(state.config_options.clone());
+            Some(state.clone())
+        });
     if let Some(snapshot) = &mut view.snapshot
         && let Some(policy) = updates.model_policies.borrow().get(session_id)
     {

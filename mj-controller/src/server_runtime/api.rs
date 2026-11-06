@@ -2797,16 +2797,9 @@ impl SubagentBackend for ApiBackend {
                     // A forced refresh bypasses the catalogue's cache, not its
                     // allow-list: an explicit request cannot select a model the
                     // picker hides.
-                    let default = self
-                        .profile_catalog
-                        .unrestricted_capabilities(&profile)
-                        .await?
-                        .model;
-                    let mut choices = crate::controller::profile_config::discover(
-                        profile.clone(),
-                        model,
-                        refresh,
-                    )
+                    let (mut choices, default) = refreshed_profile_choices(model, |model| {
+                        crate::controller::profile_config::discover(profile.clone(), model, refresh)
+                    })
                     .await?;
                     let selected = choices.model.clone();
                     choices.model = default;
@@ -3478,6 +3471,25 @@ impl SubagentBackend for ApiBackend {
             })
         })
     }
+}
+
+// Refresh the default before selecting a model, so the exemption belongs to
+// this discovery rather than the catalogue from before the refresh.
+async fn refreshed_profile_choices<F, Fut>(
+    model: Option<String>,
+    mut discover: F,
+) -> Result<(mj_core::worker_launch::ProfileConfig, Option<String>)>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<mj_core::worker_launch::ProfileConfig>>,
+{
+    let choices = discover(None).await?;
+    let default = choices.model.clone();
+    let choices = match model {
+        Some(model) => discover(Some(model)).await?,
+        None => choices,
+    };
+    Ok((choices, default))
 }
 
 #[cfg(test)]

@@ -4865,3 +4865,40 @@ async fn provider_failed_child_report_names_its_turn_profile_and_backoff() {
         mj_core::mailbox::render_mailbox_event(&event).contains(&format!("Failure: {expected}"))
     );
 }
+
+// Hard-won: 193e758af: refresh exempted the old default instead of the new one.
+#[tokio::test]
+async fn forced_refresh_uses_the_new_default_for_the_allowlist() {
+    for selected in [None, Some("allowed".to_owned())] {
+        let mut calls = Vec::new();
+        let (mut choices, default) = refreshed_profile_choices(selected.clone(), |model| {
+            calls.push(model.clone());
+            std::future::ready(Ok(mj_core::worker_launch::ProfileConfig {
+                model: model.or(Some("new-default".into())),
+                models: ["old-default", "new-default", "allowed"]
+                    .map(|value| mj_core::acp::SessionConfigChoice {
+                        value: value.into(),
+                        name: value.into(),
+                        description: None,
+                    })
+                    .to_vec(),
+                efforts: Vec::new(),
+                observed_at: 0,
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.first(), Some(&None));
+        assert_eq!(choices.model, selected.or(Some("new-default".into())));
+        choices.model = default;
+        let choices = choices.restricted_to(&["allowed".into()]);
+        assert_eq!(
+            choices
+                .models
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            ["new-default", "allowed"]
+        );
+    }
+}

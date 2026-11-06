@@ -1000,10 +1000,21 @@ impl ProfileCatalog {
         }
         let selected = choices.model.clone();
         // A default read already carries the default model. A model-specific
-        // read needs the default probe for the exemption, and only when a
-        // list applies: Muse probes fresh on every read.
+        // read uses the default entry it already depended on. Reading it must
+        // not start another live probe and replace concurrent readers.
         let default = if specific {
-            self.fetch_unrestricted(config, id, None).await?.model
+            let cached = self.lock().entries.get(&(identity.clone(), None)).cloned();
+            match cached {
+                Some(Entry::Ready(choices)) => choices.model,
+                Some(Entry::Pending(attempt)) => {
+                    attempt
+                        .await
+                        .map_err(|error| anyhow::anyhow!("{}", error.message))?
+                        .model
+                }
+                Some(Entry::Failed { error, .. }) => bail!("{error}"),
+                None => self.fetch_unrestricted(config, id, None).await?.model,
+            }
         } else {
             selected.clone()
         };
@@ -1025,8 +1036,14 @@ impl ProfileCatalog {
     ) -> Result<ProfileConfig> {
         let profile = config.enabled_profile(id).context("profile unavailable")?;
         let live = profile.kind == HarnessKind::Muse;
-        self.ensure(config);
-        let key = (profile.capabilities_key(id), model);
+        // A live read has its own fresh-probe admission in fetch_live. Re-
+        // ensuring an adopted definition would retire that owner and discard
+        // the default entry that model-specific reads depend on.
+        let identity = profile.capabilities_key(id);
+        if !live || !self.lock().definitions.contains_key(&identity) {
+            self.ensure(config);
+        }
+        let key = (identity, model);
         let cancellation = self.lock().definitions[&key.0].cancellation.clone();
         let mut revisions = self.revisions.subscribe();
         if live {
@@ -2537,6 +2554,40 @@ mod tests {
         catalog.sync_now(&config).await;
         assert_eq!(snapshot_models(&catalog), ["p-model", "m1", "m2", "m3"]);
     }
+    // Hard-won: dfbb210a5: restricted Muse reads restarted default discovery.
+    #[tokio::test]
+    async fn restricted_live_model_read_reuses_cached_default() {
+        let probes = calls();
+        let counted = probes.clone();
+        let catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            counting_probe(probes.clone()),
+            Arc::new(move |id, model| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    let mut choices = test_choices(&id);
+                    choices.model = Some(model);
+                    Ok(choices)
+                })
+            }),
+        );
+        let mut config = test_config(&[("p", HarnessKind::Muse)]);
+        config.profiles.get_mut("p").unwrap().models = vec!["allowed".into()];
+        catalog.sync_now(&config).await;
+        probes.store(0, Ordering::SeqCst);
+        let choices = catalog
+            .model_capabilities("p".into(), "allowed".into())
+            .await
+            .unwrap();
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        assert!(
+            choices
+                .models
+                .iter()
+                .any(|choice| choice.value == "p-model")
+        );
+    }
+
     // Hard-won: a2afafcb3: a model probe exempted its requested hidden model.
     #[tokio::test]
     async fn a_model_probe_cannot_exempt_a_hidden_requested_model() {
