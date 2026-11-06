@@ -133,34 +133,21 @@ fn new_session_titles(
     (title, typed)
 }
 
-/// Record a prompt a person sent through the web viewer or the HTTP API once
-/// the session has accepted it. The write runs in its own task under an
-/// upgrade admission, so a client that disconnects or a daemon handoff cannot
-/// drop an accepted prompt's record; call this with no await between the
-/// acceptance and the call. A failure to record leaves the prompt sent, so it
-/// is logged rather than returned.
-pub(super) fn record_user_prompt(session_id: String, ordinal: u64, text: String) {
-    let admission = match crate::upgrade::activity("prompt history record") {
-        Ok(admission) => admission,
-        Err(error) => {
-            tracing::warn!(error = format!("{error:#}"), %session_id, "prompt was accepted but its history could not be stored");
-            return;
-        }
+/// Record a prompt a person is sending through the web viewer or the HTTP
+/// API, before it is submitted; see `crate::database::record_user_prompt`.
+/// A failure to record does not stop the prompt, so it is logged.
+pub(super) async fn record_user_prompt(session_id: String, text: String) {
+    let recorded = tokio::task::spawn_blocking({
+        let session_id = session_id.clone();
+        move || crate::database::record_user_prompt(&session_id, &text)
+    })
+    .await;
+    let error = match recorded {
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => format!("{error:#}"),
+        Err(error) => format!("the history task failed: {error}"),
     };
-    tokio::spawn(async move {
-        let _admission = admission;
-        let recorded = tokio::task::spawn_blocking({
-            let session_id = session_id.clone();
-            move || crate::database::record_user_prompt(&session_id, ordinal, &text)
-        })
-        .await;
-        let error = match recorded {
-            Ok(Ok(())) => return,
-            Ok(Err(error)) => format!("{error:#}"),
-            Err(error) => format!("the history task failed: {error}"),
-        };
-        tracing::warn!(%error, %session_id, "prompt was accepted but its history could not be stored");
-    });
+    tracing::warn!(%error, %session_id, "prompt history could not be stored");
 }
 
 pub(super) async fn apply_phone_action(
@@ -283,18 +270,19 @@ pub(super) async fn apply_phone_action(
             images,
             command_id,
         } => {
-            let ordinal = services
+            let session = services
                 .sessions
                 .wait_for_session(&session_id, Duration::from_secs(5))
-                .await?
+                .await?;
+            record_user_prompt(session_id, text.clone()).await;
+            session
                 .submit(
                     command_id.map_or_else(|| new_command_id("phone-prompt"), Ok)?,
                     RelayCommand::Prompt {
-                        prompt: phone_prompt_blocks(text.clone(), images),
+                        prompt: phone_prompt_blocks(text, images),
                     },
                 )
                 .await?;
-            record_user_prompt(session_id, ordinal, text);
             Ok(())
         }
         ControllerAction::RunShell {

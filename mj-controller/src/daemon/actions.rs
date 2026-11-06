@@ -746,6 +746,16 @@ pub(super) async fn handle_action(
                 .wait_for_session(&session_id, Duration::from_secs(5))
                 .await?;
             let session_id = session.session_id().to_owned();
+            // History is written before the session sees the prompt; see
+            // `record_user_prompt`.
+            if let Some(text) = history {
+                let history_id = session_id.clone();
+                if let Err(error) =
+                    blocking(move || crate::database::record_user_prompt(&history_id, &text)).await
+                {
+                    tracing::warn!(%error, "prompt history could not be stored");
+                }
+            }
             let ordinal = session.submit(command_id, command).await?;
             if let Some(expected) = inherited_draft {
                 let persisted_id = session_id.clone();
@@ -765,14 +775,6 @@ pub(super) async fn handle_action(
                     }
                 });
                 state.publish_revision();
-            }
-            if let Some(text) = history
-                && let Err(error) = blocking(move || {
-                    crate::database::record_user_prompt(&session_id, ordinal, &text)
-                })
-                .await
-            {
-                tracing::warn!(%error, "prompt was accepted but its history could not be stored");
             }
             Ok(DaemonReply::Ordinal(ordinal))
         }

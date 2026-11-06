@@ -3567,7 +3567,7 @@ fn abandoned_prompts_are_searchable_in_session_and_project_history() {
         &database,
         &[("session-1", "project-1"), ("session-2", "project-1")],
     );
-    record_abandoned_prompt_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
+    record_prompt_text_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
     record_prompt_to(
         &database,
         "session-2",
@@ -3643,9 +3643,9 @@ fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe
         "submitted prompt",
     )
     .unwrap();
-    record_abandoned_prompt_to(&database, "session-1", "project-1", "submitted prompt").unwrap();
-    record_abandoned_prompt_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
-    record_abandoned_prompt_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
+    record_prompt_text_to(&database, "session-1", "project-1", "submitted prompt").unwrap();
+    record_prompt_text_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
+    record_prompt_text_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
     // The delivered prompt's ordinal remains its idempotency key after the
     // nullable-ordinal migration.
     record_prompt_to(
@@ -3677,7 +3677,7 @@ fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe
         ]
     );
 
-    record_abandoned_prompt_to(&database, "session-2", "project-1", " \n\t ").unwrap();
+    record_prompt_text_to(&database, "session-2", "project-1", " \n\t ").unwrap();
     assert!(
         session_prompts_from(&database, "session-2")
             .unwrap()
@@ -3749,29 +3749,6 @@ fn rebinding_a_session_moves_its_prompt_history_to_the_new_bundle() {
         "fix renderer",
     )
     .unwrap();
-}
-
-#[test]
-fn prompt_recording_is_idempotent_by_session_event_ordinal() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    live_sessions(&database, &[("session-1", "project-1")]);
-    for _ in 0..2 {
-        record_prompt_to(
-            &database,
-            "session-1",
-            "project-1",
-            7,
-            Some("2026-08-12T00:00:00Z"),
-            "ship it",
-        )
-        .unwrap();
-    }
-    let connection = open(&database).unwrap();
-    let count: i64 = connection
-        .query_row("SELECT count(*) FROM prompt_history", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(count, 1);
 }
 
 #[test]

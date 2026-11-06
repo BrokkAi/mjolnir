@@ -85,6 +85,13 @@ impl ChatState {
         }
         self.session_history_error = None;
         self.session_history = entries.into_iter().rev().map(|entry| entry.text).collect();
+        // Prompts sent from here are stored before they are submitted, so a
+        // listing that holds one has it in its true place among prompts sent
+        // from elsewhere. Only prompts it does not hold yet stay local.
+        let stored: std::collections::HashSet<&str> =
+            self.session_history.iter().map(String::as_str).collect();
+        self.prompt_history
+            .retain(|text| !stored.contains(text.as_str()));
         if let Some(index) = self.history_index
             && index >= self.navigation_history().len()
         {
@@ -743,6 +750,36 @@ mod tests {
         assert_eq!(
             recalled,
             vec!["this visit", "mine newest", "mine oldest", "mine oldest"]
+        );
+        chat.handle_key(key(KeyCode::Esc));
+
+        // Hard-won: 8e9b542d5: a prompt sent here earlier was recalled before a newer one sent from the web
+        chat.request_session_history();
+        let generation = chat.take_session_history_request().unwrap();
+        let stored = |id: i64, text: &str| PromptHistoryEntry {
+            id,
+            session_id: "1234567890".into(),
+            text: text.into(),
+        };
+        chat.set_session_history(
+            generation,
+            vec![
+                stored(5, "sent from the web"),
+                stored(4, "this visit"),
+                stored(3, "mine newest"),
+                stored(1, "mine oldest"),
+            ],
+        );
+        chat.history_index = None;
+        chat.clear_input();
+        let mut recalled = Vec::new();
+        for _ in 0..3 {
+            chat.handle_key(key(KeyCode::Up));
+            recalled.push(chat.input.clone());
+        }
+        assert_eq!(
+            recalled,
+            vec!["sent from the web", "this visit", "mine newest"]
         );
     }
 }

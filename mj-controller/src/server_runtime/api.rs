@@ -3199,11 +3199,8 @@ impl SubagentBackend for ApiBackend {
         command_id: Option<String>,
     ) -> BoxFuture<'_, Result<u64>> {
         Box::pin(async move {
-            let ordinal = self
-                .prompt_with_id(session_id.clone(), text.clone(), command_id)
-                .await?;
-            super::actions::record_user_prompt(session_id, ordinal, text);
-            Ok(ordinal)
+            super::actions::record_user_prompt(session_id.clone(), text.clone()).await;
+            self.prompt_with_id(session_id, text, command_id).await
         })
     }
 

@@ -1,22 +1,20 @@
 use super::*;
 
-/// Record a prompt a person sent to a session, under the project the store
-/// holds for that session. Every surface a person types into records through
-/// here; agent messages do not.
-pub fn record_user_prompt(session_id: &str, event_ordinal: u64, text: &str) -> Result<()> {
+/// Record a prompt a person is sending to a session, under the project the
+/// store holds for that session. Every surface a person types into records
+/// through here before it submits the prompt, so the record exists before
+/// the session can start or finish the turn, and nothing is left to do once
+/// the session accepts it. A prompt the session then refuses stays in the
+/// history, as an abandoned draft does. Agent messages do not record.
+pub fn record_user_prompt(session_id: &str, text: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     let text = text.to_owned();
     submit_database_write("record_user_prompt", move |_| {
-        record_user_prompt_to(&database_path(), &session_id, event_ordinal, &text)
+        record_user_prompt_to(&database_path(), &session_id, &text)
     })
 }
 
-pub(super) fn record_user_prompt_to(
-    path: &Path,
-    session_id: &str,
-    event_ordinal: u64,
-    text: &str,
-) -> Result<()> {
+pub(super) fn record_user_prompt_to(path: &Path, session_id: &str, text: &str) -> Result<()> {
     let bundle_id: Option<String> = open_reader(path)?
         .query_row(
             "SELECT bundle_id FROM session_contexts WHERE session_id = ?1",
@@ -29,7 +27,7 @@ pub(super) fn record_user_prompt_to(
     let Some(bundle_id) = bundle_id else {
         return Ok(());
     };
-    record_prompt_to(path, session_id, &bundle_id, event_ordinal, None, text)
+    record_prompt_text_to(path, session_id, &bundle_id, text)
 }
 
 pub fn record_abandoned_prompt(session_id: &str, bundle_id: &str, text: &str) -> Result<()> {
@@ -37,11 +35,12 @@ pub fn record_abandoned_prompt(session_id: &str, bundle_id: &str, text: &str) ->
     let bundle_id = bundle_id.to_owned();
     let text = text.to_owned();
     submit_database_write("record_abandoned_prompt", move |_| {
-        record_abandoned_prompt_to(&database_path(), &session_id, &bundle_id, &text)
+        record_prompt_text_to(&database_path(), &session_id, &bundle_id, &text)
     })
 }
 
-pub(super) fn record_abandoned_prompt_to(
+/// Store `text` as the session's newest prompt unless it already is.
+pub(super) fn record_prompt_text_to(
     path: &Path,
     session_id: &str,
     bundle_id: &str,
@@ -86,6 +85,9 @@ pub(super) fn record_abandoned_prompt_to(
     Ok(())
 }
 
+/// A delivered prompt keyed by its event ordinal, for fixtures that need
+/// several rows of the same text.
+#[cfg(test)]
 pub(super) fn record_prompt_to(
     path: &Path,
     session_id: &str,
