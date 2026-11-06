@@ -971,7 +971,7 @@ pub(super) async fn serve_session(
                                     }
                                     if spec.harness == HarnessKind::OpenCode
                                         && let Some(usage) = usage.as_mut()
-                                        && let Err(error) = opencode_usage::normalize(usage)
+                                        && let Err(error) = opencode_usage::normalize(usage, usage_meta.as_ref())
                                     {
                                         emit_runtime_event(events, RuntimeEvent::Warning {
                                             message: format!("OpenCode usage could not be reconciled; turn accounting is incomplete: {error:#}"),
