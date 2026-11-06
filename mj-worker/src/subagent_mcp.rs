@@ -629,6 +629,19 @@ fn call_with_budget_and_options(
             if instructions.is_empty() {
                 bail!("spawn instructions cannot be empty");
             }
+            let parent_directory = std::env::current_dir()
+                .context("resolve the parent's working directory for spawn")?;
+            let resolved_working_directory = if args.working_directory.as_os_str().is_empty() {
+                parent_directory
+            } else {
+                mj_core::target_path::join(&parent_directory, &args.working_directory)
+            };
+            if !resolved_working_directory.is_dir() {
+                bail!(
+                    "spawn working directory {} does not exist or is not a directory; pass an existing directory (relative paths resolve against the parent's working directory)",
+                    resolved_working_directory.display()
+                );
+            }
             // A subtle request without a subtle choice still reaches the
             // daemon: the configuration may have gained one since launch.
             let task_type = match args.task_type {

@@ -544,12 +544,25 @@ async fn run_bridge(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| {
-            format!(
-                "launch ACP bridge {} in working directory {}",
-                spec.command.display(),
-                spec.cwd.display()
-            )
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound && !spec.cwd.is_dir() {
+                anyhow::anyhow!(
+                    "ACP bridge working directory {} does not exist or is not a directory: {error}",
+                    spec.cwd.display()
+                )
+            } else if error.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "ACP bridge executable {} was not found while starting in working directory {}: {error}",
+                    spec.command.display(),
+                    spec.cwd.display()
+                )
+            } else {
+                anyhow::anyhow!(
+                    "launch ACP bridge {} in working directory {}: {error}",
+                    spec.command.display(),
+                    spec.cwd.display()
+                )
+            }
         })?;
     let stdin = child.stdin.take().context("ACP bridge stdin unavailable")?;
     let stdout = child

@@ -5906,6 +5906,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
 }
 
 #[cfg(unix)]
+// Hard-won: #1379: ENOENT from current_dir was reported as a missing bridge executable.
 #[tokio::test]
 async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
     let temp = tempfile::tempdir().unwrap();
@@ -5953,8 +5954,17 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
         };
 
         let error = run(spec, request_rx, event_tx).await.unwrap_err();
-        assert!(format!("{error:#}").contains(&format!("launch ACP bridge {}", bridge.display())));
-        assert!(format!("{error:#}").contains(&format!("working directory {}", cwd.display())));
+        let rendered = format!("{error:#}");
+        if bridge == Path::new("sh") {
+            assert!(rendered.contains(&format!(
+                "working directory {} does not exist",
+                cwd.display()
+            )));
+            assert!(!rendered.contains("executable sh was not found"));
+        } else {
+            assert!(rendered.contains(&format!("executable {} was not found", bridge.display())));
+            assert!(rendered.contains(&format!("working directory {}", cwd.display())));
+        }
         assert!(matches!(
             event_rx.recv().await,
             Some(RuntimeEvent::SessionFault { message }) if message.contains("ACP runtime failed")
