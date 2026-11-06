@@ -46,13 +46,18 @@ impl DashboardState {
     pub(crate) fn child_workspace_for(&self, child: &str) -> Option<ChildWorkspace> {
         Some(ChildWorkspace {
             parent_id: self.subagent_parent_for(child)?,
-            kind: self
-                .state
-                .subagents
-                .get(child)
-                .map_or(mj_core::subagent::SubagentKind::Worker, |relation| {
-                    relation.kind
-                }),
+            kind: self.state.subagents.get(child).map_or(
+                mj_core::subagent::SubagentKind::Worker,
+                |relation| {
+                    match relation.kind {
+                        // The oracle shows in the Sub-agents view.
+                        mj_core::subagent::SubagentKind::Oracle => {
+                            mj_core::subagent::SubagentKind::Worker
+                        }
+                        kind => kind,
+                    }
+                },
+            ),
         })
     }
 

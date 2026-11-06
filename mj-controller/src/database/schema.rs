@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 110;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 111;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2005,10 +2005,33 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older writers would drop a session's Oracle choice on update,
+    // and older daemons cannot decode AskOracle actions or Oracle-kind children.
+    if version < 111 {
+        connection.execute_batch("BEGIN IMMEDIATE;")?;
+        if !legacy_schema::table_has_column(connection, "sessions", "oracle")? {
+            connection.execute_batch("ALTER TABLE sessions ADD COLUMN oracle INTEGER NOT NULL DEFAULT 1 CHECK(oracle IN (0, 1));")?;
+        }
+        if !legacy_schema::table_has_column(connection, "sessions", "oracle_choice")? {
+            connection.execute_batch("ALTER TABLE sessions ADD COLUMN oracle_choice TEXT CHECK(oracle_choice IS NULL OR json_valid(oracle_choice));")?;
+        }
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS oracle_preference (
+                 profile_id TEXT PRIMARY KEY,
+                 enabled INTEGER NOT NULL CHECK(enabled IN (0, 1))
+             );
+             UPDATE schema_compatibility SET minimum_compatible_version = 111 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (111, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 111;
+             COMMIT;",
+        )?;
+    }
+
     // Compatible: clearing a nullable override changes no stored shape; older
     // readers and writers already support absent manual titles (as in the compatible
     // turn-profile backfill). Keep the existing compatibility floor.
-    if version < 111 {
+    if version < 112 {
         let transaction = rusqlite::Transaction::new_unchecked(
             connection,
             rusqlite::TransactionBehavior::Immediate,
@@ -2046,8 +2069,8 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         }
         transaction.execute_batch(
             "INSERT INTO schema_migrations(version, applied_at)
-                 VALUES (111, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
-             PRAGMA user_version = 111;",
+                 VALUES (112, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 112;",
         )?;
         transaction.commit()?;
     }
@@ -2705,7 +2728,7 @@ mod reader_tests {
     fn default_title_override_repair_runs_once_and_preserves_manual_names() {
         let connection = Connection::open_in_memory().unwrap();
         create_baseline_schema(&connection).unwrap();
-        connection.execute_batch("CREATE TRIGGER stop_repair BEFORE INSERT ON schema_migrations WHEN NEW.version=111 BEGIN SELECT RAISE(ABORT,'fixture boundary'); END;").unwrap();
+        connection.execute_batch("CREATE TRIGGER stop_repair BEFORE INSERT ON schema_migrations WHEN NEW.version=112 BEGIN SELECT RAISE(ABORT,'fixture boundary'); END;").unwrap();
         assert!(migrate_schema(&connection).is_err());
         if !connection.is_autocommit() {
             connection.execute_batch("ROLLBACK").unwrap();
@@ -2777,8 +2800,8 @@ mod reader_tests {
         drop(statement);
         assert_eq!(touched, ["bundle", "moved", "project"]);
         let schema = read_schema_state(&connection).unwrap();
-        assert_eq!(schema.revision, 111);
-        assert_eq!(schema.minimum_compatible, Some(110));
+        assert_eq!(schema.revision, 112);
+        assert_eq!(schema.minimum_compatible, Some(111));
         connection
             .execute(
                 "UPDATE sessions SET session_title_override=title WHERE session_id='bundle'",
@@ -3447,6 +3470,15 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 111 {
+            connection
+                .execute_batch(
+                    "ALTER TABLE sessions DROP COLUMN oracle_choice;
+                ALTER TABLE sessions DROP COLUMN oracle;
+                DROP TABLE IF EXISTS oracle_preference;",
+                )
+                .unwrap();
+        }
         if version < 86 {
             connection
                 .execute_batch("DROP TABLE IF EXISTS mailbox_reset_frontiers;")
@@ -3580,6 +3612,48 @@ mod reader_tests {
         }
         drop(connection);
         forget_verified_schema(path);
+    }
+
+    #[test]
+    fn oracle_migration_enables_existing_sessions_and_persists_override() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oracle.sqlite3");
+        let mut session = super::super::tests::session("existing", "project");
+        save_session_to(&path, &session).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE sessions DROP COLUMN oracle_choice;
+             ALTER TABLE sessions DROP COLUMN oracle;
+             DROP TABLE oracle_preference;
+             DELETE FROM schema_migrations WHERE version >= 111;
+             UPDATE schema_compatibility SET minimum_compatible_version = 110 WHERE singleton = 1;
+             PRAGMA user_version = 110;",
+            )
+            .unwrap();
+        drop(connection);
+        forget_verified_schema(&path);
+        let connection = open_writer(&path).unwrap();
+        assert!(
+            read_schema_state(&connection)
+                .unwrap()
+                .ensure_supported_by(110)
+                .is_err()
+        );
+        drop(connection);
+        assert!(load_state_from(&path).unwrap().sessions["existing"].oracle);
+        session.oracle = false;
+        session.oracle_choice = Some(mj_core::config::SubagentChoice {
+            model: "advisor".into(),
+            effort: Some("high".into()),
+        });
+        save_session_to(&path, &session).unwrap();
+        let loaded = load_state_from(&path).unwrap();
+        assert!(!loaded.sessions["existing"].oracle);
+        assert_eq!(
+            loaded.sessions["existing"].oracle_choice,
+            session.oracle_choice
+        );
     }
 
     #[test]

@@ -198,20 +198,25 @@ test('Move loads a summary row before rendering destination controls', async ({ 
   await expect(page.locator('#move-next')).toHaveText('Prepare move');
 });
 
-test('Move preserves a legacy single_model delegation policy when unchanged', async ({ page }) => {
+test('Move preserves a legacy delegation policy and retains an oracle override', async ({ page }) => {
   const state = await mount(page, {
     sessions: [session('legacy', {
       capabilities: { resume: true, move_session: true },
       subagents: { mode: 'single_model', model: 'old-model', effort: 'high' },
+      oracle: true,
+      oracle_choice: { model: 'advisor', effort: 'high' },
     })],
   });
   await page.evaluate(() => { location.hash = '#workspace/test/move/legacy'; });
   await expect(page.locator('#move-legacy-subagents')).toHaveValue('mjolnir');
+  await expect(page.locator('#move-legacy-oracle')).toHaveValue('enabled');
   await expect(page.locator('#move-legacy-subagent-model')).toHaveCount(0);
   await expect(page.locator('#move-legacy-subagent-effort')).toHaveCount(0);
   await page.locator('#move-next').click();
   await expect.poll(() => state.movePreflights?.length || 0).toBe(1);
   expect(state.movePreflights[0].subagents).toBeNull();
+  expect(state.movePreflights[0].oracle).toBeNull();
+  expect(state.movePreflights[0].oracle_choice).toBeNull();
 });
 
 test('resume detail keeps a visible retry when the summary row disappears before fetch', async ({ page }) => {

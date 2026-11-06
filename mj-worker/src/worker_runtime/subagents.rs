@@ -1125,7 +1125,8 @@ mod tests {
                 serde_json::json!([
                     "mcp__mj-agents__send_message",
                     "mcp__mj-agents__fetch",
-                    "mcp__mj-agents__request_review"
+                    "mcp__mj-agents__request_review",
+                    "mcp__mj-agents__ask_oracle"
                 ])
             );
             let command = settings["hooks"]["PostToolBatch"][0]["hooks"][0]["command"]
@@ -1585,7 +1586,8 @@ print(sys.argv[sys.argv.index('--role') + 1])
             serde_json::json!([
                 "mcp__mj-agents__send_message",
                 "mcp__mj-agents__fetch",
-                "mcp__mj-agents__request_review"
+                "mcp__mj-agents__request_review",
+                "mcp__mj-agents__ask_oracle"
             ])
         );
 

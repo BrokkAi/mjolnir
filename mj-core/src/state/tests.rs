@@ -193,6 +193,8 @@ fn a_running_session_reports_no_completed_turn() {
 
 fn sample_state() -> State {
     let session = SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -247,6 +249,7 @@ fn sample_state() -> State {
         }),
     };
     State {
+        last_oracle_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         version: STATE_VERSION,
@@ -590,6 +593,53 @@ fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
     assert!(state.is_subagent_session(&child.id), "a managed child");
     assert!(state.is_subagent_session(&native), "a harness-owned child");
     assert!(!state.is_subagent_session(&parent.id), "the owner");
+}
+
+#[test]
+fn only_a_sub_agent_without_a_live_worker_is_stopped() {
+    let mut parent = sample_session();
+    parent.id = "0123456789abcdef0123456789abcdef".into();
+    parent.state = SessionState::Stopped;
+    let mut child = sample_session();
+    child.id = "fedcba9876543210fedcba9876543210".into();
+    let mut state = State::default();
+    state.sessions.insert(parent.id.clone(), parent.clone());
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.subagents.insert(
+        child.id.clone(),
+        crate::subagent::SubagentMetadata {
+            kind: crate::subagent::SubagentKind::Reviewer,
+            child_session_id: child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "Review".into(),
+            profile_id: child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            request_key: "request-1".into(),
+            created_at: child.created_at.clone(),
+            noticed_turn: None,
+            reported_finish: None,
+            handback_tool: false,
+        },
+    );
+
+    for (session_state, stopped) in [
+        (SessionState::Running, false),
+        (SessionState::Closing, false),
+        (SessionState::Parked, true),
+        (SessionState::Stopped, true),
+        (SessionState::Error, true),
+    ] {
+        state.sessions.get_mut(&child.id).unwrap().state = session_state;
+        assert_eq!(
+            state.is_stopped_subagent(&child.id),
+            stopped,
+            "{session_state:?}"
+        );
+    }
+    assert!(!state.is_stopped_subagent(&parent.id), "a stopped owner");
+    assert!(!state.is_stopped_subagent("missing"));
 }
 
 fn checkout_session(id: &str) -> SessionRecord {
@@ -1878,6 +1928,18 @@ fn session_and_remembered_policy_read_legacy_selector_and_boolean_json() {
             Default::default()
         );
     }
+}
+
+#[test]
+fn oracle_state_reads_old_sessions_enabled_and_omits_empty_preferences() {
+    let mut session = serde_json::to_value(sample_session()).unwrap();
+    session.as_object_mut().unwrap().remove("oracle");
+    session.as_object_mut().unwrap().remove("oracle_choice");
+    let restored: SessionRecord = serde_json::from_value(session).unwrap();
+    assert!(restored.oracle);
+    assert!(restored.oracle_choice.is_none());
+    let state = serde_json::to_value(State::default()).unwrap();
+    assert!(state.get("last_oracle_choices").is_none());
 }
 
 #[test]

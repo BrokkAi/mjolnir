@@ -210,14 +210,24 @@
               <div id="conversation-background-tasks"></div>
             </div>
           </details>
-          <button
-            type="button"
-            id="subagents-button"
-            class="secondary hidden"
-            aria-label="Open sub-agent workspace"
-          >
-            Sub-agents
-          </button>
+          <div class="child-workspace-buttons">
+            <button
+              type="button"
+              id="subagents-button"
+              class="secondary hidden"
+              aria-label="Open sub-agent workspace"
+            >
+              Sub-agents
+            </button>
+            <button
+              type="button"
+              id="reviewers-button"
+              class="secondary hidden"
+              aria-label="Open reviewers workspace"
+            >
+              Reviewers
+            </button>
+          </div>
         </div>
         <form id="prompt-form" class="composer">
           <div
@@ -252,6 +262,14 @@
               aria-label="Open sub-agent workspace"
             >
               Sub-agents
+            </button>
+            <button
+              type="button"
+              id="reviewers-button-desktop"
+              class="secondary hidden"
+              aria-label="Open reviewers workspace"
+            >
+              Reviewers
             </button>
           </div>
           <div id="composer-actions" class="row composer-actions">

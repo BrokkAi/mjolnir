@@ -450,7 +450,12 @@ impl RuntimeState {
                     if handed_off_lifecycle {
                         tracing::info!(session_id = %operation_session_id, ?kind, "lifecycle operation yielded to the replacement daemon");
                     } else if let Err(error) = &result {
-                        tracing::warn!(session_id = %operation_session_id, ?kind, reference = %operation_reference, %error, "lifecycle operation failed");
+                        let cancel_cause = state
+                            .owner()
+                            .lifecycle
+                            .get(&operation_session_id)
+                            .and_then(|active| active.control.cancel_cause());
+                        tracing::warn!(session_id = %operation_session_id, ?kind, reference = %operation_reference, ?cancel_cause, %error, "lifecycle operation failed");
                     }
                     // Serialize final Move refusal disposition against any late
                     // startup enqueue, including cancellation before source work.

@@ -39,7 +39,7 @@ pub(super) fn request_phone_action_cancellation(
                 .flatten()
         });
     if let Some(control) = control {
-        return control.request_cancel();
+        return control.request_cancel("person cancel from phone action");
     }
     false
 }
@@ -166,6 +166,8 @@ pub(super) async fn apply_phone_action(
             base,
             no_later_history,
             subagents,
+            oracle,
+            oracle_choice,
             review,
             no_project_memory,
             no_github_events,
@@ -206,6 +208,8 @@ pub(super) async fn apply_phone_action(
                         base,
                         no_later_history,
                         subagents,
+                        oracle,
+                        oracle_choice,
                         review,
                         no_project_memory,
                         no_github_events,

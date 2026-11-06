@@ -106,6 +106,16 @@ async fn continuation_checks_run_concurrently_and_defer_review_until_each_settle
         profile: Arc::new(|_| Some("test".into())),
         log: Some(decision_log),
         control: remote.control,
+        claim: {
+            let enabled = enabled.clone();
+            Arc::new(move |_| {
+                if enabled.load(Ordering::SeqCst) {
+                    Claim::Allowed
+                } else {
+                    Claim::Blocked
+                }
+            })
+        },
         allowed: {
             let enabled = enabled.clone();
             Arc::new(move |_| enabled.load(Ordering::SeqCst))
@@ -233,6 +243,7 @@ async fn continuation_does_not_revive_old_idle_sessions_and_new_input_cancels_a_
         log: Some(log),
         control: remote.control,
         allowed: Arc::new(|_| true),
+        claim: Arc::new(|_| Claim::Allowed),
         live: Arc::new(|| ["one".into()].into()),
         review: Arc::new(|_, _| {}),
     };
@@ -313,6 +324,7 @@ async fn continuation_submits_a_guarded_prompt_and_reviews_only_after_the_chain(
             log: Some(log),
             control: remote.control,
             allowed: Arc::new(|_| true),
+            claim: Arc::new(|_| Claim::Allowed),
             live: Arc::new(|| ["one".into()].into()),
             review: {
                 let reviews = reviews.clone();
@@ -500,6 +512,7 @@ async fn quota_classification_survives_exhausted_allowance_and_unusable_authoriz
         log: None,
         control: remote.control,
         allowed: Arc::new(|_| true),
+        claim: Arc::new(|_| Claim::Allowed),
         live: Arc::new(|| ["one".into()].into()),
         review: Arc::new(|_, _| {}),
         profile: Arc::new(|_| Some("test".into())),
@@ -583,7 +596,23 @@ async fn quota_classification_survives_exhausted_allowance_and_unusable_authoriz
 
 #[tokio::test]
 async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
-    for case in ["future", "unknown", "due", "disabled", "moving", "moved"] {
+    // The "timed-" cases hold a record with a deadline. A Move that owns the
+    // session (`moving`) leaves it alone and nothing fires while it runs; any
+    // other owner, or a changed profile, clears it whatever the time; and once
+    // the Move has ended on the same profile it fires at its deadline.
+    for case in [
+        "future",
+        "unknown",
+        "due",
+        "disabled",
+        "moving",
+        "moved",
+        "timed-moving",
+        "timed-moving-future",
+        "timed-other-lifecycle",
+        "timed-moved",
+        "timed-move-failed",
+    ] {
         let mut remote = spawn_remote_session_manager().unwrap();
         remote.targets.send_replace(vec![RelaySessionTarget {
             session_id: "one".into(),
@@ -591,7 +620,19 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
             worker_recovery: None,
             project_memory: None,
         }]);
-        let enabled = !matches!(case, "disabled" | "moving");
+        let enabled = !matches!(
+            case,
+            "disabled"
+                | "moving"
+                | "timed-moving"
+                | "timed-moving-future"
+                | "timed-other-lifecycle"
+                | "timed-moved"
+        );
+        let moving = matches!(
+            case,
+            "moving" | "timed-moving" | "timed-moving-future" | "timed-moved"
+        );
         let environment = Environment {
             start_quota_move: Arc::new(|_, _, _| {
                 Box::pin(async { anyhow::bail!("unexpected Move start") })
@@ -599,11 +640,20 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
             log: None,
             control: remote.control,
             allowed: Arc::new(move |_| enabled),
+            claim: Arc::new(move |_| {
+                if moving {
+                    Claim::Move
+                } else if enabled {
+                    Claim::Allowed
+                } else {
+                    Claim::Blocked
+                }
+            }),
             live: Arc::new(|| ["one".into()].into()),
             review: Arc::new(|_, _| panic!("quota-blocked turn must not be reviewed")),
             profile: Arc::new(move |_| {
                 Some(
-                    if case == "moved" {
+                    if case.ends_with("moved") {
                         "destination"
                     } else {
                         "test"
@@ -626,7 +676,9 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
         let mut recovered = view("one", true);
         let deadline = match case {
             "unknown" | "moving" | "moved" => None,
-            "future" => Some(mj_core::clock::epoch_millis() + 60_000),
+            "future" | "timed-moving-future" | "timed-other-lifecycle" => {
+                Some(mj_core::clock::epoch_millis() + 60_000)
+            }
             _ => Some(mj_core::clock::epoch_millis() - 1),
         };
         let recovery = recovery_for(&recovered, deadline);
@@ -643,7 +695,10 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
             .await
             .unwrap();
         receive(&mut updates).await;
-        if matches!(case, "future" | "unknown" | "moving") {
+        if matches!(
+            case,
+            "future" | "unknown" | "moving" | "timed-moving" | "timed-moving-future"
+        ) {
             assert!(
                 tokio::time::timeout(Duration::from_millis(250), remote.requests.recv())
                     .await
@@ -663,7 +718,7 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
             else {
                 panic!("expected guarded recovery");
             };
-            if enabled && case != "moved" {
+            if enabled && !case.ends_with("moved") {
                 assert_eq!(command_id, "quota-retry-3");
                 assert!(matches!(command, RelayCommand::ResumeAfterQuota { .. }));
             } else {
@@ -700,6 +755,7 @@ async fn a_due_recovery_that_cannot_be_submitted_says_which_fact_refused_it() {
         log: Some(mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap()),
         control: remote.control,
         allowed: Arc::new(|_| true),
+        claim: Arc::new(|_| Claim::Allowed),
         live: Arc::new(|| ["one".into()].into()),
         review: Arc::new(|_, _| panic!("quota-blocked turn must not be reviewed")),
         profile: Arc::new(|_| Some("test".into())),
@@ -817,6 +873,7 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
             log: Some(log),
             control: remote.control,
             allowed: Arc::new(|_| true),
+            claim: Arc::new(|_| Claim::Allowed),
             live: Arc::new(|| ["one".into()].into()),
             review: Arc::new(|_, _| {}),
             profile: Arc::new(|_| Some("test".into())),
@@ -974,6 +1031,7 @@ async fn background_work_defers_continuation_and_its_end_brings_a_fresh_check() 
         log: Some(log),
         control: remote.control,
         allowed: Arc::new(|_| true),
+        claim: Arc::new(|_| Claim::Allowed),
         live: Arc::new(|| ["one".into()].into()),
         review: Arc::new(|_, _| {}),
         profile: Arc::new(|_| Some("test".into())),
@@ -1100,6 +1158,7 @@ async fn a_due_recovery_resumes_a_usage_limited_goal_and_leaves_a_spent_budget_a
             log: None,
             control: remote.control,
             allowed: Arc::new(|_| true),
+            claim: Arc::new(|_| Claim::Allowed),
             live: Arc::new(|| ["one".into()].into()),
             review: Arc::new(|_, _| {}),
             profile: Arc::new(|_| Some("test".into())),
@@ -1211,6 +1270,7 @@ async fn handoff_defers_a_completion_without_consuming_its_trigger() {
         log: None,
         control: remote.control,
         allowed: Arc::new(|_| true),
+        claim: Arc::new(|_| Claim::Allowed),
         live: Arc::new(|| ["one".into()].into()),
         review: Arc::new(|_, _| {}),
     };
@@ -1275,6 +1335,7 @@ fn idle_feed(
         log: None,
         control,
         allowed: Arc::new(|_| false),
+        claim: Arc::new(|_| Claim::Blocked),
         live: Arc::new(BTreeSet::new),
         review: Arc::new(|_, _| {}),
         quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
@@ -1465,7 +1526,7 @@ fn quota_move_request() -> mj_core::state::MoveSessionRequest {
 }
 
 #[tokio::test]
-async fn quota_schedule_writes_abstention_before_one_move_and_restores_deadline_on_refusal() {
+async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadline_on_refusal() {
     for case in ["weekly", "goal", "refused", "five-hour"] {
         let mut remote = spawn_remote_session_manager().unwrap();
         remote.targets.send_replace(vec![RelaySessionTarget {
@@ -1479,6 +1540,7 @@ async fn quota_schedule_writes_abstention_before_one_move_and_restores_deadline_
             log: None,
             control: remote.control,
             allowed: Arc::new(|_| true),
+            claim: Arc::new(|_| Claim::Allowed),
             live: Arc::new(|| ["one".into()].into()),
             review: Arc::new(|_, _| {}),
             profile: Arc::new(|_| Some("test".into())),
@@ -1530,9 +1592,8 @@ async fn quota_schedule_writes_abstention_before_one_move_and_restores_deadline_
             quota::Plan::Wait(fallback.clone())
         } else {
             let mut abstention = fallback.clone();
-            abstention.reset_at_ms = None;
-            abstention.retry_at_ms = None;
-            abstention.notice = "Moving to destination because weekly quota is exhausted".into();
+            abstention.notice =
+                quota::move_notice("the weekly quota is exhausted", "destination", &fallback);
             quota::Plan::Move {
                 request: Box::new(quota_move_request()),
                 destination: "destination".into(),
@@ -1560,8 +1621,24 @@ async fn quota_schedule_writes_abstention_before_one_move_and_restores_deadline_
                 panic!("expected recovery record")
             };
             if step == 0 && case != "five-hour" {
-                assert!(recovery.retry_at_ms.is_none());
-                assert!(recovery.reset_at_ms.is_none());
+                // The record written before the Move carries the retry, so a
+                // Move that fails leaves it in place.
+                assert_eq!(recovery.retry_at_ms, fallback.retry_at_ms);
+                assert_eq!(recovery.reset_at_ms, fallback.reset_at_ms);
+                assert!(recovery.retry_at_ms.is_some());
+                assert!(
+                    recovery.notice.starts_with(
+                        "Subscription quota reached, and the weekly quota is exhausted. \
+                         Switching this session to profile destination to continue the interrupted work. \
+                         If the switch fails while the session is still running, it continues on profile test at "
+                    ),
+                    "{}",
+                    recovery.notice
+                );
+                assert!(recovery.notice.ends_with(
+                    " (one minute after reset). If the session has already stopped, \
+                     the failure message says how to retry the Move."
+                ));
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
             } else {
                 assert_eq!(recovery.retry_at_ms, fallback.retry_at_ms);
@@ -1603,4 +1680,125 @@ async fn quota_schedule_writes_abstention_before_one_move_and_restores_deadline_
         ));
         remote.shutdown.shutdown().await.unwrap();
     }
+}
+
+#[test]
+fn move_notice_promises_a_retry_only_when_the_record_has_one_and_stays_under_the_worker_limit() {
+    let blocked = view("one", true);
+    let timed = recovery_for(&blocked, Some(mj_core::clock::epoch_millis() + 18_060_000));
+    let untimed = recovery_for(&blocked, None);
+    let notice = quota::move_notice("the quota is gone", "destination", &timed);
+    assert!(notice.contains(
+        "If the switch fails while the session is still running, it continues on profile test at"
+    ));
+    let notice = quota::move_notice("the quota is gone", "destination", &untimed);
+    assert!(!notice.contains("If the switch fails"), "{notice}");
+
+    // The longest reason `prepare` builds: a long profile id twice plus a time.
+    let profile = "p".repeat(512);
+    let mut long = timed;
+    long.profile_id = profile.clone();
+    let reason = format!(
+        "the quota for profile {profile} resets at 2026-11-06 12:00:00 UTC (+00:00), more than five hours away"
+    );
+    let notice = quota::move_notice(&reason, &profile, &long);
+    assert!(
+        notice.len() <= quota::NOTICE_BYTES,
+        "{} bytes",
+        notice.len()
+    );
+}
+
+#[test]
+fn an_appended_error_is_cut_on_a_character_boundary_within_the_worker_limit() {
+    let blocked = view("one", true);
+    let mut notice = recovery_for(&blocked, None).notice;
+    quota::append_bounded(&mut notice, " short error.");
+    assert!(notice.ends_with(" short error."));
+
+    // Multi-byte text, so a byte cut lands inside a character.
+    let mut notice = recovery_for(&blocked, None).notice;
+    quota::append_bounded(&mut notice, &"é".repeat(5000));
+    assert!(
+        notice.len() <= quota::NOTICE_BYTES,
+        "{} bytes",
+        notice.len()
+    );
+    assert!(notice.ends_with('…'));
+
+    // A notice already at the limit takes nothing and stays valid.
+    let mut notice = "x".repeat(quota::NOTICE_BYTES);
+    quota::append_bounded(&mut notice, " more");
+    assert_eq!(notice.len(), quota::NOTICE_BYTES);
+}
+
+fn lifecycle_entry(kind: LifecycleKind) -> ActiveLifecycle {
+    let (_completed, result) = tokio::sync::watch::channel(None);
+    ActiveLifecycle {
+        move_operation_id: None,
+        restart_intent: None,
+        upgrade_work: Arc::new(Mutex::new(None)),
+        phase: LifecyclePhase::Executing,
+        operation_id: "operation".into(),
+        control: LifecycleControl::default(),
+        kind,
+        started_at_epoch_seconds: 1,
+        active_stages: BTreeMap::new(),
+        resume_workspace_id: None,
+        resume_destination: None,
+        notice: None,
+        request_key: None,
+        _move_guard: None,
+        result,
+    }
+}
+
+// The tick decides whether to keep a timed quota record from one `claim`, so a
+// Move that fails between two reads cannot make a free session look owned.
+// Each answer below is one reading of the lifecycle entry, the Move owner and
+// the setting; `allowed` is exactly the `Allowed` answer.
+#[tokio::test]
+async fn claim_reads_the_session_owner_once() {
+    let state = super::super::tests::test_runtime_state();
+    let session = "claim-session";
+    assert_eq!(
+        claim(&state, session),
+        Claim::Blocked,
+        "a session the controller does not know is not claimable"
+    );
+    state.owner().install_controller(Controller {
+        config: Config::default(),
+        state: {
+            let mut records = mj_core::state::State::default();
+            records.sessions.insert(
+                session.into(),
+                crate::controller::test_support::checkpoint_test_session(session),
+            );
+            records
+        },
+    });
+    assert_eq!(claim(&state, session), Claim::Allowed);
+    assert!(allowed(&state, session));
+
+    state
+        .owner()
+        .lifecycle
+        .insert(session.into(), lifecycle_entry(LifecycleKind::Resume));
+    assert_eq!(claim(&state, session), Claim::Blocked);
+    assert!(!allowed(&state, session));
+
+    state
+        .owner()
+        .lifecycle
+        .insert(session.into(), lifecycle_entry(LifecycleKind::Move));
+    assert_eq!(claim(&state, session), Claim::Move);
+    assert!(!allowed(&state, session));
+    state.owner().lifecycle.remove(session);
+
+    // The Move owner alone, before its lifecycle entry exists or after the
+    // entry is gone, is still a Move.
+    let guard = crate::controller::move_session::MoveMutationGuard::reserve(session).unwrap();
+    assert_eq!(claim(&state, session), Claim::Move);
+    drop(guard);
+    assert_eq!(claim(&state, session), Claim::Allowed);
 }

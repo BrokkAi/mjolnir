@@ -173,6 +173,7 @@ impl DashboardState {
     }
 
     pub fn go_launch_action(&mut self, workspace_id: String, recipe: GoRecipe) -> DashboardAction {
+        let oracle = self.state.last_oracle_choice_for(&recipe.profile_id);
         // A recipe saved before DSH stopped offering Native, or one without a
         // policy, reads as the choice this profile's harness offers.
         let subagents = match self.config.profiles.get(&recipe.profile_id) {
@@ -199,6 +200,8 @@ impl DashboardState {
             project_directory: recipe.project_directory,
             create_managed_worktree: recipe.create_managed_worktree,
             subagents: Some(subagents),
+            oracle: Some(oracle),
+            oracle_choice: None,
             review: self
                 .simple_mode
                 .then_some(mj_core::config::SessionReview::Off),

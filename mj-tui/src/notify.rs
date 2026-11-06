@@ -364,6 +364,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                last_oracle_choices: Default::default(),
                 operator_presence: Default::default(),
                 last_subagent_policies: Default::default(),
                 subagents: Default::default(),

@@ -3013,6 +3013,8 @@ mod tests {
 
     fn record_template() -> SessionRecord {
         SessionRecord {
+            oracle_choice: None,
+            oracle: true,
             project: None,
             target_runtime: None,
             launch_base: None,

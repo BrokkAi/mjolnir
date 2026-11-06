@@ -67,6 +67,7 @@ impl Policy {
             "daemon catalogue installed once"
         );
         let reports = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        catalog.set_quota_reports(reports.clone());
         let rejected = Arc::new(std::sync::Mutex::new(
             mj_core::credentials::RejectedLogins::default(),
         ));

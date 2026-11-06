@@ -799,6 +799,19 @@ impl SessionState {
         )
     }
 
+    /// Whether a managed child in this state can still be given work: not
+    /// failed, lost, stopped or on its way out. A parked child wakes for it.
+    pub const fn can_receive_child_work(self) -> bool {
+        matches!(
+            self,
+            Self::Provisioning
+                | Self::Running
+                | Self::Disconnected
+                | Self::Checkpointing
+                | Self::Parked
+        )
+    }
+
     /// True while the session may have a worker process tree on its target,
     /// including one still being started or torn down: the states in which a
     /// sub-agent counts against its parent's cap.
@@ -1493,6 +1506,14 @@ pub struct SessionRecord {
         deserialize_with = "crate::subagent::deserialize_optional_policy"
     )]
     pub subagents: Option<crate::subagent::SubagentPolicy>,
+    /// Whether this session may consult an oracle when one is configured.
+    /// Records written before the choice existed allow it.
+    #[serde(default = "default_oracle_enabled")]
+    pub oracle: bool,
+    /// This session's own oracle model (`--subagent-oracle`), overriding
+    /// `[subagents.oracle]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_choice: Option<crate::config::SubagentChoice>,
     /// Turn review chosen for this session when it was created. `None`
     /// follows the global `[review]` section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1841,6 +1862,14 @@ fn default_session_workspace_id() -> String {
     crate::workspace::DEFAULT_WORKSPACE_ID.to_owned()
 }
 
+fn default_oracle_enabled() -> bool {
+    true
+}
+
+/// What a session's creator is told when an explicit request for the oracle
+/// could not be honored.
+pub const ORACLE_UNAVAILABLE_NOTICE: &str = "Oracle is off for this session: no oracle model is configured; set [subagents.oracle] or pass --subagent-oracle.";
+
 /// How a failed close's reason begins in [`SessionRecord::last_error`].
 ///
 /// A close that fails is non-destructive: the session goes back to the state
@@ -1907,6 +1936,20 @@ pub struct StartSelection {
 }
 
 impl SessionRecord {
+    /// The oracle this session may consult: none when its Oracle choice is
+    /// off, else its own override or the global `[subagents.oracle]`.
+    pub fn effective_oracle<'a>(
+        &'a self,
+        subagents: &'a crate::config::SubagentConfig,
+    ) -> Option<&'a crate::config::SubagentChoice> {
+        if !self.oracle {
+            return None;
+        }
+        self.oracle_choice
+            .as_ref()
+            .or(subagents.oracle.as_ref())
+            .filter(|choice| !choice.model.trim().is_empty())
+    }
     /// A completed close has no failure left to report. A stopped record
     /// retaining an error is a failed resume and still needs reconciliation.
     pub fn is_cleanly_stopped(&self) -> bool {
@@ -2412,6 +2455,9 @@ pub struct State {
         deserialize_with = "crate::subagent::deserialize_policy_map"
     )]
     pub last_subagent_policies: BTreeMap<String, crate::subagent::SubagentPolicy>,
+    /// The most recent Oracle choice for each profile.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_oracle_choices: BTreeMap<String, bool>,
     pub version: u32,
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
     pub sessions: SnapshotMap<String, SessionRecord>,
@@ -2433,6 +2479,7 @@ impl Default for State {
             version: STATE_VERSION,
             operator_presence: OperatorPresence::default(),
             last_subagent_policies: Default::default(),
+            last_oracle_choices: Default::default(),
             sessions: SnapshotMap::new(),
             subagents: SnapshotMap::new(),
             mount_history: SnapshotMap::new(),
@@ -2450,6 +2497,13 @@ impl State {
             .or_else(|| self.last_subagent_policies.get(""))
             .cloned()
             .unwrap_or_default()
+    }
+    /// The remembered Oracle choice for a profile; enabled when it has none.
+    pub fn last_oracle_choice_for(&self, profile_id: &str) -> bool {
+        self.last_oracle_choices
+            .get(profile_id)
+            .copied()
+            .unwrap_or(true)
     }
 }
 
@@ -2682,6 +2736,21 @@ impl State {
     #[must_use]
     pub fn is_subagent_session(&self, id: &str) -> bool {
         self.subagents.contains_key(id) || crate::native_agent::is_view_id(id)
+    }
+
+    /// Whether `id` is a Mjolnir sub-agent whose session has no live worker,
+    /// so its stored conversation can be read but not attached to.
+    ///
+    /// The terminal and the phone viewer both ask this, so they cannot
+    /// disagree about which children are readable. Callers that also know of
+    /// a transition bringing the session back add that check themselves.
+    #[must_use]
+    pub fn is_stopped_subagent(&self, id: &str) -> bool {
+        self.subagents.contains_key(id)
+            && self
+                .sessions
+                .get(id)
+                .is_some_and(|session| !session.state.has_live_worker())
     }
 
     pub fn validate(&self) -> Result<()> {

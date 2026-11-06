@@ -349,6 +349,8 @@ mod tests {
             source_checkpoint_only: false,
             operation_id: "move-one".into(),
             selection: MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
                 clear_resource_allocation: false,
