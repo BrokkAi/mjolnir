@@ -1910,6 +1910,84 @@ fn finishing_an_acp_prompt_preserves_a_later_native_goal_stream() {
     assert_eq!(session.execution, MaterializedExecutionState::Idle);
 }
 
+// Hard-won: #1450 follow-up: a cancel during a Codex native tail ended an older harness turn
+#[test]
+fn cancelling_a_codex_native_tail_preserves_the_prompt_outcome() {
+    let mut session = MaterializedSession::empty("session");
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 1 },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                start_ordinal: 1,
+                stop_reason: "end_turn".into(),
+            }),
+            origin: None,
+            prompt_in_flight: false,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "prompt".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("go")],
+            },
+            created_at_ms: 2,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandStarted {
+            command_id: "prompt".into(),
+            started_at_ms: 3,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 4 },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
+            command_id: "prompt".into(),
+            outcome: RelayCommandOutcome::Prompt {
+                diagnostic: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+            },
+        },
+    );
+    let outcome = session.last_turn_outcome.clone();
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: Some(mj_core::relay::RelayCommandKind::CancelTurn),
+            command_id: "cancel".into(),
+            outcome: RelayCommandOutcome::Cancelled,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            autonomous: None,
+            origin: Some("codex".into()),
+            prompt_in_flight: false,
+        },
+    );
+    assert_eq!(session.last_turn_outcome, outcome);
+    assert!(!session.transcript.iter().any(|item| {
+        item.stable_id
+            .starts_with(mj_core::transcript::TURN_INTERRUPTED_ITEM_PREFIX)
+    }));
+}
+
 // Hard-won: 1389c545: worker restart left an open autonomous turn that canonical checkpoint export rejected.
 #[test]
 fn a_restart_during_a_harness_turn_leaves_an_idle_session_with_no_open_streams() {
@@ -2145,6 +2223,17 @@ fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
         .expect("the harness turn marker")
         .position;
     cancel(&mut session, "cancel-1");
+    assert_eq!(interrupted_rows(&session), 0);
+    assert!(session.last_turn_outcome.is_none());
+    let settle = RelayObservation::HarnessTurnSettled {
+        autonomous: Some(mj_core::relay::SettledHarnessTurn {
+            start_ordinal: started_at,
+            stop_reason: "cancelled".into(),
+        }),
+        origin: None,
+        prompt_in_flight: false,
+    };
+    apply_observation(&mut session, settle.clone());
     assert_eq!(interrupted_rows(&session), 1, "{:?}", session.transcript);
     let outcome = session.last_turn_outcome.as_ref().expect("a turn outcome");
     assert_eq!(
@@ -2157,16 +2246,11 @@ fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
         mj_core::continuation::harness_turn_id(started_at)
     );
 
+    assert_eq!(outcome.accepted_ordinal, None);
     let cancelled = session.last_turn_outcome.clone();
-    apply_observation(
-        &mut session,
-        RelayObservation::HarnessTurnSettled {
-            autonomous: None,
-            origin: None,
-            prompt_in_flight: false,
-        },
-    );
+    apply_observation(&mut session, settle);
     assert_eq!(session.last_turn_outcome, cancelled);
+    assert_eq!(interrupted_rows(&session), 1);
 
     // Nothing running: nothing to interrupt.
     let mut idle = MaterializedSession::empty("session");

@@ -2953,6 +2953,12 @@ fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
     assert_eq!(state.execution, RelayExecutionState::Running);
     assert!(!state.safe_to_replace(HarnessKind::Codex));
     assert!(!state.safe_for_checkpoint(HarnessKind::Codex));
+    submit_relay(&mut relay, "stop-tail", RelayCommand::CancelTurn);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed("stop-tail", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    assert!(relay.harness_turn_stop.is_none());
     relay
         .record_session_update(metadata(
             serde_json::json!({"execution":{"version":1,"status":"idle","turnId":"autonomous"}}),
@@ -2975,6 +2981,29 @@ fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
             .operational_state()
             .safe_to_replace(HarnessKind::Codex),
         "between goal turns is not safe to kill"
+    );
+    relay
+        .record_session_update(metadata(
+            serde_json::json!({"execution":{"version":1,"status":"running","turnId":"next"}}),
+        ))
+        .unwrap();
+    let start = relay
+        .snapshot
+        .autonomous_harness_turn()
+        .unwrap()
+        .first_ordinal;
+    submit_relay(&mut relay, "stop-goal", RelayCommand::CancelTurn);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed("stop-goal", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    relay
+        .record_session_update(metadata(
+            serde_json::json!({"execution":{"version":1,"status":"idle","turnId":"next"}}),
+        ))
+        .unwrap();
+    assert!(
+        matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.start_ordinal == start && turn.stop_reason == "cancelled")
     );
     drop(relay);
     let mut relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
@@ -3730,6 +3759,9 @@ fn a_stop_the_harness_never_answers_ends_the_self_started_turn() {
     relay
         .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
+    assert!(
+        matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.stop_reason == "cancelled" && turn.start_ordinal == first_ordinal)
+    );
     assert!(relay.unanswered_harness_turn_stop().is_none());
     let before = relay.operational_state().latest_ordinal;
     assert!(
