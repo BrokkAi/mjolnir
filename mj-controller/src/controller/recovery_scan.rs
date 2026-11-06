@@ -563,6 +563,8 @@ fn adopted_session_record(
 ) -> SessionRecord {
     let now = now();
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,

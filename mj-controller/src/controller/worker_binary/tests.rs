@@ -3,6 +3,27 @@ use super::*;
 
 use crate::targets::tests::unwrapped_remote_line;
 
+#[test]
+fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
+    let mut session = crate::controller::test_support::checkpoint_test_session("primary");
+    let mut choices = mj_core::config::SubagentConfig::default();
+    let choice = mj_core::config::SubagentChoice {
+        model: "strong".into(),
+        effort: Some("high".into()),
+    };
+    session.oracle = true;
+    assert!(!oracle_launch_enabled(&session, false, &choices));
+    choices.oracle = Some(choice.clone());
+    assert!(oracle_launch_enabled(&session, false, &choices));
+    assert!(!oracle_launch_enabled(&session, true, &choices));
+    session.oracle = false;
+    assert!(!oracle_launch_enabled(&session, false, &choices));
+    session.oracle = true;
+    session.oracle_choice = Some(choice);
+    choices.oracle = None;
+    assert!(oracle_launch_enabled(&session, false, &choices));
+}
+
 fn stamped_worker(body: &[u8]) -> Vec<u8> {
     let mut bytes = body.to_vec();
     bytes.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
@@ -4735,6 +4756,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         commands: RefCell::new(Vec::new()),
     };
     let launch = WorkerLaunchConfig {
+        oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
@@ -4872,6 +4894,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         borrowed_from: None,
     };
     let launch = WorkerLaunchConfig {
+        oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         goal_resume_request: None,
@@ -4979,6 +5002,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         launch: RefCell::new(None),
     };
     let launch = WorkerLaunchConfig {
+        oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,

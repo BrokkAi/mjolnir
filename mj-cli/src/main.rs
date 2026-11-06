@@ -331,6 +331,9 @@ struct MoveArgs {
     /// or the recorded policy when retrying a sealed Move.
     #[arg(long)]
     subagents: Option<String>,
+    /// Oracle availability for this session.
+    #[arg(long, value_parser = ["enabled", "disabled"])]
+    oracle: Option<String>,
     /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
     subagent_straightforward: Option<String>,
@@ -343,6 +346,12 @@ struct MoveArgs {
     /// Override subtle sub-agent effort (requires --subagent-subtle).
     #[arg(long)]
     subagent_subtle_effort: Option<String>,
+    /// Override the oracle model for this session.
+    #[arg(long)]
+    subagent_oracle: Option<String>,
+    /// Oracle effort; requires --subagent-oracle.
+    #[arg(long, requires = "subagent_oracle")]
+    subagent_oracle_effort: Option<String>,
     /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_model: Option<String>,
@@ -1235,6 +1244,16 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         args.subagent_model.as_deref(),
         args.subagent_effort.as_deref(),
     )?;
+    let oracle_choice = api_commands::oracle_override(
+        args.subagent_oracle.as_deref(),
+        args.subagent_oracle_effort.as_deref(),
+        args.oracle.as_deref(),
+    )?;
+    let oracle_enabled = args
+        .oracle
+        .as_deref()
+        .map(|choice| choice == "enabled")
+        .or_else(|| oracle_choice.as_ref().map(|_| true));
     if !args.yes
         && !args.prepare
         && (!std::io::IsTerminal::is_terminal(&std::io::stdin())
@@ -1273,6 +1292,8 @@ async fn move_session(args: MoveArgs) -> Result<()> {
     };
     let selection = MoveSelection {
         subagents,
+        oracle: oracle_enabled,
+        oracle_choice,
         workspace: mj_core::move_workspace::WorkspaceSelection {
             exclusions: args
                 .exclusions
@@ -3341,6 +3362,8 @@ mod tests {
         state.sessions.insert(
             session_id.into(),
             SessionRecord {
+                oracle_choice: None,
+                oracle: true,
                 project: None,
                 target_runtime: None,
                 launch_base: None,

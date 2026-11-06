@@ -435,6 +435,8 @@ fn validate_action_against(
             review,
             no_project_memory: _,
             no_github_events: _,
+            oracle: _,
+            oracle_choice: _,
         } => {
             if let Some(review) = review {
                 let reviewers = match review {

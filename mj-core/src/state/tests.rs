@@ -193,6 +193,8 @@ fn a_running_session_reports_no_completed_turn() {
 
 fn sample_state() -> State {
     let session = SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -247,6 +249,7 @@ fn sample_state() -> State {
         }),
     };
     State {
+        last_oracle_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         version: STATE_VERSION,
@@ -1866,6 +1869,18 @@ fn session_and_remembered_policy_read_legacy_selector_and_boolean_json() {
             Default::default()
         );
     }
+}
+
+#[test]
+fn oracle_state_reads_old_sessions_enabled_and_omits_empty_preferences() {
+    let mut session = serde_json::to_value(sample_session()).unwrap();
+    session.as_object_mut().unwrap().remove("oracle");
+    session.as_object_mut().unwrap().remove("oracle_choice");
+    let restored: SessionRecord = serde_json::from_value(session).unwrap();
+    assert!(restored.oracle);
+    assert!(restored.oracle_choice.is_none());
+    let state = serde_json::to_value(State::default()).unwrap();
+    assert!(state.get("last_oracle_choices").is_none());
 }
 
 #[test]

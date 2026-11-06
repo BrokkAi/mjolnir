@@ -9,6 +9,10 @@ use mj_core::config::HarnessKind;
 use mj_core::state::{SessionRecord, SessionState, new_session_id};
 use mj_core::subagent::SubagentRecord;
 
+/// What the oracle is told before its first question. The handback variant
+/// names the tool only for a harness that gives it to children.
+pub(super) const ORACLE_INSTRUCTIONS: &str = "You are the oracle: a read-only advisor to another coding agent, the primary, which works in this workspace. The primary consults you before decisions it is unsure about. Each question includes the decision, the options and the evidence.\n\nDo not change anything. Do not edit, create or delete files in the workspace, do not change git state, and do not run builds, tests, installs or other commands that write files. Read files, search, and run read-only commands such as git log, git show, git diff and grep. You may write notes only in your report directory.\n\nCheck the primary's claims against the code. Answer with: your recommendation; the requirements the choice must satisfy and whether each option meets them; the evidence, with file:line references; what would fail if your recommendation were wrong; and what you could not verify. Say \"confirmed\", \"likely\" or \"unknown\" according to the evidence. Disagree with the primary when the evidence points the other way. If the question lacks what you need, say what is missing.\n\nSend each answer with the handback tool; Mjolnir delivers it to the primary. Later questions arrive as messages in this conversation, so you keep your earlier context.";
+
 #[derive(Debug, Clone)]
 pub struct RegisterSubagentRequest {
     pub kind: mj_core::subagent::SubagentKind,
@@ -374,6 +378,7 @@ impl Controller {
     ) -> Result<SubagentRecord> {
         let request_key = request.kind.request_key(&request.request_key);
         let reviewer = request.kind == mj_core::subagent::SubagentKind::Reviewer;
+        let oracle = request.kind == mj_core::subagent::SubagentKind::Oracle;
         if let Some(existing) =
             crate::database::lookup_subagent_request(&request.parent_session_id, &request_key)?
         {
@@ -397,12 +402,14 @@ impl Controller {
             .get(&request.parent_session_id)
             .with_context(|| format!("unknown parent session {}", request.parent_session_id))?
             .clone();
+        // Every top-level session has the message-only server that carries
+        // ask_oracle, so the oracle does not depend on delegation.
         ensure!(
-            reviewer || parent.harness_kind.supports_delegation_tools(),
+            reviewer || oracle || parent.harness_kind.supports_delegation_tools(),
             "{} sessions cannot spawn Mjolnir sub-agents",
             parent.harness_kind.display_name()
         );
-        if !reviewer {
+        if !reviewer && !oracle {
             ensure_parent_may_delegate(&parent)?;
         }
         ensure!(
@@ -438,7 +445,7 @@ impl Controller {
                 profile.kind.display_name()
             );
         }
-        if !reviewer {
+        if !reviewer && !oracle {
             self.ensure_subagent_slot_available(&parent.id, None)?;
         }
 
@@ -450,6 +457,8 @@ impl Controller {
         )?;
         let created_at = now();
         let session = SessionRecord {
+            oracle_choice: None,
+            oracle: false,
             project: parent.project.clone(),
             target_runtime: Some(parent.target_runtime_settings(&self.config)?.into_owned()),
             launch_base: None,
@@ -509,6 +518,24 @@ impl Controller {
                 mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS,
                 request.initial_prompt
             ),
+            (_, report_dir) if oracle => {
+                let instructions = if handback_tool {
+                    ORACLE_INSTRUCTIONS.to_owned()
+                } else {
+                    ORACLE_INSTRUCTIONS.replace(
+                        "Send each answer with the handback tool; Mjolnir delivers it to the primary.",
+                        "Send each answer as your last message; Mjolnir delivers it to the primary.",
+                    )
+                };
+                let directory_note = report_dir
+                    .as_ref()
+                    .map(|dir| format!("Your report directory is {dir}.\n\n"))
+                    .unwrap_or_default();
+                format!(
+                    "{directory_note}{instructions}\n\n{}",
+                    request.initial_prompt
+                )
+            }
             (true, Some(report_dir)) => format!(
                 "{}\n\n{}",
                 mj_core::subagent::handback_prompt_note(report_dir),
@@ -534,10 +561,12 @@ impl Controller {
             handback_tool,
         };
         let startup = initial_startup_deliveries(&relation, request.fast_mode)?;
-        crate::database::register_subagent_with_startup(&session, &relation, startup)?;
-        if let Some(report_dir) = &report_dir {
-            crate::database::record_subagent_report_dir(&child_id, report_dir)?;
-        }
+        crate::database::register_subagent_with_startup(
+            &session,
+            &relation,
+            startup,
+            report_dir.as_deref(),
+        )?;
         self.state.sessions.insert(child_id, session);
         self.state
             .subagents
@@ -554,6 +583,9 @@ impl Controller {
     /// Every child whose worker may be holding processes in the parent's
     /// container counts, idle or not: those processes are what the cap
     /// protects (#1161). A parked, stopped, failed or lost child holds none.
+    ///
+    /// Only ordinary workers count. A reviewer or the oracle holds processes
+    /// but never uses a delegation slot.
     pub fn ensure_subagent_slot_available(
         &self,
         parent_session_id: &str,
@@ -561,7 +593,7 @@ impl Controller {
     ) -> Result<()> {
         let live = crate::database::list_subagents(parent_session_id)?
             .into_iter()
-            .filter(|child| child.kind != mj_core::subagent::SubagentKind::Reviewer)
+            .filter(|child| child.kind == mj_core::subagent::SubagentKind::Worker)
             .filter(|child| Some(child.child_session_id.as_str()) != starting)
             .filter_map(|child| {
                 let session = self.state.sessions.get(&child.child_session_id)?;
@@ -585,7 +617,7 @@ pub(crate) fn recover_registered_subagent_startup(
     relation: &SubagentRecord,
     fast_mode: bool,
 ) -> Result<()> {
-    if relation.kind == mj_core::subagent::SubagentKind::Worker
+    if relation.kind != mj_core::subagent::SubagentKind::Reviewer
         && crate::database::load_startup_group(
             &relation.child_session_id,
             &format!("subagent-spawn-{}", relation.request_key),
@@ -603,7 +635,7 @@ fn initial_startup_deliveries(
     relation: &SubagentRecord,
     fast_mode: bool,
 ) -> Result<Vec<crate::database::StartupDelivery>> {
-    if relation.kind != mj_core::subagent::SubagentKind::Worker {
+    if relation.kind == mj_core::subagent::SubagentKind::Reviewer {
         return Ok(Vec::new());
     }
     let group_id = format!("subagent-spawn-{}", relation.request_key);

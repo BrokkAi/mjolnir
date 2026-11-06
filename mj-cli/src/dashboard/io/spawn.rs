@@ -1275,6 +1275,8 @@ pub(crate) fn spawn_dashboard_create_session(
             remember_container_size,
             create_managed_worktree,
             subagents,
+            oracle,
+            oracle_choice,
             review,
             workspace_id,
             profile_id,
@@ -1332,6 +1334,8 @@ pub(crate) fn spawn_dashboard_create_session(
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
+                        oracle,
+                        oracle_choice,
                         remember_launch_choices: true,
                         remember_container_size,
                         review,
