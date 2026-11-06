@@ -1640,10 +1640,18 @@ async fn a_mode_the_harness_refuses_for_a_new_session_leaves_its_default_mode_an
 
 #[tokio::test]
 async fn resume_and_context_restore_preserve_only_active_plan_under_guardian() {
-    for (resume_plan, saved_mode, expected) in [
-        (true, None, "plan"),
-        (false, Some("plan"), "plan"),
-        (false, Some("acceptEdits"), "auto"),
+    // A bridge that offers Plan only on its `mode` selector saves it among
+    // the selectors, not as the context's mode.
+    for (resume_plan, saved_mode, saved_selectors, expected) in [
+        (true, None, vec![], "plan"),
+        (false, Some("plan"), vec![], "plan"),
+        (
+            false,
+            None,
+            vec![("mode".to_owned(), "plan".to_owned())],
+            "plan",
+        ),
+        (false, Some("acceptEdits"), vec![], "auto"),
     ] {
         let root = tempfile::tempdir().unwrap();
         let mut spec = launch(
@@ -1658,11 +1666,11 @@ async fn resume_and_context_restore_preserve_only_active_plan_under_guardian() {
         if resume_plan {
             spec.resume_session = Some("native-plan".into());
         }
-        if let Some(mode) = saved_mode {
+        if saved_mode.is_some() || !saved_selectors.is_empty() {
             spec.context_restore = Some(ContextReset {
                 request_id: "restore".into(),
-                selectors: vec![],
-                mode: Some(mode.into()),
+                selectors: saved_selectors,
+                mode: saved_mode.map(Into::into),
             });
         }
         let (commands, requests) = mpsc::channel(8);

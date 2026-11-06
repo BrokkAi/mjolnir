@@ -528,12 +528,14 @@ pub(super) async fn serve_session(
     // earlier one. Only Plan carried over from a resumed session or a saved
     // context stays on. Muse's auto-review is off in every session muse-acp
     // opens, so the policy setting is selected on every open too.
+    // A cleared or restored context put Plan back above, through its saved
+    // mode or its saved selectors; a new session does not start in it.
     let sync = if (resumed
         || spec
             .clear_context_request
             .as_ref()
             .or(spec.context_restore.as_ref())
-            .is_some_and(|reset| reset.mode.as_deref() == Some("plan")))
+            .is_some())
         && current_session_mode(&config_options, &modes).as_deref() == Some("plan")
     {
         PolicySync::IfDrifted
@@ -1445,15 +1447,31 @@ pub(super) async fn serve_session(
                 value,
             } => {
                 if !policy_permits(enforcement, &config_options, Some(&key), &value) {
-                    emit_runtime_event(
+                    let event = match answer_refused_mode_change(
+                        connection,
+                        &session_id,
+                        spec.harness,
+                        enforcement,
+                        &mut config_options,
+                        &mut modes,
+                        Some(&key),
                         events,
-                        RuntimeEvent::CommandRejected {
+                    )
+                    .await?
+                    {
+                        Ok(value) => RuntimeEvent::ConfigApplied {
+                            request_id,
+                            key,
+                            value,
+                            config_options: config_options.clone(),
+                        },
+                        Err(message) => RuntimeEvent::CommandRejected {
                             reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
                             request_id,
-                            message: POLICY_OWNED_MODE.into(),
+                            message,
                         },
-                    )
-                    .await?;
+                    };
+                    emit_runtime_event(events, event).await?;
                     continue;
                 }
                 let previous_model = session_model(&config_options);
@@ -1578,15 +1596,31 @@ pub(super) async fn serve_session(
                 mode_id,
             } => {
                 if !policy_permits(enforcement, &config_options, None, &mode_id) {
-                    emit_runtime_event(
+                    let event = match answer_refused_mode_change(
+                        connection,
+                        &session_id,
+                        spec.harness,
+                        enforcement,
+                        &mut config_options,
+                        &mut modes,
+                        None,
                         events,
-                        RuntimeEvent::CommandRejected {
+                    )
+                    .await?
+                    {
+                        Ok(mode_id) => RuntimeEvent::SessionModeApplied {
+                            request_id,
+                            mode_id,
+                            config_options: config_options.clone(),
+                            modes: modes.clone(),
+                        },
+                        Err(message) => RuntimeEvent::CommandRejected {
                             reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
                             request_id,
-                            message: POLICY_OWNED_MODE.into(),
+                            message,
                         },
-                    )
-                    .await?;
+                    };
+                    emit_runtime_event(events, event).await?;
                     continue;
                 }
                 let advertised = modes.as_ref().is_some_and(|state| {

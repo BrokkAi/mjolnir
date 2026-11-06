@@ -915,6 +915,51 @@ pub(super) fn policy_permits(
     }
 }
 
+/// Answer a mode change from outside the worker that `policy_permits` turned
+/// down. Leaving Plan returns to the policy's mode whatever mode the caller
+/// named (Kimi's Plan control asks for `default`), so every harness leaves
+/// Plan the same way; any other change is refused. Returns the mode the
+/// session is in after leaving Plan, or the refusal to report.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn answer_refused_mode_change(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    harness: HarnessKind,
+    enforcement: Option<ExecutionEnforcement>,
+    config_options: &mut Vec<SessionConfigOption>,
+    modes: &mut Option<SessionModeState>,
+    key: Option<&str>,
+    events: &mpsc::Sender<RuntimeEvent>,
+) -> Result<std::result::Result<String, String>> {
+    let setting = enforcement
+        .and_then(ExecutionEnforcement::acp_setting)
+        .map(|(setting, _)| setting);
+    let in_plan = current_session_mode(config_options, modes).as_deref() == Some("plan");
+    if !in_plan || (key.is_some() && key == setting) {
+        return Ok(Err(POLICY_OWNED_MODE.to_owned()));
+    }
+    let left = leave_plan_for_policy(
+        connection,
+        session_id,
+        harness,
+        enforcement,
+        config_options,
+        modes,
+    )
+    .await;
+    match left {
+        Ok(warning) => {
+            if let Some(message) = warning {
+                emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
+            }
+            Ok(current_session_mode(config_options, modes)
+                .context("the policy mode was not reported")
+                .map_err(|error| format!("{error:#}")))
+        }
+        Err(error) => Ok(Err(format!("leave Plan: {error:#}"))),
+    }
+}
+
 /// Refusal for a mode change `policy_permits` turns down.
 pub(super) const POLICY_OWNED_MODE: &str =
     "The target's permission policy sets this setting. Use plan mode to enter or leave Plan.";

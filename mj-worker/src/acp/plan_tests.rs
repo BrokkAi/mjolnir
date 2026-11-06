@@ -250,6 +250,45 @@ async fn a_caller_outside_the_worker_cannot_move_a_policy_owned_mode() {
     probe.close().await;
 }
 
+/// Kimi leaves Plan by asking for `default`. The policy owns the mode, so
+/// leaving Plan returns to the policy's own mode instead of being refused.
+// Hard-won: ac3b724: refusing every mode but Plan and the policy's left Kimi stuck in Plan
+#[tokio::test]
+async fn leaving_plan_by_naming_another_mode_restores_the_policy_mode() {
+    let mut probe =
+        PlanProbe::with_harness(ExecutionPolicy::Unconstrained, true, HarnessKind::Kimi).await;
+    set_claude_config_mode(&mut probe, "enter-plan", "plan").await;
+    probe
+        .commands
+        .send(CommandRequest::SetConfig {
+            request_id: "exit-plan".into(),
+            key: "mode".into(),
+            value: "default".into(),
+        })
+        .await
+        .unwrap();
+    let restoring = probe.message().await;
+    assert_eq!(restoring["method"], "session/set_config_option");
+    assert_eq!(restoring["params"]["value"], "auto");
+    probe
+        .result(&restoring, json!({"configOptions": mode_config("auto")}))
+        .await;
+    loop {
+        match probe.event().await {
+            RuntimeEvent::ConfigApplied {
+                request_id, value, ..
+            } if request_id == "exit-plan" => {
+                assert_eq!(value, "auto");
+                break;
+            }
+            RuntimeEvent::CommandRejected { message, .. } => panic!("{message}"),
+            _ => {}
+        }
+    }
+    probe.no_message().await;
+    probe.close().await;
+}
+
 // Hard-won: 734385a: a refused approval mode skipped Muse's guardian auto-review
 #[tokio::test]
 async fn muse_guardian_keeps_auto_review_when_the_bridge_refuses_its_approval_mode() {
