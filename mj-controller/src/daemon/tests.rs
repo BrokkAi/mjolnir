@@ -941,7 +941,6 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
     state.owner().lifecycle.insert(
         "session-a".into(),
         ActiveLifecycle {
-            session_id: "test-session".into(),
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -970,7 +969,6 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
     state.owner().lifecycle.insert(
         "session-b".into(),
         ActiveLifecycle {
-            session_id: "test-session".into(),
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -2561,7 +2559,6 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
     let operation = |kind: LifecycleKind, control: LifecycleControl| {
         let (_completed, result) = tokio::sync::watch::channel(None);
         ActiveLifecycle {
-            session_id: "test-session".into(),
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -2587,7 +2584,7 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
 
     let control = LifecycleControl::default();
     let mut cancelled = operation(LifecycleKind::Create, control.clone());
-    assert!(cancelled.request_cancel("person cancellation"));
+    assert!(cancelled.request_cancel("test-session", "person cancellation"));
     assert!(!cancelled.interrupt_for_shutdown());
     assert!(control.cancelled.load(Ordering::Acquire));
     assert!(!control.stopped_for_shutdown());
@@ -2613,7 +2610,6 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
     state.owner().lifecycle.insert(
         "cleanup-gap".into(),
         ActiveLifecycle {
-            session_id: "test-session".into(),
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -8802,7 +8798,6 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
     state.owner().lifecycle.insert(
         "moving".into(),
         ActiveLifecycle {
-            session_id: "test-session".into(),
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -8831,7 +8826,7 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
         .lifecycle
         .get_mut("moving")
         .unwrap()
-        .request_cancel("test cancellation");
+        .request_cancel("moving", "test cancellation");
     assert!(state.owner().worker_is_owned("moving"));
     state.owner().lifecycle.get_mut("moving").unwrap().phase =
         LifecyclePhase::Completed(Ok(DaemonLifecycleResult::Done));

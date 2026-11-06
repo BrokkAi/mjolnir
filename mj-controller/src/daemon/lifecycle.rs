@@ -227,7 +227,6 @@ impl RuntimeState {
                 lifecycle.insert(
                     session_id.clone(),
                     ActiveLifecycle {
-                        session_id: session_id.clone(),
                         move_operation_id: move_operation_id.clone(),
                         restart_intent: None,
                         upgrade_work: upgrade_work.clone(),

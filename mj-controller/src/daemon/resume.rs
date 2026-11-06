@@ -633,7 +633,7 @@ impl RuntimeState {
             // the parent's destroy and the person's own destroy of the child
             // overlapped. Only one that outlives the wait is cancelled below.
             if !tearing_down {
-                active.request_cancel("destroy preempted the operation");
+                active.request_cancel(session_id, "destroy preempted the operation");
             }
             (
                 active.result.clone(),
@@ -651,7 +651,7 @@ impl RuntimeState {
                 .lifecycle
                 .get_mut(session_id)
                 .is_some_and(|active| {
-                    active.request_cancel("destroy timed out waiting for teardown")
+                    active.request_cancel(session_id, "destroy timed out waiting for teardown")
                 });
             if !cancelled && result.borrow().is_none() {
                 bail!(

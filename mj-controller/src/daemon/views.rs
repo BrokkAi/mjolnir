@@ -25,7 +25,7 @@ impl RuntimeState {
             }
         );
         // The control decides: a close that committed first refuses this.
-        if !active.request_cancel("person cancel from dashboard") {
+        if !active.request_cancel(session_id, "person cancel from dashboard") {
             ensure!(
                 !(active.control.is_committed()
                     && matches!(active.kind, LifecycleKind::Suspend | LifecycleKind::Restart)),

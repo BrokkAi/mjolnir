@@ -209,7 +209,7 @@ impl RuntimeState {
         request: MoveSessionRequest,
         reason: String,
         continuation: mj_core::state::QuotaMoveContinuation,
-    ) -> Result<tokio::sync::oneshot::Receiver<Option<String>>> {
+    ) -> Result<()> {
         let session_id = request.preparation.selection.session_id.clone();
         let operation_id = request.preparation.operation_id.clone();
         let source_profile = request.preparation.source_profile_id.clone();
@@ -223,7 +223,6 @@ impl RuntimeState {
         let result =
             self.admit_move_session(request, capacity, None, Some((reason, continuation)))?;
         let state = self.clone();
-        let (ended, completion) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let channel = result.clone();
             let failure = match Self::wait_lifecycle_result(result).await {
@@ -248,7 +247,6 @@ impl RuntimeState {
                     Some(format!("{error:#}"))
                 }
             };
-            let _ = ended.send(failure.clone());
             if let Some(error) = failure {
                 let current_profile = state
                     .owner()
@@ -264,7 +262,7 @@ impl RuntimeState {
             }
             state.remove_completed_lifecycle(&channel);
         });
-        Ok(completion)
+        Ok(())
     }
 
     /// Reserve lifecycle ownership before a web request is acknowledged.

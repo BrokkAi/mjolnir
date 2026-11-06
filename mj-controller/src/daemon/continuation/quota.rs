@@ -16,17 +16,12 @@ pub(super) enum Plan {
         fallback: QuotaRecovery,
     },
 }
-/// Resolves when an admitted Move ends: `None` when it completed, otherwise why
-/// it did not.
-pub(super) type MoveCompletion = futures::future::BoxFuture<'static, Option<String>>;
-/// Admits the Move and returns at once; the Move's end arrives on the
-/// completion.
 pub(super) type StartMove = Arc<
     dyn Fn(
             MoveSessionRequest,
             String,
             QuotaMoveContinuation,
-        ) -> futures::future::BoxFuture<'static, Result<MoveCompletion>>
+        ) -> futures::future::BoxFuture<'static, Result<()>>
         + Send
         + Sync,
 >;
@@ -317,13 +312,11 @@ pub(super) async fn prepare(
             {
                 match state.prepare_quota_move(id, &candidate.profile_id).await {
                     Ok(request) => {
+                        // The record keeps the fallback's times, so a Move that
+                        // fails leaves the retry on the source profile in place.
+                        // A completed Move changes the profile, which clears it.
                         let mut abstention = fallback.clone();
-                        abstention.reset_at_ms = None;
-                        abstention.retry_at_ms = None;
-                        abstention.notice = format!(
-                            "Subscription quota reached, and {reason}. Switching this session to profile {} to continue the interrupted work.",
-                            candidate.profile_id
-                        );
+                        abstention.notice = move_notice(&reason, &candidate.profile_id, &fallback);
                         return Ok(Plan::Move {
                             request: Box::new(request),
                             destination: candidate.profile_id,
@@ -343,6 +336,42 @@ pub(super) async fn prepare(
         }
     }
     Ok(Plan::Wait(fallback))
+}
+
+/// The longest notice the worker accepts in a `SetQuotaRecovery` (checked in
+/// `mj-worker/src/relay/commands.rs`).
+pub(super) const NOTICE_BYTES: usize = 4096;
+
+/// Appends `suffix` to `notice`, cutting the suffix on a character boundary and
+/// ending it with an ellipsis when the whole would pass the worker's limit.
+pub(super) fn append_bounded(notice: &mut String, suffix: &str) {
+    let room = NOTICE_BYTES.saturating_sub(notice.len());
+    if suffix.len() <= room {
+        notice.push_str(suffix);
+        return;
+    }
+    const ELLIPSIS: &str = "…";
+    let keep = suffix.floor_char_boundary(room.saturating_sub(ELLIPSIS.len()));
+    notice.push_str(&suffix[..keep]);
+    if room >= ELLIPSIS.len() {
+        notice.push_str(ELLIPSIS);
+    }
+}
+
+/// The notice stored while a quota Move runs. It promises only what the stored
+/// record does: with a retry time, the source profile continues then if the
+/// Move does not take over.
+pub(super) fn move_notice(reason: &str, destination: &str, fallback: &QuotaRecovery) -> String {
+    let mut notice = format!(
+        "Subscription quota reached, and {reason}. Switching this session to profile {destination} to continue the interrupted work."
+    );
+    if let Some(time) = fallback.retry_at_ms.and_then(local_reset) {
+        notice.push_str(&format!(
+            " If the switch fails, the session continues on profile {} at {time} (one minute after reset).",
+            fallback.profile_id
+        ));
+    }
+    notice
 }
 
 fn cursor(view: &ManagedSessionView) -> Result<RelayCursor> {
@@ -408,99 +437,29 @@ pub(super) async fn schedule(
             destination,
             reason,
             mut fallback,
-            abstention,
+            ..
         } = plan
+            && let Err(error) = (env.start_quota_move)(*request, reason, continuation).await
         {
-            match (env.start_quota_move)(*request, reason, continuation).await {
-                Ok(completion) => {
-                    // The Move can outlast the timeout around this function, so
-                    // its result is awaited in a task of its own.
-                    let env = env.clone();
-                    let id = id.to_owned();
-                    tokio::spawn(async move {
-                        if let Some(error) = completion.await
-                            && let Err(error) =
-                                fall_back_after_move(&env, &id, &view, &abstention, fallback, &destination, &error)
-                                    .await
-                        {
-                            tracing::warn!(session=%id, error=%format!("{error:#}"), "quota Move failure left the recovery as it was");
-                        }
-                    });
-                }
-                Err(error) => {
-                    fallback.notice.push_str(&format!(
-                        " Could not start the Move to profile {destination}: {error:#}."
-                    ));
-                    handle
-                        .submit(
-                            format!("quota-move-fallback-{}", fallback.completed_command_id),
-                            RelayCommand::SetQuotaRecovery {
-                                expected: cursor(&handle.view())?,
-                                recovery: Some(Box::new(fallback)),
-                            },
-                        )
-                        .await?;
-                    handle.sync_now().await?;
-                }
-            }
+            append_bounded(
+                &mut fallback.notice,
+                &format!(" Could not start the Move to profile {destination}: {error:#}."),
+            );
+            handle
+                .submit(
+                    format!("quota-move-fallback-{}", fallback.completed_command_id),
+                    RelayCommand::SetQuotaRecovery {
+                        expected: cursor(&handle.view())?,
+                        recovery: Some(Box::new(fallback)),
+                    },
+                )
+                .await?;
+            handle.sync_now().await?;
         }
         Ok(Box::new(handle.view()))
     })
     .await
     .context("quota recovery scheduling timed out")?
-}
-
-/// Replaces the Move abstention with the timed fallback once the admitted Move
-/// ended without completing, so the failure reaches the transcript and the
-/// continuation retries on the source profile. Leaves the record alone unless
-/// it is still the abstention this schedule wrote, on the same profile and
-/// conversation: a person who prompted, a changed profile, or a Move that got
-/// partway owns the session now.
-async fn fall_back_after_move(
-    env: &Environment,
-    id: &str,
-    scheduled: &ManagedSessionView,
-    abstention: &QuotaRecovery,
-    mut fallback: QuotaRecovery,
-    destination: &str,
-    error: &str,
-) -> Result<()> {
-    let handle = env
-        .control
-        .wait_for_session(id, Duration::from_secs(5))
-        .await?;
-    let current = handle.view();
-    let stored = current
-        .snapshot
-        .as_ref()
-        .and_then(|s| s.operational.continuation.quota_recovery.as_ref());
-    ensure!(
-        (env.allowed)(id)
-            && (env.profile)(id).as_deref() == Some(&fallback.profile_id)
-            && evidence_ordinal(&current) == evidence_ordinal(scheduled)
-            && stored.is_some_and(|r| {
-                !r.submitted
-                    && r.retry_at_ms.is_none()
-                    && r.user_command_id == abstention.user_command_id
-                    && r.completed_command_id == abstention.completed_command_id
-                    && r.profile_id == abstention.profile_id
-            }),
-        "the session changed after the Move ended"
-    );
-    fallback.notice.push_str(&format!(
-        " The Move to profile {destination} failed: {error}."
-    ));
-    handle
-        .submit(
-            format!("quota-move-failed-{}", fallback.completed_command_id),
-            RelayCommand::SetQuotaRecovery {
-                expected: cursor(&current)?,
-                recovery: Some(Box::new(fallback)),
-            },
-        )
-        .await?;
-    handle.sync_now().await?;
-    Ok(())
 }
 
 pub(super) async fn resume(

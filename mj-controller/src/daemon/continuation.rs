@@ -366,11 +366,25 @@ fn allowed(state: &RuntimeState, session: &str) -> bool {
         && !state.owner().lifecycle.contains_key(session)
 }
 
+/// A Move owns the session. A timed quota recovery outlasts one: a completed
+/// Move changes the profile, which clears the recovery, and a failed one leaves
+/// the quota stop real, so the retry stands.
+fn moving(state: &RuntimeState, session: &str) -> bool {
+    crate::controller::move_session::move_owns_session(session)
+        || state
+            .owner()
+            .lifecycle
+            .get(session)
+            .is_some_and(|active| active.kind == LifecycleKind::Move)
+}
+
 #[derive(Clone)]
 struct Environment {
     log: Option<mj_core::jev::DecisionLog>,
     control: SessionManagerControl,
     allowed: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    /// A Move owns the session; see [`moving`].
+    moving: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     live: Arc<dyn Fn() -> BTreeSet<String> + Send + Sync>,
     review: ReviewObserver,
     quota: quota::Resolver,
@@ -501,6 +515,10 @@ pub(super) fn spawn(
             let state = state.clone();
             Arc::new(move |id| allowed(&state, id))
         },
+        moving: {
+            let state = state.clone();
+            Arc::new(move |id| moving(&state, id))
+        },
         live: {
             let state = state.clone();
             Arc::new(move || state.live_session_ids())
@@ -518,17 +536,7 @@ pub(super) fn spawn(
             let state = state.clone();
             Arc::new(move |request, reason, continuation| {
                 let state = state.clone();
-                Box::pin(async move {
-                    let result = state
-                        .start_quota_move(request, reason, continuation)
-                        .await?;
-                    let completion: quota::MoveCompletion = Box::pin(async move {
-                        result
-                            .await
-                            .unwrap_or_else(|_| Some("the Move task ended without a result".into()))
-                    });
-                    Ok(completion)
-                })
+                Box::pin(async move { state.start_quota_move(request, reason, continuation).await })
             })
         },
         profile: {
@@ -1016,10 +1024,12 @@ fn spawn_with_gate(
                         if pending.contains_key(id) || retry_after.get(id).is_some_and(|t| *t > std::time::Instant::now()) { continue; }
                         let Some(snapshot) = &view.snapshot else { continue; };
                         let Some(recovery) = snapshot.operational.continuation.quota_recovery.as_ref().filter(|r| !r.submitted) else { continue; };
-                        let clear = (recovery.retry_at_ms.is_some() && !(environment.allowed)(id)) || (environment.profile)(id).as_deref() != Some(&recovery.profile_id);
+                        // A timed record survives a Move; any other owner of the session clears it.
+                        let clear = (recovery.retry_at_ms.is_some() && !(environment.allowed)(id) && !(environment.moving)(id)) || (environment.profile)(id).as_deref() != Some(&recovery.profile_id);
                         if !clear && recovery.retry_at_ms.is_none_or(|t| t > mj_core::clock::epoch_millis()) { continue; }
                         // Due from here on: every refusal to submit is named, once a minute.
                         let mut refusal = if clear { Vec::new() } else { quota_resume_blockers(view) };
+                        if !clear && !(environment.allowed)(id) { refusal.push("a Move owns the session"); }
                         if clear && !view.connected { refusal.push("session is not connected"); }
                         if !refusal.is_empty() {
                             skips.note(environment.log.as_ref(), id, recovery, &refusal);

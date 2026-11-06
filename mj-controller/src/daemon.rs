@@ -112,6 +112,10 @@ impl LifecycleControl {
     /// The state is written before the flag the executor reads, so an
     /// operation that sees its cancel also sees which cancel it was.
     fn cancel_as(&self, cancelled: u8, cause: &'static str) -> bool {
+        let mut cancel_cause = self
+            .cancel_cause
+            .lock()
+            .expect("lifecycle cancel cause poisoned");
         let accepted = self
             .state
             .compare_exchange(
@@ -122,10 +126,7 @@ impl LifecycleControl {
             )
             .is_ok();
         if accepted {
-            *self
-                .cancel_cause
-                .lock()
-                .expect("lifecycle cancel cause poisoned") = Some(cause);
+            *cancel_cause = Some(cause);
             self.cancelled.store(true, Ordering::Release);
         }
         accepted
@@ -547,7 +548,6 @@ struct StartupQueue {
 }
 
 struct ActiveLifecycle {
-    session_id: String,
     move_operation_id: Option<String>,
     /// Durable intent bound by Restart admission; cleanup names this exact owner.
     restart_intent: Option<String>,
@@ -601,10 +601,10 @@ impl ActiveLifecycle {
             )
     }
 
-    fn request_cancel(&mut self, cause: &'static str) -> bool {
+    fn request_cancel(&mut self, session_id: &str, cause: &'static str) -> bool {
         let accepted = self.cancel_with(|control| control.request_cancel(cause));
         if accepted {
-            tracing::info!(session_id = %self.session_id, kind = self.kind.label(), reference = %self.operation_id, cause, "lifecycle cancellation accepted");
+            tracing::info!(session_id, kind = self.kind.label(), reference = %self.operation_id, cause, "lifecycle cancellation accepted");
         }
         accepted
     }
