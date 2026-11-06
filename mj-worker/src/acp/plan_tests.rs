@@ -1759,6 +1759,20 @@ fn claude_plan_approval_offers_yes_under_the_session_policy_and_no_bypass_in_gua
             ("reject", "No, keep planning"),
         ])
     );
+    // Only the policy's clear-context option is on offer: it still rules out
+    // every other mode.
+    let mut clear_only = bridge_exit_plan_request(guardian, true);
+    clear_only["options"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|option| option["optionId"] != "exit-plan-auto");
+    assert_eq!(
+        offered(&clear_only, guardian),
+        pairs(&[
+            ("exit-plan-clear-auto", "Yes, clear context"),
+            ("reject", "No, keep planning"),
+        ])
+    );
     // A Guardian session whose bridge led with bypass still gets no option
     // above its policy.
     assert_eq!(

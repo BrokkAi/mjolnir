@@ -193,6 +193,12 @@ fn offered_permission_choices(
     }
     let policy_mode = claude_policy_mode(policy);
     let yes = claude_policy_plan_option(request, policy);
+    // Any option in the policy's mode, its clear-context one included, lets
+    // the plan be approved without another mode.
+    let policy_offered = request.options.iter().any(|option| {
+        claude_plan_option_mode(&option.option_id.to_string())
+            .is_some_and(|(mode, _)| mode == policy_mode)
+    });
     let mut choices: Vec<_> = yes
         .map(|option| PermissionChoice {
             option_id: option.option_id.clone(),
@@ -206,10 +212,10 @@ fn offered_permission_choices(
         }
         let mode = claude_plan_option_mode(&option.option_id.to_string());
         let title = match mode {
-            // The policy owns the mode: with its own option on offer, no other
+            // The policy owns the mode: with its own mode on offer, no other
             // mode is. Without it, lower modes stay so the plan can still be
             // approved.
-            Some((mode, _)) if yes.is_some() && mode != policy_mode => continue,
+            Some((mode, _)) if policy_offered && mode != policy_mode => continue,
             Some(("bypassPermissions", _)) if policy_mode != "bypassPermissions" => continue,
             Some((mode, true)) if mode == policy_mode => "Yes, clear context".to_owned(),
             _ => option.name.clone(),

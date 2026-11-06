@@ -230,6 +230,11 @@ pub(super) fn config_option_key(option: &SessionConfigOption) -> String {
 impl ChatState {
     /// Supplies the policy-owned setting keys for this chat's session.
     pub fn set_policy_config_keys(&mut self, keys: &[String]) {
+        // Refreshes call this for every open chat; rebuilding the popups
+        // would move an open completion's highlight back to the first entry.
+        if self.policy_config_keys == keys {
+            return;
+        }
         self.policy_config_keys = keys.to_vec();
         if self.config_picker.as_ref().is_some_and(|picker| {
             picker
