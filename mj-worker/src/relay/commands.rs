@@ -1272,14 +1272,6 @@ impl DurableRelay {
             // once the snapshot itself is.
             self.commit_snapshot(next_snapshot)?;
         }
-        if claimed.iter().any(|claim| {
-            matches!(
-                claim.command,
-                RelayCommand::Cancel | RelayCommand::CancelTurn
-            )
-        }) {
-            self.request_harness_turn_stop();
-        }
         Ok(claimed)
     }
 
@@ -1733,17 +1725,6 @@ impl DurableRelay {
         if let Some(message) = notice {
             self.append_relay_event(Some(command_id), RelayObservation::Notice { message })?;
         }
-        let stop_applied = matches!(outcome, RelayCommandOutcome::Cancelled)
-            && self
-                .snapshot
-                .dispatches
-                .get(command_id)
-                .is_some_and(|dispatch| {
-                    matches!(
-                        dispatch.command,
-                        RelayCommand::Cancel | RelayCommand::CancelTurn
-                    )
-                });
         let ordinal = self.append_relay_event(
             Some(command_id),
             RelayObservation::CommandCompleted {
@@ -1759,9 +1740,6 @@ impl DurableRelay {
                 outcome,
             },
         )?;
-        if stop_applied {
-            self.note_harness_turn_stop();
-        }
         if finishes_turn && !self.snapshot.goal.running() {
             self.finish_turn_activity()?;
         }
@@ -1789,10 +1767,6 @@ impl DurableRelay {
         message: impl Into<String>,
     ) -> Result<u64> {
         self.require_dispatch(command_id)?;
-        let stop = matches!(
-            self.snapshot.dispatches[command_id].command,
-            RelayCommand::Cancel | RelayCommand::CancelTurn
-        );
         let command = self.snapshot.dispatches[command_id].command.kind();
         let ordinal = self.append_relay_event(
             Some(command_id),
@@ -1804,9 +1778,6 @@ impl DurableRelay {
             },
         )?;
         self.ensure_initial_commands_succeeded()?;
-        if stop {
-            self.withdraw_harness_turn_stop();
-        }
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
             self.return_boundary_steer_after_turn_end(command_id)?;

@@ -97,14 +97,6 @@ pub enum BackgroundWorkPolicy {
     KimiTasks,
 }
 
-/// A stop aimed at one autonomous harness turn, named by its start ordinal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HarnessTurnStop {
-    first_ordinal: u64,
-    /// The runtime has sent the stop to the harness.
-    applied: bool,
-}
-
 /// Durable, session-side ACP store-and-forward relay.
 ///
 /// `RelaySnapshot` is the canonical operational state. Journal spans retain
@@ -194,11 +186,6 @@ pub struct DurableRelay {
     /// and no model cycle, so no result would settle a harness turn opened
     /// for that chunk.
     claude_pending_stops: BTreeMap<String, BTreeSet<String>>,
-    /// A stop aimed at the open autonomous harness turn, while that turn is
-    /// still open. Claude Code answers a stop of a running cycle with the
-    /// cycle's result; a turn it never ran gets no answer, so the coordinator
-    /// ends it after [`HARNESS_TURN_STOP_GRACE`] once the stop is applied.
-    harness_turn_stop: Option<HarnessTurnStop>,
     /// Kimi detached agents and processes confirmed by its native journal.
     kimi_background_tasks: BTreeMap<String, KimiTaskEntry>,
     /// Positive ACP launch evidence retained until the native journal
@@ -519,7 +506,6 @@ impl DurableRelay {
             replied_verdict: Default::default(),
             air_tasks: BTreeMap::new(),
             claude_pending_stops: BTreeMap::new(),
-            harness_turn_stop: None,
             kimi_background_tasks: BTreeMap::new(),
             kimi_provisional_tasks: BTreeMap::new(),
             kimi_observed_task_ids: BTreeSet::new(),
@@ -1272,50 +1258,19 @@ impl DurableRelay {
         )
     }
 
-    /// Record a stop the runtime is about to send, against the autonomous turn
-    /// it will interrupt. It is recorded when the relay hands the cancel over,
-    /// before the harness can see it, so the settle its result causes always
-    /// finds it: the harness's result and the cancel's acknowledgement reach
-    /// the relay by separate paths, in either order. A stop while a prompt of
-    /// ours runs is aimed at that prompt, not at the harness's turn.
-    pub(crate) fn request_harness_turn_stop(&mut self) {
-        if self.snapshot.active_prompt.is_none()
-            && let Some(turn) = self.snapshot.autonomous_harness_turn()
-        {
-            self.harness_turn_stop = Some(HarnessTurnStop {
-                first_ordinal: turn.first_ordinal,
-                applied: false,
-            });
-        }
-    }
-
-    /// The runtime applied the stop it was handed.
-    fn note_harness_turn_stop(&mut self) {
-        if let Some(stop) = &mut self.harness_turn_stop {
-            stop.applied = true;
-        }
-    }
-
-    /// The runtime could not send the stop, so the turn goes on.
-    pub(crate) fn withdraw_harness_turn_stop(&mut self) {
-        if self.harness_turn_stop.is_some_and(|stop| !stop.applied) {
-            self.harness_turn_stop = None;
-        }
-    }
-
-    fn harness_turn_stopped(&self, first_ordinal: u64) -> bool {
-        self.harness_turn_stop
-            .is_some_and(|stop| stop.first_ordinal == first_ordinal)
-    }
-
     /// The first ordinal of the open Claude harness turn a stop was applied
-    /// to, while nothing has answered that stop yet.
+    /// to, while nothing has answered that stop yet. Claude Code answers a
+    /// stop of a running cycle with the cycle's result; a turn it never ran
+    /// gets no answer, so the coordinator ends it after
+    /// [`HARNESS_TURN_STOP_GRACE`]. The snapshot owns the stop: a journal
+    /// event records it, so it is the same on every path and after a restart.
     pub fn unanswered_harness_turn_stop(&self) -> Option<u64> {
         if self.harness_turns != HarnessTurnPolicy::ClaudeAdapter {
             return None;
         }
         let turn = self.snapshot.autonomous_harness_turn()?;
-        self.harness_turn_stop
+        self.snapshot
+            .cancelling_harness_turn
             .is_some_and(|stop| stop.applied && stop.first_ordinal == turn.first_ordinal)
             .then_some(turn.first_ordinal)
     }
@@ -1367,8 +1322,13 @@ impl DurableRelay {
                         // claude-agent-acp 0.99.0 / Claude Code 2.1.308 (2026-11-06)
                         // forwards SDK results, including error-shaped interrupted cycles.
                         // Its interrupt has no yield deadline: a result can arrive after
-                        // stop_unanswered. The recorded stop owns the cancellation reason.
-                        stop_reason: if self.harness_turn_stopped(turn.first_ordinal) {
+                        // stop_unanswered. The snapshot's recorded stop owns the
+                        // cancellation reason.
+                        stop_reason: if self
+                            .snapshot
+                            .cancelling_harness_turn
+                            .is_some_and(|stop| stop.first_ordinal == turn.first_ordinal)
+                        {
                             "cancelled".into()
                         } else {
                             stop_reason.into()
@@ -1380,7 +1340,6 @@ impl DurableRelay {
                 prompt_in_flight: self.snapshot.active_prompt.is_some(),
             },
         )?;
-        self.harness_turn_stop = None;
         self.finish_turn_activity()?;
         Ok(())
     }

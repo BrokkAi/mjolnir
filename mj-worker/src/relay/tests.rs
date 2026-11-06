@@ -2958,7 +2958,7 @@ fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
     relay
         .record_command_completed("stop-tail", RelayCommandOutcome::Cancelled)
         .unwrap();
-    assert!(relay.harness_turn_stop.is_none());
+    assert!(relay.snapshot.cancelling_harness_turn.is_none());
     relay
         .record_session_update(metadata(
             serde_json::json!({"execution":{"version":1,"status":"idle","turnId":"autonomous"}}),
@@ -3788,7 +3788,7 @@ fn a_stop_the_harness_never_answers_ends_the_self_started_turn() {
     relay
         .record_command_completed("stop-fast", RelayCommandOutcome::Cancelled)
         .unwrap();
-    assert!(relay.harness_turn_stop.is_none());
+    assert!(relay.snapshot.cancelling_harness_turn.is_none());
     assert!(relay.unanswered_harness_turn_stop().is_none());
 
     // A stop the runtime could not send leaves the turn to end as it does.
@@ -3809,6 +3809,42 @@ fn a_stop_the_harness_never_answers_ends_the_self_started_turn() {
         .unwrap();
     assert!(
         matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.stop_reason == "end_turn")
+    );
+
+    // Hard-won: 3b2f0d538: a second stop downgraded an applied stop and its rejection cleared it
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay
+        .record_session_update(agent_text_chunk("Summarizing"))
+        .unwrap();
+    submit_relay(&mut relay, "stop-first", RelayCommand::CancelTurn);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed("stop-first", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    submit_relay(&mut relay, "stop-second", RelayCommand::Cancel);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_rejected(
+            "stop-second",
+            mj_core::event_outcome::OutcomeReason::CommandFailed,
+            "cancel ACP prompt: closed",
+        )
+        .unwrap();
+    let first_ordinal = relay
+        .unanswered_harness_turn_stop()
+        .expect("the acknowledged first stop outlives the refused second one");
+    // The target is journal state, so a restarted worker still has it.
+    drop(relay);
+    let mut relay = claude_relay(temp.path());
+    assert_eq!(relay.unanswered_harness_turn_stop(), Some(first_ordinal));
+    assert!(
+        relay
+            .end_unanswered_harness_turn_stop(first_ordinal)
+            .unwrap()
+    );
+    assert!(
+        matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.stop_reason == "cancelled")
     );
 }
 
