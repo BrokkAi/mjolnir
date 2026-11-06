@@ -216,7 +216,8 @@ fn copy_workspace(
 /// from the walk it is given, runs the transfer and returns its output with the
 /// lease; the lease records what the refusal means, and the next attempt
 /// leases the next shard, or waits and tries the same way as every other
-/// refused SSH command. Returns the last output.
+/// refused SSH command. A refusal that outlasts the retry bound fails the transfer
+/// with the error naming its causes. Returns the last output.
 fn retry_refused_transport(
     executor: &impl CommandExecutor,
     destination: Option<&str>,
@@ -225,7 +226,7 @@ fn retry_refused_transport(
         &mut targets::SshWalk,
     ) -> Result<(targets::CommandOutput, Option<targets::SshSessionLease>)>,
 ) -> Result<targets::CommandOutput> {
-    let mut retry = targets::SshRefusalRetry::new(true);
+    let mut retry = targets::SshRefusalRetry::new();
     loop {
         let (output, lease) = attempt(retry.walk())?;
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -240,15 +241,15 @@ fn retry_refused_transport(
         let Some((refusal, walks_on)) = refusal else {
             return Ok(output);
         };
-        let Some(delay) = retry.next(
-            refusal,
-            walks_on,
-            destination.unwrap_or_default(),
-            purpose,
-            &stderr,
-        ) else {
-            return Ok(output);
-        };
+        let delay = retry
+            .next(
+                refusal,
+                walks_on,
+                destination.unwrap_or_default(),
+                purpose,
+                &stderr,
+            )
+            .with_context(|| format!("{purpose} failed"))?;
         ensure!(
             targets::sleep_unless_cancelled(delay, &|| executor.cancellation_requested()),
             "operation cancelled while {purpose}"

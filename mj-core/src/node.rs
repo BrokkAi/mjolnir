@@ -503,7 +503,7 @@ async fn serve_stream(
     // preparation below.
     let cancelled = Arc::new(AtomicBool::new(false));
     let _cancel_on_exit = CancelOnDrop(cancelled.clone());
-    let mut retry = SshRefusalRetry::new(true);
+    let mut retry = SshRefusalRetry::new();
     loop {
         // A command over a shared SSH connection leases its session here,
         // where SSH runs, exactly as a local launch does. The executor opens
@@ -558,25 +558,26 @@ async fn serve_stream(
             // the lease lives, instead of being reported to the daemon.
             ChildEnd::Refused(refused) => {
                 let stderr = String::from_utf8_lossy(&refused.stderr_tail).into_owned();
-                let delay = retry.next(
+                let delay = match retry.next(
                     refused.refusal,
                     refused.walks_on,
                     &destination,
                     &command.purpose,
                     &stderr,
-                );
-                let Some(delay) = delay else {
-                    // Out of attempts: the daemon gets the last answer.
-                    for held in refused.held_stderr {
-                        send_all(&mut send, held).await?;
+                ) {
+                    Ok(delay) => delay,
+                    Err(persisted) => {
+                        // The refusal lasted its whole time bound: the daemon
+                        // gets the explanation instead of the last attempt's
+                        // stderr, which the error carries.
+                        let exit = NodeExit {
+                            status: None,
+                            error: Some(persisted.to_string()),
+                        };
+                        send_all(&mut send, frame(FRAME_EXIT, &serde_json::to_vec(&exit)?)).await?;
+                        send.send_data(Bytes::new(), true)?;
+                        return Ok(());
                     }
-                    send_all(
-                        &mut send,
-                        frame(FRAME_EXIT, &serde_json::to_vec(&refused.exit)?),
-                    )
-                    .await?;
-                    send.send_data(Bytes::new(), true)?;
-                    return Ok(());
                 };
                 // The refused attempt's stderr is the retry's business, not the
                 // daemon's: a later failure must not look like a refusal.
@@ -772,15 +773,14 @@ enum ChildEnd {
     Refused(Refused),
 }
 
-/// An attempt the SSH server refused, with what the daemon would have been
-/// told had the node not retried it.
+/// An attempt the SSH server refused, which the node retries instead of
+/// telling the daemon.
 struct Refused {
     refusal: crate::targets::SshRefusal,
     /// Whether the refusal is a step of the walk to another master.
     walks_on: bool,
     stderr_tail: Vec<u8>,
     held_stderr: Vec<Bytes>,
-    exit: NodeExit,
 }
 
 /// Feed stdin, drain stdout and stderr, and report the exit, all at once.
@@ -1006,7 +1006,6 @@ async fn run_child(
                     walks_on,
                     stderr_tail: tail,
                     held_stderr: held,
-                    exit,
                 }));
             }
         }

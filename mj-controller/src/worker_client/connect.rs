@@ -38,7 +38,7 @@ impl RelayClient {
         handshake_timeout: Duration,
     ) -> Result<Self> {
         let purpose = format!("{} for session {expected_session_id}", spec.purpose);
-        let mut refusals = mj_core::targets::SshRefusalRetry::new(true);
+        let mut refusals = mj_core::targets::SshRefusalRetry::new();
         let mut socket_waits = 0;
         loop {
             let outcome = Self::connect_attempt(
@@ -61,10 +61,10 @@ impl RelayClient {
                 // The shared routine every refused ssh command uses decides
                 // the wait and the logging: a MaxSessions refusal is routine
                 // while sessions start and goes to debug, one before
-                // authentication stays a warning (R7-1). Nothing here bounds
-                // the retries of a connection dropped before authentication;
-                // the caller that no longer wants the worker drops this
-                // future.
+                // authentication stays a warning (R7-1). A refusal that lasts
+                // its time bound fails the connect with the error naming its
+                // causes; the caller that no longer wants the worker ends the
+                // retries sooner by dropping this future.
                 ConnectRetry::Refused {
                     refusal,
                     stderr,
@@ -72,8 +72,8 @@ impl RelayClient {
                 } => {
                     let destination = spec.ssh_destination.as_deref().unwrap_or_default();
                     match refusals.next(refusal, walks_on, destination, &purpose, &stderr) {
-                        Some(delay) => delay,
-                        None => return Err(error),
+                        Ok(delay) => delay,
+                        Err(persisted) => return Err(error.context(persisted)),
                     }
                 }
                 ConnectRetry::SocketMissing => {

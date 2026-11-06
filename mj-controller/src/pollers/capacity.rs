@@ -332,8 +332,8 @@ pub(crate) async fn collect_local_capacity_with(
 pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<CommandOutput> {
     use crate::targets::{SshRefusalRetry, ssh_refusal};
     // The poller bounds the whole probe, retries included, with
-    // `RESOURCE_POLL_TIMEOUT`, so the retries need no budget of their own.
-    let mut retry = SshRefusalRetry::new(true);
+    // `RESOURCE_POLL_TIMEOUT`; a refusal that outlasts the retry bound fails it sooner.
+    let mut retry = SshRefusalRetry::new();
     loop {
         let (output, ssh_session) = run_resource_command(command, retry.walk()).await?;
         if output.status == 0 {
@@ -355,12 +355,11 @@ pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<Co
             // Only Unix leases own a shared session slot; free it before the wait.
             #[cfg(unix)]
             drop(ssh_session);
-            if let Some(delay) =
-                retry.next(refusal, walks_on, destination, &command.purpose, &stderr)
-            {
-                tokio::time::sleep(delay).await;
-                continue;
-            }
+            let delay = retry
+                .next(refusal, walks_on, destination, &command.purpose, &stderr)
+                .with_context(|| format!("{} failed", command.purpose))?;
+            tokio::time::sleep(delay).await;
+            continue;
         }
         bail!(
             "{} failed with status {}: {}",

@@ -421,6 +421,7 @@ pub(crate) mod fake_ssh {
     impl Drop for FastRetries {
         fn drop(&mut self) {
             set_ssh_retry_backoff_for_test(None);
+            set_ssh_persistent_refusal_for_test(None);
         }
     }
 
@@ -985,11 +986,10 @@ pub struct ProcessExecutor;
 /// not even the start marker, ever arrived), so re-running the whole
 /// invocation cannot repeat a side effect, whether or not the command
 /// streams stdin: nothing of the caller's input is read before the start.
-/// [`SshRefusalRetry`] decides each wait and when to stop: with
-/// `is_cancelled`, a connection closed before authentication is retried until
-/// the command succeeds or the caller's cancellation or deadline ends it;
-/// without one, nothing outside could stop the loop, so the retries are
-/// bounded.
+/// [`SshRefusalRetry`] decides each wait and when to stop: a refusal that
+/// persists for its time bound fails the command with an error naming the
+/// causes, for every caller; the caller's cancellation or deadline ends the
+/// retries sooner.
 ///
 /// A command that asks for a shared-connection session leases it on each
 /// attempt, and the lease tells the ledger what the refusal means
@@ -997,7 +997,7 @@ pub struct ProcessExecutor;
 /// usually means its master died, so the retry checks and reopens the master.
 /// A session refused for `MaxSessions` moves to the next shard of the
 /// command's walk at once: the walk is the state change that ends that loop,
-/// so it needs no wait and uses no attempt.
+/// so it needs no wait and spends no time.
 ///
 /// `run` receives the leased command and the gate its stdout reader must
 /// report into (`None` when the command prints no start marker).
@@ -1012,7 +1012,7 @@ fn with_ssh_refusal_retry(
     let Some(destination) = command.ssh_destination.as_deref() else {
         return run(command, None);
     };
-    let mut retry = SshRefusalRetry::new(is_cancelled.is_some());
+    let mut retry = SshRefusalRetry::new();
     loop {
         let session = command.open_ssh_session(executor, retry.walk())?;
         let output = run(session.command(), session.gate())?;
@@ -1022,10 +1022,9 @@ fn with_ssh_refusal_retry(
             return Ok(output);
         };
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let Some(delay) = retry.next(refusal, walks_on, destination, &command.purpose, &stderr)
-        else {
-            return Ok(output);
-        };
+        let delay = retry
+            .next(refusal, walks_on, destination, &command.purpose, &stderr)
+            .with_context(|| format!("{} failed", command.purpose))?;
         if !sleep_unless_cancelled(delay, is_cancelled.unwrap_or(&|| false)) {
             bail!("operation cancelled while {}", command.purpose);
         }
@@ -3212,11 +3211,14 @@ mod executor_tests {
         assert_eq!(attempts(directory.path()), 8);
     }
 
-    /// Unbounded retry must still end: at the caller's deadline when it has
-    /// one, and after a fixed number of attempts when nothing outside can stop
-    /// the loop.
+    /// A permanent block (a firewall or gateway that always closes the
+    /// connection) looks like `MaxStartups`. The retries end at the caller's
+    /// deadline when it has one, and after the persistent-refusal bound for
+    /// every caller, cancellable or not, with an error that names the host and
+    /// the possible causes.
+    // Hard-won: 5cb64e019: pre-authentication refusals were retried until cancellation, so a cancellable caller with no deadline (Move, session creation) retried a permanent block forever.
     #[test]
-    fn pre_authentication_retries_end_at_the_deadline_or_the_bounded_budget() {
+    fn pre_authentication_retries_end_at_the_deadline_or_the_time_bound() {
         let _fast_retries = FastRetries::new();
         let directory = tempfile::tempdir().expect("temp dir");
         let command = flaky_ssh_script(directory.path(), u32::MAX);
@@ -3224,18 +3226,29 @@ mod executor_tests {
             .execute(&command)
             .expect_err("a server that never lets the command in ends at the deadline");
         assert!(format!("{error:#}").contains("timed out"), "{error:#}");
-        assert!(attempts(directory.path()) > SSH_BOUNDED_RETRY_ATTEMPTS as u32);
+        assert!(attempts(directory.path()) > 3);
 
-        let directory = tempfile::tempdir().expect("temp dir");
-        let command = flaky_ssh_script(directory.path(), u32::MAX);
-        let output = ProcessExecutor
-            .execute(&command)
-            .expect("the refusal is reported, not raised");
-        assert_eq!(output.status, 255);
-        assert_eq!(
-            attempts(directory.path()),
-            SSH_BOUNDED_RETRY_ATTEMPTS as u32
-        );
+        set_ssh_persistent_refusal_for_test(Some(Duration::from_millis(400)));
+        for cancellable in [true, false] {
+            let directory = tempfile::tempdir().expect("temp dir");
+            let command = flaky_ssh_script(directory.path(), u32::MAX);
+            let started = Instant::now();
+            let error = if cancellable {
+                CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false))).execute(&command)
+            } else {
+                ProcessExecutor.execute(&command)
+            }
+            .expect_err("a server that never lets the command in fails after the bound");
+            let message = format!("{error:#}");
+            assert!(started.elapsed() < Duration::from_secs(10), "{message}");
+            for needle in ["build@10.0.0.1", "MaxStartups", "firewall", "kex_exchange"] {
+                assert!(message.contains(needle), "{needle} missing: {message}");
+            }
+            assert!(
+                attempts(directory.path()) > 3,
+                "cancellable: {cancellable}, retried within the bound"
+            );
+        }
     }
 
     /// Pins both defects of an exit-255 rule without a start proof: a command
