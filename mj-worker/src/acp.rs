@@ -18,6 +18,8 @@ mod session_config;
 pub(crate) mod verdict_client;
 use air_tasks::*;
 use drive::*;
+#[cfg(unix)]
+pub(crate) use launch::TOOL_CACHE_DIRECTORY_VARIABLES;
 use launch::*;
 pub use launch::{ContextReset, LaunchSpec, ReviewerMcpServer, SubagentMcpSocket};
 pub use opencode_logins::ImportedLogins;
@@ -36,6 +38,8 @@ mod grok_usage_tests;
 mod kimi_tasks;
 mod muse_usage;
 mod opencode_usage;
+#[cfg(test)]
+mod session_directories_tests;
 pub use kimi_tasks::resolve_session_dir as resolve_kimi_session_dir;
 pub use kimi_tasks::*;
 #[cfg(test)]

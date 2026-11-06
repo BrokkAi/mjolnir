@@ -249,15 +249,30 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         }),
         stall_policy: None,
     };
-    let request = serde_json::to_value(new_session_request(&spec, true)).unwrap();
+    let request = serde_json::to_value(new_session_request(
+        &spec,
+        &spec.additional_directories,
+        true,
+    ))
+    .unwrap();
     assert_eq!(
         request.get("mcpServers"),
         Some(&serde_json::json!([])),
         "a new session always states its MCP set, even when it is empty"
     );
     for opened in [
-        serde_json::to_value(resume_session_request(&spec, SessionId::from("native"))).unwrap(),
-        serde_json::to_value(load_session_request(&spec, SessionId::from("native"))).unwrap(),
+        serde_json::to_value(resume_session_request(
+            &spec,
+            &spec.additional_directories,
+            SessionId::from("native"),
+        ))
+        .unwrap(),
+        serde_json::to_value(load_session_request(
+            &spec,
+            &spec.additional_directories,
+            SessionId::from("native"),
+        ))
+        .unwrap(),
     ] {
         assert!(
             opened
@@ -293,11 +308,24 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
             socket.profile_registration = profile_registration;
             socket.review_gate = review_gate;
             for request in [
-                serde_json::to_value(new_session_request(&spec, true)).unwrap(),
-                serde_json::to_value(resume_session_request(&spec, SessionId::from("native")))
-                    .unwrap(),
-                serde_json::to_value(load_session_request(&spec, SessionId::from("native")))
-                    .unwrap(),
+                serde_json::to_value(new_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    true,
+                ))
+                .unwrap(),
+                serde_json::to_value(resume_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    SessionId::from("native"),
+                ))
+                .unwrap(),
+                serde_json::to_value(load_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    SessionId::from("native"),
+                ))
+                .unwrap(),
             ] {
                 let expected = if profile_registration {
                     Vec::new()
@@ -421,11 +449,24 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                 let guardian = policy == ExecutionPolicy::ConfiguredApprovals;
                 let offers_review = role.offers_review_server(true);
                 for request in [
-                    serde_json::to_value(new_session_request(&spec, true)).unwrap(),
-                    serde_json::to_value(load_session_request(&spec, SessionId::from("native")))
-                        .unwrap(),
-                    serde_json::to_value(resume_session_request(&spec, SessionId::from("native")))
-                        .unwrap(),
+                    serde_json::to_value(new_session_request(
+                        &spec,
+                        &spec.additional_directories,
+                        true,
+                    ))
+                    .unwrap(),
+                    serde_json::to_value(load_session_request(
+                        &spec,
+                        &spec.additional_directories,
+                        SessionId::from("native"),
+                    ))
+                    .unwrap(),
+                    serde_json::to_value(resume_session_request(
+                        &spec,
+                        &spec.additional_directories,
+                        SessionId::from("native"),
+                    ))
+                    .unwrap(),
                 ] {
                     let servers = request["mcpServers"].as_array().unwrap();
                     if harness != HarnessKind::Claude {
@@ -560,8 +601,12 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     );
                 }
                 spec.extra_mcp_servers.clear();
-                let without_memory =
-                    serde_json::to_value(new_session_request(&spec, false)).unwrap();
+                let without_memory = serde_json::to_value(new_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    false,
+                ))
+                .unwrap();
                 assert!(without_memory["mcpServers"].as_array().unwrap().is_empty());
                 let expected = (harness == HarnessKind::Claude && guardian)
                     .then(|| serde_json::json!(["Bash(gh:*)"]));
@@ -571,7 +616,12 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     "{without_memory}"
                 );
                 spec.project_memory = None;
-                let absent = serde_json::to_value(new_session_request(&spec, true)).unwrap();
+                let absent = serde_json::to_value(new_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    true,
+                ))
+                .unwrap();
                 assert!(absent["mcpServers"].as_array().unwrap().is_empty());
                 assert_eq!(
                     absent.pointer("/_meta/claudeCode/options/allowedTools"),
@@ -594,17 +644,30 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
         for (method, request) in [
             (
                 "session/new",
-                serde_json::to_value(new_session_request(&spec, true)).unwrap(),
+                serde_json::to_value(new_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    true,
+                ))
+                .unwrap(),
             ),
             (
                 "session/load",
-                serde_json::to_value(load_session_request(&spec, SessionId::from("native")))
-                    .unwrap(),
+                serde_json::to_value(load_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    SessionId::from("native"),
+                ))
+                .unwrap(),
             ),
             (
                 "session/resume",
-                serde_json::to_value(resume_session_request(&spec, SessionId::from("native")))
-                    .unwrap(),
+                serde_json::to_value(resume_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    SessionId::from("native"),
+                ))
+                .unwrap(),
             ),
         ] {
             // The protocol's optional field is serialized only when nonempty;
@@ -1088,7 +1151,12 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
     assert_eq!(server.name, "mj-memory");
     assert_eq!(server.command, Path::new("/worker/hel"));
     assert_eq!(server.args, ["worker", "memory-mcp"]);
-    let request = serde_json::to_value(new_session_request(&spec, true)).unwrap();
+    let request = serde_json::to_value(new_session_request(
+        &spec,
+        &spec.additional_directories,
+        true,
+    ))
+    .unwrap();
     assert_eq!(
         request["additionalDirectories"],
         serde_json::json!(["/workspace/api", "/profile/projects/abc/memory"])
