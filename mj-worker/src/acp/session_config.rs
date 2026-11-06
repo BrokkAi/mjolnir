@@ -872,11 +872,62 @@ pub(super) async fn reconcile_execution_policy(
 const POLICY_SETTLE_ROUNDS: usize = 4;
 
 /// Apply the mode and configuration reports the harness sent since the last
-/// command, starting with `first` when the caller already received it, and
-/// reconcile the policy if they moved it. Reports that arrive while the policy
-/// is restored are applied in the next round, until a round finds none that
-/// move it. The command loop runs this before it handles any command, so a
-/// prompt never starts in a mode reported while the previous turn ran.
+/// decision, starting with `first` when the caller already received it, and
+/// reconcile the policy if they moved it. Reports are applied, never dropped:
+/// one older than the cached answer only costs a redundant request, whose
+/// answer is authoritative. Reports that arrive while the policy is restored
+/// are applied in the next round, until a round finds none that move it.
+/// Returns whether the policy was reconciled.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn settle_policy_updates(
+    mut first: Option<SessionUpdate>,
+    policy_updates: &mut mpsc::UnboundedReceiver<SessionUpdate>,
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    harness: HarnessKind,
+    enforcement: Option<ExecutionEnforcement>,
+    config_options: &mut Vec<SessionConfigOption>,
+    modes: &mut Option<SessionModeState>,
+    events: &mpsc::Sender<RuntimeEvent>,
+) -> Result<bool> {
+    let mut reconciled = false;
+    for _ in 0..POLICY_SETTLE_ROUNDS {
+        let previous = policy_configuration(config_options, modes, enforcement);
+        let mut received = false;
+        for update in first
+            .take()
+            .into_iter()
+            .chain(std::iter::from_fn(|| policy_updates.try_recv().ok()))
+        {
+            apply_policy_update(update, config_options, modes);
+            received = true;
+        }
+        if !received || previous == policy_configuration(config_options, modes, enforcement) {
+            return Ok(reconciled);
+        }
+        reconcile_execution_policy(
+            connection,
+            session_id,
+            harness,
+            enforcement,
+            config_options,
+            modes,
+            events,
+        )
+        .await?;
+        reconciled = true;
+    }
+    bail!(
+        "{} kept changing its permission mode while Mjolnir restored the target's policy",
+        harness.display_name()
+    )
+}
+
+/// Settle the pending reports and publish the result. The command loop runs
+/// this before it handles any command, and the plan continuation before it
+/// starts, so no prompt starts in a mode reported while the previous turn
+/// ran. Publishing awaits, so reports that arrive meanwhile are settled too
+/// before this returns.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn apply_pending_policy_updates(
     mut first: Option<SessionUpdate>,
@@ -889,37 +940,10 @@ pub(super) async fn apply_pending_policy_updates(
     modes: &mut Option<SessionModeState>,
     events: &mpsc::Sender<RuntimeEvent>,
 ) -> Result<()> {
-    for round in 0..POLICY_SETTLE_ROUNDS {
-        let previous = policy_configuration(config_options, modes, enforcement);
-        let mut received = false;
-        for update in first
-            .take()
-            .into_iter()
-            .chain(std::iter::from_fn(|| policy_updates.try_recv().ok()))
-        {
-            apply_policy_update(update, config_options, modes);
-            received = true;
-        }
-        if !received || previous == policy_configuration(config_options, modes, enforcement) {
-            if round == 0 {
-                return Ok(());
-            }
-            emit_runtime_event(
-                events,
-                RuntimeEvent::SessionConfigured {
-                    config_options: config_options.clone(),
-                },
-            )
-            .await?;
-            return emit_runtime_event(
-                events,
-                RuntimeEvent::SessionModesConfigured {
-                    modes: modes.clone(),
-                },
-            )
-            .await;
-        }
-        reconcile_execution_policy(
+    for _ in 0..POLICY_SETTLE_ROUNDS {
+        if !settle_policy_updates(
+            first.take(),
+            policy_updates,
             connection,
             session_id,
             harness,
@@ -928,7 +952,27 @@ pub(super) async fn apply_pending_policy_updates(
             modes,
             events,
         )
+        .await?
+        {
+            return Ok(());
+        }
+        emit_runtime_event(
+            events,
+            RuntimeEvent::SessionConfigured {
+                config_options: config_options.clone(),
+            },
+        )
         .await?;
+        emit_runtime_event(
+            events,
+            RuntimeEvent::SessionModesConfigured {
+                modes: modes.clone(),
+            },
+        )
+        .await?;
+        if policy_updates.is_empty() {
+            return Ok(());
+        }
     }
     bail!(
         "{} kept changing its permission mode while Mjolnir restored the target's policy",

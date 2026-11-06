@@ -573,8 +573,21 @@ pub(super) async fn serve_session(
         )
         .await?;
     }
-    // Startup responses supersede the notifications emitted while opening.
-    while policy_updates.try_recv().is_ok() {}
+    // Reports the bridge sent while opening are settled, not dropped: one that
+    // follows the last answer is newer than it. The session publishes its
+    // configuration below, so nothing is published here.
+    settle_policy_updates(
+        None,
+        policy_updates,
+        connection,
+        &session_id,
+        spec.harness,
+        enforcement,
+        &mut config_options,
+        &mut modes,
+        events,
+    )
+    .await?;
     let memory = if spec.clear_context_request.is_some() && spec.harness != HarnessKind::Claude {
         if let Some(memory) = spec.project_memory.clone() {
             Some(
@@ -966,6 +979,12 @@ pub(super) async fn serve_session(
                                 if matches!(&response, Ok(response) if matches!(response.stop_reason, StopReason::EndTurn | StopReason::Cancelled)) {
                                     prompt_running = false;
                                     let implementation = approved_plan.take().expect("approved plan is present");
+                                    // The restoration below asks for the policy whatever the
+                                    // cache says, so reports from the planning turn only
+                                    // need to reach the cache first.
+                                    while let Ok(update) = policy_updates.try_recv() {
+                                        apply_policy_update(update, &mut config_options, &mut modes);
+                                    }
                                     mode_restoration = Some(Box::pin(restore_plan_execution_mode(connection, session_id.clone(), RestoredPlanMode {
                                         config_options: config_options.clone(), modes: modes.clone(), plan: implementation.plan, warning: None,
                                     }, implementation.permission_sent, enforcement)));
@@ -1436,6 +1455,8 @@ pub(super) async fn serve_session(
                                     }
                                     emit_runtime_event(events, RuntimeEvent::SessionConfigured { config_options: config_options.clone() }).await?;
                                     emit_runtime_event(events, RuntimeEvent::SessionModesConfigured { modes: modes.clone() }).await?;
+                                    // The continuation is a prompt like any other.
+                                    apply_pending_policy_updates(None, policy_updates, connection, &session_id, spec.harness, enforcement, &mut config_options, &mut modes, events).await?;
                                     let plan = state.plan;
                                     let continuation = format!("The user approved the following plan. Implement it now; the preceding permission cancellation was mj's mode-transition handling.\n\n{plan}");
                                     updates_before = agent_output_count.get();
@@ -1705,7 +1726,9 @@ pub(super) async fn serve_session(
                 let outcome = if let Some(outcome) = goal_outcome {
                     outcome
                 } else {
-                    match resolve_session_config_recovery(
+                    let previous_policy =
+                        policy_configuration(&config_options, &modes, enforcement);
+                    let recovered = resolve_session_config_recovery(
                         connection,
                         &session_id,
                         spec,
@@ -1717,8 +1740,22 @@ pub(super) async fn serve_session(
                         &elicitation_id,
                         &response,
                     )
-                    .await?
+                    .await?;
+                    // The answer can change the model like SetConfig does.
+                    if previous_policy != policy_configuration(&config_options, &modes, enforcement)
                     {
+                        reconcile_execution_policy(
+                            connection,
+                            &session_id,
+                            spec.harness,
+                            enforcement,
+                            &mut config_options,
+                            &mut modes,
+                            events,
+                        )
+                        .await?;
+                    }
+                    match recovered {
                         Some(outcome) => outcome,
                         None => resolve_pending_elicitation(
                             pending_elicitations,

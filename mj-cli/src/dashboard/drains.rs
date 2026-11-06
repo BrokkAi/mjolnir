@@ -605,8 +605,16 @@ impl DashboardContext {
     ) {
         let mut sessions = records;
         read_receipts::preserve_read_positions(&mut sessions, &self.controller.state.sessions);
-        let runtime_sessions_changed = self.runtime_sessions != runtime_sessions;
+        // Live views change on nearly every feed update; chats read only the
+        // policy keys, so only those are compared and handed on.
+        let policy_keys_changed =
+            policy_config_keys(&self.runtime_sessions) != policy_config_keys(&runtime_sessions);
         self.runtime_sessions = runtime_sessions;
+        if policy_keys_changed {
+            for chat in self.chats.values_mut() {
+                apply_policy_config_key(chat, &self.runtime_sessions);
+            }
+        }
         let Self {
             chats, dashboard, ..
         } = self;
@@ -637,7 +645,6 @@ impl DashboardContext {
         if self.controller.state.sessions == sessions
             && self.controller.state.subagents == subagents
             && self.controller.state.last_subagent_policies == last_subagent_policies
-            && !runtime_sessions_changed
         {
             return;
         }
@@ -850,6 +857,16 @@ pub(crate) fn refresh_open_chats(
         }
     }
     refresh_subagent_counts(chats, dashboard);
+}
+
+fn policy_config_keys(
+    sessions: &mj_core::snapshot_map::SnapshotMap<String, mj_client::daemon::RuntimeSessionView>,
+) -> BTreeMap<&str, &[String]> {
+    sessions
+        .iter()
+        .filter(|(_, view)| !view.policy_config_keys.is_empty())
+        .map(|(id, view)| (id.as_str(), view.policy_config_keys.as_slice()))
+        .collect()
 }
 
 pub(crate) fn apply_policy_config_key(
