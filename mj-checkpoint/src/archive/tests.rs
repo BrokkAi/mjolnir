@@ -1987,7 +1987,7 @@ fn session_starts_follow_the_session_between_worktree_names() {
     );
 }
 
-// Hard-won: PENDING-COMMIT: capture and restore migrated, copied or wrote review baseline pins in the user's repository.
+// Hard-won: 0c78ec89f: capture and restore migrated, copied or wrote review baseline pins in the user's repository.
 #[test]
 fn capture_and_restore_leave_a_repositorys_old_review_pins_alone() {
     for metadata_only in [false, true] {
@@ -2112,7 +2112,7 @@ fn capture_and_restore_leave_a_repositorys_old_review_pins_alone() {
     }
 }
 
-// Hard-won: PENDING-COMMIT: an old checkpoint that carried a review baseline pin must still restore without writing it.
+// Hard-won: 0c78ec89f: an old checkpoint that carried a review baseline pin must still restore without writing it.
 #[test]
 fn an_old_checkpoint_carrying_a_review_baseline_pin_restores_without_it() {
     let directory = tempfile::tempdir().unwrap();
