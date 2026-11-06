@@ -408,9 +408,9 @@ pub(super) fn prepare_review_gate(
     let push_review = launch.review_trigger == mj_core::config::ReviewTrigger::Push;
     let gate = launch.review_gate();
     let mut notices = Vec::new();
-    // A manual review can run even when review is off, so every primary
-    // records where its work starts before the harness can commit.
-    if launch.harness.supports_delegation_tools() {
+    // A manual review can run in any primary, even with review off, so every
+    // primary records where its work starts before the harness can commit.
+    {
         let git = crate::review::capture::BoundedGit::new(
             crate::review::capture::WORKSPACE_STATE_TIMEOUT,
         );
