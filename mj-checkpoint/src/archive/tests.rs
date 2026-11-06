@@ -1987,6 +1987,40 @@ fn session_starts_follow_the_session_between_worktree_names() {
     );
 }
 
+// Hard-won: PENDING-COMMIT: a metadata-only capture whose only refs/mj ref was a dropped pin restored as a full snapshot.
+#[test]
+fn a_metadata_only_capture_without_review_refs_never_restores_contents() {
+    let directory = tempfile::tempdir().unwrap();
+    let origin = directory.path().join("origin");
+    initialize_repository(&origin);
+    commit_file(&origin, "tracked", b"base\n", "base");
+    let source = clone_repository(directory.path(), &origin, "source");
+    let captured = git_line(&source, &["rev-parse", "HEAD"]);
+    let tree = git_line(&source, &["rev-parse", "HEAD^{tree}"]);
+    git(&source, &["update-ref", MAIN_SCOPE, &tree]);
+    let snapshot = collect_git_metadata_snapshot(
+        &SystemGit,
+        &source,
+        &GitCollectionSpec {
+            id: "repo".into(),
+            relative_destination: "repo".into(),
+            history: GitHistoryMode::NoBundle,
+            origin_override: None,
+        },
+    )
+    .unwrap();
+    assert!(snapshot.metadata.saved_refs.is_empty());
+    assert!(snapshot.metadata.review_refs_metadata_only);
+
+    // The user keeps working; a restore with contents must not move them back.
+    commit_file(&source, "tracked", b"later\n", "later");
+    let later = git_line(&source, &["rev-parse", "HEAD"]);
+    assert_ne!(later, captured);
+    restore_git_snapshot(&SystemGit, &source, &snapshot).unwrap();
+    assert_eq!(git_line(&source, &["rev-parse", "HEAD"]), later);
+    assert_eq!(std::fs::read(source.join("tracked")).unwrap(), b"later\n");
+}
+
 // Hard-won: 0c78ec89f: capture and restore migrated, copied or wrote review baseline pins in the user's repository.
 #[test]
 fn capture_and_restore_leave_a_repositorys_old_review_pins_alone() {

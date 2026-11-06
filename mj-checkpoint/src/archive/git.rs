@@ -207,7 +207,10 @@ pub fn collect_git_metadata_snapshot(
     let saved_refs = collect_review_refs(runner, repository)?;
     Ok(RepositorySnapshot {
         metadata: RepositoryMetadata {
-            review_refs_metadata_only: !saved_refs.is_empty(),
+            // Every capture here is metadata only, whether or not it carries
+            // refs: restore must never check out its commit into a checkout
+            // other sessions or the user may be working in.
+            review_refs_metadata_only: true,
             review_baseline_ref: if saved_refs.is_empty() {
                 None
             } else {
