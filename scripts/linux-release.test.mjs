@@ -14,7 +14,7 @@ function fixture(t) {
 }
 function script(path, text) { writeFileSync(path, `#!/bin/bash\n${text}\n`, { mode: 0o755 }); }
 
-function installer(t, { broken = false, missing = false, corrupt = false, cached = false, cachedBroken = false } = {}) {
+function installer(t, { broken = false, missing = false, corrupt = false, cached = false, cachedBroken = false, noSidecar = false } = {}) {
   const dir = fixture(t);
   const bin = join(dir, 'bin');
   const bundle = join(dir, 'bundle');
@@ -34,7 +34,7 @@ function installer(t, { broken = false, missing = false, corrupt = false, cached
   const checksum = createHash('sha256').update(readFileSync(join(dir, asset))).digest('hex');
   writeFileSync(join(dir, `${asset}.sha256`), `${corrupt ? "0".repeat(64) : checksum}  ${asset}\n`);
   writeFileSync(join(cache, 'mj.sha256'), cached ? `${checksum}\n` : 'old-checksum\n');
-  writeFileSync(join(dir, 'release.json'), JSON.stringify({ tag_name: 'v9.9.9', assets: [asset, `${asset}.sha256`].map(name => ({ browser_download_url: `https://fixture.invalid/${name}` })) }));
+  writeFileSync(join(dir, 'release.json'), JSON.stringify({ tag_name: 'v9.9.9', assets: (noSidecar ? [asset] : [asset, `${asset}.sha256`]).map(name => ({ browser_download_url: `https://fixture.invalid/${name}` })) }));
   script(join(tools, 'uname'), 'case "$1" in -s) echo Linux;; -m) echo x86_64;; -o) echo GNU/Linux;; esac');
   script(join(tools, 'curl'), `while (( $# )); do
   case "$1" in -o) dest="$2"; shift 2;; *) url="$1"; shift;; esac
@@ -60,6 +60,20 @@ for (const failure of ['broken', 'missing', 'corrupt']) {
     assert.match(f.result.stderr, failure === 'broken' ? /GLIBC_2.39 not found[\s\S]*glibc 2.28/ : failure === 'missing' ? /expected binary/ : /checksum mismatch/);
   });
 }
+
+test('installer refuses a release without a checksum sidecar', t => {
+  const f = installer(t, { noSidecar: true });
+  assert.notEqual(f.result.status, 0, f.result.stdout + f.result.stderr);
+  assert.match(f.result.stderr, /missing the checksum .*[.]sha256/);
+  // The existing installation and the cached checksum survive, and the
+  // unverified archive is never downloaded.
+  assert.equal(readFileSync(join(f.bin, 'mj'), 'utf8'), f.old);
+  for (const name of f.companions) assert.match(readFileSync(join(f.bin, name), 'utf8'), /old-companion/);
+  assert.equal(readFileSync(join(f.cache, 'mj.sha256'), 'utf8'), 'old-checksum\n');
+  assert.ok(!existsSync(join(f.dir, 'downloads')));
+  assert.ok(!existsSync(join(f.dir, 'profile')));
+  assert.doesNotMatch(f.result.stdout, /installer: done/);
+});
 
 test('installer repairs an unusable executable despite a matching cached checksum', t => {
   const f = installer(t, { cached: true, cachedBroken: true });

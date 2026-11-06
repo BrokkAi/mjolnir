@@ -10,17 +10,10 @@ fn an_api_key_codex_profile_is_authenticated_by_its_configuration_file() {
     let home = tempfile::tempdir().unwrap();
     let executor = FakeExecutor::succeeds();
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
         environment: [("ZAI_API_KEY".to_owned(), "key".to_owned())]
             .into_iter()
             .collect(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
 
     assert!(

@@ -245,6 +245,7 @@ fn model_facing(request_id: &str, result: &Value) -> Value {
 /// What a parent's tool set offers, from the worker's launch configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParentTools {
+    pub oracle: bool,
     /// Legacy option accepted for older launch arguments; it has no effect.
     pub agent_mailboxes_enabled: bool,
     /// Whether `spawn` offers the subtle task type. Without it, `spawn` has
@@ -256,6 +257,7 @@ pub struct ParentTools {
 impl Default for ParentTools {
     fn default() -> Self {
         Self {
+            oracle: false,
             agent_mailboxes_enabled: true,
             subtle_subagents: true,
             review_gate: false,
@@ -398,9 +400,10 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
     socket: &Path,
     harness: Option<HarnessKind>,
     role: SubagentMcpRole,
-    options: ParentTools,
+    mut options: ParentTools,
 ) -> Result<()> {
     let socket = socket.to_path_buf();
+    options.oracle |= oracle_enabled(&socket);
     let report_budget = if role == SubagentMcpRole::Child {
         ChildReportBudget::from_socket(&socket)?
     } else {
@@ -452,6 +455,9 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         SubagentMcpRole::MessageOnly => {
             let mut tools = vec![send_message_tool(), fetch_tool()];
             tools.extend(review_tool_definitions(options.review_gate));
+            if options.oracle {
+                tools.push(ask_oracle_tool());
+            }
             (
                 if options.review_gate {
                     MESSAGE_PUSH_INSTRUCTIONS.as_str()
@@ -464,6 +470,9 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         SubagentMcpRole::FetchOnly => {
             let mut tools = vec![fetch_tool(), send_message_tool()];
             tools.extend(review_tool_definitions(false));
+            if options.oracle {
+                tools.push(ask_oracle_tool());
+            }
             (MESSAGE_ONLY_INSTRUCTIONS, tools)
         }
         SubagentMcpRole::Child => {
@@ -576,8 +585,9 @@ fn call_with_options(
     role: SubagentMcpRole,
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
-    options: ParentTools,
+    mut options: ParentTools,
 ) -> Result<(Value, bool)> {
+    options.oracle |= oracle_enabled(socket);
     call_with_budget_and_options(
         socket,
         harness,
@@ -625,6 +635,9 @@ fn call_with_budget_and_options(
         && matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly);
     let push_review =
         params.name == "override_review" && role.supports_push_gate() && options.review_gate;
+    if params.name == "ask_oracle" && !options.oracle {
+        bail!("unknown sub-agent tool {:?} for {role}", params.name);
+    }
     if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias && !push_review {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
@@ -672,6 +685,9 @@ fn call_with_budget_and_options(
         }
         "request_review" => SubagentToolAction::RequestReview {
             path: serde_json::from_value::<RequestReviewArgs>(params.arguments)?.path,
+        },
+        "ask_oracle" => SubagentToolAction::AskOracle {
+            message: serde_json::from_value::<AskOracleArgs>(params.arguments)?.message,
         },
         "override_review" => {
             let args: OverrideReviewArgs = serde_json::from_value(params.arguments)?;
@@ -904,7 +920,34 @@ fn tool_definitions_with_options(
         fetch_tool(),
     ];
     tools.extend(review_tool_definitions(options.review_gate));
+    if options.oracle {
+        tools.push(ask_oracle_tool());
+    }
     tools
+}
+
+/// Whether the controller offered this session the oracle. Like the other
+/// target-side checks, it reads the launch file as plain JSON, so neither a
+/// field it does not know nor one an older file still carries can hide the tool.
+fn oracle_enabled(socket: &Path) -> bool {
+    std::fs::read(socket.with_file_name("launch.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|launch| launch["oracle"] == true)
+}
+
+fn ask_oracle_tool() -> Value {
+    tool(
+        "ask_oracle",
+        "Consult a strong read-only advisor about a decision before you commit to it. Consult when a choice is hard to reverse or affects more than your change, and you cannot state what it must satisfy, why your choice satisfies each requirement (beyond \"tests pass\"), and what would fail if you were wrong. Also consult before giving up, escalating to a human, or a third attempt at something that failed twice. Check facts yourself first; never use it for routine work. Send the decision, options, and evidence. The oracle remembers your earlier questions and its answers, so a follow-up can build on them.",
+        json!({"type":"object","properties":{"message":{"type":"string","description":"The decision, the options and your evidence, with file, symbol and line pointers. The oracle reads the shared workspace but not your conversation."}},"required":["message"],"additionalProperties":false}),
+    )
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AskOracleArgs {
+    message: String,
 }
 
 fn review_tool_definitions(review_gate: bool) -> Vec<Value> {
@@ -998,12 +1041,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     const MAILBOXES_DISABLED: ParentTools = ParentTools {
+        oracle: false,
         review_gate: false,
         agent_mailboxes_enabled: false,
         subtle_subagents: true,
     };
 
     const STRAIGHTFORWARD_ONLY: ParentTools = ParentTools {
+        oracle: false,
         review_gate: false,
         agent_mailboxes_enabled: true,
         subtle_subagents: false,
@@ -1990,14 +2035,119 @@ mod tests {
                 .map(|tool| tool["name"].as_str().unwrap_or_default().to_owned())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(
-            names(tool_definitions(None)),
-            SubagentMcpRole::Parent.tool_names()
+        let mut expected = SubagentMcpRole::Parent.tool_names().to_vec();
+        expected.retain(|name| *name != "ask_oracle");
+        assert_eq!(names(tool_definitions(None)), expected);
+        let oracle = tool_definitions_with_options(
+            None,
+            ParentTools {
+                oracle: true,
+                ..Default::default()
+            },
         );
+        assert_eq!(names(oracle), SubagentMcpRole::Parent.tool_names());
         assert_eq!(
             names(child_tool_definitions()),
             SubagentMcpRole::Child.tool_names()
         );
+    }
+
+    #[test]
+    fn oracle_is_read_from_the_launch_file_as_plain_json() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("control.sock");
+        assert!(!oracle_enabled(&socket), "no launch file");
+        let launch = directory.path().join("launch.json");
+        for (body, expected) in [
+            (json!({"session_id": "s"}), false),
+            (json!({"session_id": "s", "oracle": true}), true),
+            // A field this build does not know, or a retired one, changes nothing.
+            (
+                json!({"oracle": true, "future_field": 1, "bifrost_binary": "x"}),
+                true,
+            ),
+            (json!({"oracle": false}), false),
+        ] {
+            std::fs::write(&launch, body.to_string()).unwrap();
+            assert_eq!(oracle_enabled(&socket), expected, "{body}");
+        }
+    }
+
+    #[test]
+    fn oracle_tool_is_gated_and_not_read_only_hinted() {
+        let off = tool_definitions_with_options(None, ParentTools::default());
+        assert!(off.iter().all(|tool| tool["name"] != "ask_oracle"));
+        let on = tool_definitions_with_options(
+            None,
+            ParentTools {
+                oracle: true,
+                ..Default::default()
+            },
+        );
+        let oracle = on.iter().find(|tool| tool["name"] == "ask_oracle").unwrap();
+        assert!(oracle.get("annotations").is_none());
+        let description = oracle["description"].as_str().unwrap();
+        assert!(description.len() <= 1800, "{} bytes", description.len());
+        assert!(description.starts_with("Consult a strong read-only advisor about a decision"));
+        assert!(description.ends_with(
+            "The oracle remembers your earlier questions and its answers, so a follow-up can build on them."
+        ));
+        assert_eq!(
+            oracle["inputSchema"]["properties"]["message"]["description"],
+            "The decision, the options and your evidence, with file, symbol and line pointers. The oracle reads the shared workspace but not your conversation."
+        );
+        assert_eq!(oracle["inputSchema"]["required"], json!(["message"]));
+        assert!(
+            child_tool_definitions()
+                .iter()
+                .all(|tool| tool["name"] != "ask_oracle")
+        );
+    }
+
+    #[test]
+    fn oracle_is_listed_for_each_primary_role_only_when_enabled() {
+        for role in [
+            SubagentMcpRole::Parent,
+            SubagentMcpRole::MessageOnly,
+            SubagentMcpRole::FetchOnly,
+            SubagentMcpRole::Child,
+        ] {
+            for oracle in [false, true] {
+                let input = format!(
+                    "{}\n{}\n",
+                    json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+                    json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
+                );
+                let output = Arc::new(Mutex::new(Vec::new()));
+                run_with_options(
+                    input.as_bytes(),
+                    ContractWriter(output.clone()),
+                    Path::new("unused.sock"),
+                    None,
+                    role,
+                    ParentTools {
+                        oracle,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let lines = output.lock().unwrap();
+                let replies: Vec<Value> = std::str::from_utf8(&lines)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                let tools =
+                    replies.iter().find(|reply| reply["id"] == 2).unwrap()["result"]["tools"]
+                        .as_array()
+                        .unwrap();
+                assert_eq!(
+                    tools.iter().any(|tool| tool["name"] == "ask_oracle"),
+                    oracle && role != SubagentMcpRole::Child,
+                    "{role:?}"
+                );
+            }
+        }
     }
 
     #[test]

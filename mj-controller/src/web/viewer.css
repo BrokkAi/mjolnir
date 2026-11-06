@@ -641,26 +641,10 @@ pre.entry-body {
   overscroll-behavior: contain;
 }
 
-/* Passive review progress in the conversation. */
-.turn-review {
-  border-color: var(--plan);
-}
-
-.turn-review-roles {
-  margin: 6px 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-}
-
-.turn-review-findings {
-  font: inherit;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  margin: 0 0 10px;
-  /* Findings scroll rather than pushing their own buttons off the screen. */
-  max-height: 40dvh;
-  overflow-y: auto;
+/* Passive review progress: one line above the composer. */
+#turn-review > p {
+  margin: 4px 0;
+  font-size: 13px;
 }
 
 .elicitation-field {
@@ -1586,7 +1570,7 @@ article > h3 {
   display: contents;
 }
 
-#subagents-button {
+.child-workspace-buttons {
   display: none;
 }
 
@@ -1613,11 +1597,12 @@ article > h3 {
 
 .composer-lower-border {
   display: flex;
+  gap: 8px;
   min-height: 0;
   margin-top: -0.35rem;
 }
 
-.composer-lower-border:has(.hidden) {
+.composer-lower-border:not(:has(> button:not(.hidden))) {
   display: none;
 }
 
@@ -2151,7 +2136,7 @@ body[data-connection='reconnecting'] .connection {
   body.elicitation-focused #turn-review,
   body.elicitation-focused #conversation-status,
   body.elicitation-focused #conversation-side,
-  body.elicitation-focused #subagents-button,
+  body.elicitation-focused .child-workspace-buttons,
   body.elicitation-focused #prompt-form {
     display: none !important;
   }
@@ -2240,8 +2225,13 @@ body[data-connection='reconnecting'] .connection {
     white-space: nowrap;
   }
 
-  .conversation-status:has(> #subagents-button:not(.hidden)) #conversation-side > summary {
+  .conversation-status:has(#subagents-button:not(.hidden)) #conversation-side > summary,
+  .conversation-status:has(#reviewers-button:not(.hidden)) #conversation-side > summary {
     padding-right: 138px;
+  }
+
+  .conversation-status:has(#subagents-button:not(.hidden)):has(#reviewers-button:not(.hidden)) #conversation-side > summary {
+    padding-right: 258px;
   }
 
   .conversation-summary-full {
@@ -2260,11 +2250,16 @@ body[data-connection='reconnecting'] .connection {
     padding: 4px 8px 8px;
   }
 
-  #conversation-status > #subagents-button {
+  #conversation-status > .child-workspace-buttons {
     position: absolute;
     z-index: 1;
     top: 0;
     right: 0;
+    display: flex;
+    gap: 8px;
+  }
+
+  .child-workspace-buttons > button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -2276,6 +2271,7 @@ body[data-connection='reconnecting'] .connection {
   }
 
   #subagents-button-desktop,
+  #reviewers-button-desktop,
   .composer-lower-border {
     display: none !important;
   }

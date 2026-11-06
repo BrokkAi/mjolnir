@@ -43,6 +43,15 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
         let (profile_id, policy) = row?;
         state.last_subagent_policies.insert(profile_id, policy);
     }
+    let mut statement = connection
+        .prepare("SELECT profile_id, enabled FROM oracle_preference ORDER BY profile_id")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+    })?;
+    for row in rows {
+        let (profile_id, enabled) = row?;
+        state.last_oracle_choices.insert(profile_id, enabled);
+    }
     let mut statement = connection.prepare(&format!("{SESSION_QUERY} ORDER BY s.session_id"))?;
     let rows = statement.query_map([], decode_session)?;
     for row in rows {
@@ -546,8 +555,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              container_cpus, container_memory, archived, draft_input, create_managed_worktree,
              subagents, container_workspace, build_cache_json, launch_base,
              target_runtime_json, launch_branch, publication_json, checkout_json, project_json,
-             review_json, no_project_memory, no_mailbox
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33)
+             review_json, no_project_memory, no_mailbox, oracle, oracle_choice
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -582,7 +591,9 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              project_json = coalesce(excluded.project_json, sessions.project_json),
              review_json = excluded.review_json,
              no_project_memory = excluded.no_project_memory,
-             no_mailbox = excluded.no_mailbox",
+             no_mailbox = excluded.no_mailbox,
+             oracle = excluded.oracle,
+             oracle_choice = excluded.oracle_choice",
         params![
             session.id,
             session.title,
@@ -635,6 +646,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
             session.review.as_ref().map(serde_json::to_string).transpose()?,
             session.no_project_memory,
             session.no_github_events,
+            session.oracle,
+            session.oracle_choice.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     tx.execute(
@@ -661,6 +674,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
     // whoever adds it decides then whether a lifecycle transition owns it.
     // Everything bound to `_` is owned by `upsert_session` instead.
     let SessionRecord {
+        oracle_choice,
         target_runtime,
         id,
         title,
@@ -690,6 +704,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         no_github_events: _,
         // A Move can change it along with the profile the session runs on.
         subagents,
+        oracle,
         additional_mounts: _,
         container_cpus: _,
         container_memory: _,
@@ -724,7 +739,9 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
              build_cache_json = ?14,
              target_runtime_json = ?15,
              subagents = ?16,
-             project_json = coalesce(?17,project_json)
+             project_json = coalesce(?17,project_json),
+             oracle = ?18,
+             oracle_choice = ?19
          WHERE session_id = ?1",
         params![
             id,
@@ -758,6 +775,11 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
                 .transpose()?,
             subagents.as_ref().map(serde_json::to_string).transpose()?,
             project.as_ref().map(serde_json::to_string).transpose()?,
+            oracle,
+            oracle_choice
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
         ],
     )?;
     if changed != 1 {
@@ -1213,7 +1235,7 @@ const SESSION_QUERY: &str =
                 , c.workspace_id, s.create_managed_worktree, s.subagents,
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
                 s.launch_branch, s.publication_json, s.checkout_json, s.project_json,
-                s.review_json, s.no_project_memory, s.no_mailbox
+                s.review_json, s.no_project_memory, s.no_mailbox, s.oracle, s.oracle_choice
          FROM sessions s JOIN session_contexts c USING(session_id)";
 
 fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRecord>> {
@@ -1231,6 +1253,15 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
         return Ok(None);
     };
     Ok(Some(SessionRecord {
+        oracle_choice: row
+            .get::<_, Option<String>>(37)?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(37, Type::Text, Box::new(error))
+                })
+            })
+            .transpose()?,
+        oracle: row.get(36)?,
         project: row
             .get::<_, Option<String>>(32)?
             .map(|json| {

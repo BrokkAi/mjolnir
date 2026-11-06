@@ -36,13 +36,15 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             json!({"archive_after_days":null})
         }
         "subagents" if path.len() == 1 => {
-            json!({"max_concurrent":6,"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null}})
+            json!({"max_concurrent":6,"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null},"oracle":{"model":null,"effort":null}})
         }
-        "subagents" if path.len() == 2 && matches!(key, "straightforward" | "subtle") => {
+        "subagents"
+            if path.len() == 2 && matches!(key, "straightforward" | "subtle" | "oracle") =>
+        {
             json!({"model":null,"effort":null})
         }
         "profiles" if path.len() == 2 => {
-            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null,"codex_profile":null})
+            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null,"codex_profile":null,"models":[]})
         }
         "machines" if path.len() == 2 => machine_defaults(value["kind"].as_str().unwrap_or("ssh")),
         // The build cache is its own page, and the saved file keeps only the
@@ -271,6 +273,7 @@ pub fn label(key: &str) -> String {
         "subagents" => "Sub-agents",
         "straightforward" => "Straightforward",
         "subtle" => "Subtle",
+        "oracle" => "Oracle",
         "build_cache" => "Build caches",
         "scheduler" => "Compile scheduling",
         "directory" => "Cache directory",
@@ -290,6 +293,7 @@ pub fn label(key: &str) -> String {
         "context_window_bytes" => "Context budget (bytes)",
         "guardian_review_model" => "Guardian review model",
         "codex_profile" => "Codex profile",
+        "models" => "Offered models",
         "bind" => "Listen address and port",
         "tailscale_detect" => "Detect Tailscale",
         "tls_cert" => "TLS certificate file",
@@ -336,7 +340,7 @@ pub fn field_label(path: &[String]) -> String {
     {
         ["github"] => "GitHub events".to_owned(),
         ["subagents", task, field]
-            if ["straightforward", "subtle"].contains(task)
+            if ["straightforward", "subtle", "oracle"].contains(task)
                 && ["model", "effort"].contains(field) =>
         {
             format!("{} {}", label(task), field)
@@ -371,7 +375,9 @@ pub fn null_label(path: &[String], draft: &Value) -> String {
             "{} (default)",
             mj_core::config::NotifyConfig::default().delay_seconds
         ),
-        ["subagents", task, "effort"] if matches!(*task, "straightforward" | "subtle") => {
+        ["subagents", task, "effort"]
+            if matches!(*task, "straightforward" | "subtle" | "oracle") =>
+        {
             if draft["_subagent_options"][task][super::discovery::EFFORTS_PENDING] == true {
                 "Discovering efforts…".into()
             } else {
@@ -821,7 +827,7 @@ pub fn page_specific_help(path: &[String], draft: &Value) -> Option<&'static str
     Some(match path {
         [section]
             if section == "subagents"
-                && (["straightforward", "subtle"]
+                && (["straightforward", "subtle", "oracle"]
                     .iter()
                     .any(|task| draft["_subagent_options"][task].is_null())) =>
         {
@@ -964,10 +970,10 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
         }
         "quota" => {
-            "Codex, Grok and Claude quota checks start the agent. Auto runs it in your local Podman or Docker runtime's image when one is enabled, else on this machine."
+            "Codex, Grok and Claude quota checks start the agent. Auto runs it on this machine when the agent is installed here, else in your local Podman or Docker runtime's image when one is enabled."
         }
         "runtime" if path.first().is_some_and(|key| key == "quota") => {
-            "Auto: an enabled local Podman runtime, else Docker, else this machine. Podman or Docker: always that engine. Host: never a container."
+            "Auto: this machine when the agent is installed here, else an enabled local Podman runtime, else Docker. Podman or Docker: always that engine. Host: never a container."
         }
         "daemon" => {
             "Where the background daemon runs. Saving a change moves it there; running sessions keep going."
@@ -990,11 +996,14 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         "archive_after_days" => {
             "After this many days, indexed suspended sessions lose their checkpoint and attachments. Blank keeps all."
         }
-        "subagents" => "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "subagents" => {
+            "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional."
+        }
         "straightforward" => "Work with a clear method. Choose a model and its effort.",
         "subtle" => {
             "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward."
         }
+        "oracle" => "For read-only tricky questions that the primary agent isn't sure about.",
         "build_cache" => {
             "Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and Bazel."
         }
@@ -1016,6 +1025,9 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         }
         "guardian_review_model" => {
             "Codex with a custom provider: newest-flash, session (the session's model), or a model name. Blank: newest-flash."
+        }
+        "models" => {
+            "Optional. Offer only these models from this profile, one exact model name per entry. Leave empty to offer everything the profile advertises. The profile's current model is always offered."
         }
         "codex_profile" => {
             "Codex only: the name of a profile file in the account directory, such as ds for ds.config.toml, layered over config.toml like codex -p ds."

@@ -132,7 +132,7 @@ impl ViewerPublication {
                 self.children
                     .entry(relation.parent_session_id.clone())
                     .or_insert_with(Default::default)
-                    .insert(id.clone(), ());
+                    .insert(id.clone(), relation.kind);
             }
         }
         for id in self.operations.keys().chain(views.operations.keys()) {

@@ -8,9 +8,9 @@ Persist which accepted prompts finished outcomes answer, eliminating inference f
 ## Progress
 - [x] Inspected #1450 commits, steering, removal, and reminder admission.
 - [x] Parent settled owed-set cap, own-prompt answers, and CLI mismatch notice.
-- [x] Implemented stored watermark and centralized readers; added breaking migration 111.
-- [ ] Finish outbound compatibility and regression fixtures.
-- [ ] Run formatting, full touched library suites, CLI api_commands, and workspace clippy.
+- [x] Implemented stored watermark and centralized readers; added the breaking migration (113 after merging upstream, which took 111 and 112).
+- [x] Finished outbound compatibility and regression fixtures.
+- [x] Ran formatting, full touched library suites, the mj binary tests, and workspace clippy.
 
 ## Surprises & Discoveries
 Queue removal only changes relay ledger state and emits QueueChanged. A queued rejection may record an outcome while another prompt runs.
@@ -19,13 +19,13 @@ Queue removal only changes relay ledger state and emits QueueChanged. A queued r
 Parent approved capping by queued prompts except ending command and active turn unless belongs_to ending command. Each outcome answers its own acceptance as well as watermark. Numeric mismatches use neutral CLI wording.
 
 ## Outcomes & Retrospective
-Implementation in progress, no commits authorized.
+Implemented and validated. Readers ask `answers(ordinal)` of one stored outcome; no reader infers answers from the queue or the active turn. The migration became 113 when upstream took 111 (Oracle) and 112 (session titles).
 
 ## Context and Orientation
 Core state defines outcome and reader; transcript observation projection owns the watermark. Controller wait and child progress consume the outcome. Database schema controls compatibility.
 
 ## Plan of Work
-Update projection, eliminate queue inference and cached scalar answers, add migration 111 without backfill, strip outbound metadata from v1 outcomes and runtime headers, extend existing regressions.
+Update projection, eliminate queue inference and cached scalar answers, add migration 113 without backfill, strip outbound metadata from v1 outcomes and runtime headers, extend existing regressions.
 
 ## Concrete Steps
 Run plain cargo with normal mbx storage; tests outside sandbox with isolated existing fixtures. No live daemon access.

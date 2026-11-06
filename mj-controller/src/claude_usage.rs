@@ -96,6 +96,20 @@ pub async fn query(
     query_with_runtime(home, environment, USAGE_URL, executor, container).await
 }
 
+/// The program a host check starts.
+fn claude_program() -> &'static str {
+    if cfg!(windows) {
+        "claude.cmd"
+    } else {
+        "claude"
+    }
+}
+
+/// Whether `path` holds the `claude` a host login refresh would start.
+pub(crate) fn host_has_claude(path: Option<&std::ffi::OsStr>) -> bool {
+    mj_core::program_path::find_executable_on_path(claude_program(), path).is_some()
+}
+
 /// Read the quota out of Claude Code's own `/usage` output.
 async fn query_cli_with(
     environment: HashMap<String, String>,
@@ -398,11 +412,7 @@ async fn run_claude_usage(
     purpose: &'static str,
 ) -> Result<CommandOutput, String> {
     let mut command = CommandSpec::new(
-        if cfg!(windows) {
-            "claude.cmd"
-        } else {
-            "claude"
-        },
+        claude_program(),
         ["-p", "/usage", "--no-session-persistence"],
     )
     .purpose(purpose);
@@ -443,14 +453,7 @@ async fn run_claude_refresh(
     );
     let (mut command, quota_container) = match &container {
         None => {
-            let mut command = CommandSpec::new(
-                if cfg!(windows) {
-                    "claude.cmd"
-                } else {
-                    "claude"
-                },
-                ["auth", "login"],
-            );
+            let mut command = CommandSpec::new(claude_program(), ["auth", "login"]);
             command.env.extend(environment);
             (command, None)
         }
@@ -779,6 +782,31 @@ mod tests {
     use axum::routing::get;
     use axum::{Json, Router};
     use std::sync::Mutex;
+
+    /// A directory holding an executable named `name`.
+    #[cfg(unix)]
+    fn directory_with_program(name: &str) -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join(name);
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        directory
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_has_claude_only_when_it_is_on_path() {
+        let empty = tempfile::tempdir().unwrap();
+        assert!(!host_has_claude(Some(empty.path().as_os_str())));
+        assert!(!host_has_claude(None));
+        let on_path = directory_with_program("claude");
+        assert!(host_has_claude(Some(on_path.path().as_os_str())));
+        // A file the system would not run does not count.
+        let plain = tempfile::tempdir().unwrap();
+        std::fs::write(plain.path().join("claude"), "").unwrap();
+        assert!(!host_has_claude(Some(plain.path().as_os_str())));
+    }
 
     /// Captured verbatim from `claude -p /usage --no-session-persistence`.
     const CLI_USAGE: &str = "\

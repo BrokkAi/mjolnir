@@ -1,27 +1,28 @@
 use super::*;
 use crate::controller::BranchDisposition;
 
-/// Point the quota refresher at the profiles the configuration currently
-/// defines, alongside the worker-poll and credential-sync targets that are
-/// rebuilt from the same reload. A profile added to `config.toml` while the
-/// server runs otherwise reaches the snapshot but never the refresher, and
-/// reads "quota unavailable" until the next restart.
+/// Point the quota refresher at what the configuration currently asks of it,
+/// alongside the worker-poll and credential-sync targets that are rebuilt from
+/// the same reload. A profile added to `config.toml` while the server runs
+/// otherwise reaches the snapshot but never the refresher, and reads "quota
+/// unavailable" until the next restart. The same holds for anything else a
+/// request carries, such as `[quota] runtime`, which decides where each check
+/// runs.
 ///
 /// Sending a batch restarts every profile's refresh, which spawns a harness
-/// process per profile, so the batch travels only when the profiles changed.
-/// Reports whether it did.
+/// process per profile, so the batch travels only when the requests differ
+/// from the ones already sent. Reports whether it did.
 pub(crate) fn republish_quota_profiles(
     controller: &Controller,
-    published: &mut std::collections::BTreeMap<String, HarnessProfile>,
     batch: &mut QuotaRefreshBatch,
     profiles_tx: &tokio::sync::watch::Sender<QuotaRefreshBatch>,
 ) -> bool {
-    if *published == controller.config.profiles {
+    let requests = quota_refresh_profiles(controller);
+    if requests == batch.profiles {
         return false;
     }
-    published.clone_from(&controller.config.profiles);
     batch.generation = batch.generation.saturating_add(1);
-    batch.profiles = quota_refresh_profiles(controller);
+    batch.profiles = requests;
     profiles_tx.send_replace(batch.clone());
     true
 }
@@ -114,6 +115,24 @@ pub(super) struct PhoneActionServices<'a> {
     pub(super) daemon_runtime: &'a Arc<RuntimeState>,
 }
 
+/// The creation title and the rename a New action starts with. A phone that
+/// supplies no title gets the title the terminal would have derived, so a
+/// session started from either surface reads the same way in both. Only a
+/// title the person typed is a rename: the derived one must not hide the name
+/// the harness gives the session.
+fn new_session_titles(
+    title: Option<String>,
+    project_directory: Option<&std::path::Path>,
+    bundle_id: &str,
+    profile_id: &str,
+) -> (String, Option<String>) {
+    let typed = title.filter(|title| !title.trim().is_empty());
+    let title = typed.clone().unwrap_or_else(|| {
+        mj_core::state::default_session_title(project_directory, bundle_id, profile_id)
+    });
+    (title, typed)
+}
+
 pub(super) async fn apply_phone_action(
     controller: &mut Controller,
     services: PhoneActionServices<'_>,
@@ -148,6 +167,8 @@ pub(super) async fn apply_phone_action(
             base,
             no_later_history,
             subagents,
+            oracle,
+            oracle_choice,
             review,
             no_project_memory,
             no_github_events,
@@ -173,17 +194,8 @@ pub(super) async fn apply_phone_action(
             } else {
                 workspace_id
             };
-            // A phone that supplies no title gets the one the terminal would
-            // have derived, so a session started from either surface reads the
-            // same way in both.
-            let title = title.unwrap_or_else(|| {
-                mj_core::state::default_session_title(
-                    project_directory.as_deref(),
-                    &bundle_id,
-                    &profile_id,
-                )
-            });
-            let session_title_override = Some(title.clone());
+            let (title, session_title_override) =
+                new_session_titles(title, project_directory.as_deref(), &bundle_id, &profile_id);
             let (published, publication) = tokio::sync::oneshot::channel();
             let (registered, review_notice, capacity_warning) = services
                 .daemon_runtime
@@ -197,6 +209,8 @@ pub(super) async fn apply_phone_action(
                         base,
                         no_later_history,
                         subagents,
+                        oracle,
+                        oracle_choice,
                         review,
                         no_project_memory,
                         no_github_events,
@@ -608,5 +622,29 @@ pub(super) async fn apply_phone_action(
         ControllerAction::RefreshQuota { .. } | ControllerAction::RefreshCapacity { .. } => {
             bail!("refresh actions must be handled by the phone control loop")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::new_session_titles;
+    use std::path::Path;
+
+    #[test]
+    fn a_new_action_without_a_title_is_not_a_rename() {
+        for title in [None, Some(String::new()), Some("  \n".to_owned())] {
+            let (created_with, rename) =
+                new_session_titles(title, Some(Path::new("/work/project")), "bundle", "claude");
+            assert_eq!(created_with, "project via claude");
+            assert_eq!(rename, None);
+        }
+    }
+
+    #[test]
+    fn a_new_action_keeps_the_title_a_person_supplied_as_a_rename() {
+        let (created_with, rename) =
+            new_session_titles(Some("My name".into()), None, "bundle", "claude");
+        assert_eq!(created_with, "My name");
+        assert_eq!(rename.as_deref(), Some("My name"));
     }
 }

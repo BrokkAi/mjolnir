@@ -658,9 +658,12 @@ impl Adapter for MjolnirAdapter {
                 .unwrap_or_default(),
         };
 
+        // A manual name, harness title, or first-prompt provisional title, as
+        // the session list shows it. Without one the index prefers the
+        // transcript's title over the creation title.
         let title = record
-            .and_then(|record| record.session_title_override.clone())
-            .or_else(|| record.and_then(|record| record.acp_session_title.clone()))
+            .filter(|record| record.has_given_name())
+            .map(|record| record.listed_title().to_owned())
             .or_else(|| snapshot_title.clone())
             .unwrap_or_else(|| {
                 messages
@@ -2103,14 +2106,21 @@ pub fn archived_session(id: &str) -> Result<Option<ArchivedSession>> {
     let Some(row) = visible_row_by_id(&connection, id, &ownership, &cache)? else {
         return Ok(None);
     };
-    let session = sessionwiki::index::session_from_index(&connection, &row)
+    archived_session_from_row(&connection, &row).map(Some)
+}
+
+fn archived_session_from_row(
+    connection: &rusqlite::Connection,
+    row: &sessionwiki::index::SessionRow,
+) -> Result<ArchivedSession> {
+    let session = sessionwiki::index::session_from_index(connection, row)
         .context("read an indexed session")?;
     let snapshot = snapshot_of(&session)?;
-    Ok(Some(ArchivedSession {
+    Ok(ArchivedSession {
         title: session.title.clone(),
         project_directory: project_directory_of(&session.project),
         snapshot,
-    }))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3003,6 +3013,8 @@ mod tests {
 
     fn record_template() -> SessionRecord {
         SessionRecord {
+            oracle_choice: None,
+            oracle: true,
             project: None,
             target_runtime: None,
             launch_base: None,
@@ -3492,6 +3504,8 @@ mod tests {
     /// record's own last update can tell the index the title moved.
     #[test]
     fn a_rename_moves_a_session_change_token() {
+        let _held = tags::testing::lock();
+        let (_index, mut connection) = tags::testing::isolated_index();
         let directory = tempfile::tempdir().unwrap();
         let session_id = "0123456789abcdef0123456789abcdef";
         write_archive(directory.path(), session_id, 1);
@@ -3515,6 +3529,18 @@ mod tests {
                 .unwrap()
                 .title,
             "the new name"
+        );
+
+        // Cross the durable index boundary, then discard both the source
+        // record and checkpoint, as destruction after archiving does.
+        sync_adapter(&mut connection, &Arc::new(adapter));
+        std::fs::remove_dir_all(directory.path()).unwrap();
+        let row = row_by_id(&connection, session_id).unwrap().unwrap();
+        let archived = archived_session_from_row(&connection, &row).unwrap();
+        assert_eq!(archived.title, "the new name");
+        assert_eq!(
+            archived.snapshot.session.session_title.as_deref(),
+            Some("the new name")
         );
     }
 
@@ -4672,14 +4698,14 @@ mod tests {
                 format!("profile-{index}"),
                 HarnessProfile {
                     enabled: true,
-                    kind,
-                    home,
                     environment: Default::default(),
                     context_window_bytes: None,
+                    models: Default::default(),
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
                     codex_profile: None,
                     muse_auto_review: None,
+                    ..mj_core::config::HarnessProfile::new(kind, home)
                 },
             );
         }

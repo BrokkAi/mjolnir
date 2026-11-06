@@ -24,6 +24,8 @@ use super::worktree::{
 
 pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,

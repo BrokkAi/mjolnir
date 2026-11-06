@@ -440,7 +440,11 @@ fn publish(
     }) {
         (environment.review)(&session_id, &view);
     }
-    tx.send(SessionManagerUpdate { session_id, view });
+    tx.send(SessionManagerUpdate {
+        session_id,
+        view,
+        raw_observation: None,
+    });
 }
 
 /// Why the continuation service stopped forwarding session updates.
@@ -649,13 +653,16 @@ fn spawn_with_gate(
                                 }
                             } => {
                                 if let Some(view) = latest.get(&id) {
-                                    return Some(SessionManagerUpdate { session_id: id, view: view.clone() });
+                                    return Some(SessionManagerUpdate { session_id: id, view: view.clone(), raw_observation: None });
                                 }
                             }
                         }
                     }
                 } => {
                     let Some(update) = update else { break FeedEnd::SessionManagerStopped };
+                    if let Some(raw) = update.raw_observation {
+                        tx.pending_observations.lock().expect("pending observations poisoned").insert(update.session_id.clone(), raw);
+                    }
                     let id = update.session_id;
                     let view = update.view;
                     latest.insert(id.clone(), view.clone());
@@ -860,7 +867,7 @@ fn spawn_with_gate(
                                         Ok(view) => {
                                             latest.insert(id.clone(), (*view).clone());
                                             tx.send(SessionManagerUpdate {
-                                                session_id: id,
+                                                raw_observation: None,                                                session_id: id,
                                                 view: *view,
                                             });
                                         }
