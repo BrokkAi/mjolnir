@@ -180,7 +180,8 @@ fn probe_https_credentials(
     }
 }
 
-/// Whether Git on the host sends `remote` over HTTPS. Local: no network.
+/// Whether Git on the host sends `remote` over HTTPS, with or without a
+/// username in the rewritten URL. Local: no network.
 fn rewrites_to_https(host: BareHost<'_>, remote: &str, executor: &impl CommandExecutor) -> bool {
     let command = host.command(
         &["git", "ls-remote", "--get-url", remote],
@@ -192,7 +193,7 @@ fn rewrites_to_https(host: BareHost<'_>, remote: &str, executor: &impl CommandEx
         Ok(output) if output.status == 0
             && String::from_utf8_lossy(&output.stdout)
                 .trim()
-                .starts_with("https://github.com/")
+                .starts_with("https://")
     )
 }
 
@@ -572,6 +573,8 @@ mod tests {
         const EMPTY_HELPER: &str =
             "[credential]\n\thelper = \"!f() { echo username=octocat; echo password=; }; f\"\n";
         const REWRITES: &str = "[url \"https://github.com/\"]\n\tinsteadOf = git@github.com:\n\tinsteadOf = ssh://git@github.com/\n";
+        // Hard-won: 46cceae5a: a rewrite carrying a username was taken for SSH.
+        const REWRITES_WITH_USER: &str = "[url \"https://alice@github.com/\"]\n\tinsteadOf = git@github.com:\n\tinsteadOf = ssh://git@github.com/\n";
         const SCP_REWRITE_ONLY: &str =
             "[url \"https://github.com/\"]\n\tinsteadOf = git@github.com:\n";
 
@@ -595,6 +598,7 @@ mod tests {
             };
             for remote in SSH_REMOTES {
                 assert!(rewrites(REWRITES, remote), "{remote}");
+                assert!(rewrites(REWRITES_WITH_USER, remote), "{remote}");
                 assert!(!rewrites("", remote), "{remote}");
             }
             assert!(rewrites(SCP_REWRITE_ONLY, SSH_REMOTES[0]));
