@@ -136,10 +136,10 @@ fn new_session_titles(
 /// Record a prompt a person is sending through the web viewer or the HTTP
 /// API, before it is submitted; see `crate::database::record_user_prompt`.
 /// A failure to record does not stop the prompt, so it is logged.
-pub(super) async fn record_user_prompt(session_id: String, text: String) {
+pub(super) async fn record_user_prompt(session_id: String, command_id: String, text: String) {
     let recorded = tokio::task::spawn_blocking({
         let session_id = session_id.clone();
-        move || crate::database::record_user_prompt(&session_id, &text)
+        move || crate::database::record_user_prompt(&session_id, &command_id, &text)
     })
     .await;
     let error = match recorded {
@@ -274,10 +274,11 @@ pub(super) async fn apply_phone_action(
                 .sessions
                 .wait_for_session(&session_id, Duration::from_secs(5))
                 .await?;
-            record_user_prompt(session_id, text.clone()).await;
+            let command_id = command_id.map_or_else(|| new_command_id("phone-prompt"), Ok)?;
+            record_user_prompt(session_id, command_id.clone(), text.clone()).await;
             session
                 .submit(
-                    command_id.map_or_else(|| new_command_id("phone-prompt"), Ok)?,
+                    command_id,
                     RelayCommand::Prompt {
                         prompt: phone_prompt_blocks(text, images),
                     },

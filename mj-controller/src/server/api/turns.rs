@@ -137,14 +137,29 @@ pub(super) async fn submit_prompt(
             () = held.withdrawn() => return Err(withdrawn_prompt()),
         }
     }
+    // Recording and submitting hold an upgrade admission, so a handoff waits
+    // for the prompt instead of ending the daemon between them.
+    let _admission = crate::upgrade::activity("API prompt submission")
+        .map_err(|_| ApiFailure::unavailable("the daemon is shutting down"))?;
+    // A caller that names its command can retry it; one that does not sends
+    // a new command each time, so its record gets an identity of its own.
+    let history_command = match &command_id {
+        Some(command_id) => command_id.clone(),
+        None => mj_client::session::new_command_id("api-history")
+            .map_err(|error| ApiFailure::unavailable(format!("{error:#}")))?,
+    };
+    // The prompt is recorded while it can still be withdrawn: an interrupt
+    // during the write still finds the hold. A withdrawn prompt stays in the
+    // history, as an abandoned draft does.
+    backend
+        .record_user_prompt(session_id.clone(), history_command, text.clone())
+        .await;
     // Taking the hold back and an interrupt withdrawing it are one decision,
     // so a prompt is either submitted or withdrawn, never both.
     if hold.is_some_and(|held| !held.release()) {
         return Err(withdrawn_prompt());
     }
-    Ok(backend
-        .user_prompt_with_id(session_id, text, command_id)
-        .await?)
+    Ok(backend.prompt_with_id(session_id, text, command_id).await?)
 }
 
 fn withdrawn_prompt() -> ApiFailure {

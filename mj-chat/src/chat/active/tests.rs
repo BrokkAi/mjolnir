@@ -3757,7 +3757,7 @@ async fn deferred_move_prompts_keep_their_original_operation_through_attach_and_
 
 // Hard-won: 747d8ed78: a prompt sent to an open session from the web never reached Up
 #[tokio::test]
-async fn a_completed_turn_lists_the_sessions_prompts_again_for_up() {
+async fn an_accepted_prompt_lists_the_sessions_prompts_again_for_up() {
     use mj_core::storage::PromptHistoryEntry;
     let fixture = mj_client::session::replacement_session_test_fixture("history-refresh", 1);
     fixture
@@ -3809,12 +3809,16 @@ async fn a_completed_turn_lists_the_sessions_prompts_again_for_up() {
     }
 
     answer(&mut chat, &mut listings, vec![entry(1, "typed here")]).await;
-    // The web viewer sent a prompt and its turn finished.
+    // The session accepted a prompt sent from the web viewer.
     chat.state.apply_event(&SequencedEvent {
         seq: 2,
         recorded_at_ms: None,
-        request_id: None,
-        event: WorkerEvent::TurnCompleted,
+        request_id: Some("phone-prompt".into()),
+        event: WorkerEvent::PromptAccepted {
+            request_id: "phone-prompt".into(),
+            text: "sent from the web".into(),
+            attachments: Vec::new(),
+        },
     });
     chat.drain().await;
     chat.state.session_history.clear();

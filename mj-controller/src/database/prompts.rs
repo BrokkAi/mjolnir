@@ -6,15 +6,24 @@ use super::*;
 /// the session can start or finish the turn, and nothing is left to do once
 /// the session accepts it. A prompt the session then refuses stays in the
 /// history, as an abandoned draft does. Agent messages do not record.
-pub fn record_user_prompt(session_id: &str, text: &str) -> Result<()> {
+///
+/// `command_id` is the command that will carry the prompt; a retry with the
+/// same identity records nothing new.
+pub fn record_user_prompt(session_id: &str, command_id: &str, text: &str) -> Result<()> {
     let session_id = session_id.to_owned();
+    let command_id = command_id.to_owned();
     let text = text.to_owned();
     submit_database_write("record_user_prompt", move |_| {
-        record_user_prompt_to(&database_path(), &session_id, &text)
+        record_user_prompt_to(&database_path(), &session_id, &command_id, &text)
     })
 }
 
-pub(super) fn record_user_prompt_to(path: &Path, session_id: &str, text: &str) -> Result<()> {
+pub(super) fn record_user_prompt_to(
+    path: &Path,
+    session_id: &str,
+    command_id: &str,
+    text: &str,
+) -> Result<()> {
     let bundle_id: Option<String> = open_reader(path)?
         .query_row(
             "SELECT bundle_id FROM session_contexts WHERE session_id = ?1",
@@ -27,7 +36,7 @@ pub(super) fn record_user_prompt_to(path: &Path, session_id: &str, text: &str) -
     let Some(bundle_id) = bundle_id else {
         return Ok(());
     };
-    record_prompt_text_to(path, session_id, &bundle_id, text)
+    record_prompt_text_to(path, session_id, &bundle_id, Some(command_id), text)
 }
 
 pub fn record_abandoned_prompt(session_id: &str, bundle_id: &str, text: &str) -> Result<()> {
@@ -35,15 +44,18 @@ pub fn record_abandoned_prompt(session_id: &str, bundle_id: &str, text: &str) ->
     let bundle_id = bundle_id.to_owned();
     let text = text.to_owned();
     submit_database_write("record_abandoned_prompt", move |_| {
-        record_prompt_text_to(&database_path(), &session_id, &bundle_id, &text)
+        record_prompt_text_to(&database_path(), &session_id, &bundle_id, None, &text)
     })
 }
 
-/// Store `text` as the session's newest prompt unless it already is.
+/// Store `text` as one of the session's prompts. A prompt sent as a command
+/// is stored once per command; an abandoned draft, which has no command, is
+/// stored unless it equals the session's newest prompt.
 pub(super) fn record_prompt_text_to(
     path: &Path,
     session_id: &str,
     bundle_id: &str,
+    command_id: Option<&str>,
     text: &str,
 ) -> Result<()> {
     if text.trim().is_empty() {
@@ -66,20 +78,29 @@ pub(super) fn record_prompt_text_to(
     if actual_bundle != canonical_bundle {
         bail!("session {session_id} belongs to bundle {actual_bundle}, not {bundle_id}");
     }
-    let most_recent: Option<String> = tx
-        .query_row(
-            "SELECT text FROM prompt_history WHERE session_id = ?1
-             ORDER BY history_id DESC LIMIT 1",
-            [session_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if most_recent.as_deref() != Some(text) {
+    if let Some(command_id) = command_id {
         tx.execute(
-            "INSERT INTO prompt_history(session_id, event_ordinal, submitted_at, text)
-             VALUES (?1, NULL, ?2, ?3)",
-            params![session_id, submitted_at, text],
+            "INSERT INTO prompt_history(session_id, event_ordinal, submitted_at, text, command_id)
+             VALUES (?1, NULL, ?2, ?3, ?4)
+             ON CONFLICT(session_id, command_id) WHERE command_id IS NOT NULL DO NOTHING",
+            params![session_id, submitted_at, text, command_id],
         )?;
+    } else {
+        let most_recent: Option<String> = tx
+            .query_row(
+                "SELECT text FROM prompt_history WHERE session_id = ?1
+                 ORDER BY history_id DESC LIMIT 1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if most_recent.as_deref() != Some(text) {
+            tx.execute(
+                "INSERT INTO prompt_history(session_id, event_ordinal, submitted_at, text)
+                 VALUES (?1, NULL, ?2, ?3)",
+                params![session_id, submitted_at, text],
+            )?;
+        }
     }
     tx.commit()?;
     Ok(())
@@ -204,7 +225,9 @@ impl HistoryTier {
 
     /// Up to `count` of the tier's distinct matching prompts, newest first by
     /// each text's newest row, among texts whose newest row is older than
-    /// `before`. A text an earlier tier holds is left out, so every text
+    /// `position.before`. Only rows up to `position.through`, the newest row
+    /// when the search began, take part, so a prompt sent while the search is open cannot
+    /// move an unseen text past the cursor. A text an earlier tier holds is left out, so every text
     /// appears in one tier and on one page. The full-text index drives each
     /// query, so the work follows the tier's matches, not its rows.
     fn page(
@@ -213,9 +236,12 @@ impl HistoryTier {
         phrase: &str,
         session_id: &str,
         bundle_id: &str,
-        before: i64,
+        position: HistoryCursor,
         count: usize,
     ) -> Result<Vec<PromptHistoryEntry>> {
+        let HistoryCursor {
+            before, through, ..
+        } = position;
         let count = i64::try_from(count).unwrap_or(i64::MAX);
         match self {
             // The unary `+` keeps SQLite from driving this query from the
@@ -225,41 +251,42 @@ impl HistoryTier {
                 connection,
                 "SELECT max(p.history_id) AS newest, p.session_id, p.text
                  FROM prompt_history_text f JOIN prompt_history p ON p.history_id = f.rowid
-                 WHERE prompt_history_text MATCH ?1 AND +p.session_id = ?2
+                 WHERE prompt_history_text MATCH ?1 AND f.rowid <= ?5 AND +p.session_id = ?2
                  GROUP BY p.text HAVING newest < ?3
                  ORDER BY newest DESC LIMIT ?4",
-                params![phrase, session_id, before, count],
+                params![phrase, session_id, before, count, through],
             ),
             HistoryTier::Project => query_history_page(
                 connection,
                 "SELECT max(p.history_id) AS newest, p.session_id, p.text
                  FROM prompt_history_text f JOIN prompt_history p ON p.history_id = f.rowid
-                 WHERE prompt_history_text MATCH ?1 AND p.session_id <> ?2
+                 WHERE prompt_history_text MATCH ?1 AND f.rowid <= ?6 AND p.session_id <> ?2
                    AND EXISTS (SELECT 1 FROM session_contexts c
                                WHERE c.session_id = p.session_id AND c.bundle_id = ?3)
-                   AND p.text NOT IN (SELECT text FROM prompt_history WHERE session_id = ?2)
+                   AND p.text NOT IN (SELECT text FROM prompt_history
+                                      WHERE session_id = ?2 AND history_id <= ?6)
                  GROUP BY p.text HAVING newest < ?4
                  ORDER BY newest DESC LIMIT ?5",
-                params![phrase, session_id, bundle_id, before, count],
+                params![phrase, session_id, bundle_id, before, count, through],
             ),
             HistoryTier::Elsewhere => query_history_page(
                 connection,
                 "SELECT max(p.history_id) AS newest, p.session_id, p.text
                  FROM prompt_history_text f JOIN prompt_history p ON p.history_id = f.rowid
-                 WHERE prompt_history_text MATCH ?1 AND p.session_id <> ?2
+                 WHERE prompt_history_text MATCH ?1 AND f.rowid <= ?6 AND p.session_id <> ?2
                    AND NOT EXISTS (SELECT 1 FROM session_contexts c
                                    WHERE c.session_id = p.session_id AND c.bundle_id = ?3)
                    AND p.text NOT IN (
                        SELECT h.text
                        FROM prompt_history_text g JOIN prompt_history h ON h.history_id = g.rowid
-                       WHERE prompt_history_text MATCH ?1
+                       WHERE prompt_history_text MATCH ?1 AND g.rowid <= ?6
                          AND (h.session_id = ?2
                               OR EXISTS (SELECT 1 FROM session_contexts d
                                          WHERE d.session_id = h.session_id
                                            AND d.bundle_id = ?3)))
                  GROUP BY p.text HAVING newest < ?4
                  ORDER BY newest DESC LIMIT ?5",
-                params![phrase, session_id, bundle_id, before, count],
+                params![phrase, session_id, bundle_id, before, count, through],
             ),
         }
     }
@@ -292,10 +319,18 @@ pub(super) fn search_prompt_page_from(
     };
     let connection = open_reader(path)?;
     let canonical_bundle = super::projects::session_project_id(&connection, session_id, bundle_id)?;
-    let start = after.unwrap_or(HistoryCursor {
-        tier: HistoryTier::Session as u8,
-        before: i64::MAX,
-    });
+    let start = match after {
+        Some(cursor) => cursor,
+        None => HistoryCursor {
+            tier: HistoryTier::Session as u8,
+            before: i64::MAX,
+            through: connection.query_row(
+                "SELECT COALESCE(MAX(history_id), 0) FROM prompt_history",
+                [],
+                |row| row.get(0),
+            )?,
+        },
+    };
     let mut entries: Vec<PromptHistoryEntry> = Vec::new();
     for &tier in HistoryTier::of_scope(scope)
         .iter()
@@ -313,7 +348,11 @@ pub(super) fn search_prompt_page_from(
             &phrase,
             session_id,
             &canonical_bundle,
-            before,
+            HistoryCursor {
+                tier: tier as u8,
+                before,
+                through: start.through,
+            },
             wanted.saturating_add(1),
         )?;
         if rows.len() > wanted {
@@ -325,6 +364,7 @@ pub(super) fn search_prompt_page_from(
                 next: Some(HistoryCursor {
                     tier: tier as u8,
                     before,
+                    through: start.through,
                 }),
             });
         }

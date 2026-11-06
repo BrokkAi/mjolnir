@@ -750,8 +750,11 @@ pub(super) async fn handle_action(
             // `record_user_prompt`.
             if let Some(text) = history {
                 let history_id = session_id.clone();
-                if let Err(error) =
-                    blocking(move || crate::database::record_user_prompt(&history_id, &text)).await
+                let history_command = command_id.clone();
+                if let Err(error) = blocking(move || {
+                    crate::database::record_user_prompt(&history_id, &history_command, &text)
+                })
+                .await
                 {
                     tracing::warn!(%error, "prompt history could not be stored");
                 }

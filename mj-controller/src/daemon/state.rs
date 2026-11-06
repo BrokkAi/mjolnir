@@ -1579,9 +1579,12 @@ impl RuntimeState {
         // History is written before the session sees the prompt; see
         // `record_user_prompt`.
         let history_id = session_id.to_owned();
+        let history_command = command_id.to_owned();
         let history_text = text.to_owned();
-        if let Err(error) =
-            blocking(move || crate::database::record_user_prompt(&history_id, &history_text)).await
+        if let Err(error) = blocking(move || {
+            crate::database::record_user_prompt(&history_id, &history_command, &history_text)
+        })
+        .await
         {
             tracing::warn!(
                 session_id,

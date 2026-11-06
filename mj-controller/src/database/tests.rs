@@ -3529,9 +3529,12 @@ fn wider_history_scopes_list_smaller_scopes_first_and_dedupe_at_the_smallest() {
     );
 
     // Paging two at a time from each `next` cursor yields the same sequence,
-    // with no gaps and no repeats, including across tier boundaries.
+    // with no gaps and no repeats, including across tier boundaries, even
+    // when an unseen prompt is sent again while the search is open.
+    let expected = texts(HistoryScope::All);
     let mut paged = Vec::new();
     let mut after = None;
+    let mut resent = false;
     loop {
         let page = search_prompt_page_from(
             &database,
@@ -3545,12 +3548,25 @@ fn wider_history_scopes_list_smaller_scopes_first_and_dedupe_at_the_smallest() {
         .unwrap();
         assert!(page.entries.len() <= 2);
         paged.extend(page.entries.into_iter().map(|entry| entry.text));
+        if !resent {
+            // Hard-won: 8e9b542d5: a text resent between pages moved past the cursor and was never listed
+            record_prompt_to(
+                &database,
+                "session-1",
+                "project-1",
+                50,
+                Some("2026-08-12T00:00:00Z"),
+                "alpha elsewhere",
+            )
+            .unwrap();
+            resent = true;
+        }
         match page.next {
             Some(next) => after = Some(next),
             None => break,
         }
     }
-    assert_eq!(paged, texts(HistoryScope::All));
+    assert_eq!(paged, expected);
 
     assert!(
         texts_for("al").is_empty(),
@@ -3567,7 +3583,14 @@ fn abandoned_prompts_are_searchable_in_session_and_project_history() {
         &database,
         &[("session-1", "project-1"), ("session-2", "project-1")],
     );
-    record_prompt_text_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
+    record_prompt_text_to(
+        &database,
+        "session-1",
+        "project-1",
+        None,
+        "unfinished draft",
+    )
+    .unwrap();
     record_prompt_to(
         &database,
         "session-2",
@@ -3632,7 +3655,24 @@ fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe
     let database = directory.path().join("hel.sqlite3");
     live_sessions(
         &database,
-        &[("session-1", "project-1"), ("session-2", "project-1")],
+        &[
+            ("session-1", "project-1"),
+            ("session-2", "project-1"),
+            ("session-3", "project-1"),
+        ],
+    );
+    // Hard-won: 9d9cc05e2: a retried command recorded its prompt again and moved it to the front
+    for (command_id, text) in [("cmd-1", "first"), ("cmd-2", "second"), ("cmd-1", "first")] {
+        record_user_prompt_to(&database, "session-3", command_id, text).unwrap();
+    }
+    assert_eq!(
+        session_prompts_from(&database, "session-3")
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.text)
+            .collect::<Vec<_>>(),
+        ["second", "first"],
+        "the retry is the same prompt, not a newer one"
     );
     record_prompt_to(
         &database,
@@ -3643,9 +3683,30 @@ fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe
         "submitted prompt",
     )
     .unwrap();
-    record_prompt_text_to(&database, "session-1", "project-1", "submitted prompt").unwrap();
-    record_prompt_text_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
-    record_prompt_text_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
+    record_prompt_text_to(
+        &database,
+        "session-1",
+        "project-1",
+        None,
+        "submitted prompt",
+    )
+    .unwrap();
+    record_prompt_text_to(
+        &database,
+        "session-1",
+        "project-1",
+        None,
+        "unfinished draft",
+    )
+    .unwrap();
+    record_prompt_text_to(
+        &database,
+        "session-1",
+        "project-1",
+        None,
+        "unfinished draft",
+    )
+    .unwrap();
     // The delivered prompt's ordinal remains its idempotency key after the
     // nullable-ordinal migration.
     record_prompt_to(
@@ -3677,7 +3738,7 @@ fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe
         ]
     );
 
-    record_prompt_text_to(&database, "session-2", "project-1", " \n\t ").unwrap();
+    record_prompt_text_to(&database, "session-2", "project-1", None, " \n\t ").unwrap();
     assert!(
         session_prompts_from(&database, "session-2")
             .unwrap()

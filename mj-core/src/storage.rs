@@ -300,11 +300,14 @@ pub struct PushFindingsRecord {
 pub const MIN_HISTORY_QUERY_CHARS: usize = 3;
 
 /// Where a prompt search resumes: the tier it reached, counted from the
-/// asking session outward, and the newest history row it has not yet read.
+/// asking session outward; the newest-row position below which it continues;
+/// and the newest history row when the search began, past which it reads
+/// nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HistoryCursor {
     pub tier: u8,
     pub before: i64,
+    pub through: i64,
 }
 
 /// One page of a prompt search. `next` is `None` once nothing more matches.

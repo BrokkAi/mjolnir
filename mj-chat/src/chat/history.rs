@@ -653,6 +653,7 @@ mod tests {
         let cursor = HistoryCursor {
             tier: 1,
             before: 40,
+            through: 60,
         };
         let request = answer_history_page(&mut chat, &first_page, Some(cursor));
         assert_eq!((request.after, request.limit), (None, 9));

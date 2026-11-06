@@ -3192,16 +3192,15 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
-    fn user_prompt_with_id(
+    fn record_user_prompt(
         &self,
         session_id: String,
+        command_id: String,
         text: String,
-        command_id: Option<String>,
-    ) -> BoxFuture<'_, Result<u64>> {
-        Box::pin(async move {
-            super::actions::record_user_prompt(session_id.clone(), text.clone()).await;
-            self.prompt_with_id(session_id, text, command_id).await
-        })
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(super::actions::record_user_prompt(
+            session_id, command_id, text,
+        ))
     }
 
     fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, Result<String>> {

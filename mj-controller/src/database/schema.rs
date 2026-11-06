@@ -2096,7 +2096,9 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     // destroying a session removes its prompts. Writers are serialized, so a
     // prompt racing a destroy lands either before it, and is removed, or
     // after it, and is ignored.
-    // Older readers ignore the index. Older writers' inserts, deletes and
+    // It also adds a nullable `command_id` with a unique index per session;
+    // older writers list their columns and leave it empty, which the index
+    // allows. Older readers ignore the index. Older writers' inserts, deletes and
     // destroys fire the same triggers, so the table and the index follow their
     // writes; every shipped build links a bundled SQLite compiled with FTS5, so
     // they can run them. Fewer rows for older builds is a behaviour difference,
@@ -2105,8 +2107,15 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     // `subagent_sessions`, as revision 77 recreated `prompt_history`, drops
     // the triggers on that table and must create them again.
     if version < 114 {
+        connection.execute_batch("BEGIN IMMEDIATE;")?;
+        // A prompt sent as a command is stored once per command, so a retried
+        // command does not record its prompt again.
+        if !legacy_schema::table_has_column(connection, "prompt_history", "command_id")? {
+            connection.execute_batch("ALTER TABLE prompt_history ADD COLUMN command_id TEXT;")?;
+        }
         connection.execute_batch(
-            "BEGIN IMMEDIATE;
+            "CREATE UNIQUE INDEX IF NOT EXISTS prompt_history_command
+                 ON prompt_history(session_id, command_id) WHERE command_id IS NOT NULL;
              DELETE FROM prompt_history
                  WHERE session_id IN (SELECT child_session_id FROM subagent_sessions)
                     OR session_id NOT IN (SELECT session_id FROM sessions);
@@ -2669,9 +2678,15 @@ pub(super) fn restore_pre114_prompt_history(connection: &Connection, version: i6
                  DROP TRIGGER IF EXISTS prompt_history_text_insert;
                  DROP TRIGGER IF EXISTS prompt_history_text_delete;
                  DROP TRIGGER IF EXISTS prompt_history_text_update;
-                 DROP TABLE IF EXISTS prompt_history_text;",
+                 DROP TABLE IF EXISTS prompt_history_text;
+                 DROP INDEX IF EXISTS prompt_history_command;",
             )
             .unwrap();
+        if legacy_schema::table_has_column(connection, "prompt_history", "command_id").unwrap() {
+            connection
+                .execute_batch("ALTER TABLE prompt_history DROP COLUMN command_id;")
+                .unwrap();
+        }
     }
 }
 
