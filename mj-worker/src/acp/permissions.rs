@@ -537,17 +537,23 @@ fn gh_script(script: &str) -> bool {
 /// Calls to Mjolnir's own MCP servers, for a harness that cannot be told to
 /// trust them. Under configured approvals DSH and OpenCode ask before every
 /// MCP tool call (OpenCode when its configuration says `ask`) and have no
-/// per-server rule, so the worker allows calls to the servers this launch
-/// registered itself, as Claude's allowed tools and Codex's server approval
-/// mode do for those harnesses. Every other request still reaches a person.
+/// per-server rule, so the worker allows the tools the servers this launch
+/// registered itself list, as Claude's allowed tools and Codex's server
+/// approval mode do for those harnesses. Every other request still reaches a
+/// person. A title is matched against each owned tool's full name, never a
+/// server prefix: server names may contain the separator, so a separately
+/// configured `mj-agents_extra` server could otherwise borrow `mj-agents_`.
 #[derive(Debug, Clone, Default)]
 pub(super) struct OwnedMcpApprovals {
-    /// The start of the permission title of each owned server's tool calls.
-    title_prefixes: Vec<String>,
+    /// The permission title of each owned server's tool calls, without any
+    /// argument the harness appends.
+    titles: Vec<String>,
     /// Whether the harness marks an MCP call's kind `other`. OpenCode titles a
     /// shell command or file edit with its text, so only the kind tells such
     /// a request from an MCP call.
     requires_other_kind: bool,
+    /// Whether the harness follows the title with a space and an argument.
+    appends_argument: bool,
 }
 
 impl OwnedMcpApprovals {
@@ -555,27 +561,34 @@ impl OwnedMcpApprovals {
         if spec.execution_policy != ExecutionPolicy::ConfiguredApprovals {
             return Self::default();
         }
-        let (title_prefix, requires_other_kind): (fn(&str) -> String, bool) = match spec.harness {
-            // dsh-acp names an MCP tool `mcp__<server>__<tool>` and titles
-            // its call with that name, underscores shown as spaces, then any
-            // `path` argument.
-            HarnessKind::Dsh => (|server| format!("mcp__{server}__").replace('_', " "), false),
-            // OpenCode 2.2.1, with its `execute` code tool denied, offers an
-            // MCP tool as `<server>_<tool>` and titles its call with that name.
-            HarnessKind::OpenCode => (|server| format!("{server}_"), true),
-            _ => return Self::default(),
-        };
-        let title_prefixes = owned_acp_mcp_server_names(spec)
+        let (title, requires_other_kind, appends_argument): (fn(&str, &str) -> String, _, _) =
+            match spec.harness {
+                // dsh-acp names an MCP tool `mcp__<server>__<tool>` and titles
+                // its call with that name, underscores shown as spaces, then
+                // any `path` argument.
+                HarnessKind::Dsh => (
+                    |server, tool| format!("mcp__{server}__{tool}").replace('_', " "),
+                    false,
+                    true,
+                ),
+                // OpenCode 2.2.1, with its `execute` code tool denied, offers
+                // an MCP tool as `<server>_<tool>` and titles its call with
+                // exactly that name.
+                HarnessKind::OpenCode => (|server, tool| format!("{server}_{tool}"), true, false),
+                _ => return Self::default(),
+            };
+        let titles = owned_acp_mcp_tools(spec)
             .iter()
-            .map(|server| title_prefix(server))
+            .flat_map(|(server, tools)| tools.iter().map(|tool| title(server, tool)))
             .collect();
         Self {
-            title_prefixes,
+            titles,
             requires_other_kind,
+            appends_argument,
         }
     }
 
-    /// The allowing answer when `request` is a call to an owned server.
+    /// The allowing answer when `request` is a call to an owned tool.
     pub(super) fn response(
         &self,
         request: &RequestPermissionRequest,
@@ -587,13 +600,15 @@ impl OwnedMcpApprovals {
         {
             return None;
         }
-        let owned = self.title_prefixes.iter().any(|prefix| {
-            // No owned tool name starts with an underscore, so a space here
-            // means a longer DSH server name, such as `mj-agents_`, that
-            // merely begins with an owned one.
-            title
-                .strip_prefix(prefix.as_str())
-                .is_some_and(|tool| !tool.is_empty() && !tool.starts_with(' '))
+        let owned = self.titles.iter().any(|owned| {
+            title == owned
+                || (self.appends_argument
+                    // One space then the argument; more spaces mean a longer
+                    // server or tool name that merely begins with an owned one.
+                    && title
+                        .strip_prefix(owned.as_str())
+                        .and_then(|rest| rest.strip_prefix(' '))
+                        .is_some_and(|argument| !argument.is_empty() && !argument.starts_with(' ')))
         });
         if owned {
             allow_permission_response(request)

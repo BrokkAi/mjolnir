@@ -357,6 +357,12 @@ fn opencode_owned_mcp_calls_are_preapproved_only_as_mcp_calls() {
             ("mj-agents_spawn", ToolKind::Edit, false),
             ("mj-agents_", ToolKind::Other, false),
             ("mj-tools_run", ToolKind::Other, false),
+            // A server whose name merely begins with an owned one, and a tool
+            // the owned server does not list, are not approved.
+            ("mj-agents_extra_delete", ToolKind::Other, false),
+            ("mj-review_extra_request_review", ToolKind::Other, false),
+            ("mj-agents_delete", ToolKind::Other, false),
+            ("mj-agents_spawn_extra", ToolKind::Other, false),
             // The `execute` code tool is denied, so a call through it is not ours.
             ("execute", ToolKind::Other, false),
             ("opencode_session_move", ToolKind::Other, false),
@@ -535,14 +541,15 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                 }
                 if harness == HarnessKind::Dsh {
                     let approvals = OwnedMcpApprovals::for_launch(&spec);
+                    let offers = |tool: &str| role.tool_names().contains(&tool);
                     for (title, owned) in [
-                        ("mcp  mj-agents  spawn", true),
-                        ("mcp  mj-agents  list agents", true),
+                        ("mcp  mj-agents  spawn", offers("spawn")),
+                        ("mcp  mj-agents  list agents", offers("list_agents")),
                         ("mcp  mj-review  request review", offers_review),
                         ("mcp  mj-review  override review", offers_review),
                         ("mcp  mj-review  set review baseline", offers_review),
                         ("mcp  mj-review_  request review", false),
-                        ("mcp  mj-agents  handback", true),
+                        ("mcp  mj-agents  handback", offers("handback")),
                         ("mcp  mj-memory  trace file src/lib.rs", true),
                         // A configured reviewer server is not Mjolnir's,
                         // whatever its name.
@@ -550,6 +557,10 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                         ("mcp  mj-third-party  scan", false),
                         // `mj-agents_` only begins with an owned name.
                         ("mcp  mj-agents   spawn", false),
+                        ("mcp  mj-agents  x  spawn", false),
+                        ("mcp  mj-agents  spawn  x", false),
+                        ("mcp  mj-agents  delete", false),
+                        ("mcp  mj-memory  delete file x", false),
                         ("mcp  mj-agents  ", false),
                         ("Run rm -rf build", false),
                         ("write file mcp  mj-agents  spawn", false),

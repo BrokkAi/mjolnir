@@ -338,19 +338,33 @@ fn review_acp_mcp(spec: &LaunchSpec) -> Option<McpServer> {
     )))
 }
 
-/// The names of the Mjolnir-owned MCP servers this launch registers over
-/// ACP: project history, delegation and review. Reviewer servers a person configured
-/// are not Mjolnir's, so they are never in this list.
-pub(super) fn owned_acp_mcp_server_names(spec: &LaunchSpec) -> Vec<String> {
-    project_history_mcp(spec)
-        .into_iter()
-        .chain(subagent_acp_mcp(spec))
-        .chain(review_acp_mcp(spec))
-        .filter_map(|server| match server {
-            McpServer::Stdio(server) => Some(server.name),
-            _ => None,
-        })
-        .collect()
+/// The Mjolnir-owned MCP servers this launch registers over ACP, each with the
+/// tools it lists: project history, delegation and review. Reviewer servers a
+/// person configured are not Mjolnir's, so they are never in this list.
+pub(super) fn owned_acp_mcp_tools(spec: &LaunchSpec) -> Vec<(String, Vec<String>)> {
+    let names = |tools: &[&str]| tools.iter().map(|tool| (*tool).to_owned()).collect();
+    let mut owned = Vec::new();
+    for server in project_history_mcp(spec) {
+        if let McpServer::Stdio(server) = server {
+            // The history server lists its tools only with a history socket.
+            let tools = spec
+                .project_memory
+                .as_ref()
+                .is_some_and(|memory| memory.history_socket.is_some())
+                .then(crate::memory_mcp::tool_names)
+                .unwrap_or_default();
+            owned.push((server.name, tools));
+        }
+    }
+    if let (Some(McpServer::Stdio(server)), Some(socket)) =
+        (subagent_acp_mcp(spec), &spec.subagent_mcp_socket)
+    {
+        owned.push((server.name, names(socket.role.tool_names())));
+    }
+    if let Some(McpServer::Stdio(server)) = review_acp_mcp(spec) {
+        owned.push((server.name, names(mj_core::subagent::REVIEW_MCP_TOOLS)));
+    }
+    owned
 }
 
 /// Only owned registrations opt in; yolo and other harnesses stay unchanged.
