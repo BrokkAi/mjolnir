@@ -1,26 +1,35 @@
 use super::*;
 
-pub fn record_prompt(
+/// Record a prompt a person sent to a session, under the project the store
+/// holds for that session. Every surface a person types into records through
+/// here; agent messages do not.
+pub fn record_user_prompt(session_id: &str, event_ordinal: u64, text: &str) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let text = text.to_owned();
+    submit_database_write("record_user_prompt", move |_| {
+        record_user_prompt_to(&database_path(), &session_id, event_ordinal, &text)
+    })
+}
+
+pub(super) fn record_user_prompt_to(
+    path: &Path,
     session_id: &str,
-    bundle_id: &str,
     event_ordinal: u64,
-    submitted_at: Option<&str>,
     text: &str,
 ) -> Result<()> {
-    let session_id = session_id.to_owned();
-    let bundle_id = bundle_id.to_owned();
-    let submitted_at = submitted_at.map(str::to_owned);
-    let text = text.to_owned();
-    submit_database_write("record_prompt", move |_| {
-        record_prompt_to(
-            &database_path(),
-            &session_id,
-            &bundle_id,
-            event_ordinal,
-            submitted_at.as_deref(),
-            &text,
+    let bundle_id: Option<String> = open_reader(path)?
+        .query_row(
+            "SELECT bundle_id FROM session_contexts WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
         )
-    })
+        .optional()?;
+    // A session with no context has no row to keep history under; the
+    // history trigger would ignore the prompt anyway.
+    let Some(bundle_id) = bundle_id else {
+        return Ok(());
+    };
+    record_prompt_to(path, session_id, &bundle_id, event_ordinal, None, text)
 }
 
 pub fn record_abandoned_prompt(session_id: &str, bundle_id: &str, text: &str) -> Result<()> {

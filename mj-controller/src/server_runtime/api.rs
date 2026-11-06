@@ -3192,6 +3192,21 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
+    fn user_prompt_with_id(
+        &self,
+        session_id: String,
+        text: String,
+        command_id: Option<String>,
+    ) -> BoxFuture<'_, Result<u64>> {
+        Box::pin(async move {
+            let ordinal = self
+                .prompt_with_id(session_id.clone(), text.clone(), command_id)
+                .await?;
+            super::actions::record_user_prompt(session_id, ordinal, text).await;
+            Ok(ordinal)
+        })
+    }
+
     fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, Result<String>> {
         Box::pin(blocking("resolve the user's message target", move || {
             let state = Controller::load()?.state;

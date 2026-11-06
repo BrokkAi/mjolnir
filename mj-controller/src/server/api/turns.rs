@@ -142,7 +142,9 @@ pub(super) async fn submit_prompt(
     if hold.is_some_and(|held| !held.release()) {
         return Err(withdrawn_prompt());
     }
-    Ok(backend.prompt_with_id(session_id, text, command_id).await?)
+    Ok(backend
+        .user_prompt_with_id(session_id, text, command_id)
+        .await?)
 }
 
 fn withdrawn_prompt() -> ApiFailure {

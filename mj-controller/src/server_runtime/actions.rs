@@ -133,6 +133,22 @@ fn new_session_titles(
     (title, typed)
 }
 
+/// Record a prompt a person sent through the web viewer or the HTTP API once
+/// the session has accepted it. A failure to record leaves the prompt sent,
+/// so it is logged rather than returned.
+pub(super) async fn record_user_prompt(session_id: String, ordinal: u64, text: String) {
+    let recorded = tokio::task::spawn_blocking(move || {
+        crate::database::record_user_prompt(&session_id, ordinal, &text)
+    })
+    .await;
+    let error = match recorded {
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => format!("{error:#}"),
+        Err(error) => format!("the history task failed: {error}"),
+    };
+    tracing::warn!(%error, "prompt was accepted but its history could not be stored");
+}
+
 pub(super) async fn apply_phone_action(
     controller: &mut Controller,
     services: PhoneActionServices<'_>,
@@ -253,17 +269,18 @@ pub(super) async fn apply_phone_action(
             images,
             command_id,
         } => {
-            services
+            let ordinal = services
                 .sessions
                 .wait_for_session(&session_id, Duration::from_secs(5))
                 .await?
                 .submit(
                     command_id.map_or_else(|| new_command_id("phone-prompt"), Ok)?,
                     RelayCommand::Prompt {
-                        prompt: phone_prompt_blocks(text, images),
+                        prompt: phone_prompt_blocks(text.clone(), images),
                     },
                 )
                 .await?;
+            record_user_prompt(session_id, ordinal, text).await;
             Ok(())
         }
         ControllerAction::RunShell {

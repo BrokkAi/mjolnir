@@ -733,17 +733,7 @@ pub(super) async fn handle_action(
                 let values = values
                     .as_array()
                     .context("serialized prompt content is not an array")?;
-                let text = mj_core::transcript::materialized_content_text(values);
-                let bundle_id = state
-                    .owner()
-                    .controller()
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .with_context(|| format!("unknown session {session_id}"))?
-                    .bundle_id
-                    .clone();
-                Some((bundle_id, text))
+                Some(mj_core::transcript::materialized_content_text(values))
             } else {
                 None
             };
@@ -776,9 +766,9 @@ pub(super) async fn handle_action(
                 });
                 state.publish_revision();
             }
-            if let Some((bundle_id, text)) = history
+            if let Some(text) = history
                 && let Err(error) = blocking(move || {
-                    crate::database::record_prompt(&session_id, &bundle_id, ordinal, None, &text)
+                    crate::database::record_user_prompt(&session_id, ordinal, &text)
                 })
                 .await
             {

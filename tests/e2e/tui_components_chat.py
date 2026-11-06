@@ -29,22 +29,26 @@ def run_chat_controls(lab, tmux, evidence, session_id):
         tmux.mouse_click(x, y)
         time.sleep(0.15)
 
-    # Reverse search finds a prompt sent from this composer, so the stored
-    # row, its full-text index entry and the composer's paged search agree.
-    # Prompts sent through the HTTP API are not recorded as history.
+    # Reverse search finds the prompt the fixture sent through the web action
+    # and one sent from this composer, newest first, so both recording paths,
+    # the full-text index and the composer's paged search agree.
     focus_prompt()
     tmux.send_text("history needle prompt")
     tmux.send_key("Enter")
     tmux.wait_for("reliability reply: history needle prompt", "composer prompt answered")
     tmux.send_key("C-r")
-    tmux.send_text("ne")
+    tmux.send_text("pr")
     tmux.wait_for("type 3+ characters", "short history query explained")
-    tmux.send_text("edle pro")
-    tmux.wait_for("reverse-i-search [all projects]: needle pro  1/1 ", "history search match")
-    tmux.wait_for("> history needle prompt", "matched prompt in the composer")
-    record("history-search", "send a prompt; Ctrl-R; type ne, then edle pro", "short-query hint, then the stored prompt as 1/1")
+    tmux.send_text("ompt")
+    tmux.wait_for("reverse-i-search [all projects]: prompt  1/2 ", "history search matches")
+    tmux.wait_for("> history needle prompt", "newest match in the composer")
+    record("history-search", "send a prompt; Ctrl-R; type pr, then ompt", "short-query hint, then the composer prompt as 1/2")
+    tmux.send_key("C-r")
+    tmux.wait_for("reverse-i-search [all projects]: prompt  2/2 ", "older history match")
+    tmux.wait_for("> component prompt", "web-sent prompt in the composer")
+    record("history-search-web", "Ctrl-R", "the prompt sent through the web action as 2/2")
     tmux.send_key("M-r")
-    tmux.wait_for("reverse-i-search [project]: needle pro  1/1 ", "history search narrowed to the project")
+    tmux.wait_for("reverse-i-search [project]: prompt  1/2 ", "history search narrowed to the project")
     tmux.send_key("Escape")
     tmux.wait_until(lambda: "reverse-i-search" not in tmux.capture(), "history search cancelled")
     record("history-search-scope", "Alt-R; Escape", "project scope keeps the match; Escape restores the draft")

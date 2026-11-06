@@ -250,6 +250,18 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { anyhow::bail!("session messaging is unavailable") })
     }
 
+    /// Submit a prompt a person sent, and record it in their prompt history.
+    /// Agent messages go through [`Self::prompt_with_id`], which records
+    /// nothing.
+    fn user_prompt_with_id(
+        &self,
+        session_id: String,
+        text: String,
+        command_id: Option<String>,
+    ) -> BoxFuture<'_, AnyResult<u64>> {
+        self.prompt_with_id(session_id, text, command_id)
+    }
+
     /// Submit under a producer-owned identity, preserving the receipt on retries.
     fn prompt_with_id(
         &self,
