@@ -595,7 +595,10 @@ async fn refresh_profile_with_cache_root(
                 "could not read the Codex configuration: {error}"
             )),
             CodexQuotaSource::ChatGptLogin => 'codex: {
-                let launcher = match container(codex_usage::host_has_codex(cache_root.as_deref())) {
+                let launcher = match container(codex_usage::host_has_codex(
+                    cache_root.as_deref(),
+                    host_path.as_deref(),
+                )) {
                     Ok(Some(check)) => codex_usage::CodexLauncher::Container(check),
                     Ok(None) => match mj_core::placement::local_harness_runtime() {
                         mj_core::worker_launch::HarnessRuntimePolicy::Image => {

@@ -612,9 +612,17 @@ fn managed_codex_launcher(install: &Path) -> Result<PathBuf, QueryError> {
 /// Whether this host holds the managed Codex installation a host check would
 /// start: the same lease, receipt and launcher checks `spawn_codex` makes,
 /// without taking the lease. `cache_root` is as in [`CodexLauncher::Managed`].
-pub(crate) fn host_has_codex(cache_root: Option<&Path>) -> bool {
+///
+/// The launcher is a Node script, and a host check passes it only the
+/// profile's environment, so `node` must also be on `path`, the PATH that
+/// environment gives it. A host whose only Node is Mjolnir's managed copy
+/// therefore uses a container under `auto`.
+pub(crate) fn host_has_codex(cache_root: Option<&Path>, path: Option<&std::ffi::OsStr>) -> bool {
     #[cfg(unix)]
     {
+        if mj_core::program_path::find_executable_on_path("node", path).is_none() {
+            return false;
+        }
         let cache_root = match cache_root {
             Some(root) => root.to_path_buf(),
             None => match process_managed_cache_root() {
@@ -627,7 +635,7 @@ pub(crate) fn host_has_codex(cache_root: Option<&Path>) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = cache_root;
+        let _ = (cache_root, path);
         false
     }
 }
@@ -1038,20 +1046,39 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn host_has_codex_only_for_a_complete_managed_install() {
+        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().expect("tempdir");
         let cache_root = test_cache_root(&temp);
-        assert!(!host_has_codex(Some(&cache_root)));
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        std::fs::write(bin.join("node"), "#!/bin/sh\nexit 0\n").expect("node");
+        std::fs::set_permissions(bin.join("node"), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod node");
+        let with_node = Some(bin.as_os_str());
+        assert!(!host_has_codex(Some(&cache_root), with_node));
 
         let install = install_fake_managed_codex(&cache_root, "#!/bin/sh\nexit 0\n");
-        assert!(host_has_codex(Some(&cache_root)));
+        assert!(host_has_codex(Some(&cache_root), with_node));
+
+        // The launcher is a Node script: without `node` on its PATH it cannot
+        // start.
+        let empty = tempfile::tempdir().expect("tempdir");
+        assert!(!host_has_codex(
+            Some(&cache_root),
+            Some(empty.path().as_os_str())
+        ));
+        assert!(!host_has_codex(Some(&cache_root), None));
 
         // A `codex` on PATH is not the managed install.
         let other = tempfile::tempdir().expect("tempdir");
-        assert!(!host_has_codex(Some(&other.path().join("cache"))));
+        assert!(!host_has_codex(
+            Some(&other.path().join("cache")),
+            with_node
+        ));
 
         std::fs::remove_file(install.join(mj_core::harness_runtime::MANIFEST_FILE))
             .expect("remove manifest");
-        assert!(!host_has_codex(Some(&cache_root)));
+        assert!(!host_has_codex(Some(&cache_root), with_node));
     }
 
     #[cfg(unix)]
