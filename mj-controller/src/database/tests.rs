@@ -2962,6 +2962,7 @@ fn interruption_summary_matches_full_projection_and_legacy_outcomes() {
     save_session_to(&database, &session("session-1", "project-1")).unwrap();
     let mut materialized = materialized_session("session-1");
     materialized.last_turn_outcome = Some(MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "prompt".into(),
@@ -4615,6 +4616,7 @@ fn a_projection_page_persists_the_turn_outcome_and_the_queue_acceptance_ordinal(
         execution: Some(MaterializedExecutionState::Idle),
         active_turn: Some(None),
         last_turn_outcome: Some(MaterializedTurnOutcome {
+            answered_through: None,
             diagnostic: None,
             usage: None,
             command_id: "prompt-1".into(),
@@ -4884,6 +4886,7 @@ fn a_finished_turn_reports_its_own_answer_and_not_a_later_harness_notice() {
             execution: Some(MaterializedExecutionState::Idle),
             active_turn: Some(None),
             last_turn_outcome: Some(MaterializedTurnOutcome {
+                answered_through: None,
                 diagnostic: None,
                 usage: None,
                 command_id: "prompt-1".into(),
@@ -7069,7 +7072,7 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
     }
     connection
         .execute_batch(
-            "DELETE FROM schema_migrations WHERE version = 114; PRAGMA user_version = 113;",
+            "DELETE FROM schema_migrations WHERE version = 115; PRAGMA user_version = 114;",
         )
         .unwrap();
     drop(connection);

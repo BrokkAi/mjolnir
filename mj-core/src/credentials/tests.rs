@@ -880,6 +880,7 @@ fn a_kimi_token_refusal_is_an_auth_failure() {
     .unwrap();
     assert!(turn_diagnostic_reports_auth_failure(&diagnostic));
     let turn = crate::state::MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: Some(diagnostic),
         usage: None,
         command_id: "prompt-1".into(),

@@ -536,15 +536,13 @@ fn managed_clone_starting_branch(
                 "inspect origin remote",
             ))?;
             if origin.status == 0 {
-                let purpose = "resolve remote default branch";
-                let remote = command_stdout(
-                    executor.execute(&managed_network_git_command(
-                        target,
-                        repository,
-                        ["ls-remote", "--symref", "origin", "HEAD"],
-                        purpose,
-                    ))?,
-                    purpose,
+                let remote = origin_network_git_stdout(
+                    executor,
+                    target,
+                    repository,
+                    String::from_utf8_lossy(&origin.stdout).trim(),
+                    &["ls-remote", "--symref", "origin", "HEAD"],
+                    "resolve remote default branch",
                 )?;
                 let branch = remote
                     .lines()
@@ -633,19 +631,18 @@ fn refresh_source_origin(
         }
     };
     let purpose = "fetch origin";
-    command_stdout(
-        executor.execute(&managed_network_git_command(
-            target,
-            repository,
-            [
-                "fetch",
-                "--no-write-fetch-head",
-                "--no-tags",
-                "--no-recurse-submodules",
-                "origin",
-            ],
-            purpose,
-        ))?,
+    origin_network_git_stdout(
+        executor,
+        target,
+        repository,
+        String::from_utf8_lossy(&origin.stdout).trim(),
+        &[
+            "fetch",
+            "--no-write-fetch-head",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "origin",
+        ],
         purpose,
     )
     .with_context(|| {
@@ -655,6 +652,56 @@ fn refresh_source_origin(
         )
     })?;
     Ok(())
+}
+
+const GITHUB_SSH_PREFIXES: [&str; 2] = ["git@github.com:", "ssh://git@github.com/"];
+
+/// Run a network Git command against `origin`. A host can hold an HTTPS
+/// credential for GitHub, such as a GitHub CLI login, without an SSH key;
+/// sessions there push over HTTPS. So when a GitHub SSH origin fails, the
+/// command runs once more over HTTPS with the host's own credential helpers.
+fn origin_network_git_stdout(
+    executor: &impl CommandExecutor,
+    target: &ManagedWorktreeTarget,
+    repository: &Path,
+    origin_url: &str,
+    args: &[&str],
+    purpose: &str,
+) -> Result<String> {
+    let result = command_stdout(
+        executor.execute(&managed_network_git_command(
+            target, repository, args, purpose,
+        ))?,
+        purpose,
+    );
+    let Err(ssh_error) = result else {
+        return result;
+    };
+    if !GITHUB_SSH_PREFIXES
+        .iter()
+        .any(|prefix| origin_url.starts_with(prefix))
+    {
+        return Err(ssh_error);
+    }
+    let mut https_args = Vec::new();
+    for prefix in GITHUB_SSH_PREFIXES {
+        https_args.extend([
+            "-c".to_owned(),
+            format!("url.https://github.com/.insteadOf={prefix}"),
+        ]);
+    }
+    https_args.extend(args.iter().map(|arg| (*arg).to_owned()));
+    let purpose = format!("{purpose} over HTTPS");
+    command_stdout(
+        executor.execute(&managed_network_git_command(
+            target,
+            repository,
+            https_args,
+            purpose.as_str(),
+        ))?,
+        &purpose,
+    )
+    .map_err(|https_error| anyhow::anyhow!("{ssh_error:#}; {https_error:#}"))
 }
 
 fn source_fetch_lock(

@@ -95,6 +95,7 @@ fn server_retry_requires_a_jev_verdict_and_retries_with_backoff() {
         .unwrap();
     relay
         .record_observation(RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         })
@@ -295,7 +296,9 @@ fn autonomous_provider_failure_arms_one_retry_and_survives_restart() {
             )),
         )))
         .unwrap();
-    relay.settle_harness_turn(Some("test".into())).unwrap();
+    relay
+        .settle_harness_turn(Some("test".into()), "end_turn")
+        .unwrap();
     relay.prepare_pending_assessment().unwrap();
     let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
     assert!(evidence.completion.is_some());

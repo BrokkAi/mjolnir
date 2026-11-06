@@ -1098,7 +1098,7 @@ impl ApiBackend {
                             last_completed_ordinal: None,
                             report: ReportState::Fallback,
                             awaited_ordinal: None,
-                            answered_ordinal: None,
+                            answer: None,
                             failed_turn: None,
                             login_failure: None,
                             provider_failure: None,
@@ -2050,9 +2050,8 @@ pub(crate) struct ChildProgress {
     pub report: ReportState,
     /// The newest prompt the parent gave the child, by acceptance ordinal.
     pub awaited_ordinal: Option<u64>,
-    /// The newest prompt the child's last finished turn answers; see
-    /// [`mj_core::subagent::answered_ordinal`].
-    pub answered_ordinal: Option<u64>,
+    /// The outcome owning the child's answer.
+    pub answer: Option<mj_core::state::MaterializedTurnOutcome>,
     /// How that turn failed, when it did: `failed` or `interrupted`, and why.
     pub failed_turn: Option<(&'static str, String)>,
     /// The child's profile, when that turn failed because the provider
@@ -2076,7 +2075,7 @@ impl ChildProgress {
             last_completed_ordinal: Some(1),
             report,
             awaited_ordinal: None,
-            answered_ordinal: None,
+            answer: None,
             failed_turn: None,
             login_failure: None,
             provider_failure: None,
@@ -2090,10 +2089,15 @@ impl ChildProgress {
     /// `submitted` is the first prompt's ordinal while startup remembers it.
     fn awaiting_prompt(&self, submitted: Option<u64>) -> bool {
         self.last_completed_ordinal.is_none()
-            || mj_core::subagent::prompt_unanswered(
-                self.awaited_ordinal.max(submitted),
-                self.answered_ordinal,
-            )
+            || self
+                .awaited_ordinal
+                .into_iter()
+                .chain(submitted)
+                .any(|ordinal| {
+                    self.answer
+                        .as_ref()
+                        .is_none_or(|turn| !turn.answers(ordinal))
+                })
     }
 }
 
@@ -2124,7 +2128,7 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
             mj_core::clock::epoch_millis(),
         ),
         awaited_ordinal: recorded.awaited_ordinal,
-        answered_ordinal: last.and_then(mj_core::subagent::answered_ordinal),
+        answer: last.cloned(),
         failed_turn: last.and_then(|last| {
             mj_core::subagent::failed_turn(
                 last,
@@ -2193,7 +2197,7 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         last_completed_ordinal: last.as_ref().map(|turn| turn.completed_ordinal),
         report,
         awaited_ordinal: recorded.awaited_ordinal,
-        answered_ordinal: last.as_ref().and_then(mj_core::subagent::answered_ordinal),
+        answer: last.clone(),
         failed_turn,
         login_failure,
         provider_failure: last.as_ref().and_then(provider_failure),

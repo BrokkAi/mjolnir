@@ -1210,29 +1210,7 @@ pub fn awaiting_prompt(
     awaited_ordinal: Option<u64>,
     last_turn: Option<&crate::state::MaterializedTurnOutcome>,
 ) -> bool {
-    prompt_unanswered(awaited_ordinal, last_turn.and_then(answered_ordinal))
-}
-
-/// Whether the prompt accepted at `awaited_ordinal` is still unanswered by a
-/// finished turn that answers prompts up to `answered_ordinal` (see
-/// [`answered_ordinal`]). This is the one comparison every reader applies.
-#[must_use]
-pub fn prompt_unanswered(awaited_ordinal: Option<u64>, answered_ordinal: Option<u64>) -> bool {
-    awaited_ordinal
-        .is_some_and(|awaited| answered_ordinal.is_none_or(|answered| answered < awaited))
-}
-
-/// The newest prompt a finished turn answers, by acceptance ordinal.
-///
-/// A prompt's turn answers the prompt accepted at its own ordinal. A handback
-/// reminder is Mjolnir's, not the parent's: the store gives its turn no
-/// acceptance ordinal, and the report the child hands back in it answers the
-/// turn it reminded about, so it answers every prompt accepted before that
-/// turn finished. A prompt accepted after that runs after the reminder and is
-/// still owed.
-#[must_use]
-pub fn answered_ordinal(turn: &crate::state::MaterializedTurnOutcome) -> Option<u64> {
-    reminded_turn_ordinal(&turn.command_id).or(turn.accepted_ordinal)
+    awaited_ordinal.is_some_and(|ordinal| last_turn.is_none_or(|turn| !turn.answers(ordinal)))
 }
 
 /// How a child's last finished turn failed, if it did: `interrupted` for a
@@ -1985,6 +1963,7 @@ mod tests {
 
     fn finished(command_id: &str, stop_reason: &str) -> crate::state::MaterializedTurnOutcome {
         crate::state::MaterializedTurnOutcome {
+            answered_through: None,
             diagnostic: None,
             usage: None,
             command_id: command_id.to_owned(),
@@ -2725,6 +2704,27 @@ mod tests {
             Some(&reminder_turn),
             0
         ));
+        let harness_turn = crate::state::MaterializedTurnOutcome {
+            command_id: crate::continuation::harness_turn_id(103),
+            turn_start_position: Some(103),
+            answered_through: Some(83),
+            ..reminder_turn.clone()
+        };
+        // Hard-won: #1450 review: a queued task must prevent handback.
+        let queued_report = SubagentReport {
+            awaited_ordinal: Some(84),
+            ..Default::default()
+        };
+        assert!(!has_handed_back(
+            true,
+            &queued_report,
+            false,
+            Some(&harness_turn),
+            0
+        ));
+        assert!(awaiting_prompt(Some(84), Some(&harness_turn)));
+        assert!(!awaiting_prompt(Some(83), Some(&harness_turn)));
+        assert!(awaiting_prompt(Some(110), Some(&harness_turn)));
         // A prompt accepted after the reminded turn ended is still owed.
         assert!(awaiting_prompt(Some(110), Some(&reminder_turn)));
     }

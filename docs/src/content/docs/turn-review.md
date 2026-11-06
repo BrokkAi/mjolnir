@@ -16,7 +16,9 @@ model = "gpt-6.10-terra"
 effort = "xhigh"
 ```
 
-An empty reviewer list means no reviewers are configured. A session-level `--reviewer` choice enables review unless that session uses `--review off`. Old `trigger` and `enabled` keys are accepted but dropped when settings are saved.
+An empty list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers. It chooses the first available combination: Terra, Sol, and Haiku; Terra and Sol; three Haiku; two DeepSeek Flash; Grok; or Kimi K3.1 or newer. It uses the newest advertised model within each family. If no combination is available, choose reviewers in **Settings → Code Review**. A session-level `--reviewer` choice enables review unless that session uses `--review off`.
+
+Old `count`, `profile`, `model`, `effort`, `tier`, `trigger`, and `enabled` config keys remain readable; `trigger` and `enabled` are dropped when settings are saved. An existing config without `[review]`, or a `[review]` table without `reviewers` and `model`, retains the old Auto selection. The daemon saves reviewer rows after capability discovery succeeds; if discovery fails, it retries. Other settings saves preserve this pending selection. A fresh config starts with no reviewers. An explicit `reviewers = []` stays empty.
 
 ### Per-session settings
 
