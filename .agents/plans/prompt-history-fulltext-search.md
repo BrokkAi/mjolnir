@@ -85,6 +85,14 @@ To see it working, open a session in the terminal and press Ctrl-R. Type three o
   Rationale: three review rounds found defects in handling repeated rows after the fact (stalled refills, unbounded scans before and after a full page, refills walking repeat-only pages). The kept live rows hold 4,828 prompts but 4,266 distinct texts, with `/clear` 173 times and `continue` 99 times. Grouping makes each text appear once across all pages by construction. A request costs one query per tier and follows the tier's matches; on a copy of the live store the session and project tiers took under 5 ms and the other-projects tier 12 to 14 ms for common queries.
   Date/Author: 2026-11-06, agent, after review.
 
+- Decision: keep the per-tier `GROUP BY`, even though it reads every match in a tier before `LIMIT` applies and so does not stop scanning once a page is full.
+  Rationale: exact removal of repeats and stopping early conflict. Two reviewers flagged the full read; the user chose exact paging with each prompt listed once over a strict row bound, given the measured cost on the live store (under 5 ms for this session and the project, 12 to 14 ms for other projects, per request). The cost grows with the number of matches in a tier.
+  Date/Author: 2026-11-06, user.
+
+- Decision: every surface a person types into records the prompt before submitting it, by text, skipping it when it equals the session's newest prompt.
+  Rationale: recording after acceptance left a window in which a disconnect, a handoff or a failed cleanup lost the record, and a fast turn could finish before the record was written, so the chat's refresh after the turn missed it. Recording first orders the record before anything the session does with the prompt. A refused prompt stays in history, as an abandoned draft does.
+  Date/Author: 2026-11-06, agent, after review.
+
 - Decision: an open chat lists its session's stored prompts again after each `TurnCompleted`, and Up/Ctrl-P show each text once at its newest place.
   Rationale: prompts sent to the session from the web viewer or the API are recorded by the daemon, not by this chat. `PromptAccepted` events also carry agent `send_message` turns, so the event text cannot feed Up directly; the stored listing holds only recorded user prompts, and its record is written before the turn ends.
   Date/Author: 2026-11-06, agent, after review.
