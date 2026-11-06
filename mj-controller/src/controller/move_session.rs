@@ -381,6 +381,9 @@ fn sealed_selection_difference(retained: &MoveSelection, requested: &MoveSelecti
     if retained.subagents != requested.subagents {
         parts.push("sub-agent policy (send the one the Move was sealed with)".to_owned());
     }
+    if retained.oracle != requested.oracle || retained.oracle_choice != requested.oracle_choice {
+        parts.push("oracle choice (send the one the Move was sealed with)".to_owned());
+    }
     if retained.session_id != requested.session_id || parts.is_empty() {
         parts.push("the session".to_owned());
     }
@@ -1050,6 +1053,18 @@ impl Controller {
                 .target_template_id
                 .or(retained.selection.target_template_id.clone());
             selection.subagents = selection.subagents.or(retained.selection.subagents.clone());
+            selection.oracle = selection.oracle.or(retained.selection.oracle);
+            selection.oracle_choice = selection
+                .oracle_choice
+                .or(retained.selection.oracle_choice.clone());
+            if retained.selection.oracle.is_none() && selection.oracle == Some(source.oracle) {
+                selection.oracle = None;
+            }
+            if retained.selection.oracle_choice.is_none()
+                && selection.oracle_choice.as_ref() == source.oracle_choice.as_ref()
+            {
+                selection.oracle_choice = None;
+            }
             // Legacy selections omitted an unchanged policy. A viewer may
             // send that same effective policy explicitly; it changes nothing.
             if retained.selection.subagents.is_none()
@@ -1165,6 +1180,21 @@ impl Controller {
             profile.enabled,
             "destination profile {profile_id:?} is disabled"
         );
+        let requested_oracle = selection.oracle.unwrap_or(source.oracle);
+        let explicit_oracle = selection.oracle == Some(true) || selection.oracle_choice.is_some();
+        if requested_oracle
+            && explicit_oracle
+            && selection
+                .oracle_choice
+                .as_ref()
+                .or(source.oracle_choice.as_ref())
+                .or(self.config.subagents.oracle.as_ref())
+                .is_none_or(|choice| choice.model.trim().is_empty())
+        {
+            selection.oracle = Some(false);
+            selection.oracle_choice = None;
+            executor.notify_notice(mj_core::state::ORACLE_UNAVAILABLE_NOTICE);
+        }
         let policy = move_subagent_policy(source, &selection);
         // An unchanged delegation policy has already been admitted. Changing
         // credentials for the same harness does not change its eligible models.
@@ -2315,9 +2345,20 @@ impl Controller {
             // The destination worker reads its delegation policy from the
             // record at launch. `recovery_session` above keeps the old one
             // for a rollback.
-            if let Some(policy) = &operation.selection.subagents {
+            if operation.selection.subagents.is_some()
+                || operation.selection.oracle.is_some()
+                || operation.selection.oracle_choice.is_some()
+            {
                 let session = self.state.sessions.get_mut(&id).unwrap();
-                session.subagents = Some(policy.clone());
+                if let Some(policy) = &operation.selection.subagents {
+                    session.subagents = Some(policy.clone());
+                }
+                if let Some(oracle) = operation.selection.oracle {
+                    session.oracle = oracle;
+                }
+                if let Some(choice) = &operation.selection.oracle_choice {
+                    session.oracle_choice = Some(choice.clone());
+                }
                 crate::database::save_resumed_session(session, None)?;
             }
             if operation.in_place {
@@ -2617,6 +2658,13 @@ fn move_changes_nothing(source: &mj_core::state::SessionRecord, selection: &Move
         && selection.profile_id.as_deref() == Some(source.last_profile.as_str())
         && move_environment_change(source, selection, false).is_none()
         && move_subagent_policy(source, selection) == source.subagents.clone().unwrap_or_default()
+        && selection
+            .oracle
+            .is_none_or(|oracle| oracle == source.oracle)
+        && selection
+            .oracle_choice
+            .as_ref()
+            .is_none_or(|choice| Some(choice) == source.oracle_choice.as_ref())
 }
 
 pub(crate) fn parent_tools_enabled(
@@ -2655,6 +2703,10 @@ pub(in crate::controller) fn move_children(
         .subagents
         .values()
         .filter(|relation| relation.parent_session_id == parent_session_id)
+        // These children are named to the primary after an in-place swap, and
+        // the oracle is never named to it. A Move stops the oracle through the
+        // ordinary stop path, so it needs no listing.
+        .filter(|relation| relation.kind != mj_core::subagent::SubagentKind::Oracle)
         .filter_map(|relation| {
             let child = state.sessions.get(&relation.child_session_id)?;
             let state = if child.state.has_live_worker() {

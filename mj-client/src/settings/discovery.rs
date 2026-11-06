@@ -18,7 +18,7 @@ pub fn fill_subagent_options(
 ) -> Result<Option<String>, serde_json::Error> {
     let config = super::draft::config_from_draft(draft.clone())?;
     let mut unreachable = None;
-    for task in ["straightforward", "subtle"] {
+    for task in ["straightforward", "subtle", "oracle"] {
         let model = draft["subagents"][task]["model"].as_str();
         let mut options = capabilities.options(&config, None);
         let mut efforts_pending = false;

@@ -27,6 +27,8 @@ fn remote_repair_requires_confirmation_and_restores_the_previous_screen() {
         push_urls: vec!["ssh://git@example.com/repo.git".into()],
     };
     let retry = DashboardAction::CreateSession {
+        oracle: None,
+        oracle_choice: None,
         remember_container_size: false,
         subagents: None,
         review: None,
@@ -1838,6 +1840,8 @@ fn the_notice_log_age_column_keeps_messages_aligned_past_one_minute() {
 fn launch_failure_survives_notices_and_retries_original_settings_once() {
     let mut dashboard = dashboard_with_session(stopped_session());
     let retry = DashboardAction::CreateSession {
+        oracle: None,
+        oracle_choice: None,
         remember_container_size: false,
         subagents: None,
         review: None,

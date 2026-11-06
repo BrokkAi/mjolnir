@@ -62,7 +62,7 @@ impl RuntimeState {
         })
         .await?;
         self.reload_controller().await?;
-        if relation.kind == mj_core::subagent::SubagentKind::Worker {
+        if relation.kind != mj_core::subagent::SubagentKind::Reviewer {
             let id = relation.child_session_id.clone();
             if let Some(delivery) =
                 blocking(move || crate::database::next_startup_delivery(&id)).await?
@@ -302,7 +302,7 @@ impl RuntimeState {
         let path_cancelled = control.cancelled.clone();
         let remember_launch_choices = request.remember_launch_choices;
         let preferences_owner = self.clone();
-        let (registered, review_turned_off) = blocking(move || {
+        let (registered, review_turned_off, oracle_notice) = blocking(move || {
             let mut controller = Controller::load()?;
             let path_executor = crate::targets::CancellableProcessExecutor::new(path_cancelled)
                 .with_deadline(Duration::from_secs(30));
@@ -331,6 +331,8 @@ impl RuntimeState {
                     base: request.base,
                     no_later_history: request.no_later_history,
                     subagents: request.subagents,
+                    oracle: request.oracle,
+                    oracle_choice: request.oracle_choice,
                     review: request.review,
                     no_project_memory: request.no_project_memory,
                     no_github_events: request.no_github_events,
@@ -401,10 +403,16 @@ impl RuntimeState {
                     remembered_container_size,
                 },
                 registration.review_turned_off,
+                registration.oracle_notice,
             ))
         })
         .await?;
-        let capacity_warning = _container_admission.warning.clone();
+        let capacity_warning = [oracle_notice, _container_admission.warning.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let capacity_warning = (!capacity_warning.is_empty()).then_some(capacity_warning);
         drop(_container_admission);
         let session_id = registered.session.id.clone();
         self.start_or_join_lifecycle_controlled(
@@ -590,6 +598,8 @@ mod delegation_replay_tests {
                 .unwrap()
                 .last_subagent_policy_for("codex");
             let request = mj_client::daemon::CreateSessionRequest {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: remember,
                 remember_container_size: false,
                 create_managed_worktree: Some(false),
@@ -723,6 +733,8 @@ mod delegation_replay_tests {
         crate::database::save_session(&legacy).unwrap();
         let runtime = crate::daemon::tests::test_runtime_state();
         let request = mj_client::daemon::CreateSessionRequest {
+            oracle: None,
+            oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: false,
             create_managed_worktree: None,

@@ -1,5 +1,15 @@
 use super::*;
 
+/// Every top-level session of every harness gets the message-only `mj-agents`
+/// server, and that server carries ask_oracle; a child never does.
+pub(super) fn oracle_launch_enabled(
+    session: &mj_core::state::SessionRecord,
+    managed_child: bool,
+    choices: &mj_core::config::SubagentConfig,
+) -> bool {
+    !managed_child && session.effective_oracle(choices).is_some()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::controller) enum WorkerFilePreparation {
     Install,
@@ -627,6 +637,7 @@ impl Controller {
         // the default, so their launch files do not change.
         launch.subtle_subagents = !launch.subagents.uses_mjolnir()
             || self.config.subagents.offers_subtle(&launch.subagents);
+        launch.oracle = oracle_launch_enabled(session, subagent.is_some(), &self.config.subagents);
         // Registration decided whether this child can be given the tool.
         launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);
         // The child's harness opens on its spawn model instead of switching
@@ -634,7 +645,7 @@ impl Controller {
         launch.initial_model = subagent.as_ref().and_then(|child| child.model.clone());
         if let Some(child) = subagent
             .as_ref()
-            .filter(|child| child.kind == mj_core::subagent::SubagentKind::Worker)
+            .filter(|child| child.kind != mj_core::subagent::SubagentKind::Reviewer)
         {
             launch.initial_commands = crate::database::load_startup_group(
                 session_id,
@@ -1164,6 +1175,7 @@ pub(super) fn worker_launch_config_with_checkout(
     }
     Ok((
         WorkerLaunchConfig {
+            oracle: false,
             initial_commands: Vec::new(),
             reviewer_launch: None,
             goal_resume_request: None,

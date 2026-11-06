@@ -107,6 +107,15 @@ impl DashboardState {
         let subagents = wizard.subagent_change(self);
         let action = DashboardAction::MoveSession {
             subagents,
+            oracle: wizard
+                .subagents
+                .oracle_available()
+                .then(|| self.session_record(&wizard.session_id))
+                .flatten()
+                .and_then(|record| {
+                    (record.oracle != wizard.subagents.oracle).then_some(wizard.subagents.oracle)
+                }),
+            oracle_choice: None,
             workspace_selection: wizard.files.selection.clone(),
             session_id: wizard.session_id.clone(),
             profile_id,
@@ -204,6 +213,8 @@ impl DashboardState {
             }
             let action = DashboardAction::MoveSession {
                 subagents: selection.subagents.clone(),
+                oracle: selection.oracle,
+                oracle_choice: selection.oracle_choice.clone(),
                 workspace_selection: selection.workspace.clone(),
                 session_id: selection.session_id.clone(),
                 profile_id: selection.profile_id.clone().unwrap(),

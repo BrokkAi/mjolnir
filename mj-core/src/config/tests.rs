@@ -3144,6 +3144,29 @@ fn subtle_subagents_are_optional_but_never_configured_alone() {
     );
 }
 
+#[test]
+fn oracle_configuration_is_independent_and_rejects_adaptive_effort() {
+    let mut config = Config::default();
+    config.subagents.oracle = Some(SubagentChoice {
+        model: "advisor".into(),
+        effort: Some("high".into()),
+    });
+    config.validate().unwrap();
+    assert!(config.subagents.oracle_configured());
+    let encoded = serde_json::to_value(&config).unwrap();
+    assert_eq!(encoded["subagents"]["oracle"]["model"], "advisor");
+    let decoded: Config = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded.subagents.oracle, config.subagents.oracle);
+    config.subagents.oracle.as_mut().unwrap().effort = Some("adaptive".into());
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("[subagents.oracle]")
+    );
+}
+
 /// Codex profiles can point at different providers, so a native Codex thread
 /// continues only on a profile that sends requests to the same service. Each
 /// profile's provider comes from its own Codex files, overlay included, and a

@@ -138,6 +138,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         ]),
     };
     let state = AppState {
+        last_oracle_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         subagents: Default::default(),
@@ -145,6 +146,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         sessions: [(
             "session-1".into(),
             SessionRecord {
+                oracle_choice: None,
+                oracle: true,
                 project: None,
                 target_runtime: None,
                 launch_base: None,
@@ -2770,6 +2773,8 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
+        oracle: None,
+        oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
         review: None,
@@ -2857,6 +2862,8 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
         |target_id: &str,
          resource_allocation: Option<mj_core::state::SessionResourceAllocation>| {
             ControllerAction::New {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
                 review: None,
@@ -3129,6 +3136,8 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     snapshot.sessions[0].capabilities.move_session = true;
     let selection = MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,

@@ -135,7 +135,7 @@ pub fn visible_paths(path: &[String], value: &Value) -> Vec<Vec<String>> {
     let keys = visible_keys(path, value);
     if path == ["subagents"] {
         let mut fields = vec![vec!["subagents".to_owned(), "max_concurrent".to_owned()]];
-        for task in ["straightforward", "subtle"] {
+        for task in ["straightforward", "subtle", "oracle"] {
             fields.push(vec![
                 "subagents".to_owned(),
                 task.to_owned(),
@@ -154,7 +154,7 @@ pub fn visible_paths(path: &[String], value: &Value) -> Vec<Vec<String>> {
             .into_iter()
             .filter(|child| {
                 child != "max_concurrent"
-                    && !["straightforward", "subtle"].contains(&child.as_str())
+                    && !["straightforward", "subtle", "oracle"].contains(&child.as_str())
             })
             .map(|child| vec!["subagents".to_owned(), child])
             .collect::<Vec<_>>();
@@ -171,7 +171,7 @@ pub fn visible_paths(path: &[String], value: &Value) -> Vec<Vec<String>> {
 
 /// Page that owns the row for a full setting path.
 pub fn row_page(path: &[String]) -> &[String] {
-    if matches!(path, [section, task, field] if section == "subagents" && ["straightforward", "subtle"].contains(&task.as_str()) && ["model", "effort"].contains(&field.as_str()))
+    if matches!(path, [section, task, field] if section == "subagents" && ["straightforward", "subtle", "oracle"].contains(&task.as_str()) && ["model", "effort"].contains(&field.as_str()))
     {
         &path[..1]
     } else {

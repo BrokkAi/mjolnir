@@ -447,6 +447,10 @@ pub struct SubagentConfig {
     pub straightforward: Option<SubagentChoice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtle: Option<SubagentChoice>,
+    /// The read-only advisor behind `ask_oracle`. Optional, and independent
+    /// of the other two.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<SubagentChoice>,
     /// Deprecated global switch retained for read compatibility with
     /// configurations written before the per-session choice existed. It is
     /// ignored and omitted from newly written configurations.
@@ -476,6 +480,7 @@ impl Default for SubagentConfig {
         Self {
             straightforward: None,
             subtle: None,
+            oracle: None,
             enabled: false,
             max_concurrent: default_subagent_limit(),
             legacy_eligible_profiles: BTreeMap::new(),
@@ -488,6 +493,7 @@ impl SubagentConfig {
         match task_type {
             crate::subagent::SubagentTaskType::Straightforward => self.straightforward.as_ref(),
             crate::subagent::SubagentTaskType::Subtle => self.subtle.as_ref(),
+            crate::subagent::SubagentTaskType::Oracle => self.oracle.as_ref(),
         }
     }
     /// A session's choice for `task_type`: its own override, else the global one.
@@ -506,6 +512,12 @@ impl SubagentConfig {
         self.effective_choice(policy, crate::subagent::SubagentTaskType::Subtle)
             .is_some()
     }
+    /// Whether sessions can be offered an oracle.
+    pub fn oracle_configured(&self) -> bool {
+        self.oracle
+            .as_ref()
+            .is_some_and(|choice| !choice.model.trim().is_empty())
+    }
     /// Straightforward is required; subtle is optional.
     pub fn is_configured(&self) -> bool {
         self.straightforward
@@ -518,12 +530,14 @@ impl SubagentConfig {
         self.max_concurrent == default_subagent_limit()
             && self.straightforward.is_none()
             && self.subtle.is_none()
+            && self.oracle.is_none()
     }
 
     fn validate(&self) -> Result<()> {
         for task_type in [
             crate::subagent::SubagentTaskType::Straightforward,
             crate::subagent::SubagentTaskType::Subtle,
+            crate::subagent::SubagentTaskType::Oracle,
         ] {
             if let Some(choice) = self.choice(task_type) {
                 anyhow::ensure!(
@@ -650,11 +664,15 @@ impl Config {
     /// and each profile's current model have their efforts discovered ahead
     /// of a request; aggregating harnesses advertise hundreds of models.
     pub fn selected_models(&self, id: &str) -> BTreeSet<String> {
-        let mut models = [&self.subagents.straightforward, &self.subagents.subtle]
-            .into_iter()
-            .flatten()
-            .map(|choice| choice.model.clone())
-            .collect::<BTreeSet<_>>();
+        let mut models = [
+            &self.subagents.straightforward,
+            &self.subagents.subtle,
+            &self.subagents.oracle,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|choice| choice.model.clone())
+        .collect::<BTreeSet<_>>();
         if self.review.profile.as_deref() == Some(id)
             && let Some(model) = &self.review.model
         {

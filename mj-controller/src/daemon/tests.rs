@@ -1367,6 +1367,8 @@ pub(super) fn runtime_test_session(
     state: SessionState,
 ) -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -5671,6 +5673,8 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
     let shutdown = CancellationToken::new();
     let create = |title: &str| {
         DaemonAction::StartCreateSession(mj_client::daemon::CreateSessionRequest {
+            oracle: None,
+            oracle_choice: None,
             remember_launch_choices: true,
             remember_container_size: true,
             review: None,
@@ -6717,6 +6721,7 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     let parent_id = "0123456789abcdef0123456789abcdef";
     let finished_id = "11111111111111111111111111111111";
     let stuck_id = "22222222222222222222222222222222";
+    let oracle_id = "33333333333333333333333333333333";
     // A parent with nothing to checkpoint yet, so its own suspend settles
     // without a worker to talk to.
     let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
@@ -6801,6 +6806,19 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     });
     crate::database::save_subagent_session(&stuck, &runtime_test_subagent(stuck_id, parent_id))
         .unwrap();
+    // The primary's oracle, working like the child above. It is stopped with
+    // the rest but never named to the primary.
+    let mut oracle = runtime_test_session(oracle_id, &workspace.id, SessionState::Running);
+    oracle.title = "oracle".into();
+    oracle.target_template_id = "removed-target".into();
+    oracle.target = Some(mj_core::state::TargetLocator::SshBare {
+        host: "builder.invalid".into(),
+        workspace: PathBuf::from(format!(".local/share/hel/workspaces/{oracle_id}")),
+        worker_id: Some(oracle_id.into()),
+    });
+    let mut oracle_relation = runtime_test_subagent(oracle_id, parent_id);
+    oracle_relation.kind = mj_core::subagent::SubagentKind::Oracle;
+    crate::database::save_subagent_session(&oracle, &oracle_relation).unwrap();
     // The index exists but has not seen either child yet.
     sessionwiki::index::open().unwrap();
 
@@ -6815,7 +6833,7 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
 
     let stored = crate::database::load_state().unwrap();
     assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
-    for child in [finished_id, stuck_id] {
+    for child in [finished_id, stuck_id, oracle_id] {
         assert!(
             !stored.sessions.contains_key(child) && !stored.subagents.contains_key(child),
             "sub-agent {child} is removed, not suspended"
@@ -8957,6 +8975,8 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
         in_place: false,
         operation_id: "retained-move".into(),
         selection: MoveSelection {
+            oracle: None,
+            oracle_choice: None,
             subagents: None,
             workspace: Default::default(),
             session_id: session.id.clone(),
@@ -10210,6 +10230,8 @@ fn retained_startup_test_move(
         in_place: false,
         operation_id: "startup-durable-move".into(),
         selection: MoveSelection {
+            oracle: None,
+            oracle_choice: None,
             subagents: None,
             workspace: Default::default(),
             session_id: session.id.clone(),

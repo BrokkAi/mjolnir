@@ -87,6 +87,7 @@ pub enum SubagentTaskType {
     #[default]
     Straightforward,
     Subtle,
+    Oracle,
 }
 
 impl SubagentTaskType {
@@ -94,6 +95,7 @@ impl SubagentTaskType {
         match self {
             Self::Straightforward => "straightforward",
             Self::Subtle => "subtle",
+            Self::Oracle => "oracle",
         }
     }
 }
@@ -116,6 +118,7 @@ impl SubagentPolicy {
             } => match task_type {
                 SubagentTaskType::Straightforward => straightforward.as_deref(),
                 SubagentTaskType::Subtle => subtle.as_deref(),
+                SubagentTaskType::Oracle => None,
             },
             _ => None,
         }
@@ -403,6 +406,9 @@ pub enum SubagentToolAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    AskOracle {
+        message: String,
+    },
     OverrideReview {
         reason: String,
     },
@@ -474,6 +480,9 @@ enum SubagentToolActionWire {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    AskOracle {
+        message: String,
+    },
     OverrideReview {
         reason: String,
     },
@@ -532,6 +541,7 @@ impl SubagentToolAction {
             self,
             Self::Spawn { .. }
                 | Self::RequestReview { .. }
+                | Self::AskOracle { .. }
                 | Self::OverrideReview { .. }
                 | Self::SendInput { .. }
                 | Self::SendMessage { .. }
@@ -584,6 +594,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
             },
             SubagentToolActionWire::ListProfiles => Self::ListProfiles,
             SubagentToolActionWire::RequestReview { path } => Self::RequestReview { path },
+            SubagentToolActionWire::AskOracle { message } => Self::AskOracle { message },
             SubagentToolActionWire::OverrideReview { reason } => Self::OverrideReview { reason },
             SubagentToolActionWire::Spawn {
                 task_name,
@@ -732,6 +743,7 @@ pub enum SubagentKind {
     #[default]
     Worker,
     Reviewer,
+    Oracle,
 }
 
 impl SubagentKind {
@@ -741,6 +753,7 @@ impl SubagentKind {
         match self {
             Self::Worker => format!("worker:{key}"),
             Self::Reviewer => format!("reviewer:{key}"),
+            Self::Oracle => format!("oracle:{key}"),
         }
     }
 }
@@ -935,9 +948,10 @@ impl SubagentMcpRole {
                 "close",
                 "fetch",
                 "request_review",
+                "ask_oracle",
             ],
-            Self::MessageOnly => &["send_message", "fetch", "request_review"],
-            Self::FetchOnly => &["fetch", "send_message", "request_review"],
+            Self::MessageOnly => &["send_message", "fetch", "request_review", "ask_oracle"],
+            Self::FetchOnly => &["fetch", "send_message", "request_review", "ask_oracle"],
             Self::Child => &["handback", "fetch", "send_message", "request_review"],
         }
     }
@@ -1036,6 +1050,22 @@ pub fn max_child_report_bytes(max_concurrent_children: usize) -> u64 {
 /// out and how the parent can get it. Returns the text and whether it was cut.
 #[must_use]
 pub fn bounded_report(text: &str) -> (String, bool) {
+    bounded_report_with_recovery(
+        text,
+        "use send_message to ask the child to write the details to files in its report directory and send you the paths",
+    )
+}
+
+/// Bound an oracle answer while keeping its recovery channel in the oracle.
+#[must_use]
+pub fn bounded_oracle_report(text: &str) -> (String, bool) {
+    bounded_report_with_recovery(
+        text,
+        "use ask_oracle to ask for the rest; the oracle keeps its context",
+    )
+}
+
+fn bounded_report_with_recovery(text: &str, recovery: &str) -> (String, bool) {
     let total = text.chars().count();
     if total <= MAX_HANDBACK_CHARS {
         return (text.to_owned(), false);
@@ -1043,7 +1073,7 @@ pub fn bounded_report(text: &str) -> (String, bool) {
     let kept: String = text.chars().take(MAX_HANDBACK_CHARS).collect();
     (
         format!(
-            "{kept}\n[truncated: {} more characters; use send_message to ask the child to write the details to files in its report directory and send you the paths]",
+            "{kept}\n[truncated: {} more characters; {recovery}]",
             total - MAX_HANDBACK_CHARS
         ),
         true,
@@ -2170,6 +2200,23 @@ mod tests {
         );
         assert!(!SubagentMcpRole::Parent.tool_names().contains(&"send_input"));
         assert!(!SubagentMcpRole::Parent.tool_names().contains(&"interrupt"));
+    }
+
+    #[test]
+    fn oracle_question_is_a_mutating_durable_tool_action() {
+        let action = SubagentToolAction::AskOracle {
+            message: "Choose B?".into(),
+        };
+        assert!(action.mutates_child_state());
+        let wire = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"action":"ask_oracle","params":{"message":"Choose B?"}})
+        );
+        assert_eq!(
+            serde_json::from_value::<SubagentToolAction>(wire).unwrap(),
+            action
+        );
     }
 
     #[test]

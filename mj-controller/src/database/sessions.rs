@@ -54,6 +54,13 @@ pub(super) fn save_new_session_to(
             params![session.last_profile, serde_json::to_string(&policy)?],
         )?;
     }
+    if remember_launch_choices {
+        tx.execute(
+            "INSERT INTO oracle_preference(profile_id, enabled) VALUES(?1, ?2)
+             ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
+            params![session.last_profile, session.oracle],
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -83,6 +90,18 @@ pub fn set_publication_assessment_if_current(
     })
 }
 
+/// A primary may have one live oracle; registration refused another.
+#[derive(Debug)]
+pub(crate) struct OracleAlreadyLive;
+
+impl std::fmt::Display for OracleAlreadyLive {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("this session already has a live oracle")
+    }
+}
+
+impl std::error::Error for OracleAlreadyLive {}
+
 /// Persist a borrowed-target child and its parent relationship atomically.
 pub fn save_subagent_session(
     session: &SessionRecord,
@@ -107,6 +126,23 @@ pub(crate) fn register_subagent_with_startup(
             &tx,
             &subagent.parent_session_id,
         )?;
+        if subagent.kind == mj_core::subagent::SubagentKind::Oracle {
+            let mut statement = tx.prepare(
+                "SELECT s.state FROM subagent_sessions c
+                 JOIN sessions s ON s.session_id = c.child_session_id
+                 WHERE c.parent_session_id = ?1 AND c.request_key LIKE 'oracle:%'",
+            )?;
+            let live = statement
+                .query_map([&subagent.parent_session_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .iter()
+                .filter_map(|state| mj_core::state::SessionState::from_stored(state))
+                .any(mj_core::state::SessionState::can_receive_child_work);
+            drop(statement);
+            if live {
+                return Err(OracleAlreadyLive.into());
+            }
+        }
         insert_session(&tx, &session)?;
         super::usage::record_child_accounting(&tx, &subagent)?;
         tx.execute(
@@ -709,6 +745,16 @@ pub(super) fn rename_profile_references_at(
     )?;
     tx.execute(
         "DELETE FROM subagent_preference WHERE profile_id = ?1",
+        [old_id],
+    )?;
+    tx.execute(
+        "INSERT INTO oracle_preference(profile_id, enabled)
+         SELECT ?2, enabled FROM oracle_preference WHERE profile_id = ?1
+         ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
+        params![old_id, new_id],
+    )?;
+    tx.execute(
+        "DELETE FROM oracle_preference WHERE profile_id = ?1",
         [old_id],
     )?;
     tx.commit()?;

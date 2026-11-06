@@ -276,6 +276,10 @@ pub struct StartSessionRequest {
     /// Omitted uses the selected profile's subagent setting.
     #[serde(default)]
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     /// Turn review for this session. Omitted follows `[review]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "super::super::actions::deserialize_session_review")]

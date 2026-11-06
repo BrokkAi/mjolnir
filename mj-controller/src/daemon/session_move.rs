@@ -179,6 +179,8 @@ impl RuntimeState {
     ) -> Result<MoveSessionRequest> {
         let preparation = self
             .prepare_move_session(MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 session_id: session_id.to_owned(),
                 profile_id: Some(profile_id.to_owned()),
                 target_template_id: None,

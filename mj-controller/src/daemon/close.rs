@@ -171,8 +171,23 @@ impl RuntimeState {
                         crate::controller::stopped_subagent(&controller.state, child_id)
                     })
                     .collect::<Result<Vec<_>>>()?;
-                if !stopped.is_empty() {
-                    crate::database::record_stopped_subagents(&parent_session_id, &stopped)?;
+                // The primary is never told about its oracle: the notice names
+                // each child by ID and task, and the oracle has neither for it.
+                let announced = stopped
+                    .iter()
+                    .filter(|child| {
+                        controller
+                            .state
+                            .subagents
+                            .get(&child.child_session_id)
+                            .is_none_or(|relation| {
+                                relation.kind != mj_core::subagent::SubagentKind::Oracle
+                            })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !announced.is_empty() {
+                    crate::database::record_stopped_subagents(&parent_session_id, &announced)?;
                 }
                 Ok(stopped)
             }

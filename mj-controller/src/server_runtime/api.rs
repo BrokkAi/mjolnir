@@ -31,6 +31,7 @@ use mj_checkpoint::archive::{FetchMode, FetchedPath};
 use mj_client::session::{BoxFuture, SessionControl, SessionHandle, new_command_id};
 use mj_core::relay::RelayCommand;
 
+mod oracle;
 mod subagent_input;
 
 use crate::daemon::RuntimeState;
@@ -853,6 +854,13 @@ impl ApiBackend {
                 path,
                 ls,
             } => {
+                ensure!(
+                    crate::database::load_subagent(session_id)?.is_none_or(|relation| {
+                        relation.kind != mj_core::subagent::SubagentKind::Oracle
+                            || relation.parent_session_id != parent_session_id
+                    }),
+                    "session {session_id} does not belong to parent {parent_session_id}"
+                );
                 let fetch_error = |error| match error {
                     ExportError::Refused(reason) => anyhow!(reason),
                     ExportError::Failed(error) => error,
@@ -908,6 +916,10 @@ impl ApiBackend {
             SubagentToolAction::RequestReview { path } => {
                 self.exports
                     .request_review(parent_session_id.to_owned(), path.clone())
+                    .await
+            }
+            SubagentToolAction::AskOracle { message } => {
+                self.ask_oracle(parent_session_id, request, prepared, message)
                     .await
             }
             SubagentToolAction::OverrideReview { reason } => {
@@ -1022,7 +1034,7 @@ impl ApiBackend {
                     .list_subagents(parent_session_id.to_owned())
                     .await?
                     .into_iter()
-                    .filter(|relation| relation.kind != mj_core::subagent::SubagentKind::Reviewer)
+                    .filter(|relation| relation.kind == mj_core::subagent::SubagentKind::Worker)
                     .collect::<Vec<_>>();
                 let child_ids = relations
                     .iter()
@@ -1192,7 +1204,8 @@ impl ApiBackend {
                 .filter(|record| record.handback_tool)
                 .context("handback is only for a Mjolnir sub-agent that was given the tool")?;
                 let maximum = match record.kind {
-                    mj_core::subagent::SubagentKind::Worker => {
+                    mj_core::subagent::SubagentKind::Worker
+                    | mj_core::subagent::SubagentKind::Oracle => {
                         mj_core::subagent::MAX_HANDBACK_CHARS
                     }
                     mj_core::subagent::SubagentKind::Reviewer => {
@@ -1468,14 +1481,17 @@ impl ApiBackend {
                 // Older turns may predate stored selections. Prefer the
                 // session's current profile, with the child model as fallback.
                 let child = crate::database::load_subagent(&id)?;
+                let oracle = child
+                    .as_ref()
+                    .is_some_and(|child| child.kind == mj_core::subagent::SubagentKind::Oracle);
                 Ok(match selection {
-                    Some((profile, model @ Some(_))) => Some((profile, model)),
-                    Some((profile, None)) => child.map(|child| (profile, child.model)),
-                    None => child.map(|child| (child.profile_id, child.model)),
+                    Some((profile, model @ Some(_))) => Some((profile, model, oracle)),
+                    Some((profile, None)) => child.map(|child| (profile, child.model, oracle)),
+                    None => child.map(|child| (child.profile_id, child.model, oracle)),
                 })
             })
             .await?;
-            let Some((profile, model)) = selection else {
+            let Some((profile, model, oracle)) = selection else {
                 continue;
             };
             let health = crate::profile_health::shared()
@@ -1498,10 +1514,17 @@ impl ApiBackend {
                     format!("profile {profile} {fault}: {}", diagnostic.message)
                 });
             if let Some((_, message)) = &mut progress.failed_turn {
-                *message = format!(
-                    "{}. A new spawn will choose another eligible profile; send_message would run this child on {profile} again.",
-                    description.trim_end_matches('.')
-                );
+                *message = if oracle {
+                    format!(
+                        "{}. Ask again with ask_oracle to start a fresh oracle.",
+                        description.trim_end_matches('.')
+                    )
+                } else {
+                    format!(
+                        "{}. A new spawn will choose another eligible profile; send_message would run this child on {profile} again.",
+                        description.trim_end_matches('.')
+                    )
+                };
             }
         }
         Ok(())
@@ -1608,8 +1631,15 @@ impl ApiBackend {
             } else {
                 child.output
             };
-            let mut entry =
-                wait_agent_entry(id, &child.state, output, child.finished, &child.progress);
+            let oracle = child.relation.kind == mj_core::subagent::SubagentKind::Oracle;
+            let mut entry = wait_agent_entry(
+                id,
+                &child.state,
+                output,
+                child.finished,
+                &child.progress,
+                oracle,
+            );
             entry["task_name"] = child.relation.task_name.into();
             inputs.annotate(id, &mut entry);
             mark_parked(&mut entry, child.record.as_ref());
@@ -1632,7 +1662,8 @@ impl ApiBackend {
             self.list_subagents(parent_id.to_owned())
                 .await?
                 .iter()
-                .any(|child| child.child_session_id == child_id),
+                .any(|child| child.child_session_id == child_id
+                    && child.kind == mj_core::subagent::SubagentKind::Worker),
             "session {child_id} does not belong to parent {parent_id}"
         );
         Ok(())
@@ -1646,10 +1677,10 @@ impl ApiBackend {
             let child_id =
                 subagent_input::resolve_session_target(&state, Some(&parent_id), &requested_id)?;
             anyhow::ensure!(
-                state
-                    .subagents
-                    .get(&child_id)
-                    .is_some_and(|relation| { relation.parent_session_id == parent_id }),
+                state.subagents.get(&child_id).is_some_and(|relation| {
+                    relation.parent_session_id == parent_id
+                        && relation.kind == mj_core::subagent::SubagentKind::Worker
+                }),
                 "session {requested_id} does not belong to parent {parent_id}"
             );
             Ok(child_id)
@@ -2133,8 +2164,15 @@ fn wait_agent_entry(
     output: Option<String>,
     finished: bool,
     progress: &ChildProgress,
+    oracle: bool,
 ) -> serde_json::Value {
-    let output = output.map(|output| bounded_report(&output));
+    let output = output.map(|output| {
+        if oracle {
+            mj_core::subagent::bounded_oracle_report(&output)
+        } else {
+            bounded_report(&output)
+        }
+    });
     let mut agent = serde_json::json!({
         "child_session_id":id,
         "report_source":report_source(state, &progress.report),
@@ -2145,6 +2183,9 @@ fn wait_agent_entry(
     });
     if output.is_some_and(|(_, truncated)| truncated) {
         agent["truncated"] = serde_json::Value::Bool(true);
+    }
+    if oracle {
+        agent["oracle"] = serde_json::Value::Bool(true);
     }
     if state == "failed"
         && let Some(profile_id) = &progress.login_failure

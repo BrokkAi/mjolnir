@@ -270,6 +270,8 @@ impl RuntimeState {
         let _startup_admission = self.startup_enqueue.lock().await;
         let registered = self
             .start_create_session(CreateSessionRequest {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: false,
                 remember_container_size: false,
                 at: None,
@@ -1140,7 +1142,7 @@ impl RuntimeState {
                     .subagents
                     .get(session_id)
                     .is_some_and(|child| {
-                        child.kind == mj_core::subagent::SubagentKind::Worker
+                        child.kind != mj_core::subagent::SubagentKind::Reviewer
                             && step.group_id.as_deref()
                                 == Some(format!("subagent-spawn-{}", child.request_key).as_str())
                     });
