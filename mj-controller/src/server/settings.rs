@@ -11,7 +11,7 @@ use super::*;
 use mj_client::settings::{discovery, draft, hidden, save, view};
 use mj_core::profile_capabilities::CapabilityState;
 use mj_core::profile_capabilities::ProfileCapabilitiesSnapshot;
-use mj_core::review::autoconfigure::autoconfigure;
+use mj_core::review::autoconfigure::{autoconfigure, merged_model_offers};
 use mj_core::worker_launch::ProfileConfig;
 use serde_json::Value;
 
@@ -146,7 +146,11 @@ fn discover(
         let current = warm.and_then(|backend| backend.profile_capabilities_snapshot());
         let capabilities = current.as_ref().unwrap_or(capabilities);
         let action_reason = match capabilities.options(&config, None) {
-            Some(options) if autoconfigure(&options.models, |_| None).is_some() => Value::Null,
+            Some(options)
+                if autoconfigure(&merged_model_offers(&options.models), |_| None).is_some() =>
+            {
+                Value::Null
+            }
             Some(options) if !options.unavailable.is_empty() => {
                 Value::String(options.unavailable.join("; "))
             }
@@ -340,8 +344,17 @@ async fn autoconfigure_settings(
         .enabled_profiles()
         .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
         .collect::<std::collections::BTreeMap<_, _>>();
+    // Billing comes from the daemon's quota reports by profile id; a profile
+    // the daemon cannot report on (such as one added in this draft) counts
+    // as a subscription.
+    let usage_priced = backend
+        .reviewer_ready_candidates(String::new())
+        .await
+        .map(|candidates| crate::review_selection::usage_priced_profiles(&candidates))
+        .unwrap_or_default();
     let (configured, known) = crate::review_selection::autoconfigure_with_efforts(
         &available,
+        &usage_priced,
         |profile, model| {
             let backend = backend.clone();
             let mut demand = config.clone();

@@ -2,6 +2,7 @@
 //! published catalog; the editor never performs discovery on the event loop.
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use crossterm::event::Event;
@@ -114,13 +115,15 @@ impl ReviewSettingsDialog {
         &mut self,
         config: &Config,
         snapshot: &ProfileCapabilitiesSnapshot,
+        usage_priced: &BTreeSet<String>,
     ) {
         let models = snapshot.options(config, None);
+        let offers = snapshot.model_offers(config, |profile| usage_priced.contains(profile));
         self.models_known = models.is_some();
         if let Some(options) = models {
             self.models_partial = !options.unavailable.is_empty();
             self.models = options.models;
-            let configured = mj_core::review::autoconfigure::autoconfigure(&self.models, |model| {
+            let configured = mj_core::review::autoconfigure::autoconfigure(&offers, |model| {
                 known_efforts(snapshot, config, model)
             });
             self.suggested_adjustments = configured
@@ -147,10 +150,9 @@ impl ReviewSettingsDialog {
                     })
             });
             if ready || started.elapsed() >= Duration::from_secs(20) {
-                let configured =
-                    mj_core::review::autoconfigure::autoconfigure(&self.models, |model| {
-                        known_efforts(snapshot, config, model)
-                    });
+                let configured = mj_core::review::autoconfigure::autoconfigure(&offers, |model| {
+                    known_efforts(snapshot, config, model)
+                });
                 let mut resolved = configured
                     .as_ref()
                     .map(|result| result.reviewers.clone())
@@ -476,7 +478,11 @@ impl ReviewSettingsDialog {
                     self.review.reviewers[i].model = value;
                     self.review.reviewers[i].effort = None;
                     self.review.clear_legacy();
-                    self.update_choices(config, &dashboard.profile_capabilities);
+                    self.update_choices(
+                        config,
+                        &dashboard.profile_capabilities,
+                        &dashboard.usage_priced_profiles(),
+                    );
                 }
             }
             Some(Interaction::ComboBoxCommit(Effort(i), index)) => {
@@ -492,13 +498,21 @@ impl ReviewSettingsDialog {
                         effort: None,
                     });
                     self.review.clear_legacy();
-                    self.update_choices(config, &dashboard.profile_capabilities);
+                    self.update_choices(
+                        config,
+                        &dashboard.profile_capabilities,
+                        &dashboard.usage_priced_profiles(),
+                    );
                 }
             }
             Some(Interaction::Activate(Remove(i))) if i < self.review.reviewers.len() => {
                 self.review.reviewers.remove(i);
                 self.review.clear_legacy();
-                self.update_choices(config, &dashboard.profile_capabilities);
+                self.update_choices(
+                    config,
+                    &dashboard.profile_capabilities,
+                    &dashboard.usage_priced_profiles(),
+                );
             }
             Some(Interaction::Activate(Autoconfigure)) => {
                 if let Some(reviewers) = self.suggested() {
@@ -549,7 +563,11 @@ impl ReviewSettingsDialog {
                         self.review.reviewers = reviewers;
                         self.review.clear_legacy();
                     }
-                    self.update_choices(&config, &dashboard.profile_capabilities);
+                    self.update_choices(
+                        &config,
+                        &dashboard.profile_capabilities,
+                        &dashboard.usage_priced_profiles(),
+                    );
                 }
             }
             Some(Interaction::Activate(id @ (Trigger | Model(_) | Effort(_)))) => {

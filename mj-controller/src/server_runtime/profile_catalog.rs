@@ -20,6 +20,8 @@ use mj_core::profile_capabilities::{
     CapabilityState, ProfileCapabilities, ProfileCapabilitiesSnapshot,
 };
 use mj_core::worker_launch::ProfileConfig;
+
+use crate::quota::ProfileQuota;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
@@ -29,6 +31,11 @@ type ModelProbe = dyn Fn(String, String) -> BoxFuture<'static, Result<ProfileCon
 type Attempt = Shared<BoxFuture<'static, Result<ProfileConfig, AttemptError>>>;
 type CacheKey = (String, Option<String>);
 type NoticeCallback = Arc<dyn Fn(String) + Send + Sync>;
+pub(crate) type QuotaReports = Arc<Mutex<BTreeMap<String, ProfileQuota>>>;
+
+/// How long the legacy upgrade waits for every offering profile's first
+/// quota report before treating profiles without one as subscriptions.
+const QUOTA_REPORT_WAIT: Duration = Duration::from_secs(30);
 
 /// How often ready entries are checked against the choice lifetime. An
 /// entry is probed again at most this long after it expires.
@@ -115,6 +122,9 @@ pub(crate) struct ProfileCatalog {
     revisions: tokio::sync::watch::Sender<u64>,
     legacy_review_upgrade_started: AtomicBool,
     config_path: Option<PathBuf>,
+    /// The daemon's latest quota report per profile. Without it every
+    /// profile counts as a subscription when the legacy upgrade picks models.
+    quota_reports: Mutex<Option<QuotaReports>>,
     #[cfg(test)]
     probe: Option<(Arc<Probe>, Arc<ModelProbe>)>,
 }
@@ -128,6 +138,7 @@ impl ProfileCatalog {
             revisions: tokio::sync::watch::channel(0).0,
             legacy_review_upgrade_started: AtomicBool::new(false),
             config_path: None,
+            quota_reports: Mutex::new(None),
             #[cfg(test)]
             probe: None,
         })
@@ -147,6 +158,34 @@ impl ProfileCatalog {
             .publisher
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(publisher);
+    }
+
+    pub(crate) fn set_quota_reports(&self, reports: QuotaReports) {
+        *self
+            .quota_reports
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(reports);
+    }
+
+    /// The profiles in `ids` billed per use according to the latest quota
+    /// reports, and whether every one of them has a report. The upgrade
+    /// writes its choice once, so it waits briefly for reports to arrive.
+    fn usage_priced_among(&self, ids: &[String]) -> (BTreeSet<String>, bool) {
+        let reports = self
+            .quota_reports
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let Some(reports) = reports else {
+            return (BTreeSet::new(), true);
+        };
+        let reports = reports.lock().unwrap_or_else(PoisonError::into_inner);
+        let priced = ids
+            .iter()
+            .filter(|id| reports.get(*id).is_some_and(ProfileQuota::is_usage_priced))
+            .cloned()
+            .collect();
+        (priced, ids.iter().all(|id| reports.contains_key(id)))
     }
 
     pub(crate) fn set_notice(&self, notice: NoticeCallback) {
@@ -319,9 +358,22 @@ impl ProfileCatalog {
                 omitted.join(", ")
             );
         }
+        let available_ids = available
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let deadline = tokio::time::Instant::now() + QUOTA_REPORT_WAIT;
+        let usage_priced = loop {
+            let (priced, complete) = self.usage_priced_among(&available_ids);
+            if complete || tokio::time::Instant::now() >= deadline {
+                break priced;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
         let (reviewers, known, adjustments) = crate::review_selection::upgrade_reviewers(
             &legacy,
             &available,
+            &usage_priced,
             |profile, model| {
                 let catalog = Arc::clone(self);
                 async move { catalog.model_capabilities(profile, model).await }
@@ -1813,10 +1865,17 @@ mod tests {
     }
 
     fn legacy_review_file(path: &Path) {
-        let mut config = test_config(&[
-            ("codex", HarnessKind::Codex),
-            ("haiku", HarnessKind::Claude),
-        ]);
+        legacy_review_file_with(
+            path,
+            &[
+                ("codex", HarnessKind::Codex),
+                ("haiku", HarnessKind::Claude),
+            ],
+        );
+    }
+
+    fn legacy_review_file_with(path: &Path, profiles: &[(&str, HarnessKind)]) {
+        let mut config = test_config(profiles);
         config.review = mj_core::config::ReviewConfig::legacy_default();
         config.review.trigger = mj_core::config::ReviewTrigger::Turn;
         config.save_to(path).unwrap();
@@ -1839,6 +1898,102 @@ mod tests {
         assert!(!review.is_legacy());
         assert_eq!(review.reviewers.len(), 3);
         assert_eq!(review.reviewers[0].model, "gpt-6-terra");
+    }
+
+    fn usage_report(profile: &str, usage_priced: bool) -> ProfileQuota {
+        ProfileQuota {
+            paid_credits: None,
+            banked_resets: None,
+            profile_id: profile.into(),
+            harness: HarnessKind::OpenCode,
+            windows: Vec::new(),
+            extra: usage_priced.then(|| mj_client::quota::API_LABEL.to_owned()),
+            error: None,
+            refreshed_at_epoch_seconds: 0,
+            rate_limited_until_epoch_seconds: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn legacy_upgrade_skips_models_only_usage_priced_profiles_offer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("custom-config.toml");
+        legacy_review_file_with(
+            &path,
+            &[
+                ("codex", HarnessKind::Codex),
+                ("haiku", HarnessKind::Claude),
+                ("openrouter", HarnessKind::Codex),
+            ],
+        );
+        let probe: Arc<Probe> = Arc::new(|profile| {
+            Box::pin(async move {
+                let models = match profile.as_str() {
+                    "codex" => vec!["gpt-6.1-terra", "gpt-6.1-sol"],
+                    "haiku" => vec!["haiku"],
+                    _ => vec![
+                        "openrouter/~openai/gpt-terra-latest",
+                        "openrouter/~openai/gpt-sol-latest",
+                        "openrouter/~anthropic/claude-haiku-latest",
+                    ],
+                };
+                Ok(ProfileConfig {
+                    model: None,
+                    models: models
+                        .into_iter()
+                        .map(|value| mj_core::acp::SessionConfigChoice {
+                            value: value.into(),
+                            name: if value == "haiku" { "Haiku 4.5" } else { value }.into(),
+                            description: None,
+                        })
+                        .collect(),
+                    efforts: Vec::new(),
+                    observed_at: 1,
+                })
+            })
+        });
+        let mut catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            probe.clone(),
+            Arc::new(move |profile, _| probe(profile)),
+        );
+        Arc::get_mut(&mut catalog).unwrap().config_path = Some(path.clone());
+        let reports: QuotaReports = Arc::new(Mutex::new(BTreeMap::from([(
+            "codex".to_owned(),
+            usage_report("codex", false),
+        )])));
+        catalog.set_quota_reports(reports.clone());
+        let mut config = test_config(&[
+            ("codex", HarnessKind::Codex),
+            ("haiku", HarnessKind::Claude),
+            ("openrouter", HarnessKind::Codex),
+        ]);
+        config.review = mj_core::config::ReviewConfig::legacy_default();
+        catalog.sync(&config);
+        let upgrade = {
+            let catalog = Arc::clone(&catalog);
+            tokio::spawn(async move { catalog.upgrade_legacy_review(1).await })
+        };
+        // The upgrade waits for the remaining profiles' first reports, so the
+        // billing of the OpenCode profile is known when it chooses.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(Config::load_from(&path).unwrap().review.is_legacy());
+        {
+            let mut reports = reports.lock().unwrap();
+            reports.insert("haiku".into(), usage_report("haiku", false));
+            reports.insert("openrouter".into(), usage_report("openrouter", true));
+        }
+        upgrade.await.unwrap().unwrap();
+        let review = Config::load_from(&path).unwrap().review;
+        assert!(!review.is_legacy());
+        assert_eq!(
+            review
+                .reviewers
+                .iter()
+                .map(|choice| choice.model.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-6.1-terra", "gpt-6.1-sol", "haiku"]
+        );
     }
 
     #[tokio::test(start_paused = true)]

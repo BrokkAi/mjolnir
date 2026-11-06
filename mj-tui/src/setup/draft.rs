@@ -403,7 +403,11 @@ impl SetupDialog {
             }
         };
         let mut review = ReviewSettingsDialog::new(&config);
-        review.update_choices(&config, &dashboard.profile_capabilities);
+        review.update_choices(
+            &config,
+            &dashboard.profile_capabilities,
+            &dashboard.usage_priced_profiles(),
+        );
         self.sync_review_validation(&review);
         self.review_editor = Some(Box::new(review));
         self.form = RefCell::new(Dialog::default());

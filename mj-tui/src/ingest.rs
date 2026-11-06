@@ -995,6 +995,16 @@ impl DashboardState {
         }
     }
 
+    /// Profiles whose quota report says they are billed per use. A profile
+    /// with no report yet counts as a subscription.
+    pub(crate) fn usage_priced_profiles(&self) -> std::collections::BTreeSet<String> {
+        self.quotas
+            .iter()
+            .filter(|(_, quota)| quota.is_usage_priced())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     pub fn set_quotas(&mut self, quotas: BTreeMap<String, ProfileQuota>) {
         self.quota_refreshing.retain(|id| !quotas.contains_key(id));
         self.quotas = quotas;

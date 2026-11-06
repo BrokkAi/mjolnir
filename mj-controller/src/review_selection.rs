@@ -10,7 +10,9 @@ use futures::future::join_all;
 use mj_core::config::{
     LegacyReview, ReviewConfig, SessionReview, SubagentChoice, apply_legacy_override,
 };
-use mj_core::review::autoconfigure::{Autoconfigured, autoconfigure};
+use mj_core::review::autoconfigure::{
+    Autoconfigured, autoconfigure, merged_model_offers, model_offers,
+};
 use mj_core::review::settings::{ResolvedReviewSettings, ReviewModelSettings};
 use mj_core::worker_launch::ProfileConfig;
 use std::collections::{BTreeMap, BTreeSet};
@@ -110,6 +112,7 @@ async fn configured_choices(
             .filter(|profile| config.enabled_profile(profile).is_some());
         let ready =
             await_or_cancel(cancelled, backend.reviewer_ready_candidates(String::new())).await??;
+        let mut usage_priced = usage_priced_profiles(&ready);
         let candidates = if let Some(profile) = pinned {
             if let Some(candidate) = ready
                 .offered
@@ -140,11 +143,14 @@ async fn configured_choices(
                 .iter()
                 .flat_map(|candidate| candidate.choices.models.iter().cloned())
                 .collect::<Vec<_>>();
-            let candidates = if autoconfigure(&ready_models, |_| None).is_none() {
+            let candidates = if autoconfigure(&merged_model_offers(&ready_models), |_| None)
+                .is_none()
+            {
                 await_or_cancel(cancelled, backend.reviewer_autoconfigure_candidates()).await??
             } else {
                 ready
             };
+            usage_priced.extend(usage_priced_profiles(&candidates));
             candidates
                 .offered
                 .into_iter()
@@ -162,6 +168,7 @@ async fn configured_choices(
         let (choices, _, _) = upgrade_reviewers(
             settings.legacy.as_ref().expect("legacy review"),
             &available,
+            &usage_priced,
             |profile, model| {
                 let backend = Arc::clone(backend);
                 async move { backend.profile_config(profile, Some(model), false).await }
@@ -180,9 +187,24 @@ async fn configured_choices(
     Ok((choices, autoconfigured))
 }
 
+/// The profiles among `candidates` whose last quota report says they are
+/// billed per use. A profile with no report or a failed one counts as a
+/// subscription.
+pub(crate) fn usage_priced_profiles(
+    candidates: &crate::server::api::SubagentCandidates,
+) -> BTreeSet<String> {
+    candidates
+        .offered
+        .iter()
+        .filter(|candidate| candidate.quota == crate::server::api::CandidateQuota::UsagePriced)
+        .map(|candidate| candidate.profile_id.clone())
+        .collect()
+}
+
 pub(crate) async fn upgrade_reviewers<F, Fut>(
     legacy: &LegacyReview,
     available: &[(String, ProfileConfig)],
+    usage_priced: &BTreeSet<String>,
     probe: F,
     cancelled: Option<&AtomicBool>,
 ) -> Result<(
@@ -247,7 +269,8 @@ where
             adjustments,
         ));
     }
-    let (choices, known) = autoconfigure_with_efforts(available, probe, cancelled).await?;
+    let (choices, known) =
+        autoconfigure_with_efforts(available, usage_priced, probe, cancelled).await?;
     Ok((
         choices.reviewers,
         known.values().all(|known| *known),
@@ -259,6 +282,7 @@ where
 /// discovery for the daemon upgrade and the startup review fallback.
 pub(crate) async fn autoconfigure_with_efforts<F, Fut>(
     available: &[(String, ProfileConfig)],
+    usage_priced: &BTreeSet<String>,
     probe: F,
     cancelled: Option<&AtomicBool>,
 ) -> Result<(Autoconfigured, BTreeMap<String, bool>)>
@@ -266,11 +290,12 @@ where
     F: Fn(String, String) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<ProfileConfig>>,
 {
-    let models = available
-        .iter()
-        .flat_map(|(_, choices)| choices.models.iter().cloned())
-        .collect::<Vec<_>>();
-    let draft = autoconfigure(&models, |_| None)
+    let offers = model_offers(
+        available
+            .iter()
+            .map(|(profile, choices)| (choices.models.as_slice(), usage_priced.contains(profile))),
+    );
+    let draft = autoconfigure(&offers, |_| None)
         .unwrap_or_default()
         .reviewers;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -328,7 +353,7 @@ where
             *model_known = false;
         }
     }
-    let choices = autoconfigure(&models, |model| {
+    let choices = autoconfigure(&offers, |model| {
         let complete = known.get(model) == Some(&true);
         let offered = efforts.get(model);
         if complete {
@@ -419,10 +444,15 @@ mod tests {
                 observed_at: 1,
             },
         )];
-        let (choices, known, adjusted) =
-            upgrade_reviewers(&legacy, &available, |_, _| async { unreachable!() }, None)
-                .await
-                .unwrap();
+        let (choices, known, adjusted) = upgrade_reviewers(
+            &legacy,
+            &available,
+            &BTreeSet::new(),
+            |_, _| async { unreachable!() },
+            None,
+        )
+        .await
+        .unwrap();
         assert!(known);
         assert_eq!(choices.len(), 3);
         assert_eq!(adjusted.len(), 1);
@@ -458,6 +488,7 @@ mod tests {
         let (choices, known, _) = upgrade_reviewers(
             &legacy,
             &available,
+            &BTreeSet::new(),
             |_, _| async { anyhow::bail!("probe unavailable") },
             None,
         )
@@ -495,10 +526,14 @@ mod tests {
                 }]),
             ),
         ];
-        let (choices, known) =
-            autoconfigure_with_efforts(&available, |_, _| async { unreachable!() }, None)
-                .await
-                .unwrap();
+        let (choices, known) = autoconfigure_with_efforts(
+            &available,
+            &BTreeSet::new(),
+            |_, _| async { unreachable!() },
+            None,
+        )
+        .await
+        .unwrap();
         assert!(known.values().all(|known| *known));
         assert!(
             choices
@@ -524,10 +559,14 @@ mod tests {
                 observed_at: 1,
             },
         )];
-        let (configured, known) =
-            autoconfigure_with_efforts(&available, |_, _| async { unreachable!() }, None)
-                .await
-                .unwrap();
+        let (configured, known) = autoconfigure_with_efforts(
+            &available,
+            &BTreeSet::new(),
+            |_, _| async { unreachable!() },
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(known.get("claude-haiku-4.5"), Some(&true));
         assert!(
             configured
@@ -536,6 +575,76 @@ mod tests {
                 .all(|choice| choice.effort.is_none())
         );
         assert_eq!(configured.adjusted.len(), 2);
+    }
+
+    fn catalog_profile(models: &[&str]) -> ProfileConfig {
+        ProfileConfig {
+            model: None,
+            models: models
+                .iter()
+                .map(|value| SessionConfigChoice {
+                    value: (*value).into(),
+                    name: if *value == "haiku" {
+                        "Haiku 4.5"
+                    } else {
+                        value
+                    }
+                    .into(),
+                    description: None,
+                })
+                .collect(),
+            efforts: Vec::new(),
+            observed_at: 1,
+        }
+    }
+
+    /// Four codex and six claude subscriptions plus one usage-priced OpenCode
+    /// profile that advertises the OpenRouter catalogue.
+    fn live_catalog() -> Vec<(String, ProfileConfig)> {
+        let codex =
+            catalog_profile(&["gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-terra"]);
+        let claude = catalog_profile(&["haiku", "claude-haiku-4-5-20251001"]);
+        let openrouter = catalog_profile(&[
+            "openrouter/~openai/gpt-terra-latest",
+            "openrouter/~openai/gpt-sol-latest",
+            "openrouter/~anthropic/claude-haiku-latest",
+            "openrouter/anthropic/claude-haiku-5.5",
+            "openrouter/openai/gpt-5.6-terra",
+        ]);
+        let mut available = vec![("openrouter".to_owned(), openrouter)];
+        available.extend((1..=4).map(|n| (format!("codex{n}"), codex.clone())));
+        available.extend((1..=6).map(|n| (format!("claude{n}"), claude.clone())));
+        available
+    }
+
+    fn picked(configured: &Autoconfigured) -> Vec<(&str, Option<&str>)> {
+        configured
+            .reviewers
+            .iter()
+            .map(|choice| (choice.model.as_str(), choice.effort.as_deref()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn usage_priced_openrouter_models_do_not_displace_subscription_reviewers() {
+        let available = live_catalog();
+        let usage_priced = BTreeSet::from(["openrouter".to_owned()]);
+        let (configured, _) = autoconfigure_with_efforts(
+            &available,
+            &usage_priced,
+            |_, model| async move { Ok(catalog_profile(&[&model])) },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            picked(&configured),
+            [
+                ("gpt-6.1-terra", None),
+                ("gpt-6.1-sol", None),
+                ("haiku", None)
+            ]
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -558,6 +667,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let (choices, known) = autoconfigure_with_efforts(
             &available,
+            &BTreeSet::new(),
             |_, _| async { std::future::pending::<anyhow::Result<ProfileConfig>>().await },
             None,
         )
