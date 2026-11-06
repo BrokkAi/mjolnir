@@ -5,7 +5,7 @@
 //! [`surface`] projects protocol capabilities for the chat control surface.
 
 mod air_tasks;
-mod drive;
+pub(crate) mod drive;
 mod launch;
 mod native_agents;
 mod opencode_logins;

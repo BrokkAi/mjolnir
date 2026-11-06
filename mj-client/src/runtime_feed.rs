@@ -66,63 +66,222 @@ impl RuntimeProjection {
     /// Publish row detail for live work and the families the client has opened.
     /// Compact relationship metadata remains available for counts/navigation.
     pub fn for_subagent_parents(&self, parents: &BTreeSet<String>) -> Self {
-        let operations = self
+        ScopedProjection::new(self, parents.clone()).projection
+    }
+}
+
+/// A projection scoped to opened families, with the inputs its selection read.
+/// [`Self::advance`] scopes a later publication from what changed between the
+/// two, so a terminal's poll costs its changes rather than the whole history.
+#[derive(Debug, Clone)]
+pub struct ScopedProjection {
+    pub projection: RuntimeProjection,
+    selection: ScopeSelection,
+}
+
+/// What decides membership besides each session's own record and relation.
+#[derive(Debug, Clone)]
+struct ScopeSelection {
+    /// Sessions with an active lifecycle or move operation.
+    operations: BTreeSet<String>,
+    /// The opened parents and all of their ancestors.
+    ancestors: BTreeSet<String>,
+}
+
+impl ScopeSelection {
+    fn of(full: &RuntimeProjection, parents: &BTreeSet<String>) -> Self {
+        let operations = full
             .metadata
             .lifecycles
             .iter()
             .map(|operation| operation.session_id.clone())
             .chain(
-                self.moves
+                full.moves
                     .iter()
                     .filter(|(_, operation)| operation.is_active())
                     .map(|(id, _)| id.clone()),
             )
-            .collect::<BTreeSet<_>>();
+            .collect();
         let mut ancestors = parents.clone();
         for parent in parents {
             let mut id = parent.as_str();
             let mut seen = BTreeSet::new();
             while seen.insert(id.to_owned()) {
-                let Some(relation) = self.subagents.get(id) else {
+                let Some(relation) = full.subagents.get(id) else {
                     break;
                 };
                 ancestors.insert(relation.parent_session_id.clone());
                 id = &relation.parent_session_id;
             }
         }
-        let mut result = self.clone();
-        result.subagent_parents = parents.clone();
-        result.records = self.records.filtered(|id, record| {
-            let relation = self.subagents.get(id);
-            let in_family =
-                relation.is_some_and(|relation| parents.contains(&relation.parent_session_id));
-            let live = match relation {
-                None => record.state != mj_core::state::SessionState::Stopped,
-                Some(_) => !matches!(
-                    record.state,
-                    mj_core::state::SessionState::Stopped | mj_core::state::SessionState::Parked
-                ),
-            };
-            operations.contains(id)
-                || (!record.archived && (live || in_family || ancestors.contains(id)))
-        });
-        result
-            .subagents
-            .retain(|id, _| self.records.get(id).is_some_and(|record| !record.archived));
-        result
+        Self {
+            operations,
+            ancestors,
+        }
+    }
+
+    fn keeps(&self, full: &RuntimeProjection, parents: &BTreeSet<String>, id: &str) -> bool {
+        let Some(record) = full.records.get(id) else {
+            return false;
+        };
+        let relation = full.subagents.get(id);
+        let in_family =
+            relation.is_some_and(|relation| parents.contains(&relation.parent_session_id));
+        let live = match relation {
+            None => record.state != mj_core::state::SessionState::Stopped,
+            Some(_) => !matches!(
+                record.state,
+                mj_core::state::SessionState::Stopped | mj_core::state::SessionState::Parked
+            ),
+        };
+        self.operations.contains(id)
+            || (!record.archived && (live || in_family || self.ancestors.contains(id)))
+    }
+}
+
+/// Relationships stay for counts and navigation unless their session is archived.
+fn keeps_relation(full: &RuntimeProjection, id: &str) -> bool {
+    full.records.get(id).is_some_and(|record| !record.archived)
+}
+
+impl ScopedProjection {
+    pub fn new(full: &RuntimeProjection, parents: BTreeSet<String>) -> Self {
+        let selection = ScopeSelection::of(full, &parents);
+        let mut result = full.clone();
+        result.records = full
+            .records
+            .filtered(|id, _| selection.keeps(full, &parents, id));
+        result.subagent_parents = parents;
+        result.subagents.retain(|id, _| keeps_relation(full, id));
+        result.sessions = full
             .sessions
-            .retain(|id, _| result.records.contains_key(id));
-        result.moves.retain(|id, _| result.records.contains_key(id));
-        result
+            .filtered(|id, _| result.records.contains_key(id));
+        result.moves = full.moves.filtered(|id, _| result.records.contains_key(id));
+        result.session_cpu = full
             .session_cpu
-            .retain(|id, _| result.records.contains_key(id));
-        result
+            .filtered(|id, _| result.records.contains_key(id));
+        result.transcripts = full
             .transcripts
-            .retain(|id, _| result.records.contains_key(id));
-        result
+            .filtered(|id, _| result.records.contains_key(id));
+        result.native_agents = full
             .native_agents
-            .retain(|_, agent| result.records.contains_key(&agent.agent.owner_session_id));
-        result
+            .filtered(|_, agent| result.records.contains_key(&agent.agent.owner_session_id));
+        Self {
+            projection: result,
+            selection,
+        }
+    }
+
+    /// Scope `after` given that `self` scopes `before`. Only sessions whose
+    /// rows or selection inputs changed are visited, and unchanged rows keep
+    /// their shared tree nodes, so a delta from `self` costs what changed.
+    pub fn advance(&self, before: &RuntimeProjection, after: &RuntimeProjection) -> Self {
+        let parents = &self.projection.subagent_parents;
+        let selection = ScopeSelection::of(after, parents);
+        let mut result = self.projection.clone();
+        result.revision = after.revision;
+        result.metadata = after.metadata.clone();
+
+        let mut candidates = BTreeSet::new();
+        candidates.extend(before.records.changes(&after.records).map(|(id, _)| id));
+        candidates.extend(before.subagents.changes(&after.subagents).map(|(id, _)| id));
+        candidates.extend(
+            self.selection
+                .operations
+                .symmetric_difference(&selection.operations),
+        );
+        candidates.extend(
+            self.selection
+                .ancestors
+                .symmetric_difference(&selection.ancestors),
+        );
+        let mut moved = BTreeSet::new();
+        for id in candidates {
+            let keep = selection.keeps(after, parents, id);
+            if result.records.contains_key(id) != keep {
+                moved.insert(id.clone());
+            }
+            result.records.copy_entry(&after.records, id, keep);
+            result
+                .subagents
+                .copy_entry(&after.subagents, id, keeps_relation(after, id));
+        }
+
+        let records = &result.records;
+        follow_records(
+            &mut result.sessions,
+            &before.sessions,
+            &after.sessions,
+            records,
+            &moved,
+        );
+        follow_records(
+            &mut result.moves,
+            &before.moves,
+            &after.moves,
+            records,
+            &moved,
+        );
+        follow_records(
+            &mut result.session_cpu,
+            &before.session_cpu,
+            &after.session_cpu,
+            records,
+            &moved,
+        );
+        follow_records(
+            &mut result.transcripts,
+            &before.transcripts,
+            &after.transcripts,
+            records,
+            &moved,
+        );
+        let owned = moved
+            .iter()
+            .map(|owner| mj_core::native_agent::owner_view_id_prefix(owner))
+            .collect::<Vec<_>>();
+        let agents = before
+            .native_agents
+            .changes(&after.native_agents)
+            .map(|(id, _)| id)
+            .chain(
+                owned
+                    .iter()
+                    .flat_map(|prefix| after.native_agents.keys_with_prefix(prefix)),
+            )
+            .collect::<BTreeSet<_>>();
+        for id in agents {
+            let keep = after
+                .native_agents
+                .get(id)
+                .is_some_and(|agent| records.contains_key(&agent.agent.owner_session_id));
+            result
+                .native_agents
+                .copy_entry(&after.native_agents, id, keep);
+        }
+        Self {
+            projection: result,
+            selection,
+        }
+    }
+}
+
+/// Bring a per-session map to `after` for sessions whose entry changed or
+/// whose record entered or left the scope.
+fn follow_records<T: Clone + PartialEq>(
+    scoped: &mut SnapshotMap<String, T>,
+    before: &SnapshotMap<String, T>,
+    after: &SnapshotMap<String, T>,
+    records: &SnapshotMap<String, SessionRecord>,
+    moved: &BTreeSet<String>,
+) {
+    let changed = before
+        .changes(after)
+        .map(|(id, _)| id)
+        .chain(moved)
+        .collect::<BTreeSet<_>>();
+    for id in changed {
+        scoped.copy_entry(after, id, records.contains_key(id));
     }
 }
 
@@ -437,6 +596,7 @@ fn same_header(header: &MaterializedSession, materialized: &MaterializedSession)
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionTailReply {
     Tail {
+        #[serde(serialize_with = "serialize_client_projection")]
         header: Box<MaterializedSession>,
         window: ProjectionWindow,
         /// Oldest first.
@@ -481,6 +641,7 @@ impl SessionTail {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptItems {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_client_projection")]
     pub header: Option<Box<MaterializedSession>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<ProjectionWindow>,
@@ -683,6 +844,21 @@ impl RuntimeReplica {
             }
         }
     }
+}
+
+/// Older clients strictly decode the shared internal outcome inside projections.
+pub(crate) fn serialize_client_projection<T: Serialize, S: serde::Serializer>(
+    projection: &T,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut value = serde_json::to_value(projection).map_err(serde::ser::Error::custom)?;
+    if let Some(outcome) = value
+        .get_mut("last_turn_outcome")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        outcome.remove("answered_through");
+    }
+    value.serialize(serializer)
 }
 
 #[cfg(test)]
@@ -892,6 +1068,47 @@ mod tests {
             SessionTail::from_parts(*header, fetched_window, fetched),
         );
         assert_eq!(replica.projection.transcripts["s"], daemon);
+        let mut with_answer = daemon.clone();
+        with_answer.header.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+            answered_through: Some(50),
+            diagnostic: None,
+            usage: None,
+            command_id: "task".into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: Some(2),
+            completed_ordinal: 50,
+            completed_at_ms: 100,
+            outcome: mj_core::state::TurnOutcomeKind::Completed {
+                stop_reason: "end_turn".into(),
+            },
+        });
+        let reply = serde_json::to_value(SessionTailReply::of(&with_answer)).unwrap();
+        assert!(
+            reply["header"]["last_turn_outcome"]
+                .get("answered_through")
+                .is_none()
+        );
+        assert_eq!(
+            with_answer
+                .header
+                .last_turn_outcome
+                .as_ref()
+                .unwrap()
+                .answered_through,
+            Some(50)
+        );
+        let delta = TranscriptItems {
+            header: Some(Box::new(with_answer.header.clone())),
+            window: None,
+            upserts: vec![],
+            removes: vec![],
+        };
+        let encoded = serde_json::to_value(delta).unwrap();
+        assert!(
+            encoded["header"]["last_turn_outcome"]
+                .get("answered_through")
+                .is_none()
+        );
 
         type Step = Box<dyn Fn(&mut Vec<Arc<TranscriptItem>>)>;
         let steps: Vec<Step> = vec![

@@ -310,6 +310,8 @@ pub fn classify_prompt_completion(stop_reason: &str) -> PromptCompletion {
 #[serde(deny_unknown_fields)]
 pub struct MaterializedTurnOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_through: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<crate::diagnostic::TurnDiagnostic>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -325,6 +327,20 @@ pub struct MaterializedTurnOutcome {
 }
 
 impl MaterializedTurnOutcome {
+    /// The highest acceptance answered by the projection, or a legacy row.
+    pub fn answered_ordinal(&self) -> Option<u64> {
+        self.answered_through.or_else(|| {
+            crate::subagent::reminded_turn_ordinal(&self.command_id).or(self.accepted_ordinal)
+        })
+    }
+
+    pub fn answers(&self, ordinal: u64) -> bool {
+        self.accepted_ordinal == Some(ordinal)
+            || self
+                .answered_ordinal()
+                .is_some_and(|through| through >= ordinal)
+    }
+
     /// Only work that actually started can have been interrupted.
     pub fn interruption_ordinal(&self) -> Option<u64> {
         (self.turn_start_position.is_some()

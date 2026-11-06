@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 111;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 113;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2075,6 +2075,18 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         transaction.commit()?;
     }
 
+    // Breaking: older daemons reject answered_through in persisted outcome JSON.
+    if version < 113 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 113 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (113, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 113;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2610,6 +2622,7 @@ mod reader_tests {
         ).unwrap();
         migrate_schema(&connection).unwrap();
         let state = read_schema_state(&connection).unwrap();
+        assert!(state.ensure_supported_by(SCHEMA_VERSION - 1).is_err());
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         let revisions = connection
@@ -2800,8 +2813,8 @@ mod reader_tests {
         drop(statement);
         assert_eq!(touched, ["bundle", "moved", "project"]);
         let schema = read_schema_state(&connection).unwrap();
-        assert_eq!(schema.revision, 112);
-        assert_eq!(schema.minimum_compatible, Some(111));
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         connection
             .execute(
                 "UPDATE sessions SET session_title_override=title WHERE session_id='bundle'",
@@ -4275,8 +4288,30 @@ mod reader_tests {
                 |row| row.get::<_, bool>(0),
             )
             .unwrap());
+        connection.execute_batch("CREATE TRIGGER stop_before_stored_answers BEFORE INSERT ON schema_migrations WHEN NEW.version=113 BEGIN SELECT RAISE(ABORT,'stored answers migration'); END;").unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection
+            .execute_batch("ROLLBACK; DROP TRIGGER stop_before_stored_answers;")
+            .unwrap();
+        let before_answers = read_schema_state(&connection).unwrap();
+        assert_eq!(before_answers.revision, 112);
+        assert_eq!(before_answers.minimum_compatible, Some(111));
+        before_answers.ensure_supported_by(112).unwrap();
         migrate_schema(&connection).unwrap();
         let schema = read_schema_state(&connection).unwrap();
+        assert_eq!(schema.revision, 113);
+        assert_eq!(schema.minimum_compatible, Some(113));
+        assert!(matches!(
+            schema
+                .ensure_supported_by(112)
+                .unwrap_err()
+                .downcast_ref::<StoreSchemaMismatch>()
+                .unwrap()
+                .reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: 113
+            }
+        ));
         let error = schema.ensure_supported_by(98).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<StoreSchemaMismatch>().unwrap().reason,

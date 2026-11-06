@@ -279,7 +279,7 @@ impl DurableRelay {
                         .harness_turn
                         .is_some_and(|turn| turn.first_ordinal == ordinal)
                 {
-                    self.settle_harness_turn(Some("autonomous_task_ended".into()))?;
+                    self.settle_harness_turn(Some("autonomous_task_ended".into()), "end_turn")?;
                 }
             }
             return self.persist_activity_transition();
