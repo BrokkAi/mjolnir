@@ -739,6 +739,109 @@ pub(super) async fn reassert_execution_policy(
     Ok(())
 }
 
+/// Reassert the policy after the session's configuration moved. A harness
+/// that refuses the policy mode keeps its own mode with a warning, as at
+/// startup: the session stays usable instead of ending.
+pub(super) async fn reconcile_execution_policy(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    harness: HarnessKind,
+    enforcement: Option<ExecutionEnforcement>,
+    config_options: &mut Vec<SessionConfigOption>,
+    modes: &mut Option<SessionModeState>,
+    events: &mpsc::Sender<RuntimeEvent>,
+) -> Result<()> {
+    let Err(error) = reassert_execution_policy(
+        connection,
+        session_id,
+        harness,
+        enforcement,
+        config_options,
+        modes,
+        PolicySync::IfDrifted,
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    let (Some(refusal), Some(desired)) = (
+        mode_refusal(&error),
+        enforcement.and_then(ExecutionEnforcement::acp_mode),
+    ) else {
+        return Err(error);
+    };
+    tracing::warn!(
+        ?harness,
+        mode = desired,
+        error = format!("{error:#}"),
+        "the harness refused the execution mode after a configuration change"
+    );
+    let message = refused_mode_warning(
+        harness,
+        enforcement.and_then(ExecutionEnforcement::acp_mode_selector),
+        desired,
+        &refusal,
+        modes.as_ref(),
+        config_options,
+    );
+    emit_runtime_event(events, RuntimeEvent::Warning { message }).await
+}
+
+/// Apply the mode and configuration reports the harness sent since the last
+/// command, starting with `first` when the caller already received it, and
+/// reconcile the policy if they moved it. The command loop runs this before
+/// it handles any command, so a prompt never starts in a mode reported while
+/// the previous turn ran.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn apply_pending_policy_updates(
+    first: Option<SessionUpdate>,
+    policy_updates: &mut mpsc::UnboundedReceiver<SessionUpdate>,
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    harness: HarnessKind,
+    enforcement: Option<ExecutionEnforcement>,
+    config_options: &mut Vec<SessionConfigOption>,
+    modes: &mut Option<SessionModeState>,
+    events: &mpsc::Sender<RuntimeEvent>,
+) -> Result<()> {
+    let previous = policy_configuration(config_options, modes, enforcement);
+    let mut received = false;
+    for update in first
+        .into_iter()
+        .chain(std::iter::from_fn(|| policy_updates.try_recv().ok()))
+    {
+        apply_policy_update(update, config_options, modes);
+        received = true;
+    }
+    if !received || previous == policy_configuration(config_options, modes, enforcement) {
+        return Ok(());
+    }
+    reconcile_execution_policy(
+        connection,
+        session_id,
+        harness,
+        enforcement,
+        config_options,
+        modes,
+        events,
+    )
+    .await?;
+    emit_runtime_event(
+        events,
+        RuntimeEvent::SessionConfigured {
+            config_options: config_options.clone(),
+        },
+    )
+    .await?;
+    emit_runtime_event(
+        events,
+        RuntimeEvent::SessionModesConfigured {
+            modes: modes.clone(),
+        },
+    )
+    .await
+}
+
 pub(super) fn policy_configuration(
     options: &[SessionConfigOption],
     modes: &Option<SessionModeState>,

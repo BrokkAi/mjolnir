@@ -757,37 +757,18 @@ pub(super) async fn serve_session(
             && goal_question.is_none();
         let request = tokio::select! {
             Some(update) = policy_updates.recv() => {
-                let previous = policy_configuration(&config_options, &modes, enforcement);
-                apply_policy_update(update, &mut config_options, &mut modes);
-                while let Ok(update) = policy_updates.try_recv() {
-                    apply_policy_update(update, &mut config_options, &mut modes);
-                }
-                if previous != policy_configuration(&config_options, &modes, enforcement) {
-                    reassert_execution_policy(
-                        connection,
-                        &session_id,
-                        spec.harness,
-                        enforcement,
-                        &mut config_options,
-                        &mut modes,
-                        PolicySync::IfDrifted,
-                    )
-                    .await?;
-                    emit_runtime_event(
-                        events,
-                        RuntimeEvent::SessionConfigured {
-                            config_options: config_options.clone(),
-                        },
-                    )
-                    .await?;
-                    emit_runtime_event(
-                        events,
-                        RuntimeEvent::SessionModesConfigured {
-                            modes: modes.clone(),
-                        },
-                    )
-                    .await?;
-                }
+                apply_pending_policy_updates(
+                    Some(update),
+                    policy_updates,
+                    connection,
+                    &session_id,
+                    spec.harness,
+                    enforcement,
+                    &mut config_options,
+                    &mut modes,
+                    events,
+                )
+                .await?;
                 continue;
             }
             event = goal_controls.next(), if !goal_controls.is_empty() => {
@@ -809,6 +790,19 @@ pub(super) async fn serve_session(
             }
             request = requests.recv() => match request { Some(request) => request, None => break },
         };
+        // Reports that arrived with the request are settled before it runs.
+        apply_pending_policy_updates(
+            None,
+            policy_updates,
+            connection,
+            &session_id,
+            spec.harness,
+            enforcement,
+            &mut config_options,
+            &mut modes,
+            events,
+        )
+        .await?;
         let request = match request {
             CommandRequest::PromptAttachments {
                 request_id,
@@ -1520,14 +1514,14 @@ pub(super) async fn serve_session(
                         if previous_policy
                             != policy_configuration(&config_options, &modes, enforcement)
                         {
-                            reassert_execution_policy(
+                            reconcile_execution_policy(
                                 connection,
                                 &session_id,
                                 spec.harness,
                                 enforcement,
                                 &mut config_options,
                                 &mut modes,
-                                PolicySync::IfDrifted,
+                                events,
                             )
                             .await?;
                         }
@@ -1653,14 +1647,14 @@ pub(super) async fn serve_session(
                             &mut config_options,
                             &mut modes,
                         );
-                        reassert_execution_policy(
+                        reconcile_execution_policy(
                             connection,
                             &session_id,
                             spec.harness,
                             enforcement,
                             &mut config_options,
                             &mut modes,
-                            PolicySync::IfDrifted,
+                            events,
                         )
                         .await?;
                         let mode_id =

@@ -1526,7 +1526,14 @@ async fn resume_haiku_then_switch(refuse_auto: bool, switch_model: bool) -> Haik
         }
     }
     if switch_model {
-        assert_eq!(resumed.mode.as_deref(), Some("acceptEdits"));
+        assert_eq!(
+            resumed.mode.as_deref(),
+            Some(if refuse_auto {
+                "default"
+            } else {
+                "acceptEdits"
+            })
+        );
         commands
             .send(CommandRequest::SetConfig {
                 request_id: "switch-to-sonnet".into(),
@@ -1542,6 +1549,8 @@ async fn resume_haiku_then_switch(refuse_auto: bool, switch_model: bool) -> Haik
                     break;
                 }
                 RuntimeEvent::CommandRejected { message, .. } => panic!("{message}"),
+                RuntimeEvent::Warning { message } => resumed.warnings.push(message),
+                RuntimeEvent::Stopped => panic!("the model change ended the session"),
                 _ => {}
             }
         }
@@ -1560,6 +1569,21 @@ async fn resume_haiku_then_switch(refuse_auto: bool, switch_model: bool) -> Haik
 async fn switching_from_haiku_to_sonnet_reasserts_guardian_auto_mode() {
     let resumed = resume_haiku_then_switch(false, true).await;
     assert_eq!(resumed.mode.as_deref(), Some("auto"));
+}
+
+/// A bridge that refuses Auto keeps its own mode after a model change too:
+/// the reassertion warns again instead of ending the session.
+// Hard-won: 60f44f8: reasserting a refused policy mode after a model change ended the session
+#[tokio::test]
+async fn a_model_change_keeps_a_session_whose_bridge_refuses_the_policy_mode() {
+    let resumed = resume_haiku_then_switch(true, true).await;
+    assert_eq!(resumed.mode.as_deref(), Some("default"));
+    let refusals = resumed
+        .warnings
+        .iter()
+        .filter(|warning| warning.contains("this bridge refuses it"))
+        .count();
+    assert_eq!(refusals, 2, "{:?}", resumed.warnings);
 }
 
 /// R8-2: a never-prompted Claude session on haiku could not be resumed. Its

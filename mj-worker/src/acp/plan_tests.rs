@@ -274,13 +274,34 @@ async fn guardian_defers_an_announced_mode_change_until_the_turn_finishes() {
         probe
             .result(&prompt, json!({"stopReason": "end_turn"}))
             .await;
+        loop {
+            if matches!(probe.event().await, RuntimeEvent::PromptFinished { .. }) {
+                break;
+            }
+        }
+        // The next prompt is ready alongside the deferred report; the mode is
+        // settled before that prompt reaches the bridge.
+        probe
+            .commands
+            .send(CommandRequest::Prompt {
+                request_id: "next-turn".into(),
+                prompt: vec![ContentBlock::Text(TextContent::new("Next"))],
+            })
+            .await
+            .unwrap();
         if announced != "plan" {
             let restoring = probe.message().await;
+            assert_eq!(restoring["method"], "session/set_config_option");
             assert_eq!(restoring["params"]["value"], "auto");
             probe
                 .result(&restoring, json!({"configOptions": mode_config("auto")}))
                 .await;
         }
+        let next_prompt = probe.message().await;
+        assert_eq!(next_prompt["method"], "session/prompt");
+        probe
+            .result(&next_prompt, json!({"stopReason": "end_turn"}))
+            .await;
         loop {
             if let RuntimeEvent::SessionConfigured { config_options } = probe.event().await {
                 assert_eq!(
