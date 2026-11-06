@@ -7876,7 +7876,7 @@ fn push_review_requests_require_protocol_43_and_old_turn_captures_still_decode()
     let legacy = ReviewerRequest::CaptureDelta {
         repositories: None,
         baselines: Default::default(),
-        scope: CaptureScope::TurnDelta,
+        scope: CaptureScope::PushableCommits,
     };
     assert!(
         !serde_json::to_string(&legacy)
@@ -7891,7 +7891,7 @@ fn push_review_requests_require_protocol_43_and_old_turn_captures_still_decode()
         old,
         ReviewerRequest::CaptureDelta {
             repositories: None,
-            scope: CaptureScope::TurnDelta,
+            scope: CaptureScope::PushableCommits,
             ..
         }
     ));
@@ -7900,7 +7900,7 @@ fn push_review_requests_require_protocol_43_and_old_turn_captures_still_decode()
             role: None,
             request: old
         }
-        .supported_at(42)
+        .supported_at(43)
     );
 }
 

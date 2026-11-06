@@ -2628,10 +2628,10 @@ impl DaemonClient {
         }
     }
 
-    /// Ask the daemon to review the turn this session just finished.
+    /// Ask the daemon to review committed work through the push gate.
     ///
-    /// The refusal is a sentence for a person -- "prompts are queued", "set
-    /// [review] profile in config.toml" -- so it travels as text rather than
+    /// The refusal includes how to proceed, such as committing tracked
+    /// changes or choosing a harness with push-gate support. It travels as text rather than
     /// as a code every surface would have to translate.
     pub async fn start_turn_review(&mut self, session_id: String) -> Result<()> {
         match self
@@ -2639,7 +2639,7 @@ impl DaemonClient {
             .await?
         {
             DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected turn-review reply {reply:?}"),
+            reply => bail!("unexpected review reply {reply:?}"),
         }
     }
 
@@ -2993,7 +2993,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // clients reading its PID and `/proc`, and it serves the configuration that
 // owns the store instead of clients opening `config.toml`.
 // SessionReview::Inherit adds a value older API clients cannot deserialize.
-pub const PROTOCOL_VERSION: u32 = 82;
+// Client views no longer decode forwarding phases or turn-review resolutions;
+// reviewer capture actions no longer carry turn scope or baselines.
+pub const PROTOCOL_VERSION: u32 = 83;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

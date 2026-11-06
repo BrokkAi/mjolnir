@@ -300,7 +300,7 @@ impl ViewerSnapshot {
                     .then(|| session.last_error.clone())
                     .flatten()
                     .or_else(|| session.public_error().map(str::to_owned)),
-                    review_trigger: review.trigger,
+                    review_trigger: review.trigger(),
                     review_count: review.reviewers.len(),
                     review_unavailable: session.review_unavailable().map(str::to_owned),
                     storage_problem: None,
@@ -464,7 +464,7 @@ impl ViewerSnapshot {
             targets,
             bundles,
             review_config: ViewerReviewConfig {
-                trigger: config.review.trigger,
+                trigger: config.review.trigger(),
                 reviewers: config.review.reviewers.clone(),
             },
             capacity: Vec::new(),

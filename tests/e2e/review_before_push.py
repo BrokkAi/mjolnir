@@ -99,7 +99,6 @@ effort = "high"
 model = {json.dumps(args.model)}
 effort = "medium"
 [review]
-trigger = "push"
 [[review.reviewers]]
 model = {json.dumps(args.model)}
 effort = "high"

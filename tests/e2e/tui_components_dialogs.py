@@ -231,55 +231,6 @@ def probe_target_config_id(lab: Any, tmux: Any, evidence: Any) -> None:
     _wait(tmux, "Sessions", "dashboard focus restored after target probe")
 
 
-def probe_review_settings(lab: Any, tmux: Any, evidence: Any) -> None:
-    """Disabled Save consumes a real click; async discovery preserves the draft."""
-    import time
-    from tui_components_tmux import locate_text
-    before = lab.snapshot()["review_config"]
-    from tui_components_actions import open_review_settings
-    open_review_settings(tmux)
-    _wait(tmux, "Trigger")
-    _record(evidence, tmux, "review-settings-open", "open review settings", "review form visible")
-    tmux.send_key("Enter")
-    tmux.send_key("Down")
-    tmux.send_key("Enter")
-    time.sleep(0.15)
-    # Open the profile dropdown, then choose its explicit empty option.
-    screen = _capture(tmux)
-    row = next((y, line) for y, line in enumerate(screen.splitlines()) if "Profile   " in line)
-    tmux.mouse_click(row[1].index("Profile   ") + 12, row[0])
-    tmux.send_key("Home")
-    tmux.send_key("Enter")
-    screen = _wait(tmux, "No reviewer profile")
-    x, y = locate_text(screen, "  Save Setup  ")
-    tmux.mouse_click(x + 3, y)
-    time.sleep(0.3)
-    _wait(tmux, "Setup › Code Review")
-    if lab.snapshot()["review_config"] != before:
-        raise AssertionError("disabled Save persisted an invalid review draft")
-    _record(evidence, tmux, "review-disabled-save", "enable without a reviewer; click disabled Save", "invalid draft stays open and persisted settings are unchanged")
-    tmux.send_key("F1")
-    _wait(tmux, "Keyboard shortcuts")
-    tmux.send_key("Escape")
-    tmux.wait_until(lambda: "Keyboard shortcuts" not in _capture(tmux), "Help dismissed over review editor")
-    _wait(tmux, "No reviewer profile")
-    x, y = locate_text(_capture(tmux), "  Cancel  ", last=True)
-    tmux.mouse_click(x + 3, y)
-    _wait(tmux, "Discard unsaved changes?", "review draft protection")
-    tmux.send_key("Enter")
-    tmux.wait_until(lambda: "Discard unsaved changes?" not in _capture(tmux), "safe default keeps review edits")
-    _wait(tmux, "No reviewer profile")
-    tmux.send_key("Escape")
-    _wait(tmux, "Discard unsaved changes?")
-    tmux.send_key("Right")
-    tmux.send_key("Enter")
-    tmux.wait_until(lambda: "Setup › Code Review" not in _capture(tmux), "review child cancellation")
-    tmux.send_key("Escape")
-    if lab.snapshot()["review_config"] != before:
-        raise AssertionError("cancelling review settings persisted the draft")
-    _record(evidence, tmux, "review-protected-cancel", "Cancel; keep editing; Escape; discard", "safe default preserves edits and discard restores Setup without saving")
-
-
 def probe_new_wizard(lab: Any, tmux: Any, evidence: Any) -> None:
     """Open the new-session wizard, move a selector, and cancel in its footer."""
 
@@ -437,7 +388,6 @@ def run_dialog_acceptance(lab: Any, tmux: Any, evidence: Any) -> None:
     probe_setup_double_click(lab, tmux, evidence)
     probe_rename(lab, tmux, evidence)
     probe_target_config_id(lab, tmux, evidence)
-    probe_review_settings(lab, tmux, evidence)
     probe_new_wizard(lab, tmux, evidence)
     probe_resume_import(lab, tmux, evidence)
     probe_web_dialog(lab, tmux, evidence)

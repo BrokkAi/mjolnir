@@ -1821,6 +1821,7 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
                 "refs/mj/reviewed/{}",
                 git_line(&source, &["rev-parse", "HEAD^{tree}"])
             );
+            let overridden = reviewed.replace("refs/mj/reviewed/", "refs/mj/overridden/");
             let start = format!(
                 "refs/mj/session-start/{}/{}",
                 digest_bytes(b"moving"),
@@ -1828,6 +1829,7 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
             );
             for (name, object) in [
                 (reviewed.as_str(), &head),
+                (overridden.as_str(), &head),
                 (start.as_str(), &head),
                 (REVIEW_BASELINE_REF, &point),
             ] {
@@ -1857,6 +1859,7 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
             restore_git_snapshot(&SystemGit, &destination, &snapshot).unwrap();
             for (name, object) in [
                 (reviewed.as_str(), &head),
+                (overridden.as_str(), &head),
                 (start.as_str(), &head),
                 (REVIEW_BASELINE_REF, &point),
             ] {
@@ -1874,6 +1877,7 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
             );
             let later = git_line(&destination, &["rev-parse", "HEAD"]);
             git(&destination, &["update-ref", &reviewed, &later]);
+            git(&destination, &["update-ref", &overridden, &later]);
             git(&destination, &["update-ref", &start, &later]);
             let other_start = format!("refs/mj/session-start/{}/other", digest_bytes(b"other"));
             git(&destination, &["update-ref", &other_start, &later]);
@@ -1906,6 +1910,7 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
             )
             .unwrap();
             assert_eq!(git_line(&destination, &["rev-parse", &reviewed]), later);
+            assert_eq!(git_line(&destination, &["rev-parse", &overridden]), later);
             assert_eq!(git_line(&destination, &["rev-parse", &start]), head);
             assert_eq!(git_line(&destination, &["rev-parse", &other_start]), later);
             assert_eq!(

@@ -552,12 +552,6 @@ pub(crate) fn prompt_title_parts(chat: &ChatState) -> Vec<String> {
             WorkerPhase::Closed => parts.push("Agent ended".into()),
         }
     }
-    // Auto-review changes what happens when this turn ends, so the composer
-    // says it is armed rather than surprising the user with a pane.
-    let review = chat.review_config();
-    if review.arms_turn_review() {
-        parts.push("review".to_owned());
-    }
     parts
 }
 
