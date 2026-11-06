@@ -525,76 +525,51 @@ pub(super) async fn serve_session(
         )
         .await?;
     }
-    if let Some(desired_mode) = enforcement.and_then(ExecutionEnforcement::acp_mode) {
-        let selector = enforcement.and_then(ExecutionEnforcement::acp_mode_selector);
-        // Every open selects the policy, so a loaded session cannot keep an
-        // earlier one. Only Plan carried over from a resumed session or a
-        // saved context stays on.
-        let sync = if (resumed
-            || spec
-                .clear_context_request
-                .as_ref()
-                .or(spec.context_restore.as_ref())
-                .is_some_and(|reset| reset.mode.as_deref() == Some("plan")))
-            && current_session_mode(&config_options, &modes).as_deref() == Some("plan")
-        {
-            PolicySync::IfDrifted
-        } else {
-            PolicySync::Always
-        };
-        let enforced = reassert_execution_policy(
-            connection,
-            &session_id,
-            spec.harness,
-            enforcement,
-            &mut config_options,
-            &mut modes,
-            sync,
-        )
-        .await;
-        if let Err(error) = enforced {
-            // A new session the harness refuses the mode for keeps the
-            // harness's own mode rather than failing the worker, which left a
-            // resumed session suspended on every retry (R8-2). A reloaded
-            // session still fails: it has history, opened in this mode before.
-            let Some(refusal) = (!resumed).then(|| mode_refusal(&error)).flatten() else {
-                return Err(error);
-            };
-            tracing::warn!(
-                harness = ?spec.harness,
-                mode = desired_mode,
-                error = format!("{error:#}"),
-                "the harness refused the execution mode for a new session"
-            );
-            emit_runtime_event(
-                events,
-                RuntimeEvent::Warning {
-                    message: refused_mode_warning(
-                        spec.harness,
-                        selector,
-                        desired_mode,
-                        &refusal,
-                        modes.as_ref(),
-                        &config_options,
-                    ),
-                },
-            )
-            .await?;
-        }
-    }
-    // Muse's auto-review is off in every session muse-acp opens, so it is
-    // selected on every open, resumed or not.
-    if enforcement
-        .and_then(ExecutionEnforcement::acp_mode)
-        .is_none()
-        && let Some(setting) = enforcement.and_then(ExecutionEnforcement::acp_setting)
+    // Every open selects the policy, so a loaded session cannot keep an
+    // earlier one. Only Plan carried over from a resumed session or a saved
+    // context stays on. Muse's auto-review is off in every session muse-acp
+    // opens, so the policy setting is selected on every open too.
+    let sync = if (resumed
+        || spec
+            .clear_context_request
+            .as_ref()
+            .or(spec.context_restore.as_ref())
+            .is_some_and(|reset| reset.mode.as_deref() == Some("plan")))
+        && current_session_mode(&config_options, &modes).as_deref() == Some("plan")
     {
-        enforce_policy_setting(
-            connection,
-            &session_id,
-            spec.harness,
-            setting,
-            &mut config_options,
+        PolicySync::IfDrifted
+    } else {
+        PolicySync::Always
+    };
+    if let Some(refusal) = reassert_execution_policy(
+        connection,
+        &session_id,
+        spec.harness,
+        enforcement,
+        &mut config_options,
+        &mut modes,
+        sync,
+    )
+    .await?
+    {
+        // A new session the harness refuses the mode for keeps the harness's
+        // own mode rather than failing the worker, which left a resumed
+        // session suspended on every retry (R8-2). A reloaded session still
+        // fails: it has history, opened in this mode before.
+        if resumed {
+            return Err(refusal.error);
+        }
+        emit_runtime_event(
+            events,
+            RuntimeEvent::Warning {
+                message: refused_policy_warning(
+                    spec.harness,
+                    enforcement,
+                    &refusal,
+                    modes.as_ref(),
+                    &config_options,
+                ),
+            },
         )
         .await?;
     }
@@ -992,7 +967,7 @@ pub(super) async fn serve_session(
                                     prompt_running = false;
                                     let implementation = approved_plan.take().expect("approved plan is present");
                                     mode_restoration = Some(Box::pin(restore_plan_execution_mode(connection, session_id.clone(), RestoredPlanMode {
-                                        config_options: config_options.clone(), modes: modes.clone(), plan: implementation.plan,
+                                        config_options: config_options.clone(), modes: modes.clone(), plan: implementation.plan, warning: None,
                                     }, implementation.permission_sent, enforcement)));
                                     continue;
                                 }
@@ -1456,6 +1431,9 @@ pub(super) async fn serve_session(
                                 Ok(state) => {
                                     config_options = state.config_options;
                                     modes = state.modes;
+                                    if let Some(message) = state.warning {
+                                        emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
+                                    }
                                     emit_runtime_event(events, RuntimeEvent::SessionConfigured { config_options: config_options.clone() }).await?;
                                     emit_runtime_event(events, RuntimeEvent::SessionModesConfigured { modes: modes.clone() }).await?;
                                     let plan = state.plan;
@@ -1564,22 +1542,25 @@ pub(super) async fn serve_session(
             }
             CommandRequest::RestoreExecutionMode { request_id } => {
                 let applied = async {
-                    reassert_execution_policy(
+                    let warning = leave_plan_for_policy(
                         connection,
                         &session_id,
                         spec.harness,
                         enforcement,
                         &mut config_options,
                         &mut modes,
-                        PolicySync::Always,
                     )
                     .await?;
                     current_session_mode(&config_options, &modes)
                         .context("the policy mode was not reported")
+                        .map(|value| (value, warning))
                 }
                 .await;
                 match applied {
-                    Ok(value) => {
+                    Ok((value, warning)) => {
+                        if let Some(message) = warning {
+                            emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
+                        }
                         emit_runtime_event(
                             events,
                             RuntimeEvent::SessionModesConfigured {

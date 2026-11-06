@@ -316,6 +316,74 @@ async fn guardian_defers_an_announced_mode_change_until_the_turn_finishes() {
     }
 }
 
+// Hard-won: 734385a: a refused approval mode skipped Muse's guardian auto-review
+#[tokio::test]
+async fn muse_guardian_keeps_auto_review_when_the_bridge_refuses_its_approval_mode() {
+    // The probe's handshake asserts that `auto_review on` follows the refused
+    // approval mode; the session then reports the refusal and keeps serving.
+    let mut probe = PlanProbe::refusing_policy_mode(
+        ExecutionPolicy::ConfiguredApprovals,
+        false,
+        HarnessKind::Muse,
+    )
+    .await;
+    loop {
+        if let RuntimeEvent::Warning { message } = probe.event().await {
+            assert!(message.contains("this bridge refuses it"), "{message}");
+            break;
+        }
+    }
+    probe.no_message().await;
+    probe.close().await;
+}
+
+// Hard-won: 734385a: leaving Plan only retried a refused Auto, so Plan could not be left
+#[tokio::test]
+async fn leaving_plan_takes_claudes_default_mode_when_auto_is_refused() {
+    let mut probe = PlanProbe::refusing_policy_mode(
+        ExecutionPolicy::ConfiguredApprovals,
+        true,
+        HarnessKind::Claude,
+    )
+    .await;
+    set_claude_config_mode(&mut probe, "enter-plan", "plan").await;
+    probe
+        .commands
+        .send(CommandRequest::RestoreExecutionMode {
+            request_id: "exit-plan".into(),
+        })
+        .await
+        .unwrap();
+    let auto = probe.message().await;
+    assert_eq!(auto["params"]["value"], "auto");
+    probe.refuse(&auto).await;
+    let default = probe.message().await;
+    assert_eq!(default["method"], "session/set_config_option");
+    assert_eq!(default["params"]["value"], "default");
+    probe
+        .result(&default, json!({"configOptions": mode_config("default")}))
+        .await;
+    let mut warned = false;
+    loop {
+        match probe.event().await {
+            RuntimeEvent::Warning { message } if message.contains("this bridge refuses it") => {
+                warned = true;
+            }
+            RuntimeEvent::ConfigApplied {
+                request_id, value, ..
+            } if request_id == "exit-plan" => {
+                assert_eq!(value, "default");
+                break;
+            }
+            RuntimeEvent::CommandRejected { message, .. } => panic!("{message}"),
+            _ => {}
+        }
+    }
+    assert!(warned, "leaving Plan for another mode must say why");
+    probe.no_message().await;
+    probe.close().await;
+}
+
 #[tokio::test]
 async fn a_refused_claude_plan_exit_reports_failure_without_continuing() {
     let mut probe = PlanProbe::with_config(ExecutionPolicy::ConfiguredApprovals, true).await;
@@ -470,6 +538,26 @@ impl PlanProbe {
         harness: HarnessKind,
         managed_subagent: bool,
     ) -> Self {
+        Self::open(policy, config, harness, managed_subagent, false).await
+    }
+
+    /// A probe whose bridge answers the startup request for the policy mode
+    /// with a refusal, as Claude Code does when a model cannot use Auto.
+    async fn refusing_policy_mode(
+        policy: ExecutionPolicy,
+        config: bool,
+        harness: HarnessKind,
+    ) -> Self {
+        Self::open(policy, config, harness, false, true).await
+    }
+
+    async fn open(
+        policy: ExecutionPolicy,
+        config: bool,
+        harness: HarnessKind,
+        managed_subagent: bool,
+        refuse_mode: bool,
+    ) -> Self {
         let (client, agent) = tokio::io::duplex(4096);
         let (client_read, client_write) = tokio::io::split(client);
         let (agent_read, agent_write) = tokio::io::split(agent);
@@ -583,22 +671,30 @@ impl PlanProbe {
             assert_eq!(mode["method"], "session/set_config_option");
             assert_eq!(mode["params"]["configId"], selector);
             assert_eq!(mode["params"]["value"], enforced);
-            crate::acp::tests::select_option(
-                &mut options,
-                &json!({"configId": selector, "value": enforced}),
-            );
-            probe
-                .result(&mode, json!({"configOptions": options.clone()}))
-                .await;
+            if refuse_mode {
+                probe.refuse(&mode).await;
+            } else {
+                crate::acp::tests::select_option(
+                    &mut options,
+                    &json!({"configId": selector, "value": enforced}),
+                );
+                probe
+                    .result(&mode, json!({"configOptions": options.clone()}))
+                    .await;
+            }
         } else if let Some(enforced) = enforced
             && config
         {
             let mode = probe.message().await;
             assert_eq!(mode["method"], "session/set_config_option");
             assert_eq!(mode["params"]["value"], enforced);
-            probe
-                .result(&mode, json!({"configOptions": mode_config(enforced)}))
-                .await;
+            if refuse_mode {
+                probe.refuse(&mode).await;
+            } else {
+                probe
+                    .result(&mode, json!({"configOptions": mode_config(enforced)}))
+                    .await;
+            }
         } else if let Some(enforced) = enforced {
             let mode = probe.message().await;
             assert_eq!(mode["method"], "session/set_mode");
@@ -643,6 +739,15 @@ impl PlanProbe {
     async fn result(&mut self, request: &Value, result: Value) {
         self.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": result}))
             .await;
+    }
+
+    /// Answer a mode request the way Claude Code refuses Auto.
+    async fn refuse(&mut self, request: &Value) {
+        self.send(json!({"jsonrpc": "2.0", "id": request["id"], "error": {
+            "code": -32603, "message": "Internal error",
+            "data": {"details": "Cannot set permission mode: this bridge refuses it"}
+        }}))
+        .await;
     }
 
     /// Finish a prompt the way a working harness does: one line of answer,

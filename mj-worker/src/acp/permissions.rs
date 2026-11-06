@@ -17,6 +17,9 @@ pub(super) struct RestoredPlanMode {
     pub(super) config_options: Vec<SessionConfigOption>,
     pub(super) modes: Option<SessionModeState>,
     pub(super) plan: String,
+    /// Set when Claude refused the policy mode and Plan was left for its
+    /// default mode instead.
+    pub(super) warning: Option<String>,
 }
 
 pub(super) fn current_session_mode(
@@ -49,14 +52,13 @@ pub(super) async fn restore_plan_execution_mode(
         permission_sent.await.unwrap_or(false),
         "Claude's plan permission response could not be delivered"
     );
-    reassert_execution_policy(
+    state.warning = leave_plan_for_policy(
         connection,
         &session_id,
         HarnessKind::Claude,
         enforcement,
         &mut state.config_options,
         &mut state.modes,
-        PolicySync::Always,
     )
     .await?;
     Ok(state)

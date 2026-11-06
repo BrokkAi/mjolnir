@@ -686,8 +686,17 @@ pub(super) enum PolicySync {
     IfDrifted,
 }
 
+/// A harness's answer refusing the policy mode, as `mode_refusal` reads it.
+pub(super) struct ModeRefusal {
+    pub(super) error: anyhow::Error,
+    pub(super) text: String,
+}
+
 /// Reconcile the bridge with the launch policy at a command boundary. Plan
 /// controls may temporarily select Plan; leaving it always returns to policy.
+/// A refused policy mode is the answer, not an error, so the caller decides
+/// what the session does instead; the policy setting is selected either way,
+/// and any other failure, the setting's included, is an error.
 pub(super) async fn reassert_execution_policy(
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
@@ -696,10 +705,11 @@ pub(super) async fn reassert_execution_policy(
     config_options: &mut Vec<SessionConfigOption>,
     modes: &mut Option<SessionModeState>,
     sync: PolicySync,
-) -> Result<()> {
+) -> Result<Option<ModeRefusal>> {
     let Some(enforcement) = enforcement else {
-        return Ok(());
+        return Ok(None);
     };
+    let mut refused = None;
     if let Some(desired) = enforcement.acp_mode() {
         let current = mj_core::acp::execution_mode_option(
             config_options,
@@ -708,10 +718,9 @@ pub(super) async fn reassert_execution_policy(
         )
         .and_then(|option| surface::config_current_value(config_options, &option.id.to_string()))
         .or_else(|| current_session_mode(config_options, modes));
-        if sync == PolicySync::Always
-            || (current.as_deref() != Some(desired) && current.as_deref() != Some("plan"))
-        {
-            enforce_execution_mode(
+        if (sync == PolicySync::Always
+            || (current.as_deref() != Some(desired) && current.as_deref() != Some("plan")))
+            && let Err(error) = enforce_execution_mode(
                 connection,
                 session_id,
                 harness,
@@ -720,7 +729,12 @@ pub(super) async fn reassert_execution_policy(
                 config_options,
                 modes,
             )
-            .await?;
+            .await
+        {
+            let Some(text) = mode_refusal(&error) else {
+                return Err(error);
+            };
+            refused = Some(ModeRefusal { error, text });
         }
     }
     if let Some((key, value)) = enforcement.acp_setting()
@@ -736,7 +750,85 @@ pub(super) async fn reassert_execution_policy(
         )
         .await?;
     }
-    Ok(())
+    Ok(refused)
+}
+
+/// The warning a session gets when its harness refused the policy mode,
+/// naming the mode the session is left in.
+pub(super) fn refused_policy_warning(
+    harness: HarnessKind,
+    enforcement: Option<ExecutionEnforcement>,
+    refusal: &ModeRefusal,
+    modes: Option<&SessionModeState>,
+    config_options: &[SessionConfigOption],
+) -> String {
+    let desired = enforcement
+        .and_then(ExecutionEnforcement::acp_mode)
+        .unwrap_or_default();
+    tracing::warn!(
+        ?harness,
+        mode = desired,
+        error = format!("{:#}", refusal.error),
+        "the harness refused the execution mode"
+    );
+    refused_mode_warning(
+        harness,
+        enforcement.and_then(ExecutionEnforcement::acp_mode_selector),
+        desired,
+        &refusal.text,
+        modes,
+        config_options,
+    )
+}
+
+/// Claude's own mode, which a session leaving Plan takes when Claude refuses
+/// the policy mode: it asks before every change, so it is never looser than
+/// the policy, and Plan can always be left.
+const CLAUDE_DEFAULT_MODE: &str = "default";
+
+/// Leave Plan for the policy mode, returning the warning to show when the
+/// harness refused it and the session took Claude's default mode instead.
+pub(super) async fn leave_plan_for_policy(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    harness: HarnessKind,
+    enforcement: Option<ExecutionEnforcement>,
+    config_options: &mut Vec<SessionConfigOption>,
+    modes: &mut Option<SessionModeState>,
+) -> Result<Option<String>> {
+    let Some(refusal) = reassert_execution_policy(
+        connection,
+        session_id,
+        harness,
+        enforcement,
+        config_options,
+        modes,
+        PolicySync::Always,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if harness != HarnessKind::Claude {
+        return Err(refusal.error);
+    }
+    enforce_execution_mode(
+        connection,
+        session_id,
+        harness,
+        None,
+        CLAUDE_DEFAULT_MODE,
+        config_options,
+        modes,
+    )
+    .await?;
+    Ok(Some(refused_policy_warning(
+        harness,
+        enforcement,
+        &refusal,
+        modes.as_ref(),
+        config_options,
+    )))
 }
 
 /// Reassert the policy after the session's configuration moved. A harness
@@ -751,7 +843,7 @@ pub(super) async fn reconcile_execution_policy(
     modes: &mut Option<SessionModeState>,
     events: &mpsc::Sender<RuntimeEvent>,
 ) -> Result<()> {
-    let Err(error) = reassert_execution_policy(
+    let Some(refusal) = reassert_execution_policy(
         connection,
         session_id,
         harness,
@@ -760,26 +852,13 @@ pub(super) async fn reconcile_execution_policy(
         modes,
         PolicySync::IfDrifted,
     )
-    .await
+    .await?
     else {
         return Ok(());
     };
-    let (Some(refusal), Some(desired)) = (
-        mode_refusal(&error),
-        enforcement.and_then(ExecutionEnforcement::acp_mode),
-    ) else {
-        return Err(error);
-    };
-    tracing::warn!(
-        ?harness,
-        mode = desired,
-        error = format!("{error:#}"),
-        "the harness refused the execution mode after a configuration change"
-    );
-    let message = refused_mode_warning(
+    let message = refused_policy_warning(
         harness,
-        enforcement.and_then(ExecutionEnforcement::acp_mode_selector),
-        desired,
+        enforcement,
         &refusal,
         modes.as_ref(),
         config_options,
@@ -787,14 +866,20 @@ pub(super) async fn reconcile_execution_policy(
     emit_runtime_event(events, RuntimeEvent::Warning { message }).await
 }
 
+/// Reconciliation rounds a command waits for before the harness counts as
+/// unable to settle its mode. Each round needs a new report that moved the
+/// mode again after Mjolnir restored it.
+const POLICY_SETTLE_ROUNDS: usize = 4;
+
 /// Apply the mode and configuration reports the harness sent since the last
 /// command, starting with `first` when the caller already received it, and
-/// reconcile the policy if they moved it. The command loop runs this before
-/// it handles any command, so a prompt never starts in a mode reported while
-/// the previous turn ran.
+/// reconcile the policy if they moved it. Reports that arrive while the policy
+/// is restored are applied in the next round, until a round finds none that
+/// move it. The command loop runs this before it handles any command, so a
+/// prompt never starts in a mode reported while the previous turn ran.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn apply_pending_policy_updates(
-    first: Option<SessionUpdate>,
+    mut first: Option<SessionUpdate>,
     policy_updates: &mut mpsc::UnboundedReceiver<SessionUpdate>,
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
@@ -804,42 +889,51 @@ pub(super) async fn apply_pending_policy_updates(
     modes: &mut Option<SessionModeState>,
     events: &mpsc::Sender<RuntimeEvent>,
 ) -> Result<()> {
-    let previous = policy_configuration(config_options, modes, enforcement);
-    let mut received = false;
-    for update in first
-        .into_iter()
-        .chain(std::iter::from_fn(|| policy_updates.try_recv().ok()))
-    {
-        apply_policy_update(update, config_options, modes);
-        received = true;
+    for round in 0..POLICY_SETTLE_ROUNDS {
+        let previous = policy_configuration(config_options, modes, enforcement);
+        let mut received = false;
+        for update in first
+            .take()
+            .into_iter()
+            .chain(std::iter::from_fn(|| policy_updates.try_recv().ok()))
+        {
+            apply_policy_update(update, config_options, modes);
+            received = true;
+        }
+        if !received || previous == policy_configuration(config_options, modes, enforcement) {
+            if round == 0 {
+                return Ok(());
+            }
+            emit_runtime_event(
+                events,
+                RuntimeEvent::SessionConfigured {
+                    config_options: config_options.clone(),
+                },
+            )
+            .await?;
+            return emit_runtime_event(
+                events,
+                RuntimeEvent::SessionModesConfigured {
+                    modes: modes.clone(),
+                },
+            )
+            .await;
+        }
+        reconcile_execution_policy(
+            connection,
+            session_id,
+            harness,
+            enforcement,
+            config_options,
+            modes,
+            events,
+        )
+        .await?;
     }
-    if !received || previous == policy_configuration(config_options, modes, enforcement) {
-        return Ok(());
-    }
-    reconcile_execution_policy(
-        connection,
-        session_id,
-        harness,
-        enforcement,
-        config_options,
-        modes,
-        events,
+    bail!(
+        "{} kept changing its permission mode while Mjolnir restored the target's policy",
+        harness.display_name()
     )
-    .await?;
-    emit_runtime_event(
-        events,
-        RuntimeEvent::SessionConfigured {
-            config_options: config_options.clone(),
-        },
-    )
-    .await?;
-    emit_runtime_event(
-        events,
-        RuntimeEvent::SessionModesConfigured {
-            modes: modes.clone(),
-        },
-    )
-    .await
 }
 
 pub(super) fn policy_configuration(
