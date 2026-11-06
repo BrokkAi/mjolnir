@@ -911,8 +911,15 @@ impl DashboardState {
     }
 
     /// The attention level from the session's own facts alone.
-    fn own_attention_level(&self, session_id: &str) -> AttentionLevel {
+    pub(crate) fn own_attention_level(&self, session_id: &str) -> AttentionLevel {
         self.session_facts().own_attention_level(session_id)
+    }
+
+    /// Whether the session's own turn is running. Turn controls ask this,
+    /// not [`Self::attention_level`], which reads as waiting while a child
+    /// waits on a person even though the parent's turn still runs.
+    pub(crate) fn own_turn_is_running(&self, session_id: &str) -> bool {
+        self.own_attention_level(session_id) == AttentionLevel::Working
     }
 
     /// Whether a live, reachable session is computing right now: the fact the

@@ -117,7 +117,16 @@ impl DashboardState {
             if episode.reported {
                 continue;
             }
-            if visible.as_deref() == Some(id.as_str()) {
+            // A child's form is seen only in the child's own conversation.
+            let shown_in = if self.own_attention_level(id) < level {
+                self.session_facts()
+                    .waiting_child(id)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| id.clone())
+            } else {
+                id.clone()
+            };
+            if visible.as_deref() == Some(shown_in.as_str()) {
                 episode.reported = true;
                 continue;
             }

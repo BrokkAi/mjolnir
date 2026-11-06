@@ -758,6 +758,9 @@ mod tests {
         permission.id = "tool-permission-1".into();
         permission.message = "May I run this command?".into();
         permission.tool_permission = Some(mj_core::elicitation::ToolPermissionForm { skip: true });
+        let mut secret = question.clone();
+        secret.message = "Paste the token".into();
+        secret.fields[0].secret = true;
         let mut plan = question.clone();
         plan.id = format!("{}1", mj_core::acp::PLAN_REVIEW_ID_PREFIX);
         plan.message = "Approve this plan?".into();
@@ -765,7 +768,7 @@ mod tests {
             let mut observations = Vec::new();
             // A restarted harness may reuse the same question id. A parent
             // cannot grant approvals, so they stay with the person.
-            for request in [&question, &reused, &permission, &plan] {
+            for request in [&question, &reused, &permission, &secret, &plan] {
                 observations.push(RelayObservation::ElicitationRequested {
                     request: request.clone(),
                 });
@@ -800,7 +803,7 @@ mod tests {
                 .unwrap()
                 .events
                 .len(),
-            8,
+            10,
             "outbox failure rolls back its API events too"
         );
         connection
@@ -871,6 +874,7 @@ mod tests {
             !texts
                 .iter()
                 .any(|text| text.contains("May I run this command?")
+                    || text.contains("Paste the token")
                     || text.contains("Approve this plan?"))
         );
         assert_eq!(
@@ -892,7 +896,7 @@ mod tests {
         )
         .unwrap();
         let connection = open(&path).unwrap();
-        assert_eq!(connection.query_row("SELECT count(*) FROM api_events WHERE json_extract(body,'$.type')='input_required'", [], |r| r.get::<_,u64>(0)).unwrap(), 8);
+        assert_eq!(connection.query_row("SELECT count(*) FROM api_events WHERE json_extract(body,'$.type')='input_required'", [], |r| r.get::<_,u64>(0)).unwrap(), 10);
         assert_eq!(
             connection
                 .query_row("SELECT count(*) FROM mailbox_outbox", [], |r| r

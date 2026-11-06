@@ -1763,7 +1763,8 @@ async fn claude_plan_approval_form_selects_the_policy_mode_and_refuses_hidden_by
 /// Exercise the actual ACP callbacks, including the harness-specific plan
 /// envelopes, while keeping question ownership independent of harness kind.
 /// A parent agent answers questions with a message but cannot grant
-/// approvals, so tool permissions and plan reviews stay open for a person.
+/// approvals, so tool permissions and plan reviews stay open for a person,
+/// and so do secrets, which a message would keep in plain text.
 #[tokio::test]
 async fn managed_children_cancel_questions_and_keep_approvals_for_a_person() {
     for harness in HarnessKind::ALL {
@@ -1779,6 +1780,12 @@ async fn managed_children_cancel_questions_and_keep_approvals_for_a_person() {
             let question = json!({
                 "jsonrpc":"2.0", "id":"ask", "method":"elicitation/create", "params":{
                     "sessionId":"plan-session", "mode":"form", "message":"Which file?",
+                    "requestedSchema":{"type":"object", "properties":{"file":{"type":"string", "title":"File"}}}
+                }
+            });
+            let secret = json!({
+                "jsonrpc":"2.0", "id":"secret", "method":"elicitation/create", "params":{
+                    "sessionId":"plan-session", "mode":"form", "message":"Paste the token",
                     "requestedSchema":{"type":"object", "properties":{"token":{"type":"string", "title":"Secret token", "_meta":{"codex":{"isSecret":true}}}}}
                 }
             });
@@ -1789,7 +1796,7 @@ async fn managed_children_cancel_questions_and_keep_approvals_for_a_person() {
                 }
             });
             let plan = json!({"jsonrpc":"2.0", "id":"plan", "method":"session/request_permission", "params":permission("The proposed plan", &["bypassPermissions", "reject"])});
-            let mut approvals = vec![plan];
+            let mut approvals = vec![plan, secret];
             if policy.is_unconstrained() {
                 probe.send(tool_ask).await;
                 let answer = probe.message().await;
@@ -1836,10 +1843,6 @@ async fn managed_children_cancel_questions_and_keep_approvals_for_a_person() {
                         _ => {}
                     }
                 };
-                assert!(
-                    request.fields[0].secret,
-                    "secret questions follow the same routing policy"
-                );
                 let answer = probe.message().await;
                 assert_eq!(
                     answer["id"], id,
@@ -1884,7 +1887,7 @@ async fn managed_children_cancel_questions_and_keep_approvals_for_a_person() {
                 };
                 assert!(
                     !request.goes_to_parent(),
-                    "{harness:?}: {id} is an approval"
+                    "{harness:?}: {id} stays with a person"
                 );
                 probe
                     .answer_with(&request.id, ElicitationResponse::Cancel)

@@ -2163,7 +2163,7 @@ impl DashboardState {
 
 impl DashboardState {
     pub fn show_normal_restart(&mut self, session_id: String) {
-        let interrupting = self.attention_level(&session_id) == crate::AttentionLevel::Working;
+        let interrupting = self.own_turn_is_running(&session_id);
         self.mode = crate::Mode::Confirm(ConfirmDialog::new(Confirmation::RestartAgent {
             session_id,
             interrupting,

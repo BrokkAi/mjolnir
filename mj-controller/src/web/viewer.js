@@ -1461,14 +1461,23 @@ function sessionCard(session) {
   return card;
 }
 
+function pendingFormCount(session) {
+  return session.detail === false
+    ? session.pending_elicitation_count || 0
+    : (session.pending_elicitations || []).length;
+}
+
+/// A child's open form is an approval only a person can give, and the child
+/// has no card in the main list, so its parent's card says so.
 function attentionParts(session) {
   const parts = [];
   if (session.operation?.kind === 'move') parts.push(['→', 'Moving']);
   if (session.has_error) parts.push(['!', 'Error']);
-  const pending = session.detail === false
-    ? session.pending_elicitation_count || 0
-    : (session.pending_elicitations || []).length;
-  if (pending) parts.push(['?', 'Input needed']);
+  if (pendingFormCount(session)) parts.push(['?', 'Input needed']);
+  else if ((session.subagent_session_ids || []).some(id => {
+    const child = sessionById(id);
+    return child && pendingFormCount(child);
+  })) parts.push(['?', 'Sub-agent input needed']);
   const queued = session.detail === false
     ? session.queued_prompt_count || 0
     : (session.queued_prompts || []).length;
@@ -1517,7 +1526,7 @@ function updateSessionCard(card, session) {
   renderSessionTitle(card._heading, session);
   card._attention.replaceChildren(
     ...attention.map(([glyph, label]) => {
-      const node = el('span', `session-attention-item ${label === 'Error' || label === 'Input needed' ? 'alert' : ''}`, glyph);
+      const node = el('span', `session-attention-item ${['Error', 'Input needed', 'Sub-agent input needed'].includes(label) ? 'alert' : ''}`, glyph);
       node.setAttribute('aria-label', label);
       node.setAttribute('role', 'img');
       node.title = label;

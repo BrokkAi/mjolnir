@@ -3579,6 +3579,7 @@ fn resize_mode_respects_custom_commands_and_workspace_changes() {
 /// the way the parent's own question would: the row's symbol, the attention
 /// queue and a notification, and the row says whose question it is.
 // Hard-won: 91244ea: a child permission question left its parent without an attention mark.
+// Hard-won: #1451: the restored mark hid the parent's running turn from turn controls, and viewing the parent swallowed the child's notification.
 #[test]
 fn a_subagent_question_marks_its_parent_for_attention() {
     let (mut dashboard, parent) = dashboard_with_one_subagent();
@@ -3599,6 +3600,21 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         .get_mut("child-session")
         .unwrap()
         .pending_elicitations = vec![question("child-session")];
+
+    // The parent's own turn still runs, so its turn controls still apply.
+    dashboard.command_session_override = Some(parent.clone());
+    assert_eq!(
+        dashboard.dispatch_command(CommandId::InterruptTurn),
+        DashboardAction::InterruptTurn {
+            session_id: parent.clone()
+        }
+    );
+    dashboard.command_session_override = None;
+    // The child's form is not on screen while only the parent is, so the
+    // episode is not marked seen and still rings below.
+    dashboard.set_current_session(Some(&parent));
+    assert!(dashboard.notification_events(0).is_empty());
+    dashboard.set_current_session(None);
 
     assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Waiting);
     assert_eq!(

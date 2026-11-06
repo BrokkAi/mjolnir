@@ -67,10 +67,14 @@ impl ElicitationRequest {
     /// Whether a managed child sends this form to its parent agent instead of
     /// a person. A parent answers questions with a message, but it has no
     /// way to grant a tool permission or approve a plan, so those stay open
-    /// for a person, as harnesses do for their native sub-agents.
+    /// for a person, as harnesses do for their native sub-agents. A secret
+    /// stays with the person too: a message would keep it in plain text,
+    /// where a form answer is masked.
     #[must_use]
     pub fn goes_to_parent(&self) -> bool {
-        self.tool_permission.is_none() && !crate::acp::is_plan_review_id(&self.id)
+        self.tool_permission.is_none()
+            && !crate::acp::is_plan_review_id(&self.id)
+            && !self.fields.iter().any(|field| field.secret)
     }
 
     /// Whether the form offers Skip (the `decline` action). Every surface
