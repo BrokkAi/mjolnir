@@ -710,6 +710,7 @@ mod tests {
         assert!(!owner_is_gone(token, owner_is_running));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_process_that_exited_is_not_running() {
         let mut child = std::process::Command::new("true").spawn().unwrap();
