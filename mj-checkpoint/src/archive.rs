@@ -1568,9 +1568,7 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
     for repository in &manifest.repositories {
         if let Some(reference) = &repository.metadata.review_baseline_ref {
             ensure!(
-                reference == REVIEW_BASELINE_REF
-                    || (reference.starts_with("refs/mj/worktrees/")
-                        && reference.ends_with("/review-baseline")),
+                mj_core::archive::is_review_baseline_pin(reference),
                 "invalid source review baseline ref: {reference}"
             );
         }
@@ -2057,15 +2055,15 @@ mod git;
 pub use git::{
     EXPORT_REFUSED_EXIT_CODE, GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode,
     GitOutput, GitSnapshotProgress, MergeConflicts, NON_INTERACTIVE_GIT_ENV,
-    NON_INTERACTIVE_GIT_SSH_COMMAND, PushBranchError, PushedBranch, REVIEW_BASELINE_REF,
-    ReflogAnchor, ReflogEntry, ReviewPoint, SessionDiff, SessionExportError, SystemGit,
-    UntrackedFiles, capture_paths, capture_worktree_tree, collect_git_metadata_snapshot,
-    collect_git_snapshot, collect_git_snapshot_with_progress, collect_plain_directory_snapshot,
-    diff_between_trees, empty_tree_id, has_origin_refs, merge_trees, migrate_review_ref,
-    numstat_between_trees, pin_review_tree, push_branch, read_head_reflog, read_review_point,
-    record_overridden_tree, record_review_point, record_reviewed_tree, remote_workspace_base,
-    remove_departed_worktree_pins, restore_git_snapshot, review_baseline_ref, session_diff,
-    session_diff_details, tree_without_paths, validate_symlink_target,
+    NON_INTERACTIVE_GIT_SSH_COMMAND, PushBranchError, PushedBranch, ReflogAnchor, ReflogEntry,
+    ReviewPoint, SessionDiff, SessionExportError, SystemGit, UntrackedFiles, capture_paths,
+    capture_worktree_tree, collect_git_metadata_snapshot, collect_git_snapshot,
+    collect_git_snapshot_with_progress, collect_plain_directory_snapshot, diff_between_trees,
+    empty_tree_id, has_origin_refs, merge_trees, migrate_review_ref, numstat_between_trees,
+    pin_review_tree, push_branch, read_head_reflog, read_review_point, record_overridden_tree,
+    record_review_point, record_reviewed_tree, remote_workspace_base, restore_git_snapshot,
+    session_diff, session_diff_details, session_start_scope, tree_without_paths,
+    validate_symlink_target,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};

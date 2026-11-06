@@ -1787,6 +1787,11 @@ fn managed_clone_snapshot_restores_secondary_branch_and_full_stash_stack() {
     );
 }
 
+/// The scope name of a main worktree's session-start refs, and a private ref
+/// that names a bare tree or a tag rather than a commit.
+const MAIN_SCOPE: &str = "refs/mj/review-baseline";
+const NON_COMMIT_TIP: &str = "refs/mj/non-commit-tip";
+
 // Hard-won: 0fefbee48: review refs disappeared when a checkpoint moved its checkout.
 #[test]
 fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
@@ -1825,13 +1830,13 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
             let start = format!(
                 "refs/mj/session-start/{}/{}",
                 digest_bytes(b"moving"),
-                digest_bytes(REVIEW_BASELINE_REF.as_bytes())
+                digest_bytes(MAIN_SCOPE.as_bytes())
             );
             for (name, object) in [
                 (reviewed.as_str(), &head),
                 (overridden.as_str(), &head),
                 (start.as_str(), &head),
-                (REVIEW_BASELINE_REF, &point),
+                (NON_COMMIT_TIP, &point),
             ] {
                 git(&source, &["update-ref", name, object]);
             }
@@ -1861,7 +1866,7 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
                 (reviewed.as_str(), &head),
                 (overridden.as_str(), &head),
                 (start.as_str(), &head),
-                (REVIEW_BASELINE_REF, &point),
+                (NON_COMMIT_TIP, &point),
             ] {
                 assert_eq!(git_line(&destination, &["rev-parse", name]), *object);
             }
@@ -1894,7 +1899,7 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
                     },
                 )
                 .unwrap();
-                git(&destination, &["update-ref", REVIEW_BASELINE_REF, &newer]);
+                git(&destination, &["update-ref", NON_COMMIT_TIP, &newer]);
             }
             let mut conflicting = snapshot.clone();
             conflicting
@@ -1913,16 +1918,15 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
             assert_eq!(git_line(&destination, &["rev-parse", &overridden]), later);
             assert_eq!(git_line(&destination, &["rev-parse", &start]), head);
             assert_eq!(git_line(&destination, &["rev-parse", &other_start]), later);
-            assert_eq!(
-                git_line(&destination, &["rev-parse", REVIEW_BASELINE_REF]),
-                point
-            );
+            // A tip the destination already holds is not replaced.
+            let tip = git_line(&destination, &["rev-parse", NON_COMMIT_TIP]);
+            assert_eq!(tip == point, !tagged, "{tip}");
         }
     }
 }
 
 #[test]
-fn review_refs_follow_the_session_between_worktree_names() {
+fn session_starts_follow_the_session_between_worktree_names() {
     let directory = tempfile::tempdir().unwrap();
     let origin = directory.path().join("origin");
     initialize_repository(&origin);
@@ -1940,26 +1944,13 @@ fn review_refs_follow_the_session_between_worktree_names() {
             linked.to_str().unwrap(),
         ],
     );
-    let baseline = review_baseline_ref(&SystemGit, &linked).unwrap();
-    let tree = git_line(&linked, &["rev-parse", "HEAD^{tree}"]);
-    let point = record_review_point(
-        &SystemGit,
-        &linked,
-        &ReviewPoint {
-            tree,
-            head: Some(base.clone()),
-            reflog: None,
-            pending: Vec::new(),
-            session: Some("moving".into()),
-        },
-    )
-    .unwrap();
+    let scope = session_start_scope(&SystemGit, &linked).unwrap();
+    assert_eq!(scope, "refs/mj/worktrees/linked/review-baseline");
     let start = format!(
         "refs/mj/session-start/{}/{}",
         digest_bytes(b"moving"),
-        digest_bytes(baseline.as_bytes())
+        digest_bytes(scope.as_bytes())
     );
-    git(&linked, &["update-ref", &baseline, &point]);
     git(&linked, &["update-ref", &start, &base]);
     let snapshot = collect_git_snapshot(
         &SystemGit,
@@ -1972,6 +1963,10 @@ fn review_refs_follow_the_session_between_worktree_names() {
         },
     )
     .unwrap();
+    assert_eq!(
+        snapshot.metadata.review_baseline_ref.as_deref(),
+        Some(scope.as_str())
+    );
     let destination = clone_repository(directory.path(), &origin, "destination");
     super::git::restore_git_snapshot_for_session(
         &SystemGit,
@@ -1981,32 +1976,182 @@ fn review_refs_follow_the_session_between_worktree_names() {
         false,
     )
     .unwrap();
-    assert_eq!(
-        git_line(&destination, &["rev-parse", REVIEW_BASELINE_REF]),
-        point
-    );
     let relocated_start = format!(
         "refs/mj/session-start/{}/{}",
         digest_bytes(b"moving"),
-        digest_bytes(REVIEW_BASELINE_REF.as_bytes())
+        digest_bytes(MAIN_SCOPE.as_bytes())
     );
     assert_eq!(
         git_line(&destination, &["rev-parse", &relocated_start]),
         base
     );
-    let foreign = record_review_point(
+}
+
+// Hard-won: PENDING-COMMIT: capture and restore migrated, copied or wrote review baseline pins in the user's repository.
+#[test]
+fn capture_and_restore_leave_a_repositorys_old_review_pins_alone() {
+    for metadata_only in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let origin = directory.path().join("origin");
+        initialize_repository(&origin);
+        commit_file(&origin, "tracked", b"base\n", "base");
+        let head = git_line(&origin, &["rev-parse", "HEAD"]);
+        let source = clone_repository(directory.path(), &origin, "source");
+        let linked = directory.path().join("linked");
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "session",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let point = |session: &str| {
+            record_review_point(
+                &SystemGit,
+                &source,
+                &ReviewPoint {
+                    tree: git_line(&source, &["rev-parse", "HEAD^{tree}"]),
+                    head: Some(head.clone()),
+                    reflog: None,
+                    pending: Vec::new(),
+                    session: Some(session.into()),
+                },
+            )
+            .unwrap()
+        };
+        let current = point("moving");
+        let legacy = point("legacy");
+        let start = format!(
+            "refs/mj/session-start/{}/{}",
+            digest_bytes(b"moving"),
+            digest_bytes(MAIN_SCOPE.as_bytes())
+        );
+        // The pins an older release left, under both names, and a start that
+        // is live state.
+        let before = [
+            (MAIN_SCOPE, &current),
+            ("refs/mj/worktrees/linked/review-baseline", &current),
+            ("refs/hel/review-baseline", &legacy),
+            ("refs/hel/worktrees/linked/review-baseline", &legacy),
+            (start.as_str(), &head),
+        ];
+        for (name, object) in before {
+            git(&source, &["update-ref", name, object]);
+        }
+        let refs = |repository: &Path| {
+            git_line(
+                repository,
+                &["for-each-ref", "--format=%(refname) %(objectname)"],
+            )
+        };
+        let before_capture = refs(&source);
+        let spec = GitCollectionSpec {
+            id: "repo".into(),
+            relative_destination: "repo".into(),
+            history: GitHistoryMode::CloneFrom(head.clone()),
+            origin_override: None,
+        };
+
+        let snapshot = if metadata_only {
+            collect_git_metadata_snapshot(&SystemGit, &source, &spec)
+        } else {
+            collect_git_snapshot(&SystemGit, &source, &spec)
+        }
+        .unwrap();
+
+        assert_eq!(
+            refs(&source),
+            before_capture,
+            "capture wrote to the repository"
+        );
+        assert!(snapshot.metadata.saved_refs.contains_key(&start));
+        assert!(
+            snapshot
+                .metadata
+                .saved_refs
+                .keys()
+                .all(|name| !name.contains("review-baseline")),
+            "a pin was carried: {:?}",
+            snapshot.metadata.saved_refs
+        );
+        let destination = if metadata_only {
+            source.clone()
+        } else {
+            clone_repository(directory.path(), &origin, "restored")
+        };
+        let before_restore = refs(&destination);
+        super::git::restore_git_snapshot_for_session(
+            &SystemGit,
+            &destination,
+            &snapshot,
+            Some("moving"),
+            true,
+        )
+        .unwrap();
+        let after_restore = refs(&destination);
+        if metadata_only {
+            assert_eq!(
+                after_restore, before_restore,
+                "restore wrote to the repository"
+            );
+        } else {
+            assert_eq!(
+                after_restore
+                    .lines()
+                    .filter(|line| line.contains("review-baseline"))
+                    .count(),
+                0,
+                "restore wrote a pin into the destination"
+            );
+            assert_eq!(git_line(&destination, &["rev-parse", &start]), head);
+        }
+    }
+}
+
+// Hard-won: PENDING-COMMIT: an old checkpoint that carried a review baseline pin must still restore without writing it.
+#[test]
+fn an_old_checkpoint_carrying_a_review_baseline_pin_restores_without_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let origin = directory.path().join("origin");
+    initialize_repository(&origin);
+    commit_file(&origin, "tracked", b"base\n", "base");
+    let head = git_line(&origin, &["rev-parse", "HEAD"]);
+    let source = clone_repository(directory.path(), &origin, "source");
+    let start = format!(
+        "refs/mj/session-start/{}/{}",
+        digest_bytes(b"moving"),
+        digest_bytes(MAIN_SCOPE.as_bytes())
+    );
+    git(&source, &["update-ref", &start, &head]);
+    let mut snapshot = collect_git_snapshot(
         &SystemGit,
-        &destination,
-        &ReviewPoint {
-            tree: git_line(&destination, &["rev-parse", "HEAD^{tree}"]),
-            head: Some(base),
-            reflog: None,
-            pending: Vec::new(),
-            session: Some("other".into()),
+        &source,
+        &GitCollectionSpec {
+            id: "repo".into(),
+            relative_destination: "repo".into(),
+            history: GitHistoryMode::CloneFrom(head.clone()),
+            origin_override: None,
         },
     )
     .unwrap();
-    git(&destination, &["update-ref", REVIEW_BASELINE_REF, &foreign]);
+    // What an older release wrote: the pin among the saved refs, whose object
+    // may have been garbage-collected since.
+    let missing = "0".repeat(40);
+    snapshot
+        .metadata
+        .saved_refs
+        .insert(MAIN_SCOPE.to_owned(), missing.clone());
+    snapshot.metadata.saved_refs.insert(
+        "refs/mj/worktrees/linked/review-baseline".to_owned(),
+        missing,
+    );
+    snapshot.metadata.review_baseline_ref = Some(MAIN_SCOPE.to_owned());
+
+    let destination = clone_repository(directory.path(), &origin, "restored");
     super::git::restore_git_snapshot_for_session(
         &SystemGit,
         &destination,
@@ -2015,9 +2160,18 @@ fn review_refs_follow_the_session_between_worktree_names() {
         true,
     )
     .unwrap();
+
+    assert_eq!(git_line(&destination, &["rev-parse", &start]), head);
     assert_eq!(
-        git_line(&destination, &["rev-parse", REVIEW_BASELINE_REF]),
-        foreign
+        git_line(
+            &destination,
+            &[
+                "for-each-ref",
+                "refs/mj/review-baseline",
+                "refs/mj/worktrees"
+            ]
+        ),
+        ""
     );
 }
 

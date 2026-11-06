@@ -7355,11 +7355,7 @@ async fn a_suspend_without_the_acknowledgement_ignores_review_refs_on_a_publishe
     let tree = test_git(&clone.checkout, &["rev-parse", "HEAD^{tree}"]);
     test_git(
         &clone.checkout,
-        &[
-            "update-ref",
-            mj_checkpoint::archive::REVIEW_BASELINE_REF,
-            &tree,
-        ],
+        &["update-ref", "refs/mj/review-baseline", &tree],
     );
     test_git(
         &clone.checkout,
