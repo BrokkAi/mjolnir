@@ -174,7 +174,7 @@ pub fn collect_git_snapshot_with_progress(
             .keys()
             .any(|name| name.starts_with(mj_core::archive::MJOLNIR_REF_NAMESPACE))
         {
-            snapshot.metadata.review_baseline_ref = Some(review_baseline_ref(runner, repository)?);
+            snapshot.metadata.review_baseline_ref = Some(session_start_scope(runner, repository)?);
         }
         snapshot.metadata.saved_refs = state.saved_refs;
         snapshot.metadata.stash_stack = state.stash_stack;
@@ -186,7 +186,7 @@ pub fn collect_git_snapshot_with_progress(
     } else {
         let mut snapshot = result?;
         if !review_refs.is_empty() {
-            snapshot.metadata.review_baseline_ref = Some(review_baseline_ref(runner, repository)?);
+            snapshot.metadata.review_baseline_ref = Some(session_start_scope(runner, repository)?);
         }
         snapshot.metadata.saved_refs = review_refs;
         Ok(snapshot)
@@ -207,11 +207,14 @@ pub fn collect_git_metadata_snapshot(
     let saved_refs = collect_review_refs(runner, repository)?;
     Ok(RepositorySnapshot {
         metadata: RepositoryMetadata {
-            review_refs_metadata_only: !saved_refs.is_empty(),
+            // Every capture here is metadata only, whether or not it carries
+            // refs: restore must never check out its commit into a checkout
+            // other sessions or the user may be working in.
+            review_refs_metadata_only: true,
             review_baseline_ref: if saved_refs.is_empty() {
                 None
             } else {
-                Some(review_baseline_ref(runner, repository)?)
+                Some(session_start_scope(runner, repository)?)
             },
             saved_refs,
             stash_stack: Vec::new(),
@@ -473,53 +476,32 @@ pub fn has_origin_refs(runner: &dyn GitCommandRunner, repository: &Path) -> Resu
     Ok(!refs.is_empty())
 }
 
-/// Historical review baseline pin, retained in checkpoints and existing repositories.
-/// Push review derives its session-start ref name from this worktree-specific name.
-/// Older pins name a review point or a bare tree; both resolve with `^{tree}`.
-pub const REVIEW_BASELINE_REF: &str = "refs/mj/review-baseline";
-
-/// Where linked worktrees pin their review baselines, as
+/// Where linked worktrees scoped their review state, as
 /// `refs/mj/worktrees/<name>/review-baseline`.
-const WORKTREE_REVIEW_PINS: &str = "refs/mj/worktrees/";
-const LEGACY_WORKTREE_REVIEW_PINS: &str = "refs/hel/worktrees/";
+const WORKTREE_REVIEW_SCOPES: &str = "refs/mj/worktrees/";
 
-/// The ref that pins the review baseline of the worktree `repository` is.
+/// The name that scopes the session-start refs of the worktree `repository`
+/// is. It is a name only: the ref it spells is no longer written, and this
+/// reads and writes nothing in the repository.
 ///
-/// Every linked worktree shares its repository's refs, so a single name would
-/// give every session on a repository one pin: a new session would take
-/// another's baseline as its own, and each completed review would unpin the
-/// others'. The main worktree keeps [`REVIEW_BASELINE_REF`]; a linked worktree
-/// pins under its name in the repository's `worktrees` directory, which Git
-/// keeps a valid ref component. The pins stay in the shared namespace because
-/// `git gc` keeps only the objects that the worktree it runs in reaches through
-/// `refs/worktree/`; a pin there would protect nothing from a gc run elsewhere.
-pub fn review_baseline_ref(runner: &dyn GitCommandRunner, repository: &Path) -> Result<String> {
+/// Every linked worktree shares its repository's refs, so a session's start
+/// ref is keyed by a hash of this name to keep one worktree's start from being
+/// taken as another's. The main worktree uses `refs/mj/review-baseline`; a
+/// linked worktree uses its own name under `refs/mj/worktrees/`.
+pub fn session_start_scope(runner: &dyn GitCommandRunner, repository: &Path) -> Result<String> {
     let (git_dir, common_dir) = git_directories(runner, repository)?;
     if same_directory(&git_dir, &common_dir)? {
-        migrate_review_ref(
-            runner,
-            repository,
-            "refs/hel/review-baseline",
-            REVIEW_BASELINE_REF,
-        )?;
-        return Ok(REVIEW_BASELINE_REF.to_owned());
+        return Ok("refs/mj/review-baseline".to_owned());
     }
     let name = git_dir
         .file_name()
         .and_then(|name| name.to_str())
         .with_context(|| format!("name the worktree of {}", git_dir.display()))?;
-    let reference = format!("{WORKTREE_REVIEW_PINS}{name}/review-baseline");
-    migrate_review_ref(
-        runner,
-        repository,
-        &format!("{LEGACY_WORKTREE_REVIEW_PINS}{name}/review-baseline"),
-        &reference,
-    )?;
-    Ok(reference)
+    Ok(format!("{WORKTREE_REVIEW_SCOPES}{name}/review-baseline"))
 }
 
-/// Move a legacy pin without overwriting a concurrent initializer or deleting
-/// a legacy value that changed after it was read.
+/// Move a legacy session-start ref without overwriting a concurrent
+/// initializer or deleting a legacy value that changed after it was read.
 pub fn migrate_review_ref(
     runner: &dyn GitCommandRunner,
     repository: &Path,
@@ -544,7 +526,7 @@ pub fn migrate_review_ref(
     if old.status != 0 {
         return Ok(());
     }
-    let object = trim_output(&old.stdout, "read the legacy review ref")?;
+    let object = trim_output(&old.stdout, "read the legacy session-start ref")?;
     // One Git transaction publishes the new ref and removes the old one only
     // if neither value changed. Failure is visible; no baseline is discarded.
     let transaction = format!("create {reference} {object}\ndelete {legacy} {object}\n");
@@ -553,72 +535,9 @@ pub fn migrate_review_ref(
         repository,
         ["update-ref", "--stdin"],
         transaction.as_bytes(),
-        "migrate the legacy review ref",
+        "migrate the legacy session-start ref",
     )?;
     Ok(())
-}
-
-/// Deletes the review pins of linked worktrees the repository no longer has,
-/// and returns the refs it deleted.
-///
-/// A pin outlives its worktree, so without this every session in a managed
-/// worktree would leave a ref behind in the user's repository. The pins are
-/// listed before the worktrees, and each is deleted only while it still holds
-/// the listed value. A worktree exists before anything can pin for it, so a
-/// pin that was listed belongs to a worktree that the later listing still
-/// shows unless it was removed; a pin rewritten in between is left alone.
-pub fn remove_departed_worktree_pins(
-    runner: &dyn GitCommandRunner,
-    repository: &Path,
-) -> Result<Vec<String>> {
-    let pins = git_text(
-        runner,
-        repository,
-        [
-            "for-each-ref",
-            "--format=%(objectname) %(refname)",
-            WORKTREE_REVIEW_PINS,
-            LEGACY_WORKTREE_REVIEW_PINS,
-        ],
-    )
-    .context("list the worktree review pins")?;
-    if pins.is_empty() {
-        return Ok(Vec::new());
-    }
-    let (_, common_dir) = git_directories(runner, repository)?;
-    let worktrees = match std::fs::read_dir(common_dir.join("worktrees")) {
-        Ok(entries) => entries
-            .map(|entry| entry.map(|entry| entry.file_name()))
-            .collect::<std::io::Result<BTreeSet<_>>>()
-            .context("list the repository's worktrees")?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
-        Err(error) => return Err(error).context("list the repository's worktrees"),
-    };
-    let mut removed = Vec::new();
-    for line in pins.lines() {
-        let Some((object, reference)) = line.split_once(' ') else {
-            continue;
-        };
-        let Some(name) = reference
-            .strip_prefix(WORKTREE_REVIEW_PINS)
-            .or_else(|| reference.strip_prefix(LEGACY_WORKTREE_REVIEW_PINS))
-            .and_then(|rest| rest.strip_suffix("/review-baseline"))
-        else {
-            continue;
-        };
-        if worktrees.contains(std::ffi::OsStr::new(name)) {
-            continue;
-        }
-        git_bytes(
-            runner,
-            repository,
-            ["update-ref", "-d", reference, object],
-            &[],
-            "delete a departed worktree's review pin",
-        )?;
-        removed.push(reference.to_owned());
-    }
-    Ok(removed)
 }
 
 /// The worktree's own Git directory and the repository's common one, which
@@ -1594,8 +1513,6 @@ fn collect_review_refs(
     runner: &dyn GitCommandRunner,
     repository: &Path,
 ) -> Result<BTreeMap<String, String>> {
-    // Migrate this checkout's baseline before enumerating durable state.
-    review_baseline_ref(runner, repository)?;
     git_text(
         runner,
         repository,
@@ -1606,9 +1523,13 @@ fn collect_review_refs(
         ],
     )?
     .lines()
-    .map(|line| {
-        let (name, oid) = line.split_once(' ').context("malformed review ref")?;
-        Ok((name.to_owned(), oid.to_owned()))
+    .filter_map(|line| {
+        let Some((name, oid)) = line.split_once(' ') else {
+            return Some(Err(anyhow!("malformed review ref")));
+        };
+        // Old baseline pins are not carried: nothing reads them.
+        (!mj_core::archive::is_review_baseline_pin(name))
+            .then(|| Ok((name.to_owned(), oid.to_owned())))
     })
     .collect()
 }
@@ -1646,7 +1567,6 @@ fn collect_clone_refs(
         ["rev-parse", "--verify", &format!("{base}^{{commit}}")],
     )
     .context("managed clone source commit is unavailable")?;
-    review_baseline_ref(runner, repository)?;
     let mut list_refs = [
         "for-each-ref",
         "--format=%(refname) %(objectname)",
@@ -1668,6 +1588,9 @@ fn collect_clone_refs(
     for line in lines.lines() {
         let (name, oid) = line.split_once(' ').context("malformed saved Git ref")?;
         ensure!(!oid.is_empty(), "saved Git ref {name} has no object");
+        if mj_core::archive::is_review_baseline_pin(name) {
+            continue;
+        }
         saved_refs.insert(name.to_owned(), oid.to_owned());
     }
     let stash_present = run_git(
@@ -1964,8 +1887,8 @@ fn collect_git_contents(
 }
 
 /// A worktree name changes when a session moves into another checkout. Keep
-/// every archived ref, and publish that session's baseline and start under the
-/// destination checkout's names as well.
+/// every archived ref except old baseline pins, which are not restored, and
+/// publish that session's start under the destination checkout's name as well.
 fn relocated_review_refs(
     runner: &dyn GitCommandRunner,
     repository: &Path,
@@ -1974,6 +1897,9 @@ fn relocated_review_refs(
 ) -> Result<BTreeMap<String, String>> {
     let mut refs = BTreeMap::new();
     for (name, oid) in &metadata.saved_refs {
+        if mj_core::archive::is_review_baseline_pin(name) {
+            continue;
+        }
         if metadata.review_refs_metadata_only {
             let object = run_git(runner, repository, ["cat-file", "-e", oid], &[])?;
             if object.status != 0 {
@@ -1987,13 +1913,7 @@ fn relocated_review_refs(
     let (Some(session), Some(source)) = (session, metadata.review_baseline_ref.as_deref()) else {
         return Ok(restored);
     };
-    let destination = review_baseline_ref(runner, repository)?;
-    if let Some(oid) = refs.get(source) {
-        let owner = read_review_point(runner, repository, oid)?.session;
-        if owner.as_deref().is_none_or(|owner| owner == session) {
-            restored.insert(destination.clone(), oid.clone());
-        }
-    }
+    let destination = session_start_scope(runner, repository)?;
     let prefix = format!(
         "refs/mj/session-start/{}/",
         digest_bytes(session.as_bytes())
@@ -2185,19 +2105,7 @@ pub(crate) fn restore_git_snapshot_for_session(
                             digest_bytes(session.as_bytes())
                         ))
                     });
-                    let owned_baseline = session.is_some()
-                        && (name == REVIEW_BASELINE_REF
-                            || (name.starts_with(WORKTREE_REVIEW_PINS)
-                                && name.ends_with("/review-baseline")))
-                        && read_review_point(runner, repository, oid)?
-                            .session
-                            .as_deref()
-                            == session
-                        && read_review_point(runner, repository, &old)?
-                            .session
-                            .as_deref()
-                            == session;
-                    if !owned_start && !owned_baseline {
+                    if !owned_start {
                         continue;
                     }
                 }

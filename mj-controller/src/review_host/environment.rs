@@ -272,6 +272,11 @@ impl ReviewEnvironment for ControllerEnvironment {
     ) -> mj_client::session::BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             let runtime = self.runtime().await?;
+            // A child that is already gone is closed; retrying an unknown
+            // session would never end.
+            if runtime.session_record(child).is_none() {
+                return Ok(());
+            }
             runtime
                 .suspend_session(child.to_owned())
                 .await

@@ -240,6 +240,9 @@ struct FakeEnvironment {
     started: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
     close_error: Mutex<Option<String>>,
+    /// While set, every close fails, and each attempt is counted.
+    close_fails: std::sync::atomic::AtomicBool,
+    close_attempts: std::sync::atomic::AtomicUsize,
     start_error: Mutex<Option<String>>,
     register_error: Mutex<Option<String>>,
     register_gate: Mutex<Option<Arc<SaveGate>>>,
@@ -319,6 +322,8 @@ impl FakeEnvironment {
             started: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
             close_error: Mutex::new(None),
+            close_fails: std::sync::atomic::AtomicBool::new(false),
+            close_attempts: std::sync::atomic::AtomicUsize::new(0),
             start_error: Mutex::new(None),
             register_error: Mutex::new(None),
             register_gate: Mutex::new(None),
@@ -489,6 +494,11 @@ impl ReviewEnvironment for FakeEnvironment {
         child: &'a str,
     ) -> mj_client::session::BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
+            self.close_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.close_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("worker restart queue is full".into());
+            }
             if let Some(error) = self.close_error.lock().unwrap().take() {
                 return Err(error);
             }
@@ -1198,6 +1208,44 @@ async fn a_review_still_preparing_at_a_restart_is_reported_by_the_next_daemon() 
 }
 
 // Queued primary prompts do not block independent review preparation.
+
+/// One owner retries a reviewer child's close, and a close that keeps failing
+/// backs off to minutes instead of resubmitting a worker restart every few seconds.
+// Hard-won: #1456: failed reviewer-child closes were resubmitted every 30 s forever, refilling the worker restart queue.
+#[tokio::test(start_paused = true)]
+async fn a_failing_reviewer_close_backs_off_and_stops_once_it_succeeds() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let session = session_id("closebackoff");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    environment.close_fails.store(true, SeqCst);
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    // The second hand-off arrives while the first close is pending: one owner.
+    host.close_child("child-1".into());
+    host.close_child("child-1".into());
+
+    tokio::time::sleep(Duration::from_secs(3600)).await;
+    // Attempts at 0 s, then after 1, 2, 4 ... 256 s, then every 300 s: about
+    // 20 in an hour. A 30 s cap gives about 125 and a duplicate owner doubles them.
+    let attempts = environment.close_attempts.load(SeqCst);
+    assert!(
+        (15..=25).contains(&attempts),
+        "{attempts} close attempts in an hour"
+    );
+
+    environment.close_fails.store(false, SeqCst);
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    assert_eq!(*environment.closed.lock().unwrap(), vec!["child-1"]);
+    let settled = environment.close_attempts.load(SeqCst);
+    tokio::time::sleep(Duration::from_secs(3600)).await;
+    assert_eq!(environment.close_attempts.load(SeqCst), settled);
+
+    host.shutdown().await.expect("shutdown the host");
+}
 
 /// A reviewer launch failure closes on its own and preserves the baseline.
 // Hard-won: #1448: failed reviewer starts retained borrowed targets after their review ended.

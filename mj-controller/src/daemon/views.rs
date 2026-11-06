@@ -154,10 +154,8 @@ impl RuntimeState {
                         active.interrupt_for_shutdown();
                     }
                     let stage = active
-                        .active_stages
-                        .keys()
-                        .next_back()
-                        .map(|stage| stage.label())
+                        .stage_labels()
+                        .pop()
                         .unwrap_or_else(|| "container cleanup".to_owned());
                     (
                         session_id.clone(),
@@ -520,6 +518,22 @@ impl RuntimeState {
             active.resume_destination = Some((profile_id, target_id));
             self.publish_revision();
         }
+    }
+
+    /// The stages the running lifecycle `operation_id` of `session_id` is in
+    /// now. A waiting upgrade handoff reads this when it names its blockers.
+    /// Empty once that operation has ended or has reported no stage.
+    pub(super) fn lifecycle_stage_labels(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+    ) -> Vec<String> {
+        self.owner()
+            .lifecycle
+            .get(session_id)
+            .filter(|active| active.operation_id == operation_id && active.is_running())
+            .map(ActiveLifecycle::stage_labels)
+            .unwrap_or_default()
     }
 
     pub(super) fn change_lifecycle_stage(
