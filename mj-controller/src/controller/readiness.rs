@@ -496,9 +496,10 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
     let mut probe_error: Option<anyhow::Error> = None;
     let mut accepting = false;
     let mut reached_socket = false;
-    let mut attempt = Some(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
-        probe.connect(),
-    )));
+    // Connection attempts in flight. Each runs in its own task so a blocking
+    // probe cannot stall it, and dropping the set aborts whatever is left.
+    let mut attempts = tokio::task::JoinSet::new();
+    attempts.spawn(probe.connect());
     let mut next_attempt = started;
     let mut first_attempt = true;
     loop {
@@ -512,16 +513,8 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
             // The independently scheduled connection can finish while the
             // synchronous target probe blocks. Use it before any failure or
             // deadline decision based on that probe.
-            if attempt
-                .as_ref()
-                .is_some_and(|attempt| attempt.is_finished())
-            {
-                let result = attempt
-                    .take()
-                    .unwrap()
-                    .await
-                    .context("worker relay connection task failed")?;
-                match result {
+            while let Some(result) = attempts.try_join_next() {
+                match result.context("worker relay connection task failed")? {
                     Ok(relay) => return Ok(relay),
                     Err(error) => last_error = Some(error),
                 }
@@ -531,6 +524,7 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
             match inspected {
                 Ok(found) => {
                     probe_error = None;
+                    let newly_accepting = !accepting && found.accepting();
                     accepting |= found.accepting();
                     reached_socket |= found.reached_socket();
                     match verdict(&found) {
@@ -553,6 +547,13 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
                             });
                         }
                         StartupVerdict::Working(reported) => {
+                            // An attempt made before this worker accepted can
+                            // sit in a previous worker's socket or backlog and
+                            // never be answered. Give the accepting worker a
+                            // fresh one beside it; the first to connect wins.
+                            if newly_accepting && !attempts.is_empty() {
+                                attempts.spawn(probe.connect());
+                            }
                             if accepting {
                                 deadline = ceiling;
                                 step = reported;
@@ -575,7 +576,7 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            if attempt.is_some() {
+            if !attempts.is_empty() {
                 last_error = Some(anyhow::anyhow!(
                     "the connection attempt was still pending after {}s",
                     started.elapsed().as_secs()
@@ -586,26 +587,22 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
             break;
         }
         let now = tokio::time::Instant::now();
-        if attempt.is_none() && now >= next_attempt {
-            attempt = Some(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
-                probe.connect(),
-            )));
+        if attempts.is_empty() && now >= next_attempt {
+            attempts.spawn(probe.connect());
         }
         let mut wake = std::cmp::min(
             deadline,
             std::cmp::min(next_probe, now + CANCELLATION_POLL_INTERVAL),
         );
-        if attempt.is_none() {
+        if attempts.is_empty() {
             wake = std::cmp::min(wake, next_attempt);
         }
         tokio::select! {
-            result = async { attempt.as_mut().unwrap().await }, if attempt.is_some() => {
-                let result = result.context("worker relay connection task failed")?;
-                match result {
+            Some(result) = attempts.join_next(), if !attempts.is_empty() => {
+                match result.context("worker relay connection task failed")? {
                     Ok(relay) => return Ok(relay),
                     Err(error) => last_error = Some(error),
                 }
-                attempt = None;
                 if first_attempt {
                     next_probe = tokio::time::Instant::now();
                     first_attempt = false;
@@ -1377,6 +1374,42 @@ mod tests {
         assert!(
             started.elapsed() > WORKER_STARTUP_CONNECT_TIMEOUT,
             "the wait must have outlasted its first window, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The #1192 hang itself: an attempt made before the worker accepted is
+    /// never answered. Once the record shows "serving", a fresh attempt must
+    /// connect instead of the wait sitting on the old one until the ceiling.
+    // Hard-won: ee2e05027: an attempt hanging from before "serving" was kept until the ceiling
+    #[tokio::test(start_paused = true)]
+    async fn startup_connect_replaces_an_attempt_that_hangs_from_before_serving() {
+        let executor = CancellableProcessExecutor::new(std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        ));
+        let mut worker = FakeStartingWorker {
+            hangs: true,
+            steps: &[
+                "start",
+                "durable-relay",
+                "bind-socket",
+                "serving",
+                "harness-resolve",
+            ],
+            ..FakeStartingWorker::accepting_after(2)
+        };
+        let started = tokio::time::Instant::now();
+
+        let relay =
+            connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
+                .await
+                .unwrap();
+
+        assert_eq!(relay, "relay");
+        assert_eq!(worker.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            started.elapsed() < WORKER_STARTUP_CONNECT_TIMEOUT,
+            "took {:?}",
             started.elapsed()
         );
     }
