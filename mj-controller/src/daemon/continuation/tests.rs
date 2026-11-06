@@ -1504,7 +1504,8 @@ async fn quota_schedule_writes_abstention_before_one_move_and_restores_deadline_
                         if case == "refused" {
                             anyhow::bail!("lifecycle busy")
                         }
-                        Ok(())
+                        let completion: quota::MoveCompletion = Box::pin(async { None });
+                        Ok(completion)
                     })
                 })
             },
@@ -1601,6 +1602,163 @@ async fn quota_schedule_writes_abstention_before_one_move_and_restores_deadline_
             tokio::time::timeout(Duration::from_millis(150), remote.requests.recv()).await,
             Ok(Some(_))
         ));
+        remote.shutdown.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn admitted_quota_move_that_fails_writes_the_fallback_unless_the_session_moved_on() {
+    for case in ["failed", "prompted", "profile-changed"] {
+        let mut remote = spawn_remote_session_manager().unwrap();
+        remote.targets.send_replace(vec![RelaySessionTarget {
+            session_id: "one".into(),
+            spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+        let (ended, completion) = tokio::sync::oneshot::channel::<Option<String>>();
+        let completion = Arc::new(std::sync::Mutex::new(Some(completion)));
+        let profile = Arc::new(std::sync::Mutex::new("test".to_owned()));
+        let environment = Environment {
+            log: None,
+            control: remote.control,
+            allowed: Arc::new(|_| true),
+            live: Arc::new(|| ["one".into()].into()),
+            review: Arc::new(|_, _| {}),
+            profile: {
+                let profile = profile.clone();
+                Arc::new(move |_| Some(profile.lock().unwrap().clone()))
+            },
+            quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
+            start_quota_move: Arc::new(move |_, _, _| {
+                let completion = completion.lock().unwrap().take().unwrap();
+                Box::pin(async move {
+                    let completion: quota::MoveCompletion =
+                        Box::pin(async move { completion.await.unwrap() });
+                    Ok(completion)
+                })
+            }),
+        };
+        let blocked = view("one", true);
+        remote
+            .publisher
+            .publish("one".into(), blocked.clone())
+            .await
+            .unwrap();
+        let fallback = recovery_for(&blocked, Some(mj_core::clock::epoch_millis() + 18_060_000));
+        let mut abstention = fallback.clone();
+        abstention.reset_at_ms = None;
+        abstention.retry_at_ms = None;
+        abstention.notice = "Moving to destination because weekly quota is exhausted".into();
+        let plan = quota::Plan::Move {
+            request: Box::new(quota_move_request()),
+            destination: "destination".into(),
+            reason: "the weekly quota is exhausted".into(),
+            abstention: abstention.clone(),
+            fallback: fallback.clone(),
+        };
+        let scheduled = blocked.clone();
+        let task =
+            tokio::spawn(
+                async move { quota::schedule(&environment, "one", scheduled, plan).await },
+            );
+        let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let RemoteSessionRequest::Submit { command, reply, .. } = request else {
+            panic!("expected abstention")
+        };
+        let RelayCommand::SetQuotaRecovery {
+            recovery: Some(recovery),
+            ..
+        } = command
+        else {
+            panic!("expected recovery record")
+        };
+        assert_eq!(*recovery, abstention);
+        let mut stored = view("one", true);
+        stored
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .operational
+            .continuation
+            .quota_recovery = Some(*recovery);
+        remote
+            .publisher
+            .publish("one".into(), stored)
+            .await
+            .unwrap();
+        reply.send(Ok(4)).unwrap();
+        let sync = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let RemoteSessionRequest::Sync { reply, .. } = sync else {
+            panic!("expected sync")
+        };
+        reply.send(Ok(())).unwrap();
+        // The Move is admitted, so scheduling is over before it fails.
+        task.await.unwrap().unwrap();
+
+        match case {
+            "prompted" => {
+                remote
+                    .publisher
+                    .publish("one".into(), view("one", false))
+                    .await
+                    .unwrap();
+            }
+            "profile-changed" => *profile.lock().unwrap() = "partway".into(),
+            _ => {}
+        }
+        ended
+            .send(Some(
+                "operation cancelled while waiting for recovery copy".into(),
+            ))
+            .unwrap();
+
+        if case == "failed" {
+            let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let RemoteSessionRequest::Submit { command, reply, .. } = request else {
+                panic!("expected fallback")
+            };
+            let RelayCommand::SetQuotaRecovery {
+                recovery: Some(recovery),
+                ..
+            } = command
+            else {
+                panic!("expected fallback record")
+            };
+            assert_eq!(recovery.retry_at_ms, fallback.retry_at_ms);
+            assert_eq!(recovery.reset_at_ms, fallback.reset_at_ms);
+            assert!(!recovery.submitted);
+            assert!(recovery.notice.starts_with(&fallback.notice));
+            assert!(recovery.notice.ends_with(
+                " The Move to profile destination failed: operation cancelled while waiting for recovery copy."
+            ));
+            reply.send(Ok(5)).unwrap();
+            let sync = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let RemoteSessionRequest::Sync { reply, .. } = sync else {
+                panic!("expected sync")
+            };
+            reply.send(Ok(())).unwrap();
+        } else {
+            assert!(
+                !matches!(
+                    tokio::time::timeout(Duration::from_millis(300), remote.requests.recv()).await,
+                    Ok(Some(_))
+                ),
+                "{case}: the failure overwrote a session that moved on"
+            );
+        }
         remote.shutdown.shutdown().await.unwrap();
     }
 }

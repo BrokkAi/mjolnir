@@ -41,7 +41,7 @@ fn web_restart_and_move_use_the_lifecycle_cancellation_control() {
             &control.cancelled,
             &lifecycle_control.cancelled
         ));
-        assert!(control.request_cancel());
+        assert!(control.request_cancel("test cancellation"));
         assert!(control.cancelled.load(Ordering::Acquire));
         assert!(lifecycle_control.cancelled.load(Ordering::Acquire));
     }
@@ -2296,14 +2296,15 @@ fn phone_new_cancel_and_running_commit_have_one_atomic_winner() {
         let cancelling = control.clone();
         let committing = control.clone();
         let (cancelled, committed) = std::thread::scope(|scope| {
-            let cancel = scope.spawn(move || cancelling.request_cancel());
+            let cancel =
+                scope.spawn(move || cancelling.request_cancel("concurrent test cancellation"));
             let commit = scope.spawn(move || committing.grant_new_commit());
             (cancel.join().unwrap(), commit.join().unwrap())
         });
 
         assert_ne!(cancelled, committed);
         assert_eq!(control.cancelled.load(Ordering::Acquire), cancelled);
-        assert!(!control.request_cancel());
+        assert!(!control.request_cancel("test cancellation"));
         assert!(!control.grant_new_commit());
     }
 }

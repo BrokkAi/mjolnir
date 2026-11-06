@@ -518,7 +518,17 @@ pub(super) fn spawn(
             let state = state.clone();
             Arc::new(move |request, reason, continuation| {
                 let state = state.clone();
-                Box::pin(async move { state.start_quota_move(request, reason, continuation).await })
+                Box::pin(async move {
+                    let result = state
+                        .start_quota_move(request, reason, continuation)
+                        .await?;
+                    let completion: quota::MoveCompletion = Box::pin(async move {
+                        result
+                            .await
+                            .unwrap_or_else(|_| Some("the Move task ended without a result".into()))
+                    });
+                    Ok(completion)
+                })
             })
         },
         profile: {

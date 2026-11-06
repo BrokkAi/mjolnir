@@ -432,7 +432,7 @@ impl RuntimeState {
                     None
                 };
                 if publication_error.is_some() {
-                    control.request_cancel();
+                    control.request_cancel("session publication failed");
                 }
                 let executor = DaemonStageReportingExecutor::new(
                     CancellableProcessExecutor::new(cancelled),
@@ -667,7 +667,7 @@ mod delegation_replay_tests {
                     policy_before
                 );
             }
-            control.request_cancel();
+            control.request_cancel("create test cancelled");
             drop(publish);
             assert!(
                 runtime
