@@ -23,7 +23,7 @@ pub(crate) const NATIVE_SESSION_STARTUP_TIMEOUT: Duration = Duration::from_secs(
 /// [`WORKER_STARTUP_PROGRESS_GRACE`].
 const WORKER_STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long a worker may stay on one startup step before the wait gives up.
+/// How long a worker may stay on one startup step before serving begins.
 /// Recovering a large durable journal is one legitimately slow step.
 const WORKER_STARTUP_PROGRESS_GRACE: Duration = Duration::from_secs(60);
 
@@ -35,13 +35,8 @@ const WORKER_STARTUP_CONNECT_CEILING: Duration = NATIVE_SESSION_STARTUP_TIMEOUT;
 /// Delay between connection attempts against a worker that is still starting.
 const WORKER_STARTUP_CONNECT_INTERVAL: Duration = Duration::from_millis(500);
 
-/// How often the worker itself is looked at while the wait runs. A probe is a
-/// command on the target, which on a container or SSH target is a round trip,
-/// so it does not run once per connection attempt. The first failed attempt is
-/// probed at once, so a worker that is already dead is reported as soon as
-/// that attempt gives up. An attempt that finds no control socket retries for
-/// about a second and a half first (`WORKER_SOCKET_RETRY_DELAYS`), since a
-/// worker that is still starting binds it within that time.
+/// How often to inspect worker progress, independently of the connection attempt.
+/// An in-flight connection is retained across probes, including slow SSH hops.
 const WORKER_STARTUP_PROBE_INTERVAL: Duration = Duration::from_secs(3);
 
 /// How often a wait loop looks for cancellation while it is idle.
@@ -352,7 +347,7 @@ pub(super) async fn wait_for_native_session_in_stage(
 trait StartingWorkerProbe {
     type Relay;
 
-    async fn connect(&mut self) -> Result<Self::Relay>;
+    async fn connect(&self) -> Result<Self::Relay>;
 
     /// What the worker looks like on the target right now, or why the target
     /// could not tell.
@@ -370,7 +365,7 @@ struct StartingWorkerConnection<'a, E: CommandExecutor> {
 impl<E: CommandExecutor> StartingWorkerProbe for StartingWorkerConnection<'_, E> {
     type Relay = StandaloneSession;
 
-    async fn connect(&mut self) -> Result<StandaloneSession> {
+    async fn connect(&self) -> Result<StandaloneSession> {
         StandaloneSession::connect_command(self.spec, self.session_id).await
     }
 
@@ -445,11 +440,6 @@ impl std::fmt::Display for WorkerStartupFailure {
 
 impl std::error::Error for WorkerStartupFailure {}
 
-/// Whether a startup step means the worker had already published its socket.
-fn reached_socket(step: Option<&str>) -> bool {
-    matches!(step, Some("bind-socket" | "serving"))
-}
-
 /// What one look at the worker says the wait should do next.
 enum StartupVerdict {
     /// The worker will never answer. The string says why, and a refusal is the
@@ -480,10 +470,10 @@ fn verdict(probe: &WorkerProbe) -> StartupVerdict {
 ///
 /// The wait watches the worker, not only the clock. A worker that has died, or
 /// that recorded its own exit, fails immediately with the reason. A worker that
-/// keeps reaching new startup steps is waited for beyond the initial window,
-/// because the steps it is on are proportional to the session's own data, up to
-/// a ceiling. A worker that sits on one step past the grace fails naming that
-/// step, which is a far better answer than "did not accept a connection".
+/// keeps reaching new startup steps extends the initial window up to a ceiling.
+/// Before serving, a stalled step fails after the progress grace. Once serving
+/// is observed, only the ceiling ends the wait. A pending connection survives
+/// progress probes; failed connections retry after the connection interval.
 async fn connect_to_starting_worker<P: StartingWorkerProbe>(
     probe: &mut P,
     executor: &impl CommandExecutor,
@@ -498,65 +488,35 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
     let mut stalled_on: Option<String> = None;
     // Why the latest probe of the worker failed, when it did.
     let mut probe_error: Option<anyhow::Error> = None;
+    let mut accepting = false;
+    let mut reached_socket = false;
+    let mut attempt = Some(Box::pin(probe.connect()));
+    let mut next_attempt = started;
+    let mut first_attempt = true;
     loop {
         if executor.cancellation_requested() {
             bail!("operation cancelled while connecting to the worker relay");
         }
-        // An attempt, hello included, never outlives the probe interval. One
-        // that hangs, such as a connection to a socket nobody accepts on, is a
-        // failed attempt like any other, so the worker still gets looked at and
-        // the deadline still moves when it has made progress.
-        let attempt_started = tokio::time::Instant::now();
-        let attempt_limit = std::cmp::min(
-            deadline,
-            tokio::time::Instant::now() + WORKER_STARTUP_PROBE_INTERVAL,
-        );
-        let attempt = {
-            let attempt = probe.connect();
-            tokio::pin!(attempt);
-            loop {
-                let now = tokio::time::Instant::now();
-                if now >= attempt_limit {
-                    break None;
-                }
-                let cancellation_poll =
-                    std::cmp::min(attempt_limit, now + CANCELLATION_POLL_INTERVAL);
-                tokio::select! {
-                    attempt = &mut attempt => break Some(attempt),
-                    _ = tokio::time::sleep_until(cancellation_poll) => {
-                        if executor.cancellation_requested() {
-                            bail!("operation cancelled while connecting to the worker relay");
-                        }
-                    }
-                }
-            }
-        };
-        let timed_out = attempt.is_none();
-        let error = match attempt {
-            Some(Ok(relay)) => return Ok(relay),
-            Some(Err(error)) => error,
-            None => anyhow::anyhow!(
-                "the connection attempt was still pending after {}s",
-                started.elapsed().as_secs()
-            ),
-        };
         let now = tokio::time::Instant::now();
-        // Look at the worker when it is due, after an attempt that hung, and at
-        // the deadline, so that the step named in a failure is the last one the
-        // worker recorded and a worker that just moved is not given up on.
-        if now >= next_probe || timed_out || now >= deadline {
+        if now >= next_probe || now >= deadline {
             next_probe = now + WORKER_STARTUP_PROBE_INTERVAL;
             match probe.inspect() {
                 Ok(found) => {
                     probe_error = None;
+                    accepting |= found.accepting();
+                    reached_socket |= found.reached_socket();
                     match verdict(&found) {
                         StartupVerdict::Hopeless(reason, refusal) => {
-                            let error = error.context(reason).context(WorkerStartupFailure {
-                                reached_socket: reached_socket(found.step()),
-                            });
-                            // A refusal is a precondition the caller can fix, so
-                            // its sentence travels to the caller as a 409 rather
-                            // than stopping at the daemon log.
+                            let error = last_error
+                                .take()
+                                .unwrap_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "the connection attempt was still pending after {}s",
+                                        started.elapsed().as_secs()
+                                    )
+                                })
+                                .context(reason)
+                                .context(WorkerStartupFailure { reached_socket });
                             return Err(match refusal {
                                 Some(refusal) => {
                                     error.context(mj_core::refusal::Refusal::precondition(refusal))
@@ -565,10 +525,11 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
                             });
                         }
                         StartupVerdict::Working(reported) => {
-                            if reported != step {
-                                // The worker is getting somewhere. Let it, up to
-                                // the ceiling: what it is doing takes as long as
-                                // the session's own data takes.
+                            if accepting {
+                                deadline = ceiling;
+                                step = reported;
+                                stalled_on = None;
+                            } else if reported != step {
                                 step = reported;
                                 deadline =
                                     std::cmp::min(ceiling, now + WORKER_STARTUP_PROGRESS_GRACE);
@@ -579,73 +540,81 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
                         }
                     }
                 }
-                // The target could not tell; keep waiting on the clock, and say
-                // why if the wait ends without a better answer.
-                Err(inspect_error) => {
-                    tracing::debug!(
-                        error = %format!("{inspect_error:#}"),
-                        "could not probe a starting worker"
-                    );
-                    probe_error = Some(inspect_error);
+                Err(error) => {
+                    tracing::debug!(error = %format!("{error:#}"), "could not probe a starting worker");
+                    probe_error = Some(error);
                 }
             }
         }
-        // An attempt with no time left is only the loop's last look at the
-        // worker; it says nothing new, so it keeps the earlier real error.
-        if !(timed_out && attempt_limit <= attempt_started) || last_error.is_none() {
-            last_error = Some(error);
-        }
-        if executor.cancellation_requested() {
-            bail!("operation cancelled while connecting to the worker relay");
-        }
         if tokio::time::Instant::now() >= deadline {
+            if attempt.is_some() {
+                last_error = Some(anyhow::anyhow!(
+                    "the connection attempt was still pending after {}s",
+                    started.elapsed().as_secs()
+                ));
+            } else if let Some(error) = last_error.take() {
+                last_error = Some(error.context("the last connection attempt failed"));
+            }
             break;
         }
-        let next_attempt = std::cmp::min(
+        let now = tokio::time::Instant::now();
+        if attempt.is_none() && now >= next_attempt {
+            attempt = Some(Box::pin(probe.connect()));
+        }
+        let mut wake = std::cmp::min(
             deadline,
-            tokio::time::Instant::now() + WORKER_STARTUP_CONNECT_INTERVAL,
+            std::cmp::min(next_probe, now + CANCELLATION_POLL_INTERVAL),
         );
-        loop {
-            let now = tokio::time::Instant::now();
-            if now >= next_attempt {
-                break;
+        if attempt.is_none() {
+            wake = std::cmp::min(wake, next_attempt);
+        }
+        tokio::select! {
+            result = async { attempt.as_mut().unwrap().as_mut().await }, if attempt.is_some() => {
+                match result {
+                    Ok(relay) => return Ok(relay),
+                    Err(error) => last_error = Some(error),
+                }
+                attempt = None;
+                if first_attempt {
+                    next_probe = tokio::time::Instant::now();
+                    first_attempt = false;
+                }
+                next_attempt = tokio::time::Instant::now() + WORKER_STARTUP_CONNECT_INTERVAL;
             }
-            tokio::time::sleep_until(std::cmp::min(
-                next_attempt,
-                now + CANCELLATION_POLL_INTERVAL,
-            ))
-            .await;
-            if executor.cancellation_requested() {
-                bail!("operation cancelled while connecting to the worker relay");
-            }
+            _ = tokio::time::sleep_until(wake) => {}
         }
     }
     let waited = started.elapsed().as_secs();
-    let gave_up = match stalled_on {
-        Some(step) => format!(
-            "the worker has been on the startup step {step:?} for {}s without progress",
-            WORKER_STARTUP_PROGRESS_GRACE.as_secs()
-        ),
-        None => match &step {
+    let gave_up = if accepting {
+        format!(
+            "the worker has been accepting connections since its \"serving\" step (last step {step:?})",
+            step = step.as_deref().unwrap_or("serving")
+        )
+    } else {
+        match stalled_on {
             Some(step) => format!(
-                "worker relay did not accept a connection in {waited}s; \
-                 its last startup step was {step:?}"
+                "the worker has been on the startup step {step:?} for {}s without progress",
+                WORKER_STARTUP_PROGRESS_GRACE.as_secs()
             ),
-            None => match &probe_error {
-                Some(probe_error) => format!(
+            None => match &step {
+                Some(step) => format!(
                     "worker relay did not accept a connection in {waited}s; \
+                 its last startup step was {step:?}"
+                ),
+                None => match &probe_error {
+                    Some(probe_error) => format!(
+                        "worker relay did not accept a connection in {waited}s; \
                      the worker could not be probed: {probe_error:#}"
-                ),
-                None => format!(
-                    "worker relay did not accept a connection in {waited}s; \
+                    ),
+                    None => format!(
+                        "worker relay did not accept a connection in {waited}s; \
                      it recorded no startup step"
-                ),
+                    ),
+                },
             },
-        },
+        }
     };
-    let marker = WorkerStartupFailure {
-        reached_socket: reached_socket(step.as_deref()),
-    };
+    let marker = WorkerStartupFailure { reached_socket };
     match last_error {
         Some(error) => Err(error.context(gave_up).context(marker)),
         None => Err(anyhow::Error::new(marker).context(gave_up)),
@@ -658,7 +627,9 @@ mod tests {
 
     use anyhow::{Result, bail};
 
-    use crate::controller::worker_binary::{WorkerExitRecord, WorkerStartupRecord};
+    use crate::controller::worker_binary::{
+        WorkerExitRecord, WorkerStartupRecord, WorkerStartupStep,
+    };
     use crate::targets::{CancellableProcessExecutor, CommandOutput};
 
     use super::*;
@@ -1008,7 +979,7 @@ mod tests {
     /// reports a recorded death once `death_after_attempts` attempts ran, and
     /// otherwise looks alive on the step `steps` names for that attempt.
     struct FakeStartingWorker {
-        attempts: usize,
+        attempts: std::cell::Cell<usize>,
         accepts_after_attempts: Option<usize>,
         death_after_attempts: Option<usize>,
         vanishes_after_attempts: Option<usize>,
@@ -1022,6 +993,8 @@ mod tests {
         /// A connect that is not yet accepted never returns, like a hello to a
         /// socket nobody accepts on.
         hangs: bool,
+        connect_delay: Duration,
+        inspections: std::cell::Cell<usize>,
         /// Reports the step of the same number, counting from one, once that
         /// many attempts have run: a record that advances through its steps.
         steps: &'static [&'static str],
@@ -1032,7 +1005,7 @@ mod tests {
     impl FakeStartingWorker {
         fn never_accepts() -> Self {
             Self {
-                attempts: 0,
+                attempts: std::cell::Cell::new(0),
                 accepts_after_attempts: None,
                 death_after_attempts: None,
                 vanishes_after_attempts: None,
@@ -1041,6 +1014,8 @@ mod tests {
                 refusal: None,
                 cancel_on_attempt: None,
                 hangs: false,
+                connect_delay: Duration::ZERO,
+                inspections: std::cell::Cell::new(0),
                 steps: &[],
                 not_started_until: None,
             }
@@ -1056,22 +1031,24 @@ mod tests {
     impl StartingWorkerProbe for FakeStartingWorker {
         type Relay = &'static str;
 
-        async fn connect(&mut self) -> Result<&'static str> {
-            self.attempts += 1;
+        async fn connect(&self) -> Result<&'static str> {
+            tokio::time::sleep(self.connect_delay).await;
+            self.attempts.set(self.attempts.get() + 1);
             if let Some(cancel) = &self.cancel_on_attempt {
                 cancel.store(true, std::sync::atomic::Ordering::Release);
             }
             match self.accepts_after_attempts {
-                Some(accepts) if self.attempts >= accepts => Ok("relay"),
+                Some(accepts) if self.attempts.get() >= accepts => Ok("relay"),
                 _ if self.hangs => std::future::pending().await,
-                _ => bail!("connect attempt {} refused", self.attempts),
+                _ => bail!("connect attempt {} refused", self.attempts.get()),
             }
         }
 
         fn inspect(&self) -> Result<WorkerProbe> {
+            self.inspections.set(self.inspections.get() + 1);
             if self
                 .not_started_until
-                .is_some_and(|started| self.attempts < started)
+                .is_some_and(|started| self.attempts.get() < started)
             {
                 return Ok(WorkerProbe {
                     startup: None,
@@ -1081,22 +1058,36 @@ mod tests {
             }
             let exited = self
                 .death_after_attempts
-                .is_some_and(|died_after| self.attempts >= died_after);
+                .is_some_and(|died_after| self.attempts.get() >= died_after);
             let gone = self
                 .vanishes_after_attempts
-                .is_some_and(|gone_after| self.attempts >= gone_after);
-            let step = if !self.steps.is_empty() {
+                .is_some_and(|gone_after| self.attempts.get() >= gone_after);
+            // The history holds only the steps reached so far; a stuck worker
+            // has reached all of them.
+            let reached = if self.stuck_step.is_some() {
                 self.steps
-                    .get(self.attempts.saturating_sub(1))
-                    .or(self.steps.last())
-                    .map(|step| (*step).to_owned())
-            } else if self.progressing {
-                Some(format!("step-{}", self.attempts))
             } else {
-                self.stuck_step.map(ToOwned::to_owned)
+                &self.steps[..self.inspections.get().max(1).min(self.steps.len())]
+            };
+            let step = if let Some(step) = self.stuck_step {
+                Some(step.to_owned())
+            } else if let Some(step) = reached.last() {
+                Some((*step).to_owned())
+            } else if self.progressing {
+                Some(format!("step-{}", self.inspections.get()))
+            } else {
+                None
             };
             Ok(WorkerProbe {
-                startup: step.map(|step| WorkerStartupRecord { step }),
+                startup: step.map(|step| WorkerStartupRecord {
+                    step,
+                    steps: reached
+                        .iter()
+                        .map(|step| WorkerStartupStep {
+                            step: (*step).to_owned(),
+                        })
+                        .collect(),
+                }),
                 exit: exited.then(|| WorkerExitRecord {
                     reason: "durable relay open failed".into(),
                     refusal: self.refusal.map(ToOwned::to_owned),
@@ -1119,7 +1110,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(relay, "relay");
-        assert_eq!(worker.attempts, 4);
+        assert_eq!(worker.attempts.get(), 4);
     }
     // Hard-won: b5e0edb9: startup waited through its timeout after the worker had recorded death
     #[tokio::test(start_paused = true)]
@@ -1137,7 +1128,7 @@ mod tests {
                 .await
                 .unwrap_err();
 
-        assert_eq!(worker.attempts, 1);
+        assert_eq!(worker.attempts.get(), 1);
         assert!(started.elapsed() < WORKER_STARTUP_CONNECT_INTERVAL);
         let reported = format!("{error:#}");
         assert!(
@@ -1191,7 +1182,7 @@ mod tests {
                 .await
                 .unwrap_err();
 
-        assert_eq!(worker.attempts, 1);
+        assert_eq!(worker.attempts.get(), 1);
         assert!(
             error
                 .to_string()
@@ -1246,7 +1237,7 @@ mod tests {
                 .await
                 .unwrap_err();
 
-        assert_eq!(worker.attempts, 1);
+        assert_eq!(worker.attempts.get(), 1);
         assert!(started.elapsed() < WORKER_STARTUP_CONNECT_INTERVAL);
         let reported = format!("{error:#}");
         assert!(
@@ -1292,30 +1283,35 @@ mod tests {
                 .await
                 .unwrap_err();
 
-        assert!(worker.attempts > 1, "{} attempts", worker.attempts);
+        assert!(
+            worker.attempts.get() > 1,
+            "{} attempts",
+            worker.attempts.get()
+        );
         assert!(started.elapsed() >= WORKER_STARTUP_CONNECT_TIMEOUT);
         let reported = format!("{error:#}");
         assert!(
-            reported.contains(&format!("connect attempt {} refused", worker.attempts)),
+            reported.contains(&format!(
+                "connect attempt {} refused",
+                worker.attempts.get()
+            )),
             "{reported}"
         );
     }
 
     /// The failure behind #1192: the worker's socket accepts a connection into
     /// its backlog but nobody answers the hello, so the attempt never returns.
-    /// The wait must not sit on that attempt. It gives up on it, looks at the
-    /// worker, sees the record move, and keeps waiting until the worker answers.
+    /// The wait probes progress while retaining the attempt until it answers.
     // Hard-won: da519db5: one hanging relay attempt hid later worker progress and caused a false timeout
     #[tokio::test(start_paused = true)]
     async fn startup_connect_extends_past_a_hanging_attempt_while_the_record_advances() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let executor = CancellableProcessExecutor::new(cancelled);
-        // Each hung attempt lasts one probe interval (3s), so 25 attempts are
-        // 75 seconds, well past the 30-second first window.
+        // One slow attempt spans repeated progress probes and the first window.
         let mut worker = FakeStartingWorker {
-            hangs: true,
+            connect_delay: Duration::from_secs(75),
             progressing: true,
-            ..FakeStartingWorker::accepting_after(25)
+            ..FakeStartingWorker::accepting_after(1)
         };
         let started = tokio::time::Instant::now();
 
@@ -1332,8 +1328,29 @@ mod tests {
         );
     }
 
-    /// The same hang with a record that does not move fails, and says which
-    /// step the record ended on instead of claiming it recorded none.
+    // Hard-won: da519db5: its per-attempt cut-off cancelled every connection slower than one probe interval
+    #[tokio::test(start_paused = true)]
+    async fn startup_connect_preserves_slow_attempt_after_serving() {
+        let executor = CancellableProcessExecutor::new(std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        ));
+        let mut worker = FakeStartingWorker {
+            steps: &["start", "bind-socket", "serving", "acp-session-open"],
+            stuck_step: Some("acp-session-open"),
+            connect_delay: Duration::from_secs(70),
+            ..FakeStartingWorker::accepting_after(1)
+        };
+        assert_eq!(
+            connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
+                .await
+                .unwrap(),
+            "relay"
+        );
+        assert_eq!(worker.attempts.get(), 1);
+    }
+
+    /// A hang after serving waits to the ceiling and names the last step,
+    /// preserving the fact that the worker had already started accepting.
     // Hard-won: da519db5: hanging relay attempts hid the last recorded startup step in the failure
     #[tokio::test(start_paused = true)]
     async fn startup_connect_names_the_last_recorded_step_when_an_attempt_hangs_without_progress() {
@@ -1352,11 +1369,13 @@ mod tests {
                 .unwrap_err();
 
         assert!(
-            started.elapsed() < WORKER_STARTUP_CONNECT_CEILING,
-            "a stalled worker must not be waited for up to the ceiling"
+            started.elapsed() == WORKER_STARTUP_CONNECT_CEILING,
+            "an accepting worker must be waited for up to the ceiling"
         );
         let reported = format!("{error:#}");
         assert!(reported.contains("harness-resolve"), "{reported}");
+        assert!(reported.contains("accepting connections"), "{reported}");
+        assert!(!reported.contains("never published"), "{reported}");
         assert!(!reported.contains("no startup step"), "{reported}");
         assert!(reported.contains("still pending"), "{reported}");
     }
