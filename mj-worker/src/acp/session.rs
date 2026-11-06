@@ -1476,6 +1476,12 @@ pub(super) async fn serve_session(
                 }
                 let previous_model = session_model(&config_options);
                 let grok_model_change = grok_models.is_some() && grok::handles_config_key(&key);
+                // A model change, even one the bridge then refuses and rolls
+                // back, can move the bridge's mode, so the policy follows it.
+                let model_change =
+                    mj_core::acp::find_session_config_option(&config_options, &key).is_some_and(
+                        |option| option.category == Some(SessionConfigOptionCategory::Model),
+                    ) || key == "model";
                 let applied = apply_session_selector(
                     connection,
                     &session_id,
@@ -1488,9 +1494,7 @@ pub(super) async fn serve_session(
                 .await;
                 match applied {
                     Ok(value) => {
-                        // The model decides whether the bridge allows the
-                        // policy mode; the response just read is current.
-                        if previous_model != session_model(&config_options) {
+                        if model_change || previous_model != session_model(&config_options) {
                             reconcile_execution_policy(
                                 connection,
                                 &session_id,
@@ -1524,6 +1528,32 @@ pub(super) async fn serve_session(
                             return Err(error.context(
                                 "Grok model change response was lost; reload the session to reconcile its model state",
                             ));
+                        }
+                        if model_change {
+                            reconcile_execution_policy(
+                                connection,
+                                &session_id,
+                                spec.harness,
+                                enforcement,
+                                &mut config_options,
+                                &mut modes,
+                                events,
+                            )
+                            .await?;
+                            emit_runtime_event(
+                                events,
+                                RuntimeEvent::SessionConfigured {
+                                    config_options: config_options.clone(),
+                                },
+                            )
+                            .await?;
+                            emit_runtime_event(
+                                events,
+                                RuntimeEvent::SessionModesConfigured {
+                                    modes: modes.clone(),
+                                },
+                            )
+                            .await?;
                         }
                         emit_runtime_event(
                             events,
