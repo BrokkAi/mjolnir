@@ -511,14 +511,24 @@ async fn serve_stream(
         let preparation = {
             let command = command.clone();
             let executor = CancellableProcessExecutor::new(cancelled.clone());
-            tokio::task::spawn_blocking(move || -> Result<SshPrepared> {
-                let (command, lease) = command.open_ssh_session(&executor)?.into_parts();
-                Ok(SshPrepared { command, lease })
+            let mut walked = std::mem::take(retry.walk());
+            tokio::task::spawn_blocking(move || {
+                let prepared = command
+                    .open_ssh_session(&executor, &mut walked)
+                    .map(|session| {
+                        let (command, lease) = session.into_parts();
+                        SshPrepared { command, lease }
+                    });
+                (prepared, walked)
             })
         };
         tokio::pin!(preparation);
         let prepared = tokio::select! {
-            joined = &mut preparation => joined.context("node SSH preparation task failed")?,
+            joined = &mut preparation => {
+                let (prepared, walked) = joined.context("node SSH preparation task failed")?;
+                *retry.walk() = walked;
+                prepared
+            }
             reset = poll_fn(|cx| send.poll_reset(cx)) => {
                 cancelled.store(true, Ordering::Release);
                 let _ = preparation.await;
@@ -550,7 +560,7 @@ async fn serve_stream(
                 let stderr = String::from_utf8_lossy(&refused.stderr_tail).into_owned();
                 let delay = retry.next(
                     refused.refusal,
-                    refused.redirected,
+                    refused.walks_on,
                     &destination,
                     &command.purpose,
                     &stderr,
@@ -568,6 +578,14 @@ async fn serve_stream(
                     send.send_data(Bytes::new(), true)?;
                     return Ok(());
                 };
+                // The refused attempt's stderr is the retry's business, not the
+                // daemon's: a later failure must not look like a refusal.
+                tracing::debug!(
+                    purpose = %command.purpose,
+                    discarded_stderr_frames = refused.held_stderr.len(),
+                    stderr = %stderr.trim(),
+                    "discarded the stderr of a refused SSH attempt"
+                );
                 tokio::select! {
                     () = tokio::time::sleep(delay) => {}
                     reset = poll_fn(|cx| send.poll_reset(cx)) => {
@@ -758,8 +776,8 @@ enum ChildEnd {
 /// told had the node not retried it.
 struct Refused {
     refusal: crate::targets::SshRefusal,
-    /// Whether the next lease can land on another master at once.
-    redirected: bool,
+    /// Whether the refusal is a step of the walk to another master.
+    walks_on: bool,
     stderr_tail: Vec<u8>,
     held_stderr: Vec<Bytes>,
     exit: NodeExit,
@@ -899,10 +917,14 @@ async fn run_child(
                         let excess = tail.len().saturating_sub(4096);
                         tail.drain(..excess);
                     }
-                    let waiting = gate
+                    // Stderr waits until the session is known to have started.
+                    // A session whose stdout ended with no byte never started:
+                    // its stderr is classified with its exit, and the caller
+                    // sends it only if the exit is not a refusal.
+                    let started = gate
                         .as_ref()
-                        .is_some_and(|gate| gate.phase() == crate::targets::StartPhase::Waiting);
-                    if is_stderr && waiting {
+                        .is_none_or(|gate| gate.phase() == crate::targets::StartPhase::Started);
+                    if is_stderr && !started {
                         held.push(framed);
                         continue;
                     }
@@ -962,9 +984,10 @@ async fn run_child(
         status: status.code(),
         error: None,
     };
-    // A session the server turned away tells the ledger what it learned: a
-    // dead master is rechecked, and a full one is not leased again. A session
-    // that printed the start marker is not refused, whatever its exit status.
+    // A session the server turned away tells the ledger what it means: a dead
+    // master is rechecked, and a full one sends the retry down the walk. A
+    // session that printed the start marker is not refused, whatever its exit
+    // status.
     if let (Some(lease), Some(code)) = (&lease, status.code()) {
         let text = String::from_utf8_lossy(&tail);
         let refusal = match &gate {
@@ -972,7 +995,7 @@ async fn run_child(
             None => crate::targets::ssh_refusal(code, &text),
         };
         if let Some(refusal) = refusal {
-            let redirected = lease.note_refusal(refusal);
+            let walks_on = lease.note_refusal(refusal);
             if gate.is_some() {
                 // Nothing reached the daemon: the caller retries the attempt.
                 // The lease is released first, then the process group's
@@ -980,7 +1003,7 @@ async fn run_child(
                 drop(group);
                 return Ok(ChildEnd::Refused(Refused {
                     refusal,
-                    redirected,
+                    walks_on,
                     stderr_tail: tail,
                     held_stderr: held,
                     exit,
@@ -1717,6 +1740,7 @@ mod tests {
     /// node, where the lease lives, retries; it holds the daemon's input and
     /// the refused attempts' stderr back, so the daemon sees one clean run.
     // Hard-won: 5cb64e019: the daemon counted each refusal of a node-hosted relay as unproductive and gave up after three.
+    // Hard-won: 75da0c2b0: stderr that arrived after stdout had ended was flushed to the daemon before the refused attempt was classified.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)] // The sharing override is process-wide.
     async fn a_node_stream_refused_repeatedly_runs_once_without_the_daemon_seeing_it() {
@@ -1729,7 +1753,7 @@ mod tests {
         set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
         let _fast_retries = FastRetries::new();
         let fake = FakeSsh::new(&[
-            "refuse-session",
+            "refuse-session-late-stderr",
             "refuse-session",
             "refuse-auth",
             "refuse-auth",

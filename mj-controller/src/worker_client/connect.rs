@@ -46,6 +46,7 @@ impl RelayClient {
                 expected_session_id,
                 request_timeout,
                 handshake_timeout,
+                refusals.walk(),
             )
             .await;
             let (error, retry) = match outcome {
@@ -67,10 +68,10 @@ impl RelayClient {
                 ConnectRetry::Refused {
                     refusal,
                     stderr,
-                    learned,
+                    walks_on,
                 } => {
                     let destination = spec.ssh_destination.as_deref().unwrap_or_default();
-                    match refusals.next(refusal, learned, destination, &purpose, &stderr) {
+                    match refusals.next(refusal, walks_on, destination, &purpose, &stderr) {
                         Some(delay) => delay,
                         None => return Err(error),
                     }
@@ -112,6 +113,7 @@ impl RelayClient {
         expected_session_id: &str,
         request_timeout: Duration,
         handshake_timeout: Duration,
+        walk: &mut mj_core::targets::SshWalk,
     ) -> std::result::Result<Self, ConnectFailure> {
         // SSH that runs on the node is leased there, beside the connection
         // it shares.
@@ -129,11 +131,18 @@ impl RelayClient {
         let executor =
             crate::targets::CancellableProcessExecutor::with_timeout(SSH_MASTER_OPEN_TIMEOUT);
         let _cancel_preparation = executor.cancel_on_drop();
+        let mut walked = std::mem::take(walk);
         let prepared = tokio::task::spawn_blocking(move || {
-            let (spec, lease) = requested.open_ssh_session(&executor)?.into_parts();
-            Ok::<_, anyhow::Error>((spec, lease))
+            let prepared = requested
+                .open_ssh_session(&executor, &mut walked)
+                .map(mj_core::targets::SessionCommand::into_parts);
+            (prepared, walked)
         })
         .await;
+        let prepared = prepared.map(|(prepared, walked)| {
+            *walk = walked;
+            prepared
+        });
         let (spec, lease) = match prepared {
             Ok(Ok(prepared)) => prepared,
             Ok(Err(error)) => {
@@ -274,8 +283,9 @@ impl RelayClient {
                         None => ssh_refusal(status, &stderr),
                     });
                 // The lease tells the ledger what the refusal means: a dead
-                // master is rechecked, a full one is not leased again.
-                let learned = match (refusal, &client.ssh_session) {
+                // master is rechecked, and a full one sends the next attempt
+                // down the walk to another master.
+                let walks_on = match (refusal, &client.ssh_session) {
                     (Some(refusal), Some(lease)) => lease.note_refusal(refusal),
                     _ => false,
                 };
@@ -284,7 +294,7 @@ impl RelayClient {
                     Some(refusal) => Some(ConnectRetry::Refused {
                         refusal,
                         stderr,
-                        learned,
+                        walks_on,
                     }),
                     None if status.is_some() && worker_socket_missing(&stderr) => {
                         Some(ConnectRetry::SocketMissing)

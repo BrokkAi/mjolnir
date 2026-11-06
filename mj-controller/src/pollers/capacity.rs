@@ -335,7 +335,7 @@ pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<Co
     // `RESOURCE_POLL_TIMEOUT`, so the retries need no budget of their own.
     let mut retry = SshRefusalRetry::new(true);
     loop {
-        let (output, ssh_session) = run_resource_command(command).await?;
+        let (output, ssh_session) = run_resource_command(command, retry.walk()).await?;
         if output.status == 0 {
             return Ok(output);
         }
@@ -348,15 +348,15 @@ pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<Co
         if let Some(destination) = command.ssh_destination.as_deref()
             && let Some(refusal) = refusal
         {
-            // The lease learns what the refusal means while it is still held.
-            let learned = ssh_session
+            // The lease records what the refusal means while it is still held.
+            let walks_on = ssh_session
                 .as_ref()
                 .is_some_and(|lease| lease.note_refusal(refusal));
             // Only Unix leases own a shared session slot; free it before the wait.
             #[cfg(unix)]
             drop(ssh_session);
             if let Some(delay) =
-                retry.next(refusal, learned, destination, &command.purpose, &stderr)
+                retry.next(refusal, walks_on, destination, &command.purpose, &stderr)
             {
                 tokio::time::sleep(delay).await;
                 continue;
@@ -375,6 +375,7 @@ pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<Co
 /// on. The lease is returned so it outlives the child.
 async fn run_resource_command(
     command: &CommandSpec,
+    walk: &mut crate::targets::SshWalk,
 ) -> Result<(CommandOutput, Option<crate::targets::SshSessionLease>)> {
     // A remote probe the daemon runs itself is one session on a shared SSH
     // connection; the lease is held until the probe has exited. A probe that
@@ -387,13 +388,17 @@ async fn run_resource_command(
                 crate::targets::SSH_MASTER_OPEN_TIMEOUT,
             );
             let _cancel_preparation = executor.cancel_on_drop();
-            tokio::task::spawn_blocking(move || {
-                requested
-                    .open_ssh_session(&executor)
-                    .map(crate::targets::SessionCommand::into_parts)
+            let mut walked = std::mem::take(walk);
+            let (prepared, walked) = tokio::task::spawn_blocking(move || {
+                let prepared = requested
+                    .open_ssh_session(&executor, &mut walked)
+                    .map(crate::targets::SessionCommand::into_parts);
+                (prepared, walked)
             })
             .await
-            .context("join the SSH session lease for a resource probe")??
+            .context("join the SSH session lease for a resource probe")?;
+            *walk = walked;
+            prepared?
         } else {
             (command.clone(), None)
         };

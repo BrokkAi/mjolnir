@@ -239,3 +239,28 @@ One mechanism closes all four: **every remote command mj sends over `ssh` first 
 ### Tests
 
 The real-`sshd` test (`MaxSessions 2`) runs concurrent plain commands and a streamed command with 192 KB of stdin while the master fills, and asserts the learned capacity is 2. Tricky-condition tests: a marker split across reads, a stream that diverges from the marker, exit 255 after the marker is not retried, a streamed command refused twice still delivers its whole stdin once, a reopened master forgets capacity and ignores a late refusal from the old one, and a node-hosted relay refused repeatedly connects without the daemon seeing the refusals.
+
+## Revision note (2026-11-06, last): a walk across shards replaces learned capacity
+
+Pre-push review of 75da0c2b0 found that the ledger cannot know how many sessions the server will accept on a master. (1) Another process on the same control socket (an overlapping daemon during a handoff, `mj doctor`, Tab completion, each with its own ledger) can fill a master. This ledger recorded a capacity of at least one from its own low count, kept placing on that shard, and the refusals at "known capacity" taught nothing and exhausted three attempts, so commands failed while the daemon was healthy. (2) A channel can close on the server and another be accepted before the first local lease drops, so local `open` overlapped and inflated `high_water` above the real `MaxSessions`; nothing lowered it. (3) A race between `verified_at` and the generation reset in `restart_shard` let a lease join the old generation for a new master. The fact "how many sessions this server accepts on this master right now" belongs to the server, so the ledger stops estimating it.
+
+This revision replaces the "Capacity from confirmed sessions" design above (and the 2026-11-06 learned-capacity note). The start marker stays: it still makes every refusal before the remote command starts safe to retry.
+
+### Design
+
+- **The ledger owns only what this process owns.** Per connection key: which shards exist, each one's control socket (named from the key and the shard index, so other processes find the same sockets), when its master was last verified alive, and a soft hint. There is no capacity, high-water, open/reserved split or generation.
+- **Placement is a walk, one per command.** `SshWalk` (owned by the command's `SshRefusalRetry`) lists the shards the command has already tried. Each lease takes the first shard it has not tried, in order starting at the hint and wrapping, and opens a new shard only when it has tried all that exist. A `SessionLimit` refusal (exit 255 before the start marker, existing stderr classification) therefore moves the same command to the next shard at once, with no backoff and no attempt counted: the walk is the state change that ends the loop. A command whose lease has no shared master (unshared) cannot walk and keeps three attempts.
+- **The hint** is the shard that most recently started a session for the connection. It only chooses where a walk starts. A stale hint costs extra refusals and never a failure.
+- **Termination guard.** A master this process opens is checked with one real session (`true`) while the process holds the master's opening locks, so that session is the first one the server sees on it and no burst of other leases can race it. If the server refuses that first session for `SessionLimit`, it does not allow shared sessions (`MaxSessions 0`). The master is closed and `lease` fails with an error that names the host and the sshd setting. The process neither opens masters in a loop nor falls back to a direct connection (`AGENTS.md`: no quiet degradation). A burst of leases cannot trigger the guard by itself: when many leases are refused at once, their markers have not arrived yet, so only a session that runs alone proves "refused with nothing else in flight".
+- **Pre-authentication refusals** keep `SshRefusalRetry`'s behaviour (backoff until the caller's cancellation or deadline; three attempts without one).
+- **Move's rsync** (`transfer.rs`) cannot carry the marker, because its stdout is the rsync protocol. It is idempotent, so when rsync fails and the `ssh` stderr it relays shows a refusal, `copy_workspace` runs the whole rsync again with the same walk: the next attempt uses the next shard, and pre-authentication refusals back off as above.
+- **Node stderr** (`node.rs`): `run_child` now holds stderr until the attempt has started, not only while it waits, so a refused attempt's stderr is classified with the exit and discarded (logged at debug) instead of flushing when stdout ends.
+- **Probes** (`lease_probe`) walk the same way but never open a master; past the last known shard a probe uses the next index, which joins that shard's master if some process opened it and otherwise connects directly, as probes always did.
+
+### File map
+
+`mj-core/src/targets/ssh.rs` (ledger, `SshWalk`, first-session check, `SshRefusalRetry`), `mj-core/src/targets.rs` (`open_ssh_session` takes the walk), `mj-core/src/node.rs`, `mj-controller/src/worker_client/connect.rs`, `mj-controller/src/pollers/capacity.rs`, `mj-controller/src/controller/move_session/transfer.rs`, `docs/SSH.md`.
+
+### Tests
+
+The real-`sshd` test (`MaxSessions 2`) gains a second ledger that fills the first master through the same control socket; the first ledger's commands still all succeed by walking. A `MaxSessions 0` server fails the lease with the guard error and leaves no master behind. Ledger tests of capacity, high-water and generations are removed. Tricky-condition tests: a refused-then-successful node stream delivers no stderr from the refused attempt; Move's rsync retry moves to the next shard.

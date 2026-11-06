@@ -297,9 +297,15 @@ impl CommandSpec {
     /// the lease's [`StartGate`] (see [`SessionCommand::gate`]); the executors,
     /// the node and `spawn_session_proxy` do. A command without a session
     /// request is returned unchanged. `executor` runs the master check and,
-    /// when needed, the opener.
-    pub fn open_ssh_session(&self, executor: &dyn CommandExecutor) -> Result<SessionCommand<'_>> {
-        self.lease_ssh_session(executor, true)
+    /// when needed, the opener. `walk` is the command's walk across the
+    /// connection's shards: a command that retries after a refusal passes the
+    /// same walk to each attempt (see [`SshRefusalRetry::walk`]).
+    pub fn open_ssh_session(
+        &self,
+        executor: &dyn CommandExecutor,
+        walk: &mut SshWalk,
+    ) -> Result<SessionCommand<'_>> {
+        self.lease_ssh_session(executor, walk, true)
     }
 
     /// [`Self::open_ssh_session`] for a command whose `ssh` is run by another
@@ -309,13 +315,15 @@ impl CommandSpec {
     pub fn open_ssh_session_without_marker(
         &self,
         executor: &dyn CommandExecutor,
+        walk: &mut SshWalk,
     ) -> Result<SessionCommand<'_>> {
-        self.lease_ssh_session(executor, false)
+        self.lease_ssh_session(executor, walk, false)
     }
 
     fn lease_ssh_session(
         &self,
         executor: &dyn CommandExecutor,
+        walk: &mut SshWalk,
         marker: bool,
     ) -> Result<SessionCommand<'_>> {
         let Some(ssh) = &self.ssh_session else {
@@ -332,9 +340,9 @@ impl CommandSpec {
             "ssh",
         );
         let lease = if self.ssh_session_probe {
-            SshSessions::lease_probe(ssh)
+            SshSessions::lease_probe(ssh, walk)
         } else {
-            SshSessions::lease(ssh, executor)?
+            SshSessions::lease(ssh, executor, walk)?
         };
         let mut command = self.clone();
         command.ssh_session = None;
@@ -422,8 +430,10 @@ pub(crate) mod fake_ssh {
 
     impl FakeSsh {
         /// `plan` has one word per attempt: `refuse-session`, `refuse-auth`,
-        /// or `run-then-255` (runs the command, then fails like a dropped
-        /// connection). Attempts past the plan just run.
+        /// `refuse-session-late-stderr` (closes stdout first and prints the
+        /// refusal to stderr moments later), or `run-then-255` (runs the
+        /// command, then fails like a dropped connection). Attempts past the
+        /// plan just run.
         pub(crate) fn new(plan: &[&str]) -> Self {
             let directory = tempfile::tempdir().expect("fake ssh directory");
             let script = r#"#!/bin/sh
@@ -433,6 +443,11 @@ echo $((count + 1)) > "$dir/attempts"
 for last; do :; done
 case "$(sed -n "$((count + 1))p" "$dir/plan")" in
   refuse-session)
+    echo 'mux_client_request_session: session request failed: Session open refused by peer' >&2
+    exit 255 ;;
+  refuse-session-late-stderr)
+    exec >&-
+    sleep 0.3
     echo 'mux_client_request_session: session request failed: Session open refused by peer' >&2
     exit 255 ;;
   refuse-auth)
@@ -980,9 +995,9 @@ pub struct ProcessExecutor;
 /// attempt, and the lease tells the ledger what the refusal means
 /// ([`SshSessionLease::note_refusal`]). A session turned away by the transport
 /// usually means its master died, so the retry checks and reopens the master.
-/// A session refused for `MaxSessions` records the master's capacity, and the
-/// retry lands on another master at once: the recorded capacity is the state
-/// change that ends that loop, so it needs no wait and uses no attempt.
+/// A session refused for `MaxSessions` moves to the next shard of the
+/// command's walk at once: the walk is the state change that ends that loop,
+/// so it needs no wait and uses no attempt.
 ///
 /// `run` receives the leased command and the gate its stdout reader must
 /// report into (`None` when the command prints no start marker).
@@ -999,15 +1014,15 @@ fn with_ssh_refusal_retry(
     };
     let mut retry = SshRefusalRetry::new(is_cancelled.is_some());
     loop {
-        let session = command.open_ssh_session(executor)?;
+        let session = command.open_ssh_session(executor, retry.walk())?;
         let output = run(session.command(), session.gate())?;
         let refusal = note_session_refusal(&session, &output);
         drop(session);
-        let Some((refusal, learned)) = refusal else {
+        let Some((refusal, walks_on)) = refusal else {
             return Ok(output);
         };
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let Some(delay) = retry.next(refusal, learned, destination, &command.purpose, &stderr)
+        let Some(delay) = retry.next(refusal, walks_on, destination, &command.purpose, &stderr)
         else {
             return Ok(output);
         };
@@ -1035,7 +1050,7 @@ fn note_session_refusal(
 
 /// Wait out `delay`, giving up early if the supervising operation is
 /// cancelled. Returns whether the wait completed.
-fn sleep_unless_cancelled(delay: Duration, is_cancelled: &dyn Fn() -> bool) -> bool {
+pub fn sleep_unless_cancelled(delay: Duration, is_cancelled: &dyn Fn() -> bool) -> bool {
     let deadline = Instant::now() + delay;
     loop {
         if is_cancelled() {
@@ -3090,6 +3105,10 @@ mod executor_tests {
                     }
                     Ok(reply(0, ""))
                 });
+            }
+            // The first session on a master the ledger just opened.
+            if command.args.contains(&"ProxyCommand=false".to_owned()) {
+                return Ok(reply(0, ""));
             }
             let socket = command
                 .args
