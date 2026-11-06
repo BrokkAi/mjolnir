@@ -43,12 +43,13 @@ pub(super) struct MetadataDigests(pub(super) [Option<[u8; 32]>; METADATA_FIELDS.
 
 /// Summary rows retain exactly these serialized session fields: `id`,
 /// `workspace_id`, `bundle_id`, `title`, `subagent_parent_id`,
-/// `subagent_session_ids`, `publication_state`, `profile_id`, `target_id`,
-/// `state`, `container_upgrade_supported`, `created_at`, `updated_at`, `has_error`, `configuration_issue`,
+/// `subagent_session_ids`, `reviewer_session_ids`, `publication_state`,
+/// `profile_id`, `target_id`, `state`, `container_upgrade_supported`,
+/// `created_at`, `updated_at`, `has_error`, `configuration_issue`,
 /// `launch_error`, `storage_problem`, `project_label`, `display_location`,
 /// `lifecycle`, `transitioning`, `last_activity_at_ms`, `last_message_at_ms`,
 /// `capacity_retry`, `retry_assessment_pending`, `quota_recovery`, `operation`,
-/// `move_recovery`, `chat_phase`, `is_idle`, `activity_details`, `activity`,
+/// `move_recovery`, `chat_phase`, `is_idle`, `active`, `activity_details`, `activity`,
 /// and `capabilities`. Prompt and elicitation bodies become
 /// `queued_prompt_count` and `pending_elicitation_count`. These are the
 /// dashboard, resume-list, session-index, and sub-agent workspace/count fields
@@ -61,6 +62,7 @@ const SUMMARY_FIELDS: &[&str] = &[
     "title",
     "subagent_parent_id",
     "subagent_session_ids",
+    "reviewer_session_ids",
     "publication_state",
     "profile_id",
     "target_id",
@@ -86,6 +88,7 @@ const SUMMARY_FIELDS: &[&str] = &[
     "move_recovery",
     "chat_phase",
     "is_idle",
+    "active",
     "activity_details",
     "activity",
     "capabilities",

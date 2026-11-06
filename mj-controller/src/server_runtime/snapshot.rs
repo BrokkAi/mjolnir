@@ -217,6 +217,8 @@ pub(super) fn session_capabilities(
         open: session.conversation_available
             && !session.transitioning
             && session.lifecycle == ViewerLifecycleCategory::Live,
+        // Settled by the caller, which holds the state that defines it.
+        read_history: false,
         prompt: live && attached && !mutation_busy,
         run_shell: live && attached && !mutation_busy,
         // A turn Claude Code started on its own after a background task can
@@ -883,6 +885,10 @@ pub(super) fn viewer_snapshot_selected(
             container_target,
             tree_turn_running,
         );
+        // The state owns what "stopped sub-agent" means, so the terminal and
+        // the viewer agree on which children can be read.
+        session.capabilities.read_history =
+            controller.state.is_stopped_subagent(&session.id) && !session.transitioning;
         session.available_commands = phone_commands(session, live);
         if let Some(transcript) = conversations.get(&session.id) {
             session.conversation_available = true;

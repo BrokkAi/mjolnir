@@ -102,6 +102,7 @@
   "bundle_id": "project",
   "target_id": "podman",
   "state": "running",
+  "active": true,
   "created_at": "2026-08-14T00:00:00Z",
   "updated_at": "2026-08-14T00:00:00Z",
   "has_error": true,
@@ -148,6 +149,7 @@
   "capabilities": {
     "clear_context": false,
     "open": false,
+    "read_history": false,
     "prompt": true,
     "run_shell": true,
     "interrupt_turn": false,
@@ -203,6 +205,7 @@
     "bundle_id": "project",
     "target_id": "podman",
     "state": "running",
+    "active": true,
     "created_at": "2026-08-14T00:00:00Z",
     "updated_at": "2026-08-14T00:00:00Z",
     "has_error": true,
@@ -210,7 +213,7 @@
     "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
     "conversation_available": false,
     "prompt_images_supported": false,
-    "capabilities_ref": "c3ab2fdf6f887d5c",
+    "capabilities_ref": "384a583596d3e25e",
     "project_label": "project",
     "project_key": "1c8e6dc679624037",
     "display_location": "podman",
@@ -248,12 +251,10 @@
         "argument": "status"
       }
     ],
-    "be0135ab881b9218": [
-      "podman"
-    ],
-    "c3ab2fdf6f887d5c": {
+    "384a583596d3e25e": {
       "clear_context": false,
       "open": false,
+      "read_history": false,
       "prompt": true,
       "run_shell": true,
       "interrupt_turn": false,
@@ -269,7 +270,10 @@
       "container_settings": true,
       "restart": true,
       "interrupt_all": false
-    }
+    },
+    "be0135ab881b9218": [
+      "podman"
+    ]
   }
 }
 === only workspace (1 session card) ===
@@ -294,6 +298,7 @@
   "bundle_id": "project",
   "target_id": "podman",
   "state": "running",
+  "active": true,
   "created_at": "2026-08-14T00:00:00Z",
   "updated_at": "2026-08-14T00:00:00Z",
   "has_error": true,
@@ -340,6 +345,7 @@
   "capabilities": {
     "clear_context": false,
     "open": false,
+    "read_history": false,
     "prompt": true,
     "run_shell": true,
     "interrupt_turn": false,
@@ -383,6 +389,7 @@
       "bundle_id": "project",
       "target_id": "podman",
       "state": "running",
+      "active": true,
       "created_at": "2026-08-14T00:00:00Z",
       "updated_at": "2026-08-14T00:00:00Z",
       "has_error": true,
@@ -390,7 +397,7 @@
       "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
       "conversation_available": false,
       "prompt_images_supported": false,
-      "capabilities_ref": "3f72bd38943a3575",
+      "capabilities_ref": "f58b9c3b71090769",
       "project_label": "project",
       "project_key": "1c8e6dc679624037",
       "display_location": "podman",
@@ -430,9 +437,13 @@
           "argument": "status"
         }
       ],
-      "3f72bd38943a3575": {
+      "be0135ab881b9218": [
+        "podman"
+      ],
+      "f58b9c3b71090769": {
         "clear_context": false,
         "open": false,
+        "read_history": false,
         "prompt": true,
         "run_shell": true,
         "interrupt_turn": false,
@@ -448,10 +459,7 @@
         "container_settings": true,
         "restart": true,
         "interrupt_all": false
-      },
-      "be0135ab881b9218": [
-        "podman"
-      ]
+      }
     }
   }
 }
@@ -481,6 +489,7 @@
       "bundle_id": "project",
       "target_id": "podman",
       "state": "running",
+      "active": true,
       "created_at": "2026-08-14T00:00:00Z",
       "updated_at": "2026-08-14T00:00:00Z",
       "has_error": true,
@@ -488,7 +497,7 @@
       "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
       "conversation_available": false,
       "prompt_images_supported": false,
-      "capabilities_ref": "3f72bd38943a3575",
+      "capabilities_ref": "f58b9c3b71090769",
       "project_label": "project",
       "project_key": "1c8e6dc679624037",
       "display_location": "podman",
@@ -528,9 +537,13 @@
           "argument": "status"
         }
       ],
-      "3f72bd38943a3575": {
+      "be0135ab881b9218": [
+        "podman"
+      ],
+      "f58b9c3b71090769": {
         "clear_context": false,
         "open": false,
+        "read_history": false,
         "prompt": true,
         "run_shell": true,
         "interrupt_turn": false,
@@ -546,10 +559,7 @@
         "container_settings": true,
         "restart": true,
         "interrupt_all": false
-      },
-      "be0135ab881b9218": [
-        "podman"
-      ]
+      }
     }
   }
 }
@@ -576,6 +586,7 @@
     "bundle_id": "project",
     "target_id": "podman",
     "state": "running",
+    "active": true,
     "created_at": "2026-08-14T00:00:00Z",
     "updated_at": "2026-08-14T00:00:00Z",
     "has_error": true,
@@ -622,6 +633,7 @@
     "capabilities": {
       "clear_context": false,
       "open": false,
+      "read_history": false,
       "prompt": true,
       "run_shell": true,
       "interrupt_turn": false,
@@ -659,6 +671,7 @@
     "bundle_id": "project",
     "target_id": "podman",
     "state": "running",
+    "active": true,
     "created_at": "2026-08-14T00:00:00Z",
     "updated_at": "2026-08-14T00:00:00Z",
     "has_error": true,
@@ -708,6 +721,7 @@
     "capabilities": {
       "clear_context": false,
       "open": false,
+      "read_history": false,
       "prompt": true,
       "run_shell": true,
       "interrupt_turn": true,
@@ -748,6 +762,7 @@
   "bundle_id": "project",
   "target_id": "podman",
   "state": "running",
+  "active": true,
   "created_at": "2026-08-14T00:00:00Z",
   "updated_at": "2026-08-14T00:00:00Z",
   "has_error": true,
@@ -794,6 +809,7 @@
   "capabilities": {
     "clear_context": false,
     "open": false,
+    "read_history": false,
     "prompt": true,
     "run_shell": true,
     "interrupt_turn": false,
@@ -849,6 +865,7 @@
   "bundle_id": "project",
   "target_id": "podman",
   "state": "suspended",
+  "active": false,
   "created_at": "2026-08-14T00:00:00Z",
   "updated_at": "2026-08-14T00:00:00Z",
   "has_error": false,
@@ -888,6 +905,7 @@
   "capabilities": {
     "clear_context": false,
     "open": false,
+    "read_history": false,
     "prompt": false,
     "run_shell": false,
     "interrupt_turn": false,
@@ -920,6 +938,7 @@
     "bundle_id": "project",
     "target_id": "podman",
     "state": "suspended",
+    "active": false,
     "created_at": "2026-08-14T00:00:00Z",
     "updated_at": "2026-08-14T00:00:00Z",
     "has_error": false,
@@ -936,12 +955,13 @@
     "pending_elicitation_count": 0,
     "detail": false,
     "queued_prompt_count": 0,
-    "capabilities_ref": "d04f8ed13d81a1cb"
+    "capabilities_ref": "c6ac9d70d06b69a4"
   },
   "interned": {
-    "d04f8ed13d81a1cb": {
+    "c6ac9d70d06b69a4": {
       "clear_context": false,
       "open": false,
+      "read_history": false,
       "prompt": false,
       "run_shell": false,
       "interrupt_turn": false,
@@ -979,6 +999,7 @@
   "bundle_id": "project",
   "target_id": "podman",
   "state": "running",
+  "active": true,
   "created_at": "2026-08-14T00:00:00Z",
   "updated_at": "2026-08-14T00:00:00Z",
   "has_error": true,
@@ -1021,6 +1042,7 @@
   "capabilities": {
     "clear_context": false,
     "open": true,
+    "read_history": false,
     "prompt": false,
     "run_shell": false,
     "interrupt_turn": false,
@@ -1058,6 +1080,7 @@
   "bundle_id": "project",
   "target_id": "podman",
   "state": "running",
+  "active": true,
   "created_at": "2026-08-14T00:00:00Z",
   "updated_at": "2026-08-14T00:00:00Z",
   "has_error": true,
@@ -1098,6 +1121,7 @@
   "capabilities": {
     "clear_context": false,
     "open": true,
+    "read_history": false,
     "prompt": false,
     "run_shell": false,
     "interrupt_turn": false,
@@ -1135,6 +1159,7 @@
   "bundle_id": "project",
   "target_id": "podman",
   "state": "running",
+  "active": true,
   "created_at": "2026-08-14T00:00:00Z",
   "updated_at": "2026-08-14T00:00:00Z",
   "has_error": true,
@@ -1171,6 +1196,7 @@
   "capabilities": {
     "clear_context": false,
     "open": false,
+    "read_history": false,
     "prompt": false,
     "run_shell": false,
     "interrupt_turn": false,
@@ -1209,6 +1235,7 @@
     "bundle_id": "project",
     "target_id": "podman",
     "state": "provisioning",
+    "active": true,
     "created_at": "2026-08-14T00:00:00Z",
     "updated_at": "2026-08-14T00:00:00Z",
     "has_error": true,
@@ -1245,6 +1272,7 @@
     "capabilities": {
       "clear_context": false,
       "open": false,
+      "read_history": false,
       "prompt": false,
       "run_shell": false,
       "interrupt_turn": false,

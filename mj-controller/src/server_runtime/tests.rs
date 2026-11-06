@@ -516,6 +516,82 @@ fn a_session_whose_turn_outlives_the_daemon_is_not_reported_idle() {
 }
 
 #[test]
+fn only_a_stopped_sub_agent_can_read_its_history() {
+    let mut controller = controller_with_profiles(&["codex"]);
+    for (id, state) in [
+        ("parent", SessionState::Stopped),
+        ("live-child", SessionState::Running),
+        ("stopped-child", SessionState::Stopped),
+        ("stopped-other", SessionState::Stopped),
+    ] {
+        let mut record = phone_session(id, 0);
+        record.state = state;
+        controller.state.sessions.insert(id.to_owned(), record);
+    }
+    for id in ["live-child", "stopped-child"] {
+        controller.state.subagents.insert(
+            id.into(),
+            mj_core::subagent::SubagentRecord {
+                kind: mj_core::subagent::SubagentKind::Reviewer,
+                reviewer_launch: None,
+                child_session_id: id.into(),
+                parent_session_id: "parent".into(),
+                task_name: id.into(),
+                profile_id: "codex".into(),
+                model: None,
+                effort: None,
+                working_directory: PathBuf::new(),
+                initial_prompt: String::new(),
+                request_key: id.into(),
+                created_at: "now".into(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            }
+            .into(),
+        );
+    }
+    let snapshot = viewer_snapshot(
+        &controller,
+        &[],
+        &std::collections::BTreeMap::new(),
+        &PhoneSessionViews {
+            native_agents: &Default::default(),
+            conversations: &mj_core::snapshot_map::SnapshotMap::new(),
+            queued_prompts: &std::collections::BTreeMap::new(),
+            active_user_shells: &std::collections::BTreeMap::new(),
+            pending_elicitations: &std::collections::BTreeMap::new(),
+            prompt_images: &std::collections::BTreeSet::new(),
+            operational: &std::collections::BTreeMap::new(),
+            materialized_activity: &std::collections::BTreeMap::new(),
+            project_sources: &PhoneProjectSources::default(),
+            operations: &std::collections::BTreeMap::new(),
+            move_recoveries: &std::collections::BTreeMap::new(),
+            capacity: &[],
+            launch_failures: &[],
+            reviews: &std::collections::BTreeMap::new(),
+        },
+        1,
+    );
+    let read_history = |id: &str| {
+        snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == id)
+            .unwrap()
+            .capabilities
+            .read_history
+    };
+    assert!(read_history("stopped-child"), "a stopped sub-agent");
+    assert!(!read_history("live-child"), "a sub-agent with a worker");
+    assert!(
+        !read_history("stopped-other"),
+        "a stopped top-level session"
+    );
+    assert!(!read_history("parent"), "a stopped parent");
+}
+
+#[test]
 fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance() {
     use agent_client_protocol::v1::schema::{
         AvailableCommand, AvailableCommandInput, SessionMode, SessionModeState,
