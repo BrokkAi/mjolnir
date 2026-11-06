@@ -136,28 +136,15 @@ pub fn capture_pushable_commits(
             commit: mb,
         };
     }
-    let refs = checked_git_text(
-        runner,
-        root,
-        &[
-            "for-each-ref",
-            "--sort=-committerdate",
-            "--format=%(objectname)",
-            "refs/mj/reviewed/",
-        ],
-    )?;
-    for commit in refs.lines() {
-        if is_ancestor(runner, root, commit, &head)?
-            && match base.commit() {
-                Some(base) => is_ancestor(runner, root, base, commit)?,
-                None => true,
-            }
-        {
-            base = PushBase::ReviewPoint {
-                commit: commit.to_owned(),
-            };
-            break;
-        }
+    // Git filters the reviewed refs to HEAD's history within the boundary,
+    // then keeps the one that every other candidate leads to.
+    let mut filters = vec![format!("--merged={head}")];
+    if let Some(boundary) = base.commit() {
+        filters.push(format!("--contains={boundary}"));
+    }
+    let eligible = reviewed_refs(runner, root, &filters)?;
+    if let Some(commit) = furthest_reviewed_ancestor(runner, root, &eligible)? {
+        base = PushBase::ReviewPoint { commit };
     }
     // Reviewed work merged with newer default-branch history: diff from Git's
     // merge of the two, so the reviewer sees only resolutions and later edits.
@@ -168,35 +155,36 @@ pub fn capture_pushable_commits(
         commit: mb,
     } = &base
     {
-        for reviewed in refs.lines() {
-            if is_ancestor(runner, root, reviewed, &head)?
-                && !is_ancestor(runner, root, reviewed, mb)?
-            {
-                let version = checked_git_text(runner, root, &["version"])?;
-                let found = mj_core::local_git::parse_git_version(&version);
-                let floor = mj_core::local_git::MINIMUM_GIT_VERSION;
-                if found.is_some_and(|found| found >= floor) {
-                    merged = Some(merged_review_tree(runner, root, reviewed, mb, &head)?);
-                } else {
-                    push_review_warning = Some(format!(
-                        "Pushed without review: Git {} in {} is older than {}.{}.{} or its version could not be read, so Mjolnir could not separate this merge's new changes from reviewed work. Upgrade Git to review merged work.",
-                        version
-                            .trim()
-                            .strip_prefix("git version ")
-                            .unwrap_or(version.trim()),
-                        root.display(),
-                        floor.0,
-                        floor.1,
-                        floor.2
-                    ));
-                }
-                base = PushBase::MergedReviewPoint {
-                    commit: reviewed.to_owned(),
-                    merge_base: mb.clone(),
-                    default_branch: default_branch.clone(),
-                };
-                break;
+        let eligible = reviewed_refs(
+            runner,
+            root,
+            &[format!("--merged={head}"), format!("--no-merged={mb}")],
+        )?;
+        if let Some(reviewed) = furthest_reviewed_ancestor(runner, root, &eligible)? {
+            let reviewed = reviewed.as_str();
+            let version = checked_git_text(runner, root, &["version"])?;
+            let found = mj_core::local_git::parse_git_version(&version);
+            let floor = mj_core::local_git::MINIMUM_GIT_VERSION;
+            if found.is_some_and(|found| found >= floor) {
+                merged = Some(merged_review_tree(runner, root, reviewed, mb, &head)?);
+            } else {
+                push_review_warning = Some(format!(
+                    "Pushed without review: Git {} in {} is older than {}.{}.{} or its version could not be read, so Mjolnir could not separate this merge's new changes from reviewed work. Upgrade Git to review merged work.",
+                    version
+                        .trim()
+                        .strip_prefix("git version ")
+                        .unwrap_or(version.trim()),
+                    root.display(),
+                    floor.0,
+                    floor.1,
+                    floor.2
+                ));
             }
+            base = PushBase::MergedReviewPoint {
+                commit: reviewed.to_owned(),
+                merge_base: mb.clone(),
+                default_branch: default_branch.clone(),
+            };
         }
     }
     let merged_in = match &base {
@@ -384,23 +372,6 @@ fn merge_base(
     }
 }
 
-fn is_ancestor(
-    runner: &dyn GitCommandRunner,
-    root: &Path,
-    older: &str,
-    newer: &str,
-) -> Result<bool> {
-    let output = run(runner, root, &["merge-base", "--is-ancestor", older, newer])?;
-    match output.status {
-        0 => Ok(true),
-        1 => Ok(false),
-        _ => anyhow::bail!(
-            "check review ancestry: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ),
-    }
-}
-
 pub(crate) fn checked_git(
     runner: &dyn GitCommandRunner,
     root: &Path,
@@ -466,6 +437,73 @@ pub fn set_review_base(
     );
     mj_checkpoint::archive::record_reviewed_tree(runner, root, &tree, &commit)?;
     Ok((commit, tree))
+}
+
+/// Reviewed commits under `refs/mj/reviewed/` that match the given
+/// `for-each-ref` filters, such as `--merged=<head>`.
+fn reviewed_refs(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    filters: &[String],
+) -> Result<Vec<String>> {
+    let mut args = vec!["for-each-ref", "--format=%(objectname)"];
+    args.extend(filters.iter().map(String::as_str));
+    args.push("refs/mj/reviewed/");
+    Ok(checked_git_text(runner, root, &args)?
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
+
+/// The candidate that every other candidate is an ancestor of, found in one
+/// graph traversal. Several independent tips have no single review base.
+fn furthest_reviewed_ancestor(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    candidates: &[String],
+) -> Result<Option<String>> {
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let mut args = vec!["merge-base", "--independent"];
+    args.extend(candidates.iter().map(String::as_str));
+    let tips = checked_git_text(runner, root, &args)?;
+    let mut tips = tips.lines();
+    Ok(match (tips.next(), tips.next()) {
+        (Some(tip), None) => Some(tip.to_owned()),
+        _ => None,
+    })
+}
+
+pub fn later_review_base(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    revision: &str,
+) -> Result<Option<(String, String)>> {
+    anyhow::ensure!(
+        !revision.is_empty() && !revision.starts_with('-'),
+        "invalid review commit"
+    );
+    let commit = checked_git_text(
+        runner,
+        root,
+        &["rev-parse", "--verify", &format!("{revision}^{{commit}}")],
+    )?;
+    let head = checked_git_text(runner, root, &["rev-parse", "HEAD"])?;
+    let later = reviewed_refs(
+        runner,
+        root,
+        &[format!("--contains={commit}"), format!("--merged={head}")],
+    )?;
+    let Some(candidate) = later.into_iter().find(|candidate| *candidate != commit) else {
+        return Ok(None);
+    };
+    let tree = checked_git_text(
+        runner,
+        root,
+        &["rev-parse", &format!("{candidate}^{{tree}}")],
+    )?;
+    Ok(Some((candidate, tree)))
 }
 
 fn checked_git_text(runner: &dyn GitCommandRunner, root: &Path, args: &[&str]) -> Result<String> {
@@ -1010,7 +1048,7 @@ pub(super) mod push_tests {
     }
 
     #[test]
-    fn push_capture_orders_reviewed_ancestors_by_committer_date() {
+    fn push_capture_orders_reviewed_ancestors_by_ancestry() {
         let temp = repository();
         let root = temp.path().join("checkout");
         let start = git(&root, &["rev-parse", "HEAD"]);
@@ -1035,19 +1073,29 @@ pub(super) mod push_tests {
         let later = commit(&root, "reviewed with earlier clock");
         let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
         record_reviewed_tree(&SystemGit, &root, &tree, &later).unwrap();
-        assert_eq!(
-            capture(&root, &start).base.commit(),
-            Some(newer_date.as_str())
-        );
+        assert_eq!(capture(&root, &start).base.commit(), Some(later.as_str()));
+        let amended = SystemGit
+            .run(
+                &root,
+                &GitCommand {
+                    arguments: ["commit", "--amend", "--no-edit", "-q"]
+                        .map(Into::into)
+                        .to_vec(),
+                    stdin: Vec::new(),
+                    env: vec![("GIT_COMMITTER_DATE".into(), "2030-01-01T00:00:00Z".into())],
+                },
+            )
+            .unwrap();
+        assert_eq!(amended.status, 0);
+        let later = git(&root, &["rev-parse", "HEAD"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &later).unwrap();
+        assert_eq!(capture(&root, &start).base.commit(), Some(later.as_str()));
         git(&root, &["checkout", "-qb", "sibling", &start]);
         let sibling = commit(&root, "not an ancestor");
         let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
         record_reviewed_tree(&SystemGit, &root, &tree, &sibling).unwrap();
         git(&root, &["checkout", "-q", "feature"]);
-        assert_eq!(
-            capture(&root, &start).base.commit(),
-            Some(newer_date.as_str())
-        );
+        assert_eq!(capture(&root, &start).base.commit(), Some(later.as_str()));
     }
 
     #[test]

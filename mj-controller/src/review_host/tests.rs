@@ -171,6 +171,7 @@ fn answer_for(action: &ReviewerAction) -> Result<ReviewerOutcome, String> {
             Ok(ReviewerOutcome::BaselineAdvanced)
         }
         ReviewerAction::SetReviewBase { path, commit } => Ok(ReviewerOutcome::ReviewBaseSet {
+            changed: true,
             root: path.clone().unwrap_or_else(|| "/workspace/app".into()),
             commit: commit.clone(),
             tree: "settree".into(),
@@ -2206,6 +2207,23 @@ async fn open_commit_review(
         .unwrap()
         .operational
         .relay_protocol_version = Some(43);
+    running.snapshot.as_mut().unwrap().materialized.transcript =
+        ["Keep the public API stable", "Fix the retry behavior"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| {
+                Arc::new(mj_core::state::TranscriptItem {
+                    stable_id: format!("user:{index}"),
+                    position: index as u64 + 1,
+                    latest_content_event_ordinal: Some(index as u64 + 1),
+                    created_at_ms: 0,
+                    last_changed_at_ms: 0,
+                    body: mj_core::state::TranscriptBody::User {
+                        content: vec![serde_json::json!({"type": "text", "text": text})],
+                    },
+                })
+            })
+            .collect();
     manager
         .publisher
         .publish(manager.session.clone(), running)
@@ -2546,6 +2564,10 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
             .store(name == "manualchild", std::sync::atomic::Ordering::Release);
         if name == "pushclean" {
             pending_push_findings(&environment);
+            environment.state.lock().unwrap().decline_findings(
+                [declined("other repository", "still applies")],
+                vec!["/workspace/other".into()],
+            );
         }
         let disabled = matches!(name, "manualoff" | "manualchild");
         let config: ReviewConfigSource = Arc::new(move |_| ReviewConfig {
@@ -2568,6 +2590,11 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
             let children = environment.children.lock().unwrap();
             let prompt = &children[0].2;
             assert!(!prompt.contains("corrective pass"));
+            assert!(!prompt.contains("other repository"));
+            assert!(prompt.contains(
+                "<user_message index=\"1\">\nKeep the public API stable\n</user_message>"
+            ));
+            assert!(prompt.contains("<user_message index=\"2\" current_outer_turn=\"true\">\nFix the retry behavior\n</user_message>"));
             assert_eq!(
                 prompt.contains("<declined_findings>\n- Finding: [P3] old finding\n  Reason: old reason\n</declined_findings>"),
                 name == "pushclean",
@@ -2615,8 +2642,13 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
         assert!(mj_core::mailbox::render_mailbox_event(&mailbox[0]).starts_with(expected));
         let state = environment.state();
         assert!(
-            state.declined_findings.is_empty(),
-            "a clean verdict moves the baseline and clears the declined findings"
+            if name == "pushclean" {
+                state.declined_findings.len() == 1
+                    && state.declined_findings[0].finding == "other repository"
+            } else {
+                state.declined_findings.is_empty()
+            },
+            "a scoped clean verdict clears only its repositories"
         );
         assert_eq!(state.push_findings.is_some(), name == "pushfindings");
         if let Some(findings) = &state.push_findings {
@@ -2749,7 +2781,10 @@ fn one_override(reason: &str) -> Vec<mj_core::subagent::ReviewOverride> {
 
 fn pending_push_findings(environment: &FakeEnvironment) {
     *environment.state.lock().unwrap() = TurnReviewState {
-        declined_findings: vec![declined("[P3] old finding", "old reason")],
+        declined_findings: vec![mj_core::storage::DeclinedFinding {
+            entry: declined("[P3] old finding", "old reason"),
+            repositories: vec!["/workspace/app".into()],
+        }],
         push_findings: Some(mj_core::storage::PushFindingsRecord {
             review_id: "review-1".into(),
             trees: [(
@@ -2796,6 +2831,15 @@ async fn finish_override_worker_actions_for(
     expected_notice: &str,
     old_worker: bool,
 ) {
+    finish_override_worker_actions_with_failure(manager, expected_notice, old_worker, None).await;
+}
+
+async fn finish_override_worker_actions_with_failure(
+    manager: &mut FakeManager,
+    expected_notice: &str,
+    old_worker: bool,
+    failure: Option<(&FakeEnvironment, &str)>,
+) {
     match manager.next().await {
         RemoteSessionRequest::Submit {
             command: RelayCommand::RecordNotice { text },
@@ -2834,6 +2878,9 @@ async fn finish_override_worker_actions_for(
         trees[&PathBuf::from("/workspace/app")],
         ("newtree".to_owned(), "bbbbbbb456".to_owned())
     );
+    if let Some((environment, error)) = failure {
+        *environment.save_error.lock().unwrap() = Some(error.into());
+    }
     reply.send(answer_for(&action)).unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(50), manager.requests.recv())
@@ -3020,8 +3067,12 @@ async fn push_override_keeps_reservation_during_save_and_drains_admitted_work_on
         }))
         .unwrap();
     let gate = environment.block_saves();
-    finish_override_worker_actions(&mut manager, "override requested").await;
-    gate.entered().await;
+    let finishing = finish_override_worker_actions(&mut manager, "override requested");
+    tokio::pin!(finishing);
+    tokio::select! {
+        () = gate.entered() => {},
+        () = &mut finishing => panic!("override finished before the blocked save"),
+    }
     assert!(!request.is_finished());
     assert!(
         host.override_push(&session, one_override("again"))
@@ -3040,9 +3091,66 @@ async fn push_override_keeps_reservation_during_save_and_drains_admitted_work_on
         "admitted override finishes before shutdown drains persistence"
     );
     gate.release();
+    finishing.await;
     assert_eq!(request.await.unwrap().unwrap()["accepted"], true);
     shutdown.await.unwrap().unwrap();
     assert!(environment.state().push_findings.is_none());
+}
+
+// Hard-won: 9ebd246b2: crashes between state and ref writes lost declined findings.
+#[tokio::test]
+async fn push_override_retries_after_initial_save_or_ref_failure() {
+    for fail_save in [true, false] {
+        let session = session_id(if fail_save {
+            "override-initial-fail"
+        } else {
+            "override-ref-fail"
+        });
+        let mut manager = FakeManager::new(&session).await;
+        let environment = FakeEnvironment::new();
+        pending_push_findings(&environment);
+        if fail_save {
+            *environment.save_error.lock().unwrap() = Some("injected save failure".into());
+        }
+        let host =
+            TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+        for attempt in 0..2 {
+            let request = {
+                let host = host.clone();
+                let session = session.clone();
+                tokio::spawn(async move {
+                    host.override_push(&session, one_override("false positive"))
+                        .await
+                })
+            };
+            answer_override_capture(&mut manager, vec![push_delta("/workspace/app", "newtree")])
+                .await;
+            if attempt == 0 {
+                let RemoteSessionRequest::Submit { reply, .. } = manager.next().await else {
+                    panic!("expected notice");
+                };
+                reply.send(Ok(1)).unwrap();
+                if !fail_save {
+                    let (_, action, reply) = manager
+                        .next_reviewer(|_, action| {
+                            matches!(action, ReviewerAction::RecordOverridden { .. })
+                        })
+                        .await;
+                    assert!(matches!(action, ReviewerAction::RecordOverridden { .. }));
+                    reply.send(Err("injected ref failure".into())).unwrap();
+                }
+                assert!(request.await.unwrap().is_err());
+                assert!(environment.state().push_findings.is_some());
+            } else {
+                finish_override_worker_actions(&mut manager, "false positive").await;
+                assert_eq!(request.await.unwrap().unwrap()["accepted"], true);
+                let state = environment.state();
+                assert!(state.push_findings.is_none());
+                assert_eq!(state.declined_findings.len(), 2);
+            }
+        }
+        host.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -3051,7 +3159,6 @@ async fn push_override_retries_after_reviewed_ref_was_recorded_but_state_save_fa
     let mut manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
     pending_push_findings(&environment);
-    *environment.save_error.lock().unwrap() = Some("database busy".into());
     let host =
         TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
     for attempt in 0..2 {
@@ -3064,7 +3171,13 @@ async fn push_override_retries_after_reviewed_ref_was_recorded_but_state_save_fa
             })
         };
         answer_override_capture(&mut manager, vec![push_delta("/workspace/app", "newtree")]).await;
-        finish_override_worker_actions(&mut manager, "false positive").await;
+        finish_override_worker_actions_with_failure(
+            &mut manager,
+            "false positive",
+            false,
+            (attempt == 0).then_some((&environment, "database busy")),
+        )
+        .await;
         let result = request.await.unwrap();
         if attempt == 0 {
             assert!(result.unwrap_err().0.contains("database busy"));
@@ -3075,8 +3188,8 @@ async fn push_override_retries_after_reviewed_ref_was_recorded_but_state_save_fa
         } else {
             assert_eq!(result.unwrap()["accepted"], true);
             assert!(environment.state().push_findings.is_none());
-            // The failed first save kept nothing, so the retry records each
-            // declined finding once, after the earlier one.
+            // The first save kept the decline before the ref write. Retrying
+            // the failed final save must not duplicate that decline.
             assert_eq!(
                 environment.state().declined_findings,
                 vec![
@@ -3176,6 +3289,10 @@ async fn set_review_baseline_moves_the_base_and_clears_the_declined_list() {
     let mut manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
     pending_push_findings(&environment);
+    environment.state.lock().unwrap().decline_findings(
+        [declined("shared", "keep the other repository")],
+        vec!["/workspace/app".into(), "/workspace/linked".into()],
+    );
     let host =
         TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
     let request = {
@@ -3196,6 +3313,7 @@ async fn set_review_baseline_moves_the_base_and_clears_the_declined_list() {
     ));
     reply
         .send(Ok(ReviewerOutcome::ReviewBaseSet {
+            changed: true,
             root: "/workspace/linked".into(),
             commit: "abc1234ffff".into(),
             tree: "settree".into(),
@@ -3210,7 +3328,15 @@ async fn set_review_baseline_moves_the_base_and_clears_the_declined_list() {
         "{message}"
     );
     let state = environment.state();
-    assert!(state.declined_findings.is_empty());
+    assert_eq!(
+        state.declined_findings[1].repositories,
+        vec![PathBuf::from("/workspace/app")]
+    );
+    assert_eq!(
+        state.declined_findings[0].repositories,
+        vec![PathBuf::from("/workspace/app")]
+    );
+
     assert!(
         state.push_findings.is_some(),
         "a pending findings verdict stays overridable"
@@ -3220,6 +3346,39 @@ async fn set_review_baseline_moves_the_base_and_clears_the_declined_list() {
             .await
             .is_err()
     );
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: 9ebd246b2: an older reviewed commit erased declined findings.
+#[tokio::test]
+async fn set_review_baseline_preserves_state_when_a_later_base_already_exists() {
+    let session = session_id("set-base-unchanged");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    pending_push_findings(&environment);
+    let original = environment.state();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let request = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move { host.set_push_base(&session, "older".into(), None).await })
+    };
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::SetReviewBase { .. }))
+        .await;
+    reply
+        .send(Ok(ReviewerOutcome::ReviewBaseSet {
+            root: "/workspace/app".into(),
+            commit: "later".into(),
+            tree: "tree".into(),
+            changed: false,
+        }))
+        .unwrap();
+    let result = request.await.unwrap().unwrap();
+    assert!(result["message"].as_str().unwrap().contains("later"));
+    assert_eq!(environment.state(), original);
+    assert!(environment.writes().is_empty());
     host.shutdown().await.unwrap();
 }
 

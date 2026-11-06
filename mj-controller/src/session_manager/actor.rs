@@ -1404,8 +1404,13 @@ pub(super) async fn drive_reviewer(
             ReviewerOutcome::BaselineAdvanced
         }
         ReviewerAction::SetReviewBase { path, commit } => {
-            let (root, commit, tree) = client.set_review_base(role, path, commit).await?;
-            ReviewerOutcome::ReviewBaseSet { root, commit, tree }
+            let (root, commit, tree, changed) = client.set_review_base(role, path, commit).await?;
+            ReviewerOutcome::ReviewBaseSet {
+                root,
+                commit,
+                tree,
+                changed,
+            }
         }
     })
 }

@@ -146,7 +146,7 @@ impl ReviewCapture {
     ) -> Result<RelayResponseBody> {
         let roots = self.roots();
         let cwd = self.cwd.clone();
-        let (root, commit, tree) = tokio::task::spawn_blocking(move || {
+        let (root, commit, tree, changed) = tokio::task::spawn_blocking(move || {
             let git = &mj_checkpoint::archive::SystemGit;
             let discovered = crate::review::capture::discover_repositories(git, &roots);
             let (repositories, _) =
@@ -155,13 +155,23 @@ impl ReviewCapture {
                 .into_iter()
                 .next()
                 .context("the path names no repository")?;
+            if let Some((commit, tree)) =
+                crate::review::capture::later_review_base(git, &root, &commit)?
+            {
+                return Ok((root, commit, tree, false));
+            }
             let (commit, tree) = crate::review::capture::set_review_base(git, &root, &commit)?;
-            Ok::<_, anyhow::Error>((root, commit, tree))
+            Ok::<_, anyhow::Error>((root, commit, tree, true))
         })
         .await
         .map_err(|error| anyhow::anyhow!("the review base update stopped: {error}"))??;
         Ok(RelayResponseBody::Ok {
-            payload: RelayResponsePayload::ReviewBaseSet { root, commit, tree },
+            payload: RelayResponsePayload::ReviewBaseSet {
+                root,
+                commit,
+                tree,
+                changed,
+            },
         })
     }
 }
@@ -576,6 +586,7 @@ mod tests {
                     root,
                     commit,
                     tree: set,
+                    changed: true,
                 },
         } = result
         else {
@@ -592,6 +603,30 @@ mod tests {
             ),
             head.trim()
         );
+        // Hard-won: 9ebd246b2: setting an older reviewed base must be a no-op.
+        std::fs::write(repository.join("tracked.rs"), "later\n").unwrap();
+        git(&repository, &["commit", "-qam", "later reviewed commit"]);
+        let later = git(&repository, &["rev-parse", "HEAD"]);
+        let later_tree = git(&repository, &["rev-parse", "HEAD^{tree}"]);
+        capture
+            .handle(ReviewerRequest::RecordReviewed {
+                trees: std::collections::BTreeMap::from([(
+                    repository.clone(),
+                    (later_tree, later.clone()),
+                )]),
+            })
+            .await
+            .unwrap();
+        let unchanged = capture
+            .handle(ReviewerRequest::SetReviewBase {
+                path: None,
+                commit: head.trim().into(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(unchanged, RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ReviewBaseSet { commit, changed: false, .. }
+        } if commit == later));
         let outside = capture
             .handle(ReviewerRequest::SetReviewBase {
                 path: Some(temp.path().to_path_buf()),

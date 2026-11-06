@@ -84,14 +84,24 @@ async fn run_set_base(
     )
     .await
     .map_err(StartRefusal)?;
-    let ReviewerOutcome::ReviewBaseSet { root, commit, tree } = outcome else {
+    let ReviewerOutcome::ReviewBaseSet {
+        root,
+        commit,
+        tree,
+        changed,
+    } = outcome
+    else {
         return Err(StartRefusal(
             "the worker did not confirm the review base".into(),
         ));
     };
-    // Declined findings applied to the old range. Reviews that start after
-    // the new base cover different commits, so they begin with a clean list.
-    state.declined_findings.clear();
+    if !changed {
+        return Ok(
+            serde_json::json!({"accepted": true, "repository": root, "commit": commit, "tree": tree, "message": format!("The review base already includes later reviewed commit {commit}; the base and declined findings are unchanged.")}),
+        );
+    }
+    // Only this repository starts a new range; other declined ranges remain.
+    state.advance_review_bases(std::slice::from_ref(&root));
     let (reply, saved) = oneshot::channel();
     persistence
         .send(PersistenceRequest::SaveAcknowledged {

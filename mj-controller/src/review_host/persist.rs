@@ -44,11 +44,19 @@ impl HostState {
                 return;
             }
         };
-        let seed = TurnReviewSeed {
-            task: String::new(),
-            user_messages: Vec::new(),
-            declined: prepared.state.declined_findings.clone(),
-        };
+        let mut seed = prepared.seed.clone();
+        seed.declined = prepared
+            .state
+            .declined_findings
+            .iter()
+            .filter(|entry| {
+                prepared
+                    .captured
+                    .iter()
+                    .any(|delta| entry.covers(&delta.root))
+            })
+            .map(|entry| entry.entry.clone())
+            .collect();
         let (mut driver, _) = TurnReviewDriver::start(
             seed,
             review_id.clone(),

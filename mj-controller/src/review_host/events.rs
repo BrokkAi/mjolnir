@@ -161,6 +161,7 @@ pub(super) enum ReviewStep {
 
 /// Everything one blocking preparation gathered before a review can start.
 pub(super) struct Prepared {
+    pub seed: TurnReviewSeed,
     pub(super) state: TurnReviewState,
     pub(super) reviewers: Vec<ReviewerIdentity>,
     /// Committed work captured before choosing reviewers.

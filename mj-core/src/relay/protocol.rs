@@ -706,6 +706,8 @@ pub enum RelayResponsePayload {
         root: std::path::PathBuf,
         commit: String,
         tree: String,
+        #[serde(default = "review_base_changed_default")]
+        changed: bool,
     },
 }
 
@@ -849,6 +851,10 @@ pub fn read_bounded_line(
             return Ok((consumed_total, true));
         }
     }
+}
+
+fn review_base_changed_default() -> bool {
+    true
 }
 
 #[cfg(test)]

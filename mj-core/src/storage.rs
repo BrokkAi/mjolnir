@@ -199,14 +199,46 @@ pub struct TranscriptRetention {
     pub remaining: bool,
 }
 
+/// A declined finding and the repositories whose review range it covers. An
+/// entry stored before repositories were recorded has none and covers every
+/// repository until any review base moves.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DeclinedFinding {
+    #[serde(flatten)]
+    pub entry: crate::subagent::ReviewOverride,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<std::path::PathBuf>,
+}
+
+impl DeclinedFinding {
+    /// Whether a review of `root` must be told not to repeat this finding.
+    pub fn covers(&self, root: &std::path::Path) -> bool {
+        self.repositories.is_empty() || self.repositories.iter().any(|covered| covered == root)
+    }
+}
+
+impl std::ops::Deref for DeclinedFinding {
+    type Target = crate::subagent::ReviewOverride;
+    fn deref(&self) -> &Self::Target {
+        &self.entry
+    }
+}
+
+impl PartialEq<crate::subagent::ReviewOverride> for DeclinedFinding {
+    fn eq(&self, other: &crate::subagent::ReviewOverride) -> bool {
+        self.entry == *other
+    }
+}
+
 /// Durable review work, findings and declined findings for this session.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TurnReviewState {
     /// Findings the author declined to fix with `override_review`, newest last.
     /// Every before-push review of this session tells its reviewers not to
-    /// report them again. A baseline move clears them. Bounded to `DECLINED_FINDINGS_BYTES`.
+    /// report them again in those repositories. A baseline move removes that
+    /// repository from their coverage. Bounded to `DECLINED_FINDINGS_BYTES`.
     #[serde(default)]
-    pub declined_findings: Vec<crate::subagent::ReviewOverride>,
+    pub declined_findings: Vec<DeclinedFinding>,
     /// A review that was running when the daemon stopped. On recovery it is
     /// cleared without advancing the baseline.
     pub active: Option<String>,
@@ -223,15 +255,43 @@ pub struct TurnReviewState {
 pub const DECLINED_FINDINGS_BYTES: usize = 24 * 1024;
 
 impl TurnReviewState {
+    /// Stop covering the repositories whose review base moved, dropping entries
+    /// left with none. An entry without recorded repositories is dropped.
+    pub fn advance_review_bases(&mut self, moved: &[std::path::PathBuf]) {
+        if moved.is_empty() {
+            return;
+        }
+        self.declined_findings.retain_mut(|entry| {
+            entry.repositories.retain(|root| !moved.contains(root));
+            !entry.repositories.is_empty()
+        });
+    }
+
     /// Adds findings the author declined, then drops the oldest entries until
     /// the list fits `DECLINED_FINDINGS_BYTES`.
     pub fn decline_findings(
         &mut self,
         entries: impl IntoIterator<Item = crate::subagent::ReviewOverride>,
+        repositories: Vec<std::path::PathBuf>,
     ) {
-        self.declined_findings.extend(entries);
-        let size =
-            |entry: &crate::subagent::ReviewOverride| entry.finding.len() + entry.reason.len();
+        for entry in entries {
+            let entry = DeclinedFinding {
+                entry,
+                repositories: repositories.clone(),
+            };
+            if !self.declined_findings.contains(&entry) {
+                self.declined_findings.push(entry);
+            }
+        }
+        let size = |entry: &DeclinedFinding| {
+            entry.entry.finding.len()
+                + entry.entry.reason.len()
+                + entry
+                    .repositories
+                    .iter()
+                    .map(|root| root.as_os_str().len())
+                    .sum::<usize>()
+        };
         let mut total: usize = self.declined_findings.iter().map(size).sum();
         let mut drop = 0;
         while total > DECLINED_FINDINGS_BYTES && drop < self.declined_findings.len() {
@@ -539,11 +599,42 @@ mod declined_findings_tests {
         }
     }
 
+    // Hard-won: 9ebd246b2: clearing one repository erased other ranges.
+    #[test]
+    fn a_base_move_stops_covering_only_its_own_repository() {
+        let mut state: TurnReviewState = serde_json::from_value(serde_json::json!({
+            "active": null, "declined_findings": [{"finding": "legacy", "reason": "all repositories"}]
+        })).unwrap();
+        assert!(state.declined_findings[0].covers(std::path::Path::new("/b")));
+        state.decline_findings([entry("scoped", "both")], vec!["/a".into(), "/b".into()]);
+        state.decline_findings([entry("scoped", "both")], vec!["/a".into(), "/b".into()]);
+        assert_eq!(
+            state.declined_findings.len(),
+            2,
+            "a retried override is not duplicated"
+        );
+        state.advance_review_bases(&["/a".into()]);
+        assert_eq!(
+            state.declined_findings.len(),
+            1,
+            "an unscoped entry ends at any move"
+        );
+        assert_eq!(
+            state.declined_findings[0].repositories,
+            vec![std::path::PathBuf::from("/b")]
+        );
+        let restored: TurnReviewState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(restored, state);
+        state.advance_review_bases(&["/b".into()]);
+        assert!(state.declined_findings.is_empty());
+    }
+
     #[test]
     fn the_declined_list_keeps_the_newest_entries_within_its_byte_budget() {
         let mut state = TurnReviewState::default();
-        state.decline_findings([entry("first", "kept order")]);
-        state.decline_findings([entry("second", "kept order")]);
+        state.decline_findings([entry("first", "kept order")], vec![]);
+        state.decline_findings([entry("second", "kept order")], vec![]);
         assert_eq!(
             state.declined_findings.len(),
             2,
@@ -551,7 +642,10 @@ mod declined_findings_tests {
         );
 
         let half = DECLINED_FINDINGS_BYTES / 2 - 2;
-        state.decline_findings([entry(&"a".repeat(half), "x"), entry(&"b".repeat(half), "y")]);
+        state.decline_findings(
+            [entry(&"a".repeat(half), "x"), entry(&"b".repeat(half), "y")],
+            vec![],
+        );
         let kept: Vec<_> = state
             .declined_findings
             .iter()

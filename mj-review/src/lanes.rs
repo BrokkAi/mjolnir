@@ -144,6 +144,7 @@ pub fn review_prompt(job: &ReviewJob) -> String {
          ## Task\n\
          Review the code changes made since the last review and provide prioritized findings.\n\n\
          For each repository, inspect the captured tree-to-tree diff using the command below.\n\
+         Inspect the code with git and read-only commands. Do not build, run tests, or modify files.\n\
          {repositories}\n\n\
          Per-file diffstat for the captured changes ({} changed lines):\n\
          {}\n\n\
@@ -209,6 +210,7 @@ mod tests {
     fn review_prompt_contains_the_codex_rubric_tree_ids_and_diff_command_without_a_diff() {
         let prompt = review_prompt(&job());
         assert!(prompt.starts_with(CODEX_REVIEW_RUBRIC));
+        assert!(prompt.contains("Inspect the code with git and read-only commands. Do not build, run tests, or modify files."));
         assert!(prompt.contains("You are acting as a reviewer for a proposed code change"));
         assert!(prompt.contains("git -C /workspace/app diff --no-ext-diff --ignore-submodules=none baseline123 capture456"));
         assert!(prompt.contains("Repository: /workspace/app -- 1 file changed"));

@@ -295,6 +295,26 @@ async fn run_override(
     })?
     .map_err(|error| StartRefusal(format!("could not record override notice: {error:#}")))?;
 
+    // Keep pending findings until the worker ref is recorded. A retry can
+    // safely repeat either write after a crash.
+    state.decline_findings(overrides, findings.trees.keys().cloned().collect());
+    let (reply, saved) = oneshot::channel();
+    persistence
+        .send(PersistenceRequest::SaveAcknowledged {
+            session_id: session_id.clone(),
+            state: Box::new(state.clone()),
+            reply,
+        })
+        .map_err(|_| {
+            StartRefusal("review persistence stopped before recording the overridden tree".into())
+        })?;
+    saved
+        .await
+        .map_err(|_| {
+            StartRefusal("review persistence stopped before recording the overridden tree".into())
+        })?
+        .map_err(StartRefusal)?;
+
     // A worker that predates overridden records can only write the reviewed
     // ref, which also moves the base of the next review.
     let base_moved = protocol < mj_core::relay::RELAY_REVIEW_BASE_PROTOCOL;
@@ -310,7 +330,6 @@ async fn run_override(
     )
     .await
     .map_err(StartRefusal)?;
-    state.decline_findings(overrides);
     state.push_findings = None;
     let (reply, saved) = oneshot::channel();
     persistence

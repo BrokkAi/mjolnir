@@ -74,7 +74,7 @@ impl RelayClient {
         role: Option<&str>,
         path: Option<std::path::PathBuf>,
         commit: String,
-    ) -> Result<(std::path::PathBuf, String, String)> {
+    ) -> Result<(std::path::PathBuf, String, String, bool)> {
         let request =
             self.reviewer_request(role, ReviewerRequest::SetReviewBase { path, commit })?;
         anyhow::ensure!(
@@ -85,7 +85,12 @@ impl RelayClient {
             .call_with_timeout(request, REVIEW_CAPTURE_TIMEOUT)
             .await?
         {
-            RelayResponsePayload::ReviewBaseSet { root, commit, tree } => Ok((root, commit, tree)),
+            RelayResponsePayload::ReviewBaseSet {
+                root,
+                commit,
+                tree,
+                changed,
+            } => Ok((root, commit, tree, changed)),
             _ => bail!("relay returned an unexpected review base response"),
         }
     }

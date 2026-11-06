@@ -90,6 +90,7 @@ pub enum ReviewerOutcome {
         root: std::path::PathBuf,
         commit: String,
         tree: String,
+        changed: bool,
     },
 }
 

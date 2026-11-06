@@ -159,6 +159,7 @@ pub(super) async fn prepare(
     }
     if mj_review::delta::trees_unchanged(&captured) {
         return Ok(Prepared {
+            seed: seed_from_session(&snapshot.materialized),
             state,
             // No reviewer process starts for a turn with nothing to review.
             reviewers: vec![ReviewerIdentity::default()],
@@ -184,6 +185,7 @@ pub(super) async fn prepare(
             .map_err(StartRefusal)?;
     }
     Ok(Prepared {
+        seed: seed_from_session(&snapshot.materialized),
         state,
         reviewers: reviewer.clone(),
         captured,
@@ -293,5 +295,56 @@ fn short_failure_reason(reason: &str) -> String {
         format!("{short}…")
     } else {
         short
+    }
+}
+
+/// The review's task and user messages from the session transcript: the
+/// latest user prompt is the task, and every user message since the last
+/// context boundary is intent. Nothing the primary agent wrote is included.
+/// The declined findings for the captured repositories are added when the
+/// review starts.
+pub(super) fn seed_from_session(session: &MaterializedSession) -> TurnReviewSeed {
+    let mut task = String::new();
+    let mut user_messages = Vec::new();
+
+    let context_start = session
+        .transcript
+        .iter()
+        .filter(|item| mj_core::archive::is_context_boundary(&item.stable_id))
+        .map(|item| item.position)
+        .max()
+        .unwrap_or(0);
+    for item in session
+        .transcript
+        .iter()
+        .filter(|item| context_start == 0 || item.position > context_start)
+    {
+        let mj_core::state::TranscriptBody::User { content } = &item.body else {
+            continue;
+        };
+        let text = mj_core::transcript::materialized_content_text(content);
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if mj_core::continuation::is_generated_prompt_text(text)
+            || mj_core::continuation::is_generated_prompt(
+                item.stable_id
+                    .strip_prefix("user:")
+                    .unwrap_or(&item.stable_id),
+            )
+        {
+            continue;
+        }
+        task = text.to_owned();
+        // Reviewers need the complete chronological user history to
+        // tell a current steering prompt from an earlier requirement.
+        // `task` separately identifies the latest outer prompt.
+        user_messages.push(mj_core::review::lanes::UserMessage::prompt(text));
+    }
+    TurnReviewSeed {
+        task,
+        user_messages,
+        declined: Vec::new(),
     }
 }

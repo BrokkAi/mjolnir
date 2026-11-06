@@ -188,7 +188,12 @@ pub(super) async fn finish_push_delivery(
         if let Err(reason) = recorded {
             verdict = ReviewVerdict::Failed { reason };
         } else {
-            state.declined_findings.clear();
+            state.advance_review_bases(
+                &deltas
+                    .iter()
+                    .map(|delta| delta.root.clone())
+                    .collect::<Vec<_>>(),
+            );
             state.push_findings = None;
         }
     }
