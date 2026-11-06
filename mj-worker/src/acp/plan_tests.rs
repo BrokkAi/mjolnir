@@ -250,6 +250,32 @@ async fn a_caller_outside_the_worker_cannot_move_a_policy_owned_mode() {
     probe.close().await;
 }
 
+/// `mode` reaches a bridge's Mode selector whatever its id, so the policy's
+/// ownership follows the same resolution.
+// Hard-won: 853cd39: the `mode` alias reached a differently named policy selector unchecked
+#[test]
+fn a_mode_alias_is_checked_against_the_selector_it_reaches() {
+    let options: Vec<SessionConfigOption> = serde_json::from_value(json!([{
+        "id": "interaction_mode", "name": "Mode", "category": "mode", "type": "select",
+        "currentValue": "auto", "options": [
+            {"value": "auto", "name": "Auto"}, {"value": "plan", "name": "Plan"},
+            {"value": "bypassPermissions", "name": "Bypass"}
+        ]
+    }]))
+    .unwrap();
+    let guardian = HarnessKind::Claude.execution_enforcement(ExecutionPolicy::ConfiguredApprovals);
+    for key in ["mode", "interaction_mode"] {
+        assert!(
+            !policy_permits(guardian, &options, Some(key), "bypassPermissions"),
+            "{key}"
+        );
+        assert!(
+            policy_permits(guardian, &options, Some(key), "plan"),
+            "{key}"
+        );
+    }
+}
+
 /// Kimi carries its execution mode on the Plan selector, like Claude, so it
 /// leaves Plan through the worker, which restores the policy's own mode.
 // Hard-won: ac3b724: refusing every mode but Plan and the policy's left Kimi stuck in Plan

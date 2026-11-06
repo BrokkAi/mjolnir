@@ -1706,6 +1706,22 @@ pub(super) async fn serve_session(
                             events,
                         )
                         .await?;
+                        // The answer published its own configuration before
+                        // the policy was restored.
+                        emit_runtime_event(
+                            events,
+                            RuntimeEvent::SessionConfigured {
+                                config_options: config_options.clone(),
+                            },
+                        )
+                        .await?;
+                        emit_runtime_event(
+                            events,
+                            RuntimeEvent::SessionModesConfigured {
+                                modes: modes.clone(),
+                            },
+                        )
+                        .await?;
                     }
                     match recovered {
                         Some(outcome) => outcome,

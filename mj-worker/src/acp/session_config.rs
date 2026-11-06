@@ -906,7 +906,13 @@ pub(super) fn policy_permits(
         return true;
     };
     let policy_mode = |value: &str| value == "plan" || enforcement.acp_mode() == Some(value);
-    match key {
+    // The selector the change would reach: `set_session_config` resolves
+    // aliases such as `mode` to the bridge's own selector id.
+    let resolved = key.map(|key| {
+        mj_core::acp::find_session_config_option(options, key)
+            .map_or_else(|| key.to_owned(), |option| option.id.to_string())
+    });
+    match resolved.as_deref() {
         None => {
             enforcement.acp_mode().is_none()
                 || enforcement.acp_mode_selector().is_some()
