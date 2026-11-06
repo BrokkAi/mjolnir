@@ -2883,7 +2883,12 @@ impl SubagentBackend for ApiBackend {
                         models.extend(choice.models);
                     }
                     answered.push(id);
-                    if mj_core::review::autoconfigure::autoconfigure(&models, |_| None).is_some() {
+                    if mj_core::review::autoconfigure::autoconfigure(
+                        &mj_core::review::autoconfigure::merged_model_offers(&models),
+                        |_| None,
+                    )
+                    .is_some()
+                    {
                         break;
                     }
                 }

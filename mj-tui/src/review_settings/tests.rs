@@ -60,7 +60,11 @@ fn autoconfigure_button_fills_rows_with_offered_efforts() {
             .borrow()
             .is_enabled(ReviewSettingsFocus::Autoconfigure)
     );
-    dialog.update_choices(&config, &catalog(&config, &["gpt-6-terra", "gpt-6-sol"]));
+    dialog.update_choices(
+        &config,
+        &catalog(&config, &["gpt-6-terra", "gpt-6-sol"]),
+        &Default::default(),
+    );
     assert!(dialog.review.reviewers.is_empty());
     let suggested = dialog.suggested().unwrap();
     assert_eq!(suggested[0].model, "gpt-6-terra");
@@ -71,8 +75,196 @@ fn autoconfigure_button_fills_rows_with_offered_efforts() {
             .borrow()
             .is_enabled(ReviewSettingsFocus::Autoconfigure)
     );
-    dialog.update_choices(&config, &catalog(&config, &["gpt-6-terra", "gpt-6-sol"]));
+    dialog.update_choices(
+        &config,
+        &catalog(&config, &["gpt-6-terra", "gpt-6-sol"]),
+        &Default::default(),
+    );
     assert!(dialog.review.reviewers.is_empty());
+}
+
+#[test]
+fn autoconfigure_skips_models_only_usage_priced_profiles_offer() {
+    let config = config();
+    let subscription = ["gpt-6.1-terra", "gpt-6.1-sol", "claude-haiku-4.5"];
+    let api = [
+        "openrouter/~openai/gpt-terra-latest",
+        "openrouter/~openai/gpt-sol-latest",
+        "openrouter/~anthropic/claude-haiku-latest",
+    ];
+    let mut snapshot = catalog(&config, &subscription);
+    // Two usage-priced profiles outnumber the one subscription, so only the
+    // billing tier keeps the subscription models.
+    let api_entry = catalog(&config, &api)
+        .profiles
+        .into_values()
+        .next()
+        .unwrap();
+    for id in ["codex-1", "codex-2"] {
+        snapshot
+            .profiles
+            .insert(config.profiles[id].capabilities_key(id), api_entry.clone());
+    }
+    let suggested = |usage_priced: &[&str]| {
+        let mut dialog = ReviewSettingsDialog::new(&config);
+        let usage_priced = usage_priced.iter().map(|id| id.to_string()).collect();
+        dialog.update_choices(&config, &snapshot, &usage_priced);
+        dialog
+            .suggested()
+            .unwrap()
+            .iter()
+            .map(|choice| choice.model.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        suggested(&["codex-1", "codex-2"]),
+        ["gpt-6.1-terra", "gpt-6.1-sol", "claude-haiku-4.5"]
+    );
+    // Unknown billing counts as a subscription, so the newer aliases win.
+    assert!(suggested(&[])[0].starts_with("openrouter/"));
+}
+
+const SUBSCRIPTION_MODELS: [&str; 3] = ["gpt-6.1-terra", "gpt-6.1-sol", "claude-haiku-4.5"];
+const API_MODELS: [&str; 3] = [
+    "openrouter/~openai/gpt-terra-latest",
+    "openrouter/~openai/gpt-sol-latest",
+    "openrouter/~anthropic/claude-haiku-latest",
+];
+
+/// Every profile offers the subscription models except `api`, which offers
+/// only newer-looking OpenRouter aliases.
+fn billing_snapshot(config: &Config, api: &[&str]) -> ProfileCapabilitiesSnapshot {
+    let mut snapshot = catalog(config, &SUBSCRIPTION_MODELS);
+    let api_entry = catalog(config, &API_MODELS)
+        .profiles
+        .into_values()
+        .next()
+        .unwrap();
+    for id in api {
+        snapshot
+            .profiles
+            .insert(config.profiles[*id].capabilities_key(id), api_entry.clone());
+    }
+    snapshot
+}
+
+fn api_quota(
+    profile: &str,
+    harness: mj_core::config::HarnessKind,
+) -> mj_client::quota::ProfileQuota {
+    mj_client::quota::ProfileQuota {
+        paid_credits: None,
+        banked_resets: None,
+        profile_id: profile.into(),
+        harness,
+        windows: Vec::new(),
+        extra: Some(mj_client::quota::API_LABEL.into()),
+        error: None,
+        refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
+    }
+}
+
+fn setup_review_models(dashboard: &DashboardState) -> Vec<String> {
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    setup
+        .review_editor
+        .as_ref()
+        .unwrap()
+        .review
+        .reviewers
+        .iter()
+        .map(|choice| choice.model.clone())
+        .collect()
+}
+
+fn press_autoconfigure(dashboard: &mut DashboardState) {
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    setup
+        .review_editor
+        .as_mut()
+        .unwrap()
+        .form
+        .get_mut()
+        .focus(ReviewSettingsFocus::Autoconfigure);
+    dashboard.handle_key(key(KeyCode::Enter));
+}
+
+#[test]
+fn autoconfigure_button_uses_the_quota_reports_present_when_pressed() {
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    // The suggestion is computed before any quota report: both OpenRouter
+    // profiles count as subscriptions and their newer aliases win.
+    let snapshot = billing_snapshot(&dashboard.config, &["codex-1", "codex-2"]);
+    dashboard.set_profile_capabilities(snapshot);
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    assert!(
+        setup.review_editor.as_ref().unwrap().suggested().unwrap()[0]
+            .model
+            .starts_with("openrouter/")
+    );
+    // The reports arrive without any event that refreshes the dialog.
+    for id in ["codex-1", "codex-2"] {
+        dashboard.quotas.insert(
+            id.into(),
+            api_quota(id, mj_core::config::HarnessKind::Codex),
+        );
+    }
+    press_autoconfigure(&mut dashboard);
+    assert_eq!(setup_review_models(&dashboard), SUBSCRIPTION_MODELS);
+}
+
+#[test]
+fn quota_updates_refresh_the_open_dialogs_suggestion() {
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let snapshot = billing_snapshot(&dashboard.config, &["codex-1", "codex-2"]);
+    dashboard.set_profile_capabilities(snapshot);
+    let suggested = |dashboard: &DashboardState| {
+        let Mode::Setup(setup) = &dashboard.mode else {
+            panic!("setup")
+        };
+        setup.review_editor.as_ref().unwrap().suggested().unwrap()[0]
+            .model
+            .clone()
+    };
+    assert!(suggested(&dashboard).starts_with("openrouter/"));
+    dashboard.apply_quota(api_quota("codex-1", mj_core::config::HarnessKind::Codex));
+    dashboard.apply_quota(api_quota("codex-2", mj_core::config::HarnessKind::Codex));
+    assert_eq!(suggested(&dashboard), "gpt-6.1-terra");
+}
+
+#[test]
+fn an_opencode_profile_without_a_report_is_usage_priced() {
+    let mut config = config();
+    config.profiles.insert(
+        "openrouter".into(),
+        mj_core::config::HarnessProfile {
+            kind: mj_core::config::HarnessKind::OpenCode,
+            home: "/profiles/openrouter/opencode".into(),
+            ..config.profiles["codex-1"].clone()
+        },
+    );
+    let mut dashboard = DashboardState::new(config, Default::default(), Default::default());
+    assert_eq!(
+        dashboard.usage_priced_profiles(&dashboard.config),
+        std::collections::BTreeSet::from(["openrouter".to_owned()])
+    );
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let snapshot = billing_snapshot(&dashboard.config, &["openrouter"]);
+    dashboard.set_profile_capabilities(snapshot);
+    press_autoconfigure(&mut dashboard);
+    assert_eq!(setup_review_models(&dashboard), SUBSCRIPTION_MODELS);
 }
 
 #[test]
@@ -83,7 +275,11 @@ fn opening_with_reviewers_preserves_them_when_catalog_arrives() {
         effort: Some("high".into()),
     }];
     let mut dialog = ReviewSettingsDialog::new(&config);
-    dialog.update_choices(&config, &catalog(&config, &["gpt-6-terra", "gpt-6-sol"]));
+    dialog.update_choices(
+        &config,
+        &catalog(&config, &["gpt-6-terra", "gpt-6-sol"]),
+        &Default::default(),
+    );
     assert_eq!(dialog.review.reviewers, config.review.reviewers);
 }
 
@@ -91,7 +287,11 @@ fn opening_with_reviewers_preserves_them_when_catalog_arrives() {
 fn autoconfigure_disabled_without_supported_models() {
     let config = config();
     let mut dialog = ReviewSettingsDialog::new(&config);
-    dialog.update_choices(&config, &catalog(&config, &["other-model"]));
+    dialog.update_choices(
+        &config,
+        &catalog(&config, &["other-model"]),
+        &Default::default(),
+    );
     assert!(dialog.review.reviewers.is_empty());
     assert!(
         !dialog
@@ -119,9 +319,9 @@ fn effort_choices_follow_the_selected_model() {
         );
     }
     let mut dialog = ReviewSettingsDialog::new(&config);
-    dialog.update_choices(&config, &catalog);
+    dialog.update_choices(&config, &catalog, &Default::default());
     dialog.review.reviewers = dialog.suggested().unwrap();
-    dialog.update_choices(&config, &catalog);
+    dialog.update_choices(&config, &catalog, &Default::default());
     assert_eq!(
         dialog.choices(ReviewSettingsFocus::Effort(0)).0,
         ["Default", "xhigh"]
@@ -145,7 +345,7 @@ fn reviewer_rows_can_be_added_removed_and_reconfigured() {
     };
     let editor = setup.review_editor.as_mut().unwrap();
     editor.review.reviewers = editor.suggested().unwrap();
-    editor.update_choices(&config, &snapshot);
+    editor.update_choices(&config, &snapshot, &Default::default());
     assert_eq!(editor.review.reviewers.len(), 2);
     editor.form.get_mut().focus(ReviewSettingsFocus::Add);
     dashboard.handle_key(key(KeyCode::Enter));
@@ -277,7 +477,7 @@ fn known_effort_choices_gate_save_but_pending_choices_do_not() {
             .efforts
             .insert("gpt-6-terra".into(), CapabilityState::Ready(vec![]));
     }
-    dialog.update_choices(&config, &catalog);
+    dialog.update_choices(&config, &catalog, &Default::default());
     assert!(!dialog.can_save());
     assert_eq!(
         ReviewSettingsDialog::validation_error(&dialog.validation_snapshot(), &dialog.review)
@@ -292,7 +492,7 @@ fn known_effort_choices_gate_save_but_pending_choices_do_not() {
             .efforts
             .insert("gpt-6-terra".into(), CapabilityState::Pending);
     }
-    dialog.update_choices(&config, &catalog);
+    dialog.update_choices(&config, &catalog, &Default::default());
     assert!(dialog.can_save());
 }
 
@@ -309,7 +509,7 @@ fn reviewer_focus_follows_model_effort_remove_order() {
     };
     let editor = setup.review_editor.as_mut().unwrap();
     editor.review.reviewers = editor.suggested().unwrap();
-    editor.update_choices(&config, &snapshot);
+    editor.update_choices(&config, &snapshot, &Default::default());
     editor.form.get_mut().focus(ReviewSettingsFocus::Model(0));
     drawn(&mut dashboard, 100, 30);
     for expected in [
@@ -404,7 +604,7 @@ fn autoconfigure_waits_for_efforts_then_uses_harness_default_for_unsupported_eff
         panic!("setup")
     };
     let editor = setup.review_editor.as_mut().unwrap();
-    editor.update_choices(&dashboard.config, &snapshot);
+    editor.update_choices(&dashboard.config, &snapshot, &Default::default());
     assert!(editor.pending_autoconfigure.is_none());
     assert_eq!(editor.review.reviewers[0].effort, None);
     assert_eq!(editor.review.reviewers[1].effort.as_deref(), Some("medium"));
@@ -494,7 +694,7 @@ fn failed_effort_discovery_is_reported_when_autoconfigure_times_out() {
         }],
         Instant::now() - Duration::from_secs(21),
     ));
-    dialog.update_choices(&config, &snapshot);
+    dialog.update_choices(&config, &snapshot, &Default::default());
     assert_eq!(dialog.review.reviewers[0].effort, None);
     assert!(
         dialog
@@ -517,7 +717,7 @@ fn partial_discovery_does_not_reject_configured_reviewer_on_save() {
         profile.choices = CapabilityState::Failed("probe failed".into());
     }
     let mut dialog = ReviewSettingsDialog::new(&config);
-    dialog.update_choices(&config, &snapshot);
+    dialog.update_choices(&config, &snapshot, &Default::default());
     assert!(dialog.can_save());
     assert!(
         ReviewSettingsDialog::validation_error(&dialog.validation_snapshot(), &dialog.review)
@@ -633,7 +833,7 @@ fn autoconfigure_ignores_a_failed_profile_that_does_not_offer_the_model() {
     config.profiles.insert(failed_id, failed);
     let mut dialog = ReviewSettingsDialog::new(&config);
     dialog.pending_autoconfigure = Some((Vec::new(), Instant::now()));
-    dialog.update_choices(&config, &snapshot);
+    dialog.update_choices(&config, &snapshot, &Default::default());
     assert!(dialog.pending_autoconfigure.is_none());
     assert!(!dialog.review.reviewers.is_empty());
     for reviewer in &dialog.review.reviewers {
