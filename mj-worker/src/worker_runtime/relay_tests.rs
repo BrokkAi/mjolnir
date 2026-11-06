@@ -7962,6 +7962,29 @@ fn a_primary_without_push_review_still_records_where_its_work_starts() {
     );
 }
 
+// Hard-won: 81aa005a1: an unwritable checkout stopped review-off sessions.
+#[cfg(unix)]
+#[test]
+fn a_session_without_push_review_starts_when_its_start_cannot_be_recorded() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let repository = git_repository(&temp);
+    let refs = repository.join(".git/refs");
+    std::fs::set_permissions(&refs, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let packed = repository.join(".git");
+    std::fs::set_permissions(&packed, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let mut launch = launch_config("/test/profile");
+    launch.cwd = repository.clone();
+    launch.harness = HarnessKind::Codex;
+    launch.review_trigger = mj_core::config::ReviewTrigger::Off;
+    let result = super::harness_launch::prepare_review_gate(&launch);
+    std::fs::set_permissions(&packed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&refs, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let notices = result.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].contains("Could not record where this session's work starts"));
+}
+
 #[test]
 fn push_gate_startup_reports_a_refused_hook_install_once() {
     let temp = tempfile::tempdir().unwrap();

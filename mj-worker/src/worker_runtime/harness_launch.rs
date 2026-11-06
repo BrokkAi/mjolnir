@@ -418,14 +418,23 @@ pub(super) fn prepare_review_gate(
         let mut roots = vec![launch.cwd.clone()];
         roots.extend(super::reviewer_workspace_directories(launch));
         for repository in crate::review::capture::discover_repositories(&git, &roots) {
-            crate::review::capture::ensure_session_start_head(
+            let start = crate::review::capture::ensure_session_start_head(
                 &git,
                 &repository,
                 &launch.session_id,
-            )?;
+            );
             if !gate {
+                // Without the gate the start only serves a later manual review,
+                // so an unwritable checkout must not stop the session.
+                if let Err(error) = start {
+                    notices.push(format!(
+                        "Could not record where this session's work starts in {}: {error:#}. A manual review there may treat earlier commits as reviewed.",
+                        repository.display()
+                    ));
+                }
                 continue;
             }
+            start?;
             use crate::review::hook::{HookInstall, install_pre_push_hook};
             let reason = match install_pre_push_hook(&git, &repository) {
                 Ok(HookInstall::Installed | HookInstall::Rewritten) => None,
