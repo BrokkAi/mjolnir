@@ -2106,14 +2106,21 @@ pub fn archived_session(id: &str) -> Result<Option<ArchivedSession>> {
     let Some(row) = visible_row_by_id(&connection, id, &ownership, &cache)? else {
         return Ok(None);
     };
-    let session = sessionwiki::index::session_from_index(&connection, &row)
+    archived_session_from_row(&connection, &row).map(Some)
+}
+
+fn archived_session_from_row(
+    connection: &rusqlite::Connection,
+    row: &sessionwiki::index::SessionRow,
+) -> Result<ArchivedSession> {
+    let session = sessionwiki::index::session_from_index(connection, row)
         .context("read an indexed session")?;
     let snapshot = snapshot_of(&session)?;
-    Ok(Some(ArchivedSession {
+    Ok(ArchivedSession {
         title: session.title.clone(),
         project_directory: project_directory_of(&session.project),
         snapshot,
-    }))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3495,6 +3502,8 @@ mod tests {
     /// record's own last update can tell the index the title moved.
     #[test]
     fn a_rename_moves_a_session_change_token() {
+        let _held = tags::testing::lock();
+        let (_index, mut connection) = tags::testing::isolated_index();
         let directory = tempfile::tempdir().unwrap();
         let session_id = "0123456789abcdef0123456789abcdef";
         write_archive(directory.path(), session_id, 1);
@@ -3518,6 +3527,18 @@ mod tests {
                 .unwrap()
                 .title,
             "the new name"
+        );
+
+        // Cross the durable index boundary, then discard both the source
+        // record and checkpoint, as destruction after archiving does.
+        sync_adapter(&mut connection, &Arc::new(adapter));
+        std::fs::remove_dir_all(directory.path()).unwrap();
+        let row = row_by_id(&connection, session_id).unwrap().unwrap();
+        let archived = archived_session_from_row(&connection, &row).unwrap();
+        assert_eq!(archived.title, "the new name");
+        assert_eq!(
+            archived.snapshot.session.session_title.as_deref(),
+            Some("the new name")
         );
     }
 
