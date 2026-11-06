@@ -390,8 +390,8 @@ fn remove_reports_failure(stderr: &[u8]) -> bool {
 
 /// This process as a container owner: `<pid>:<birth identity>`. The birth
 /// identity keeps a reused process id from passing for this process. `None`
-/// when the host cannot report it; a container without an owner is never
-/// swept.
+/// when the host cannot report it; the next daemon's sweep then removes a
+/// container this process left without an owner.
 fn owner_token() -> Option<&'static str> {
     static OWNER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     OWNER
@@ -420,12 +420,18 @@ fn owner_is_running(pid: u32, birth: &str) -> bool {
 
 /// Whether the sweep may remove a container with this owner label.
 ///
-/// Only a label that names a process which is no longer running qualifies. A
-/// container with no label or an unreadable one is kept: it was started by a
-/// build that did not record its owner, so a live daemon may be using it, and
-/// a quota container can live as long as its daemon.
+/// A label that names a process which is no longer running qualifies. So does
+/// a missing label: a build that did not record owners, or a host that cannot
+/// report a birth identity, started it. Only the daemon sweeps, before it
+/// starts any check of its own, and a daemon holds its instance alone, so such
+/// a container belongs to an earlier daemon. A label in another format is
+/// kept.
 fn owner_is_gone(label: &str, running: impl Fn(u32, &str) -> bool) -> bool {
-    let Some((pid, birth)) = label.trim().split_once(':') else {
+    let label = label.trim();
+    if label.is_empty() {
+        return true;
+    }
+    let Some((pid, birth)) = label.split_once(':') else {
         return false;
     };
     let Ok(pid) = pid.parse::<u32>() else {
@@ -438,8 +444,8 @@ fn owner_is_gone(label: &str, running: impl Fn(u32, &str) -> bool) -> bool {
 /// daemon stopped mid-check. Runs on the engines installed on this host.
 ///
 /// Containers whose owning process is still running stay. The instance
-/// identity comes from the data directory, so a second daemon, a CLI command
-/// or a test run on the same host sweeps with the live daemon's identity.
+/// identity comes from the data directory, so any other process on the same
+/// host that sweeps does so with the live daemon's identity.
 pub(crate) fn sweep_quota_containers(executor: &impl CommandExecutor, path: Option<&OsStr>) {
     sweep_quota_containers_with(executor, path, &owner_is_running)
 }
@@ -679,11 +685,11 @@ mod tests {
         assert_eq!(removed, ["dead"]);
     }
 
-    /// A container started before owners were recorded may belong to a live
-    /// daemon, and a daemon's containers can outlive any age bound, so it
-    /// stays. An unreadable label is treated the same way.
+    /// A container without an owner was started by a build that did not
+    /// record one, or on a host that cannot, and only an earlier daemon can own
+    /// it. A label in another format stays.
     #[test]
-    fn sweep_keeps_containers_without_a_readable_owner() {
+    fn sweep_removes_unowned_containers_and_keeps_unreadable_owners() {
         let removed = sweep_removed(
             vec![
                 ("legacy", ""),
@@ -692,7 +698,7 @@ mod tests {
             ],
             &|_, _| false,
         );
-        assert!(removed.is_empty(), "{removed:?}");
+        assert_eq!(removed, ["legacy"]);
     }
 
     #[test]
