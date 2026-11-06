@@ -251,8 +251,8 @@ pub enum RelayRequest {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureScope {
-    #[default]
     TurnDelta,
+    #[default]
     PushableCommits,
 }
 

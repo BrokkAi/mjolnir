@@ -5281,27 +5281,6 @@ async fn first_daemon_start_does_not_record_a_restart_marker() {
 }
 
 #[tokio::test]
-async fn first_daemon_start_pins_the_worktree_before_the_primary_harness() {
-    let temp = tempfile::tempdir().unwrap();
-    let repository = git_repository(&temp);
-    std::fs::write(repository.join("preexisting.rs"), "already here\n").unwrap();
-    let root = temp.path().join("relay");
-    let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
-    config.bridge_command = temp.path().join("missing-acp-bridge");
-    config.cwd = repository.clone();
-
-    expect_daemon_launch_failure(&root, config).await;
-
-    let baseline = std::process::Command::new("git")
-        .args(["rev-parse", "--verify", "refs/mj/review-baseline^{tree}"])
-        .current_dir(&repository)
-        .output()
-        .unwrap();
-    assert!(baseline.status.success());
-    assert!(!baseline.stdout.is_empty());
-}
-
-#[tokio::test]
 async fn restored_relay_seed_records_a_restart_marker() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().to_owned();
@@ -7515,55 +7494,6 @@ async fn the_control_socket_answers_while_the_harness_is_prepared() {
             position("harness-resolve").is_some_and(|resolving| serving < resolving)
         }),
         "worker did not publish before harness preparation: {recorded:?}"
-    );
-    daemon.abort();
-    assert!(daemon.await.unwrap_err().is_cancelled());
-}
-
-/// Review capture still precedes bridge start, while the relay remains live.
-#[tokio::test]
-async fn a_reviewed_session_serves_its_relay_while_preparing_its_baseline() {
-    let workspace = repository_whose_staging_blocks(10);
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("worker");
-    std::fs::create_dir_all(&root).unwrap();
-
-    let mut config = launch_config("profile-home");
-    config.cwd = workspace.path().to_owned();
-    config.review_capture = true;
-    let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
-
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-    let (status, last_error) = async {
-        let mut last_error = "startup step not reached".to_owned();
-        loop {
-            if startup_step_recorded(&root, "review-baseline") {
-                match worker_status(&root).await {
-                    Ok(status) => break (Some(status), last_error),
-                    Err(error) => last_error = error,
-                }
-            }
-            if daemon.is_finished() || tokio::time::Instant::now() >= deadline {
-                break (None, last_error);
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }
-    .await;
-    let status = status.unwrap_or_else(|| {
-        let startup = std::fs::read_to_string(root.join(WORKER_STARTUP_FILE))
-            .unwrap_or_else(|error| format!("cannot read startup record: {error}"));
-        panic!(
-            "worker did not answer Status during review baseline preparation: {last_error}; startup record: {startup}"
-        )
-    });
-    assert!(
-        matches!(
-            status.harness_preparation,
-            Some(mj_core::relay::HarnessPreparation::Preparing { ref step, .. })
-                if step == "review-baseline"
-        ),
-        "unexpected worker preparation state after Status succeeded: {status:?}; last request error: {last_error}"
     );
     daemon.abort();
     assert!(daemon.await.unwrap_err().is_cancelled());

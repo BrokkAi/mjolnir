@@ -8,8 +8,6 @@ pub(super) struct ReviewCapture {
     pub session_id: String,
     pub cwd: PathBuf,
     pub additional_directories: Vec<PathBuf>,
-    pub review_capture: bool,
-    pub untracked_at_start: super::unix::UntrackedReviewEntries,
     pub primary_relay: Arc<Mutex<DurableRelay>>,
     pub operation: tokio::sync::Mutex<()>,
 }
@@ -37,10 +35,10 @@ impl ReviewCapture {
             ReviewerAdmission::acquire(self.primary_relay.clone(), "review capture".to_owned())?;
         match request {
             mj_core::relay::ReviewerRequest::CaptureDelta {
-                baselines,
+                baselines: _,
                 scope,
                 repositories,
-            } => self.capture_delta(baselines, scope, repositories).await,
+            } => self.capture_delta(scope, repositories).await,
             mj_core::relay::ReviewerRequest::RecordReviewed { trees } => {
                 tokio::task::spawn_blocking(move || -> Result<()> {
                     for (root, (tree, commit)) in trees {
@@ -59,8 +57,8 @@ impl ReviewCapture {
                     payload: RelayResponsePayload::ReviewBaselineAdvanced,
                 })
             }
-            mj_core::relay::ReviewerRequest::AdvanceBaseline { trees } => {
-                self.advance_baseline(trees).await
+            mj_core::relay::ReviewerRequest::AdvanceBaseline { .. } => {
+                anyhow::bail!("per-turn review was removed")
             }
             mj_core::relay::ReviewerRequest::RecordOverridden { trees } => {
                 tokio::task::spawn_blocking(move || -> Result<()> {
@@ -91,30 +89,22 @@ impl ReviewCapture {
         roots
     }
 
-    /// Reports what every workspace repository changed since `baselines`.
+    /// Captures committed work since the push review base in each repository.
     ///
     /// Git work is blocking and can take a moment on a large tree, so it runs
     /// on the blocking pool rather than on the runtime that also serves the
     /// primary session's relay.
     async fn capture_delta(
         &self,
-        baselines: std::collections::BTreeMap<PathBuf, String>,
         scope: mj_core::relay::CaptureScope,
         requested: Option<Vec<PathBuf>>,
     ) -> Result<RelayResponseBody> {
         anyhow::ensure!(
-            self.review_capture || scope == mj_core::relay::CaptureScope::PushableCommits,
-            "this session was started without a review baseline, so a turn review \
-             cannot tell its work from what the working tree already held; \
-             configure an eligible reviewer in Settings and resume or restart the session"
+            scope == mj_core::relay::CaptureScope::PushableCommits,
+            "per-turn review was removed"
         );
         let roots = self.roots();
         let cwd = self.cwd.clone();
-        let untracked_at_start = self
-            .untracked_at_start
-            .lock()
-            .expect("untracked-at-start lock poisoned")
-            .clone();
         let session_id = self.session_id.clone();
         let repositories = tokio::task::spawn_blocking(move || {
             let discovered = crate::review::capture::discover_repositories(
@@ -125,41 +115,32 @@ impl ReviewCapture {
                 Some(paths) => scoped_repositories(&cwd, &discovered, &paths)?,
                 None => (discovered, Default::default()),
             };
-            if scope == mj_core::relay::CaptureScope::PushableCommits {
-                return repositories
-                    .iter()
-                    .map(|root| {
-                        let git = &mj_checkpoint::archive::SystemGit;
-                        let start = match origins.get(root) {
-                            Some(origin) => crate::review::capture::linked_worktree_start(
-                                git,
-                                root,
-                                origin,
-                                &session_id,
-                            )?,
-                            None => crate::review::capture::ensure_session_start_head(
-                                git,
-                                root,
-                                &session_id,
-                            )?,
-                        }
-                        .ok_or_else(|| anyhow::anyhow!("the repository has no HEAD commit"))?;
-                        let capture =
-                            crate::review::capture::capture_pushable_commits(git, root, &start)?;
-                        let mut delta = capture.delta;
-                        delta.base_commit = capture.base.commit().map(str::to_owned);
-                        delta.head_commit = Some(capture.head_commit);
-                        Ok(delta)
-                    })
-                    .collect::<Result<Vec<_>>>();
-            }
-            crate::review::capture::capture_repository_deltas(
-                &mj_checkpoint::archive::SystemGit,
-                &repositories,
-                &baselines,
-                &untracked_at_start,
-                &session_id,
-            )
+            repositories
+                .iter()
+                .map(|root| {
+                    let git = &mj_checkpoint::archive::SystemGit;
+                    let start = match origins.get(root) {
+                        Some(origin) => crate::review::capture::linked_worktree_start(
+                            git,
+                            root,
+                            origin,
+                            &session_id,
+                        )?,
+                        None => crate::review::capture::ensure_session_start_head(
+                            git,
+                            root,
+                            &session_id,
+                        )?,
+                    }
+                    .ok_or_else(|| anyhow::anyhow!("the repository has no HEAD commit"))?;
+                    let capture =
+                        crate::review::capture::capture_pushable_commits(git, root, &start)?;
+                    let mut delta = capture.delta;
+                    delta.base_commit = capture.base.commit().map(str::to_owned);
+                    delta.head_commit = Some(capture.head_commit);
+                    Ok(delta)
+                })
+                .collect::<Result<Vec<_>>>()
         })
         .await
         .map_err(|error| anyhow::anyhow!("the review capture stopped: {error}"))??;
@@ -192,38 +173,6 @@ impl ReviewCapture {
         .map_err(|error| anyhow::anyhow!("the review base update stopped: {error}"))??;
         Ok(RelayResponseBody::Ok {
             payload: RelayResponsePayload::ReviewBaseSet { root, commit, tree },
-        })
-    }
-
-    /// Records the trees a completed review reviewed through.
-    async fn advance_baseline(
-        &self,
-        trees: std::collections::BTreeMap<PathBuf, String>,
-    ) -> Result<RelayResponseBody> {
-        // The untracked list has to move with the tree it belongs to, or the
-        // next review would report every file this turn created as new work
-        // all over again. Re-reading the state is one stat-walk per completed
-        // review, which is what the new capture costs anyway.
-        let roots = self.roots();
-        let refreshed = tokio::task::spawn_blocking(move || {
-            let repositories = crate::review::capture::discover_repositories(
-                &mj_checkpoint::archive::SystemGit,
-                &roots,
-            );
-            crate::review::capture::advance_baselines(&mj_checkpoint::archive::SystemGit, &trees)?;
-            crate::review::capture::read_untracked_at_start(
-                &mj_checkpoint::archive::SystemGit,
-                &repositories,
-            )
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("the review baseline update stopped: {error}"))??;
-        *self
-            .untracked_at_start
-            .lock()
-            .expect("untracked-at-start lock poisoned") = refreshed;
-        Ok(RelayResponseBody::Ok {
-            payload: RelayResponsePayload::ReviewBaselineAdvanced,
         })
     }
 }
@@ -324,8 +273,6 @@ mod tests {
             session_id: "scoped-test".into(),
             cwd: root.clone(),
             additional_directories: Vec::new(),
-            review_capture: false,
-            untracked_at_start: Default::default(),
             primary_relay: Arc::new(Mutex::new(
                 DurableRelay::open(&relay_dir, "scoped-test", "1.0.0").unwrap(),
             )),
@@ -452,8 +399,6 @@ mod tests {
             session_id: "fork-test".into(),
             cwd: root.clone(),
             additional_directories: Vec::new(),
-            review_capture: true,
-            untracked_at_start: Default::default(),
             primary_relay: Arc::new(Mutex::new(
                 DurableRelay::open(&relay_dir, "fork-test", "1.0.0").unwrap(),
             )),
@@ -535,8 +480,6 @@ mod tests {
             session_id: "orphan-test".into(),
             cwd: root.clone(),
             additional_directories: Vec::new(),
-            review_capture: true,
-            untracked_at_start: Default::default(),
             primary_relay: Arc::new(Mutex::new(
                 DurableRelay::open(&relay_dir, "orphan-test", "1.0.0").unwrap(),
             )),
@@ -601,8 +544,6 @@ mod tests {
             session_id: "override-test".into(),
             cwd: repository.clone(),
             additional_directories: Vec::new(),
-            review_capture: true,
-            untracked_at_start: Default::default(),
             primary_relay: Arc::new(Mutex::new(
                 DurableRelay::open(&worker, "override-test", "1.0.0").unwrap(),
             )),
@@ -693,12 +634,8 @@ mod tests {
         git(&repository, &["add", "tracked.rs"]);
         git(&repository, &["commit", "-qm", "base"]);
         let start = git(&repository, &["rev-parse", "HEAD"]);
-        crate::review::capture::initialize_review_baselines(
-            &SystemGit,
-            std::slice::from_ref(&repository),
-            "push-test",
-        )
-        .unwrap();
+        crate::review::capture::ensure_session_start_head(&SystemGit, &repository, "push-test")
+            .unwrap();
         git(&repository, &["checkout", "-qb", "feature"]);
         std::fs::write(repository.join("tracked.rs"), "after\n").unwrap();
         git(&repository, &["commit", "-qam", "change"]);
@@ -709,8 +646,6 @@ mod tests {
             session_id: "push-test".into(),
             cwd: repository.clone(),
             additional_directories: Vec::new(),
-            review_capture: true,
-            untracked_at_start: Default::default(),
             primary_relay: Arc::new(Mutex::new(
                 DurableRelay::open(&worker, "push-test", "1.0.0").unwrap(),
             )),
@@ -766,21 +701,25 @@ mod tests {
             .trim(),
             head.trim()
         );
-        capture
-            .handle(ReviewerRequest::AdvanceBaseline {
-                trees: std::collections::BTreeMap::from([(
-                    repository.clone(),
-                    delta.current_tree.clone(),
-                )]),
-            })
-            .await
-            .unwrap();
-        let baseline =
-            mj_checkpoint::archive::review_baseline_ref(&SystemGit, &repository).unwrap();
-        assert_eq!(
-            git(&repository, &["rev-parse", &format!("{baseline}^{{tree}}")]).trim(),
-            delta.current_tree
-        );
+        for request in [
+            ReviewerRequest::AdvanceBaseline {
+                trees: Default::default(),
+            },
+            ReviewerRequest::CaptureDelta {
+                baselines: Default::default(),
+                scope: CaptureScope::TurnDelta,
+                repositories: None,
+            },
+        ] {
+            assert!(
+                capture
+                    .handle(request)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("per-turn review was removed")
+            );
+        }
         std::fs::write(repository.join("tracked.rs"), "dirty\n").unwrap();
         let error = capture
             .handle(ReviewerRequest::CaptureDelta {
@@ -805,7 +744,7 @@ mod tests {
                 baselines: Default::default(),
             },
         };
-        assert_eq!(request.minimum_protocol(), 6);
+        assert_eq!(request.minimum_protocol(), 43);
         assert!(!request.supported_at(5));
         assert!(request.supported_at(RELAY_PROTOCOL_VERSION));
         assert_eq!(request.method_name(), "reviewer_capture_delta");

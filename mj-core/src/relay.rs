@@ -102,7 +102,8 @@ pub const RELAY_MERGED_REVIEW_WARNING_PROTOCOL: u32 = 50;
 /// 51 adds RecordOverridden and SetReviewBase: an override that allows a push
 /// without moving the review base, and an explicit move of that base.
 pub const RELAY_REVIEW_BASE_PROTOCOL: u32 = 51;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_REVIEW_BASE_PROTOCOL;
+/// 52 removes per-turn capture and baseline advancement; push review remains.
+pub const RELAY_PROTOCOL_VERSION: u32 = 52;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

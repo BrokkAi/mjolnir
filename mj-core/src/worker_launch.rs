@@ -189,14 +189,8 @@ pub struct WorkerLaunchConfig {
     /// that one wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_model: Option<String>,
-    /// Whether a review can ever run for this session, which is the only
-    /// reason to spend anything on capturing the working tree.
-    ///
-    /// The controller decides it: `[review] profile` has to name a reviewer,
-    /// and a sub-agent child is never reviewed. A session with this off does
-    /// no Git work at startup at all, which is what makes starting a session
-    /// in a large working tree cheap.
-    #[serde(default)]
+    /// Accepted from older daemon launch files; no longer used or written.
+    #[serde(default, skip_serializing)]
     pub review_capture: bool,
     #[serde(default)]
     pub review_trigger: crate::config::ReviewTrigger,
@@ -637,6 +631,7 @@ mod tests {
         assert!(launch.review_gate());
         let rewritten = serde_json::to_value(&launch).unwrap();
         assert_eq!(rewritten["review_trigger"], "push");
+        assert!(rewritten.get("review_capture").is_none());
     }
 
     // Hard-won: 32d96d199: push reviews exposed delegation tools with subagents=None.
