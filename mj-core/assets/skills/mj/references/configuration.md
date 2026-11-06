@@ -616,7 +616,7 @@ home = "/home/me/.codex-work"
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
 | `enabled` | boolean | no | `true` | Disabled profiles stay configured but cannot be selected for new work, login, import, review, quota reporting, or utility-model inference. Existing running sessions continue. |
-| `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `muse`, `opencode`, or `dsh`. `deepseek`, the removed DeepSeek harness, fails to load. A profile whose kind is `mimo`, the removed MiMo Code harness, is ignored with a warning when the configuration loads and is removed from the file on the next save. |
+| `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `muse`, `open-code` (OpenCode), or `dsh`. `deepseek`, the removed DeepSeek harness, fails to load. A profile whose kind is `mimo`, the removed MiMo Code harness, is ignored with a warning when the configuration loads and is removed from the file on the next save. |
 | `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
 | `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` reads that variable from the environment Mjolnir started with unless it is set here; when it is set in neither, the profile cannot start, the configuration still loads, and `mj doctor` says how to supply it. A DSH profile takes `DEEPSEEK_API_KEY` from the key saved in DSH (`.credentials.yaml` in its home) first, then the environment Mjolnir started with, then `.env` in its home, and only then from this table. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
@@ -646,7 +646,9 @@ use their image-provided runtime or the documented installer fallback. The
 
 Profiles do not accept `model` or `reasoning_effort`. Use `/model` and `/effort`
 or `/config` inside a session, or configure the harness's own defaults in its
-home. For
+home. For example, an OpenCode profile's default model and OpenRouter provider
+routing go in `opencode.json` in its home, which sessions receive unchanged
+except for `permission`. For
 credential files, staging allowlists, skills, quotas, and harness limitations,
 see [Profiles and harnesses](/profiles/).
 

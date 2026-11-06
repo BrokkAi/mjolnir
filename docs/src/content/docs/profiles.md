@@ -535,7 +535,7 @@ configuration copy and stores native history under that copy's `.data/muse/`
 tree, including on a bare runtime on this machine. Do not override `XDG_CONFIG_HOME` or
 `XDG_DATA_HOME` in the profile environment.
 
-For OpenCode, configure `kind = "opencode"` and a home ending in `opencode`,
+For OpenCode, configure `kind = "open-code"` and a home ending in `opencode`,
 for example `home = "/home/me/.config/opencode"` or
 `/home/me/accounts/work/opencode`. Discovery uses `$XDG_CONFIG_HOME/opencode`
 when set. OpenCode 2 keeps its logins in its database, `opencode.db`, in its
@@ -565,6 +565,33 @@ variables a provider in your `opencode.json` or `opencode.jsonc` lists under
 wins over a key for the same provider, as it does in OpenCode. Export the key
 before running `mj`, and run `mj daemon restart` after exporting a new one;
 `mj doctor` names the keys a profile is using.
+
+Mjolnir copies the profile's `opencode.json` to each session unchanged and adds
+its own permission rules on top, so any OpenCode setting in it applies. For example, to set a
+default model and send every OpenRouter request for it to one provider, with
+no fallback to others:
+
+```json
+{
+  "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+  "provider": {
+    "openrouter": {
+      "models": {
+        "deepseek/deepseek-v4.1-flash-1017": {
+          "options": {
+            "provider": { "only": ["morph"], "allow_fallbacks": false }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+The `provider` object under `options` is OpenRouter's provider routing
+preference, sent with each request. Provider names are the endpoint tags that
+`https://openrouter.ai/api/v1/models/<model>/endpoints` lists, such as
+`morph` for `morph/fp8`.
 
 For DSH, configure `kind = "dsh"`, for example with
 `home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
