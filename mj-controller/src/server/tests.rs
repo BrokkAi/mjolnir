@@ -800,6 +800,11 @@ fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
     ] {
         let mut child = parent.clone();
         child.id = id.into();
+        child.state = if id == "reviewer" {
+            mj_core::state::SessionState::Error
+        } else {
+            mj_core::state::SessionState::Stopped
+        };
         state.sessions.insert(id.into(), child);
         state.subagents.insert(
             id.into(),
@@ -832,6 +837,8 @@ fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
     );
     assert_eq!(row("session-1").reviewer_session_ids, ["reviewer"]);
     assert!(row("worker").reviewer_session_ids.is_empty());
+    assert!(row("reviewer").active);
+    assert!(!row("worker").active);
 
     // The summary rows a compact client sees carry both lists, so Reviewers
     // and Subagents never wait for a child's own record.

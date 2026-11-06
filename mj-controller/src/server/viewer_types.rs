@@ -265,6 +265,7 @@ impl ViewerSnapshot {
                         _ => session.state.as_str(),
                     }
                     .into(),
+                    active: session.state.is_active(),
                     created_at: session.created_at.clone(),
                     updated_at: session.updated_at.clone(),
                     has_error: session.last_error.is_some()
@@ -342,6 +343,7 @@ impl ViewerSnapshot {
                     capabilities: ViewerSessionCapabilities {
                         clear_context: false,
                         open: false,
+                        read_history: false,
                         prompt: false,
                         run_shell: false,
                         interrupt_turn: false,
@@ -564,6 +566,10 @@ pub struct ViewerSession {
     pub bundle_id: String,
     pub target_id: String,
     pub state: String,
+    /// `SessionState::is_active`: the one definition of an open session, which
+    /// the terminal also uses for its reviewer count.
+    #[serde(default)]
+    pub active: bool,
     pub created_at: String,
     pub updated_at: String,
     pub has_error: bool,
@@ -1191,6 +1197,10 @@ pub struct ViewerSessionCapabilities {
     #[serde(default)]
     pub clear_context: bool,
     pub open: bool,
+    /// A stopped sub-agent whose stored conversation can be read but not
+    /// opened live. `open` still gates the live conversation and composer.
+    #[serde(default)]
+    pub read_history: bool,
     pub prompt: bool,
     pub run_shell: bool,
     /// Cancel the turn the agent is working on now, leaving the session alive.

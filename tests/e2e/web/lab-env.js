@@ -40,7 +40,7 @@ const SUMMARY_FIELDS = new Set([
   'configuration_issue', 'launch_error', 'storage_problem', 'project_label',
   'display_location', 'lifecycle', 'transitioning', 'last_activity_at_ms',
   'last_message_at_ms', 'capacity_retry', 'retry_assessment_pending',
-  'quota_recovery', 'operation', 'move_recovery', 'chat_phase', 'is_idle',
+  'quota_recovery', 'operation', 'move_recovery', 'chat_phase', 'is_idle', 'active',
   'activity_details', 'activity', 'capabilities',
 ]);
 

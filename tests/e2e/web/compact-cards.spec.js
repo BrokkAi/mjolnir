@@ -44,6 +44,7 @@ function session(id, projectKey, projectLabel, options = {}) {
     display_location: options.displayLocation || '/work/project',
     state: lifecycle === 'live' ? 'running' : lifecycle,
     lifecycle,
+    active: options.active ?? ['live', 'starting', 'suspending'].includes(lifecycle),
     transitioning: Boolean(options.transitioning),
     created_at: options.createdAt || '2030-06-15T00:00:00Z',
     updated_at: '2030-06-15T00:00:00Z',
@@ -1254,9 +1255,9 @@ test('reviewers open their own workspace and stay out of Subagents', async ({ pa
   const child = (id, options = {}) => session(id, 'project', 'Project', { subagentParentId: 'parent', ...options });
   const worker = child('worker', { title: 'Worker', isIdle: false });
   worker.chat_phase = 'running';
-  const reviewOpen = child('review-open', { title: 'Open reviewer', isIdle: false });
+  const reviewOpen = child('review-open', { title: 'Open reviewer', lifecycle: 'failed', active: true, isIdle: false });
   reviewOpen.chat_phase = 'running';
-  const reviewDone = child('review-done', { title: 'Done reviewer', lifecycle: 'suspended', capabilities: { open: false, resume: true } });
+  const reviewDone = child('review-done', { title: 'Done reviewer', lifecycle: 'suspended', active: false, capabilities: { open: false, read_history: true, resume: true } });
   const state = await mount(page, [parent, worker, reviewOpen, reviewDone]);
   await card(page, 'parent').click();
   await expect(page.locator('#subagents-button')).toHaveText('Subagents · 1');
@@ -1281,6 +1282,31 @@ test('reviewers open their own workspace and stay out of Subagents', async ({ pa
   await page.getByRole('button', { name: 'Show idle' }).click();
   await expect(card(page, 'review-done')).toBeVisible();
   await expect(card(page, 'worker')).toHaveCount(0);
+
+  // A stopped reviewer cannot open live, but its stored messages can be read
+  // without leaving the list. The newest page loads first.
+  const historyRequests = [];
+  await page.route('**/api/v1/sessions/review-done/history*', route => {
+    historyRequests.push(new URL(route.request().url()).search);
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ frontier: 5, before: null, items: [{ role: 'agent', text: 'Stored verdict from the done reviewer' }] }),
+    });
+  });
+  await expect(card(page, 'review-done')).toHaveAttribute('role', 'link');
+  await card(page, 'review-done').click();
+  const stored = page.getByRole('dialog', { name: 'Conversation: Done reviewer' });
+  await expect(stored).toContainText('Stored verdict from the done reviewer');
+  await expect(stored.getByRole('heading', { name: 'Done reviewer' })).toBeVisible();
+  await expect(page).toHaveURL(/#reviewers\/parent$/);
+  expect(historyRequests).toEqual(['']);
+  await stored.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(stored).toHaveCount(0);
+  await card(page, 'review-done').focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('dialog', { name: 'Conversation: Done reviewer' })).toContainText('Stored verdict');
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
 
   // A reviewer conversation returns to the reviewer list, and the close
   // control returns to the parent conversation.
@@ -1321,6 +1347,7 @@ test('reviewers open their own workspace and stay out of Subagents', async ({ pa
   // with none at all the control is gone and Subagents keeps its own count.
   reviewOpen.lifecycle = 'suspended';
   reviewOpen.state = 'suspended';
+  reviewOpen.active = false;
   await refresh(page, state);
   await expect(page.locator('#reviewers-button')).toHaveText('Reviewers · 0');
   parent.subagent_session_ids = ['worker'];

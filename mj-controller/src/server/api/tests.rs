@@ -5663,7 +5663,16 @@ async fn earlier_history_authenticates_validates_the_cursor_and_renders_stored_m
         }),
         ..FakeBackend::default()
     });
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+        // A stopped sub-agent has no live conversation, but its stored history
+        // is what the viewer's `read_history` capability opens.
+        let mut stopped = snapshot.sessions.get("session-1").unwrap().clone();
+        stopped.id = "stopped-child".into();
+        stopped.subagent_parent_id = Some("session-1".into());
+        stopped.lifecycle = crate::server::ViewerLifecycleCategory::Suspended;
+        stopped.capabilities.open = false;
+        snapshot.sessions.push(stopped);
+    });
     let unauthenticated = app
         .clone()
         .oneshot(
@@ -5702,7 +5711,25 @@ async fn earlier_history_authenticates_validates_the_cursor_and_renders_stored_m
     assert_eq!(body["items"][0]["role"], "agent");
     assert_eq!(body["before"], serde_json::to_value(&cursor).unwrap());
     assert_eq!(body["frontier"], 20);
-    assert_eq!(*backend.history_cursors.lock().unwrap(), vec![Some(cursor)]);
+    assert_eq!(
+        *backend.history_cursors.lock().unwrap(),
+        vec![Some(cursor.clone())]
+    );
+    let stopped = app
+        .clone()
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/stopped-child/history"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(stopped).await["items"][0]["text"],
+        "stored answer",
+        "a stopped child's stored history is served like a live session's"
+    );
     let missing = app
         .oneshot(
             bearer(Request::get("/api/v1/sessions/missing/history"))

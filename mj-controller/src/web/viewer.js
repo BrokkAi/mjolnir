@@ -1385,16 +1385,20 @@ async function openNativeHistory(owner, agent) {
 
 document.querySelector('#earlier-messages').onclick = () => openConversationHistory(currentSession);
 
-function openConversationHistory(sessionId) {
+/// Page through a session's stored messages, newest page first. Opened for
+/// the current conversation it shows the pages before the feed and closes if
+/// the conversation changes; with `title` it reads a stopped sub-agent chosen
+/// from a list, which no conversation owns.
+function openConversationHistory(sessionId, { title = null } = {}) {
   if (!sessionId) return;
   const generation = conversationGeneration;
   const modal = el('dialog', 'native-agent-history');
-  modal.setAttribute('aria-label', 'Earlier messages');
+  modal.setAttribute('aria-label', title ? `Conversation: ${title}` : 'Earlier messages');
   const close = button('Close');
   const earlier = button('Load earlier page');
   const status = el('p'); status.setAttribute('role', 'status');
   const content = el('div');
-  modal.append(el('h2', '', 'Earlier messages'), close, earlier, status, content);
+  modal.append(el('h2', '', title || 'Earlier messages'), close, earlier, status, content);
   document.body.append(modal);
   const controller = new AbortController();
   let before = null;
@@ -1411,6 +1415,7 @@ function openConversationHistory(sessionId) {
   async function load() {
     if (loading) return;
     loading = true; earlier.disabled = true; status.textContent = 'Loading earlier messages…';
+    const firstPage = before === null;
     try {
       const query = new URLSearchParams();
       if (before) {
@@ -1421,7 +1426,7 @@ function openConversationHistory(sessionId) {
       const page = await request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/history${suffix}`, {
         signal: controller.signal,
       });
-      if (!modal.open || currentSession !== sessionId || conversationGeneration !== generation) {
+      if (!modal.open || (!title && (currentSession !== sessionId || conversationGeneration !== generation))) {
         if (modal.open) modal.close();
         return;
       }
@@ -1429,7 +1434,9 @@ function openConversationHistory(sessionId) {
       before = page.before;
       earlier.textContent = 'Load earlier page';
       earlier.hidden = !before;
-      status.textContent = before ? 'Showing an earlier page.' : 'Beginning of conversation.';
+      status.textContent = before
+        ? (title && firstPage ? 'Showing the latest messages.' : 'Showing an earlier page.')
+        : 'Beginning of conversation.';
       if (!page.items.length) status.textContent = 'No recorded messages.';
       modal.scrollTop = 0;
     } catch (error) {
@@ -1528,8 +1535,12 @@ function updateSessionCard(card, session) {
   card._session = session;
   const can = session.capabilities || {};
   const openable = can.open === true || isTransitioningSession(session);
+  // A stopped sub-agent has no live conversation to open; the controller says
+  // its stored one can be read.
+  const readable = !openable && can.read_history === true;
   card.dataset.openable = String(openable);
-  if (openable) {
+  card.dataset.readHistory = String(readable);
+  if (openable || readable) {
     card.setAttribute('role', 'link');
     card.setAttribute('tabindex', '0');
   } else {
@@ -1540,7 +1551,7 @@ function updateSessionCard(card, session) {
   const attentionText = attention.map(([, label]) => label.toLowerCase()).join(', ');
   card.setAttribute(
     'aria-label',
-    `${can.open === true ? 'Open session' : openable ? 'View session status' : 'Session'} ${session.title || session.id}${attentionText ? `; needs attention: ${attentionText}` : ''}`,
+    `${can.open === true ? 'Open session' : openable ? 'View session status' : readable ? 'Read conversation of' : 'Session'} ${session.title || session.id}${attentionText ? `; needs attention: ${attentionText}` : ''}`,
   );
   renderSessionTitle(card._heading, session);
   card._attention.replaceChildren(
@@ -1874,7 +1885,7 @@ function sessionCardFromEvent(event) {
   const target = event.target;
   if (!target || target.closest('button')) return null;
   const card = target.closest('.session[data-session-id]');
-  return card?.dataset.openable === 'true' ? card : null;
+  return card?.dataset.openable === 'true' || card?.dataset.readHistory === 'true' ? card : null;
 }
 
 function openSessionCard(event) {
@@ -1886,6 +1897,11 @@ function openSessionCard(event) {
     return false;
   }
   closeSessionMenu(false);
+  if (card.dataset.readHistory === 'true') {
+    const session = sessionById(card.dataset.sessionId);
+    openConversationHistory(card.dataset.sessionId, { title: session?.title || card.dataset.sessionId });
+    return true;
+  }
   navigate({
     name: 'conversation',
     sessionId: card.dataset.sessionId,
@@ -8628,7 +8644,7 @@ function renderConversationHeader(session) {
   // Reviewers stay reachable once any exist, so a finished review's
   // conversations can still be read; the count is the ones still open.
   const reviewers = childSessionIds(session, 'reviewer');
-  const reviewersOpen = reviewers.filter(id => isOpenChildSession(sessionById(id))).length;
+  const reviewersOpen = reviewers.filter(id => sessionById(id)?.active === true).length;
   for (const button of [reviewersButton, reviewersDesktopButton]) {
     if (!button) continue;
     button.textContent = `Reviewers · ${reviewersOpen}`;
@@ -8664,13 +8680,6 @@ function renderConversationHeader(session) {
   if (session.plan_mode_active) {
     state.textContent = `${sessionLifecycleLabel(session)} · plan`;
   }
-}
-
-/// A child that has not finished: still running, parked for reuse, or
-/// starting or stopping. Mirrors the terminal's count of open reviewers, which
-/// counts every child whose session is not stopped or lost.
-function isOpenChildSession(session) {
-  return ['live', 'starting', 'suspending'].includes(session?.lifecycle);
 }
 
 function openChildWorkspace(childKind) {

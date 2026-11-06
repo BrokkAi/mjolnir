@@ -2661,6 +2661,21 @@ impl State {
         self.subagents.contains_key(id) || crate::native_agent::is_view_id(id)
     }
 
+    /// Whether `id` is a Mjolnir sub-agent whose session has no live worker,
+    /// so its stored conversation can be read but not attached to.
+    ///
+    /// The terminal and the phone viewer both ask this, so they cannot
+    /// disagree about which children are readable. Callers that also know of
+    /// a transition bringing the session back add that check themselves.
+    #[must_use]
+    pub fn is_stopped_subagent(&self, id: &str) -> bool {
+        self.subagents.contains_key(id)
+            && self
+                .sessions
+                .get(id)
+                .is_some_and(|session| !session.state.has_live_worker())
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.version != STATE_VERSION {
             bail!(
