@@ -8000,17 +8000,12 @@ fn push_gate_startup_and_environment_follow_harness_and_primary_ownership() {
         launch
             .environment
             .remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
-        for trigger in [
-            mj_core::config::ReviewTrigger::Turn,
-            mj_core::config::ReviewTrigger::Off,
-        ] {
-            launch.review_trigger = trigger;
-            assert!(
-                !super::harness_launch::primary_supervisor_spec(&launch)
-                    .environment
-                    .contains_key("MJ_REVIEW_GATE")
-            );
-        }
+        launch.review_trigger = mj_core::config::ReviewTrigger::Off;
+        assert!(
+            !super::harness_launch::primary_supervisor_spec(&launch)
+                .environment
+                .contains_key("MJ_REVIEW_GATE")
+        );
     }
 }
 

@@ -625,6 +625,20 @@ mod tests {
         })
     }
 
+    /// A launch file written before per-turn review was removed still names
+    /// `"turn"`. It must keep parsing, and reads as the push gate.
+    #[test]
+    fn a_launch_file_written_for_turn_review_still_parses_as_push() {
+        let mut json = launch_json();
+        json["review_trigger"] = serde_json::json!("turn");
+        json["review_capture"] = serde_json::json!(true);
+        let launch: WorkerLaunchConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(launch.review_trigger, crate::config::ReviewTrigger::Push);
+        assert!(launch.review_gate());
+        let rewritten = serde_json::to_value(&launch).unwrap();
+        assert_eq!(rewritten["review_trigger"], "push");
+    }
+
     // Hard-won: 32d96d199: push reviews exposed delegation tools with subagents=None.
     #[test]
     fn persisted_review_trigger_controls_primary_mcp_without_leaking_to_children() {
@@ -638,7 +652,6 @@ mod tests {
         ] {
             for trigger in [
                 crate::config::ReviewTrigger::Off,
-                crate::config::ReviewTrigger::Turn,
                 crate::config::ReviewTrigger::Push,
             ] {
                 let mut json = launch_json();

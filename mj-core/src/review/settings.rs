@@ -120,8 +120,8 @@ pub const PLAIN_DIRECTORY_REVIEW_OFF: &str = "Code review is off for this sessio
 
 pub const NO_REVIEWERS_REVIEW_OFF: &str = "Review is off for this session: no reviewers are configured. Choose reviewers in Settings › Code Review, or pass --reviewer.";
 
-/// A session whose armed trigger would run with no reviewers is created with
-/// review off. An omitted list means the global list (empty and not legacy
+/// A session that asked for review but would run with no reviewers is created
+/// with review off. An omitted list means the global list (empty and not legacy
 /// here), and an explicitly empty list means no reviewers whatever the global
 /// list is. Legacy Auto is resolved during review preparation.
 pub fn no_reviewers_turns_review_off(
@@ -130,15 +130,13 @@ pub fn no_reviewers_turns_review_off(
 ) -> bool {
     use crate::config::{ReviewTrigger, SessionReview};
     match session {
-        Some(SessionReview::Turn { reviewers } | SessionReview::Push { reviewers }) => {
-            match reviewers {
-                Some(reviewers) => reviewers.is_empty(),
-                None => !config.review.is_legacy() && config.review.reviewers.is_empty(),
-            }
-        }
+        Some(SessionReview::Push { reviewers }) => match reviewers {
+            Some(reviewers) => reviewers.is_empty(),
+            None => !config.review.is_legacy() && config.review.reviewers.is_empty(),
+        },
         Some(SessionReview::Inherit {
             reviewers: Some(reviewers),
-        }) => reviewers.is_empty() && config.review.trigger != ReviewTrigger::Off,
+        }) => reviewers.is_empty() && config.review.trigger() != ReviewTrigger::Off,
         _ => false,
     }
 }
@@ -151,7 +149,7 @@ pub fn plain_directory_turns_review_off(
     config: &crate::config::Config,
     session: Option<&crate::config::SessionReview>,
 ) -> bool {
-    config.review.for_session(session).trigger != crate::config::ReviewTrigger::Off
+    config.review.for_session(session).trigger() != crate::config::ReviewTrigger::Off
         && can_review(config, session)
 }
 
@@ -163,15 +161,14 @@ mod tests {
     #[test]
     fn explicit_session_review_without_global_reviewers_turns_off_only_that_session() {
         let mut config = crate::config::Config::default();
-        config.review.trigger = ReviewTrigger::Off;
         assert!(no_reviewers_turns_review_off(
             &config,
-            Some(&SessionReview::Turn { reviewers: None })
+            Some(&SessionReview::Push { reviewers: None })
         ));
         assert!(!no_reviewers_turns_review_off(&config, None));
         assert!(no_reviewers_turns_review_off(
             &config,
-            Some(&SessionReview::Turn {
+            Some(&SessionReview::Push {
                 reviewers: Some(vec![])
             })
         ));
@@ -181,11 +178,11 @@ mod tests {
                 reviewers: Some(vec![])
             })
         ));
-        config.review.trigger = ReviewTrigger::Push;
         config.review.reviewers = vec![crate::config::SubagentChoice {
             model: "gpt-6-astra".into(),
             effort: None,
         }];
+        assert_eq!(config.review.trigger(), ReviewTrigger::Push);
         assert!(no_reviewers_turns_review_off(
             &config,
             Some(&SessionReview::Push {
@@ -200,7 +197,7 @@ mod tests {
         ));
         assert!(!no_reviewers_turns_review_off(
             &config,
-            Some(&SessionReview::Turn { reviewers: None })
+            Some(&SessionReview::Push { reviewers: None })
         ));
         config.review.reviewers.clear();
         config.review = crate::config::ReviewConfig::legacy_default();

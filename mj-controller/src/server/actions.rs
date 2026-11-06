@@ -57,7 +57,7 @@ pub enum ControllerAction {
         /// Omitted uses the selected profile's subagent setting.
         #[serde(default)]
         subagents: Option<mj_core::subagent::SubagentPolicy>,
-        /// Turn review for this session. Omitted follows `[review]`.
+        /// Review for this session. Omitted follows `[review]`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[serde(deserialize_with = "deserialize_session_review")]
         review: Option<mj_core::config::SessionReview>,
@@ -619,6 +619,10 @@ pub enum BackgroundTaskStopFailure {
     Internal,
 }
 
+/// What a public request that asks for per-turn review is told. Stored
+/// actions that still say `turn` read as `push` instead.
+const TURN_REVIEW_REMOVED: &str = "Per-turn review was removed. Use review.mode \"push\", or omit review to review before push when reviewers are configured.";
+
 pub(super) fn deserialize_session_review<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<mj_core::config::SessionReview>, D::Error> {
@@ -646,12 +650,13 @@ pub(super) fn deserialize_api_session_review<'de, D: serde::Deserializer<'de>>(
     let value = Option::<serde_json::Value>::deserialize(deserializer)?;
     value
         .map(|value| {
-            if !matches!(
-                value.get("mode").and_then(serde_json::Value::as_str),
-                Some("inherit" | "off" | "turn" | "push")
-            ) {
+            let mode = value.get("mode").and_then(serde_json::Value::as_str);
+            if mode == Some("turn") {
+                return Err(serde::de::Error::custom(TURN_REVIEW_REMOVED));
+            }
+            if !matches!(mode, Some("inherit" | "off" | "push")) {
                 return Err(serde::de::Error::custom(
-                    "review.mode must be inherit, off, turn, or push",
+                    "review.mode must be inherit, off, or push",
                 ));
             }
             let mode = value

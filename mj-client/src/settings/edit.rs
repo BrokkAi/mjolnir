@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 fn clear_review_legacy(draft: &mut Value) {
     if let Some(review) = draft.get_mut("review").and_then(Value::as_object_mut) {
+        review.remove("trigger");
         review.remove("count");
         review.remove("profile");
         review.remove("effort");

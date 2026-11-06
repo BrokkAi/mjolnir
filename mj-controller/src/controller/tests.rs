@@ -879,7 +879,6 @@ fn registration_records_a_plain_local_directory_as_its_project() {
     config
         .targets
         .insert("local".into(), TargetTemplate::LocalBare);
-    config.review.trigger = mj_core::config::ReviewTrigger::Turn;
     config.review.reviewers = vec![mj_core::config::SubagentChoice {
         model: "gpt-6-astra".into(),
         effort: None,
@@ -923,7 +922,7 @@ fn registration_records_a_plain_local_directory_as_its_project() {
     controller.config.review.reviewers.clear();
     let mut options = launch_options(Vec::new());
     options.project_directory = Some(workspace.path().to_owned());
-    options.review = Some(mj_core::config::SessionReview::Turn { reviewers: None });
+    options.review = Some(mj_core::config::SessionReview::Push { reviewers: None });
     let no_reviewers = controller
         .register_session_reporting_review("codex", "project", "local", "plain", options)
         .unwrap();
@@ -2127,7 +2126,7 @@ fn a_session_named_review_model_takes_a_baseline_for_the_reviewer_auto_will_choo
             .register_session_with_resources("dsh", "project", "podman", "reviewable", options)
             .unwrap()
     };
-    let named = register(Some(mj_core::config::SessionReview::Turn {
+    let named = register(Some(mj_core::config::SessionReview::Push {
         reviewers: Some(vec![mj_core::config::SubagentChoice {
             model: "deepseek-flash".into(),
             effort: None,

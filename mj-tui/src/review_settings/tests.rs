@@ -99,9 +99,7 @@ fn autoconfigure_disabled_without_supported_models() {
             .borrow()
             .is_enabled(ReviewSettingsFocus::Autoconfigure)
     );
-    assert!(dialog.can_save()); // Off accepts an empty list.
-    dialog.review.trigger = ReviewTrigger::Turn;
-    assert!(!dialog.can_save());
+    assert!(dialog.can_save()); // No reviewers means review is off.
 }
 
 #[test]
@@ -243,24 +241,6 @@ fn adding_reviewer_during_legacy_upgrade_serializes_the_edit() {
             .get("reviewers")
             .is_some()
     );
-}
-
-#[test]
-fn save_validation_requires_rows_only_for_automatic_trigger() {
-    let config = config();
-    let mut dialog = ReviewSettingsDialog::new(&config);
-    assert!(dialog.can_save());
-    dialog.review.trigger = ReviewTrigger::Push;
-    assert!(!dialog.can_save());
-    assert!(
-        ReviewSettingsDialog::validation_error(&dialog.validation_snapshot(), &dialog.review)
-            .is_some()
-    );
-    dialog.review.reviewers.push(SubagentChoice {
-        model: "gpt-6-terra".into(),
-        effort: None,
-    });
-    assert!(dialog.can_save());
 }
 
 #[test]

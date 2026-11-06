@@ -195,7 +195,7 @@ fn notices(path: &[String]) -> Vec<String> {
             "Build cache settings change in the terminal Settings, which inspects this machine's mbx installation first.".to_owned(),
         ],
         ["review"] => vec![
-            "Add reviewer to choose up to three reviewers. Automatic review needs at least one reviewer.".to_owned(),
+            "Add reviewer to choose up to three reviewers. Review runs before push when at least one reviewer is set.".to_owned(),
         ],
         _ => Vec::new(),
     }
@@ -449,7 +449,7 @@ mod review_tests {
     use serde_json::json;
 
     #[test]
-    fn reviewers_can_be_edited_and_trigger_is_editable() {
+    fn reviewers_can_be_edited_and_no_trigger_is_offered() {
         let draft = json!({"review": {"trigger": "push", "reviewers": [{"model": "gpt-6-terra"}]}, "_reviewer_options": {"0": {"models": [{"value": "gpt-6-terra", "label": "Terra"}], "efforts": []}}});
         let path = |parts: &[&str]| {
             parts
@@ -462,8 +462,14 @@ mod review_tests {
             &path(&["review", "reviewers", "0", "model"]),
             &draft
         ));
-        assert!(!read_only(&path(&["review", "trigger"]), &draft));
         let page = render_page(&draft, &path(&["review"])).unwrap();
         assert_eq!(page.actions[0].id, "review.autoconfigure");
+        // The stored trigger is not a setting, so no row offers it.
+        assert!(
+            page.groups
+                .iter()
+                .flat_map(|group| &group.rows)
+                .all(|row| row.path.last().map(String::as_str) != Some("trigger"))
+        );
     }
 }

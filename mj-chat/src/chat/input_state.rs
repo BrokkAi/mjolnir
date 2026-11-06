@@ -818,7 +818,7 @@ impl ChatState {
                         // machine-wide setting from inside one conversation.
                         "on" | "off" => {
                             self.set_notice(
-                                "automatic review is configured in config.toml: [review] trigger",
+                                "review runs before push when reviewers are set in Settings › Code Review",
                             );
                             ChatAction::None
                         }

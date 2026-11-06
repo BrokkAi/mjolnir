@@ -132,13 +132,19 @@ impl PhoneConfig {
     }
 }
 
-/// Automatic review trigger and ordered reviewer choices.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Ordered reviewer choices. Review runs before push exactly when reviewers
+/// are configured; there is no separate switch. See [`ReviewConfig::trigger`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "ReviewConfigInput", into = "ReviewConfigOutput")]
 pub struct ReviewConfig {
+    /// A configuration written before reviewer lists that asked for review
+    /// but named no model. Its reviewers are chosen automatically once, after
+    /// which this is cleared. It counts as configured while it is set.
     pub legacy: Option<LegacyReview>,
-    pub trigger: ReviewTrigger,
     pub reviewers: Vec<SubagentChoice>,
+    /// Set only by [`ReviewConfig::for_session`] for a session that chose
+    /// Off. Never read from or written to a file.
+    pub disabled: bool,
 }
 
 pub const MAX_REVIEWERS: usize = 3;
@@ -150,16 +156,6 @@ pub struct LegacyReview {
     pub effort: Option<String>,
 }
 
-impl Default for ReviewConfig {
-    fn default() -> Self {
-        Self {
-            legacy: None,
-            trigger: ReviewTrigger::Off,
-            reviewers: Vec::new(),
-        }
-    }
-}
-
 impl ReviewConfig {
     pub fn is_legacy(&self) -> bool {
         self.legacy.is_some()
@@ -169,7 +165,8 @@ impl ReviewConfig {
         self.legacy = None;
     }
 
-    /// The old default represented Auto when the review table was absent.
+    /// Review as an older configuration that asked for it without naming a
+    /// model loads: reviewers still to be chosen automatically.
     pub fn legacy_default() -> Self {
         Self {
             legacy: Some(LegacyReview::default()),
@@ -178,9 +175,14 @@ impl ReviewConfig {
     }
 }
 
+/// What a save writes. The removed `trigger` key appears only while reviewers
+/// still have to be chosen automatically, so a restart before that finishes
+/// does not forget that review was wanted. Once reviewers are configured the
+/// next save drops it.
 #[derive(Serialize)]
 struct ReviewConfigOutput {
-    trigger: ReviewTrigger,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trigger: Option<ReviewTrigger>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reviewers: Option<Vec<SubagentChoice>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -195,7 +197,7 @@ impl From<ReviewConfig> for ReviewConfigOutput {
     fn from(value: ReviewConfig) -> Self {
         let legacy = value.legacy;
         Self {
-            trigger: value.trigger,
+            trigger: legacy.is_some().then_some(ReviewTrigger::Push),
             reviewers: legacy.is_none().then_some(value.reviewers),
             count: legacy.as_ref().and_then(|old| old.count),
             profile: legacy.as_ref().and_then(|old| old.profile.clone()),
@@ -204,12 +206,15 @@ impl From<ReviewConfig> for ReviewConfigOutput {
     }
 }
 
+/// Whether review runs before push for a session. It is derived, never
+/// chosen globally: see [`ReviewConfig::trigger`]. Per-turn review was
+/// removed; a stored `turn` reads as `push`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewTrigger {
     #[default]
     Off,
-    Turn,
+    #[serde(alias = "turn")]
     Push,
 }
 
@@ -217,9 +222,23 @@ impl std::fmt::Display for ReviewTrigger {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Off => "off",
-            Self::Turn => "turn",
             Self::Push => "push",
         })
+    }
+}
+
+/// The value of the removed `[review] trigger` key. Any value loads: only
+/// `push` and `turn` mean the user wanted review.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RemovedTrigger {
+    Name(String),
+    Other(serde::de::IgnoredAny),
+}
+
+impl RemovedTrigger {
+    fn wanted_review(&self) -> bool {
+        matches!(self, Self::Name(name) if matches!(name.as_str(), "push" | "turn"))
     }
 }
 
@@ -227,7 +246,7 @@ impl std::fmt::Display for ReviewTrigger {
 #[serde(deny_unknown_fields)]
 struct ReviewConfigInput {
     #[serde(default)]
-    trigger: Option<ReviewTrigger>,
+    trigger: Option<RemovedTrigger>,
     #[serde(default)]
     reviewers: Option<Vec<SubagentChoice>>,
     #[serde(default)]
@@ -259,26 +278,28 @@ impl From<ReviewConfigInput> for ReviewConfig {
             model,
             effort,
         } = input;
-        let legacy = (reviewers.is_none() && model.is_none()).then_some(LegacyReview {
+        // Review is on exactly when reviewers are configured. A table that
+        // names none but asked for review (the removed `trigger` or `enabled`
+        // keys) keeps asking for automatic reviewers; one that did not has
+        // nothing to configure and review stays off.
+        let wanted = trigger.map_or(enabled == Some(true), |trigger| trigger.wanted_review());
+        let legacy = (reviewers.is_none() && model.is_none() && wanted).then_some(LegacyReview {
             count,
             profile,
             effort: effort.clone(),
         });
         Self {
             legacy,
-            trigger: trigger.unwrap_or(if enabled == Some(true) {
-                ReviewTrigger::Turn
-            } else {
-                ReviewTrigger::Off
-            }),
             reviewers: legacy_reviewers(reviewers, count, model, effort).unwrap_or_default(),
+            disabled: false,
         }
     }
 }
 
 /// One session's review choice, made when the session is created. It
 /// overrides `[review]` for that session only; a session without one follows
-/// `[review]`.
+/// `[review]`. A stored `turn` (or `on`) reads as `push`, with the same
+/// reviewers, and is never written.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "SessionReviewInput", into = "SessionReviewOutput")]
 pub enum SessionReview {
@@ -292,9 +313,6 @@ pub enum SessionReview {
         reviewers: Option<Vec<SubagentChoice>>,
     },
     Off,
-    Turn {
-        reviewers: Option<Vec<SubagentChoice>>,
-    },
     Push {
         reviewers: Option<Vec<SubagentChoice>>,
     },
@@ -312,15 +330,7 @@ enum SessionReviewInput {
         tier: Option<String>,
     },
     Off,
-    #[serde(alias = "on")]
-    Turn {
-        reviewers: Option<Vec<SubagentChoice>>,
-        count: Option<std::num::NonZeroUsize>,
-        model: Option<String>,
-        effort: Option<String>,
-        #[expect(dead_code, reason = "accepted only so that old files still load")]
-        tier: Option<String>,
-    },
+    #[serde(alias = "turn", alias = "on")]
     Push {
         reviewers: Option<Vec<SubagentChoice>>,
         count: Option<std::num::NonZeroUsize>,
@@ -343,15 +353,6 @@ enum SessionReviewOutput {
         #[serde(skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
     },
-    #[serde(rename = "turn")]
-    LegacyTurn {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        count: Option<std::num::NonZeroUsize>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        effort: Option<String>,
-    },
     #[serde(rename = "push")]
     LegacyPush {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -366,10 +367,6 @@ enum SessionReviewOutput {
         reviewers: Option<Vec<SubagentChoice>>,
     },
     Off,
-    Turn {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reviewers: Option<Vec<SubagentChoice>>,
-    },
     Push {
         #[serde(skip_serializing_if = "Option::is_none")]
         reviewers: Option<Vec<SubagentChoice>>,
@@ -414,24 +411,6 @@ impl From<SessionReviewInput> for SessionReview {
                 }
             }
             SessionReviewInput::Off => Self::Off,
-            SessionReviewInput::Turn {
-                reviewers,
-                count,
-                model,
-                effort,
-                tier: _,
-            } => {
-                if reviewers.is_none() && (count.is_some() || model.is_some() || effort.is_some()) {
-                    Self::Legacy {
-                        trigger: Some(ReviewTrigger::Turn),
-                        count,
-                        model,
-                        effort,
-                    }
-                } else {
-                    Self::Turn { reviewers }
-                }
-            }
             SessionReviewInput::Push {
                 reviewers,
                 count,
@@ -467,11 +446,6 @@ impl From<SessionReview> for SessionReviewOutput {
                     model,
                     effort,
                 },
-                Some(ReviewTrigger::Turn) => Self::LegacyTurn {
-                    count,
-                    model,
-                    effort,
-                },
                 Some(ReviewTrigger::Push) => Self::LegacyPush {
                     count,
                     model,
@@ -480,7 +454,6 @@ impl From<SessionReview> for SessionReviewOutput {
             },
             SessionReview::Inherit { reviewers } => Self::Inherit { reviewers },
             SessionReview::Off => Self::Off,
-            SessionReview::Turn { reviewers } => Self::Turn { reviewers },
             SessionReview::Push { reviewers } => Self::Push { reviewers },
         }
     }
@@ -491,32 +464,38 @@ impl SessionReview {
             Self::Legacy { trigger, .. } => *trigger,
             Self::Inherit { .. } => None,
             Self::Off => Some(ReviewTrigger::Off),
-            Self::Turn { .. } => Some(ReviewTrigger::Turn),
             Self::Push { .. } => Some(ReviewTrigger::Push),
         }
     }
 }
 
 impl ReviewConfig {
-    pub fn arms_turn_review(&self) -> bool {
-        self.trigger == ReviewTrigger::Turn
+    /// Whether review runs before push. This is the only answer: review is on
+    /// exactly when reviewers are configured (or still to be chosen
+    /// automatically), unless the session chose Off.
+    pub fn trigger(&self) -> ReviewTrigger {
+        if !self.disabled && (self.legacy.is_some() || !self.reviewers.is_empty()) {
+            ReviewTrigger::Push
+        } else {
+            ReviewTrigger::Off
+        }
     }
 
     pub fn is_push(&self) -> bool {
-        self.trigger == ReviewTrigger::Push
+        self.trigger() == ReviewTrigger::Push
     }
 
     /// This configuration as it applies to a session with `session`'s choice.
+    /// `Off` and `Push` decide whether review runs; a session that names
+    /// neither follows `self`, whatever reviewers it lists.
     #[must_use]
     pub fn for_session(&self, session: Option<&SessionReview>) -> Self {
         let mut config = self.clone();
         match session {
             None => {}
-            Some(SessionReview::Off) => config.trigger = ReviewTrigger::Off,
+            Some(SessionReview::Off) => config.disabled = true,
             Some(choice) => {
-                if let Some(trigger) = choice.trigger() {
-                    config.trigger = trigger;
-                }
+                config.disabled = choice.trigger().is_none() && !self.is_push();
                 if let SessionReview::Legacy {
                     count,
                     model,
@@ -546,9 +525,9 @@ impl ReviewConfig {
                 }
                 let reviewers = match choice {
                     SessionReview::Legacy { .. } => unreachable!(),
-                    SessionReview::Inherit { reviewers }
-                    | SessionReview::Turn { reviewers }
-                    | SessionReview::Push { reviewers } => reviewers,
+                    SessionReview::Inherit { reviewers } | SessionReview::Push { reviewers } => {
+                        reviewers
+                    }
                     SessionReview::Off => unreachable!(),
                 };
                 if let Some(reviewers) = reviewers {
@@ -1099,7 +1078,7 @@ struct StoredConfig {
     daemon: DaemonConfig,
     #[serde(default, skip_serializing_if = "GithubConfig::is_default")]
     github: GithubConfig,
-    #[serde(default = "ReviewConfig::legacy_default")]
+    #[serde(default)]
     review: ReviewConfig,
     #[serde(
         default = "crate::continuation::ContinuationConfig::enabled",
@@ -1805,10 +1784,7 @@ impl Config {
         let contents = fs::read_to_string(path)
             .with_context(|| format!("read Mjolnir config {}", path.display()))?;
         if contents.trim().is_empty() {
-            return Ok(Self {
-                review: ReviewConfig::legacy_default(),
-                ..Self::default()
-            });
+            return Ok(Self::default());
         }
         let mut document: toml::Value = contents
             .parse()

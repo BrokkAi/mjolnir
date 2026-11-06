@@ -907,7 +907,7 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
     let mut context = chat_context("session-review", &[]);
     context.config.review = mj_core::config::ReviewConfig {
         legacy: None,
-        trigger: mj_core::config::ReviewTrigger::Turn,
+        disabled: false,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "gpt-6-terra".into(),
@@ -930,7 +930,7 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
         chat.state.review_config(),
         mj_core::config::ReviewConfig {
             legacy: None,
-            trigger: mj_core::config::ReviewTrigger::Turn,
+            disabled: false,
             reviewers: vec![
                 mj_core::config::SubagentChoice {
                     model: "gpt-6-terra".into(),
@@ -941,7 +941,9 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
         }
     );
     let title = prompt_title_parts(&chat.state);
-    assert!(title.iter().any(|part| part == "review"), "{title:?}");
+    // Review runs before push, not at the end of a turn, so the composer
+    // shows nothing for it.
+    assert!(title.iter().all(|part| part != "review"), "{title:?}");
     assert!(
         title
             .iter()

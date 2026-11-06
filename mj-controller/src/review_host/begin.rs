@@ -1,7 +1,7 @@
 use super::*;
 
 impl HostState {
-    /// Watches one session for the edge that arms an automatic review.
+    /// Records one session's view for reviewer-child questions and recovery.
     pub(super) async fn observe(
         &mut self,
         session_id: String,
@@ -13,7 +13,7 @@ impl HostState {
             .map_or(MaterializedExecutionState::Idle, |snapshot| {
                 snapshot.execution
             });
-        let previous = self.sessions.insert(
+        self.sessions.insert(
             session_id.clone(),
             SessionWatch {
                 execution,
@@ -41,48 +41,9 @@ impl HostState {
             && matches!(execution, MaterializedExecutionState::Idle)
         {
             self.begin_recovery(&session_id);
-            return;
         }
-        // A turn the harness starts on its own also runs and then goes idle.
-        // Reviewing that is a separate decision, so the edge that arms a
-        // review is the end of a turn that answered a prompt.
-        let finished_turn = previous.as_ref().is_some_and(|watch| {
-            watch.prompt_driven
-                && matches!(watch.execution, MaterializedExecutionState::Running { .. })
-        }) && matches!(execution, MaterializedExecutionState::Idle);
-        if !finished_turn || !(self.config)(&session_id).arms_turn_review() {
-            if matches!(execution, MaterializedExecutionState::Idle) {
-                self.begin_followup(&session_id);
-            }
-            return;
-        }
-        if self.reviews.contains_key(&session_id)
-            || self.preparing.contains_key(&session_id)
-            || self.pending_open.contains_key(&session_id)
-            || self.refuse_start(&session_id).is_some()
-            || self.sessions.get(&session_id).is_some_and(|watch| {
-                watch
-                    .materialized
-                    .as_ref()
-                    .is_some_and(|view| !view.queued_prompts.is_empty())
-            })
-        {
-            self.mark_followup(&session_id);
-            return;
-        }
-        if self.followups.contains(&session_id) {
-            self.begin_followup(&session_id);
-            return;
-        }
-        if !self.startup_ready {
-            self.deferred_admissions.push(HostEvent::Start {
-                session_id,
-                manual: false,
-                reply: None,
-            });
-            return;
-        }
-        self.begin(session_id, false, None);
+        // Per-turn review was removed: the end of a turn arms nothing. The
+        // rest of the turn pipeline is deleted separately.
     }
 
     pub(super) fn mark_followup(&mut self, session_id: &str) {

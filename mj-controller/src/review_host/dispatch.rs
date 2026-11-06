@@ -229,10 +229,12 @@ impl HostState {
             }
             HostEvent::RestoreGroups {
                 groups,
-                pending_followups,
+                // A follow-up marks a turn that ended during a review. Turns no
+                // longer start reviews, so a stored mark is not acted on; the
+                // next save of the row clears it.
+                pending_followups: _,
                 abandoned_children,
             } => {
-                self.followups.extend(pending_followups);
                 for (session_id, state) in groups {
                     if let Err(error) = self.restore_group(session_id, state) {
                         let _ =
