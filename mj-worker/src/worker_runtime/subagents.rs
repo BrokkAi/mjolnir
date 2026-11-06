@@ -376,6 +376,55 @@ pub(super) fn configure_claude_mailbox_hook(
     Ok(true)
 }
 
+/// Keep the person's `~/.claude/CLAUDE.md` out of the session's project
+/// instructions. The session's configuration lives in the staged profile, so
+/// Claude Code finds that file only as an ancestor of any checkout under the
+/// home directory: it loads the person's instructions a second time as
+/// project files, and the project then counts as having a CLAUDE.md, so its
+/// AGENTS.md is not loaded (anthropics/claude-code#80580). `user_home` is the
+/// HOME the harness runs with. Exclusions the person already has are kept.
+pub(super) fn exclude_default_claude_instructions(
+    root: &Path,
+    session_id: &str,
+    home: &Path,
+    user_home: Option<&Path>,
+) -> Result<()> {
+    let Some(default_config) = user_home
+        .filter(|user_home| user_home.is_absolute())
+        .map(|user_home| user_home.join(".claude"))
+        .filter(|default_config| default_config != home)
+    else {
+        return Ok(());
+    };
+    let path = home.join("settings.json");
+    if !(private_staged_home(root, session_id, home) && regular_file_or_absent(&path)) {
+        return Ok(());
+    }
+    let excluded = default_config
+        .join("CLAUDE.md")
+        .to_string_lossy()
+        .into_owned();
+    edit_profile_json(&path, "staged Claude settings", |settings| {
+        let excludes = settings
+            .entry("claudeMdExcludes")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .with_context(|| {
+                format!(
+                    "claudeMdExcludes in {} must be a JSON array",
+                    path.display()
+                )
+            })?;
+        if !excludes
+            .iter()
+            .any(|entry| entry.as_str() == Some(&excluded))
+        {
+            excludes.push(excluded.into());
+        }
+        Ok(())
+    })
+}
+
 /// Register the owned server in Codex's session-private profile. The ACP bridge
 /// cannot carry omit_tools_from. Do this on the worker before launching the
 /// harness so an upgraded worker also repairs an older staged profile.
@@ -1275,6 +1324,42 @@ mod tests {
         let elsewhere = login.path().join("session-7");
         std::fs::create_dir(&elsewhere).unwrap();
         assert!(!configure_claude_mailbox_hook(&root, "session-7", &elsewhere).unwrap());
+    }
+
+    #[test]
+    fn claude_settings_exclude_the_default_config_instructions_once() {
+        let login = tempfile::tempdir().unwrap();
+        let root = login.path().join("worker");
+        let home = root.join("profile");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("settings.json"),
+            br#"{"model":"opus","claudeMdExcludes":["/work/CLAUDE.md"]}"#,
+        )
+        .unwrap();
+
+        for _ in 0..2 {
+            exclude_default_claude_instructions(&root, "session", &home, Some(login.path()))
+                .unwrap();
+        }
+        let settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(
+            settings,
+            serde_json::json!({
+                "model": "opus",
+                "claudeMdExcludes": [
+                    "/work/CLAUDE.md",
+                    login.path().join(".claude/CLAUDE.md"),
+                ]
+            })
+        );
+
+        // A home that is not this session's staged profile is never edited.
+        let own = login.path().join(".claude");
+        std::fs::create_dir_all(&own).unwrap();
+        exclude_default_claude_instructions(&root, "session", &own, Some(login.path())).unwrap();
+        assert!(!own.join("settings.json").exists());
     }
 
     // Hard-won: #1302: a nested staging link allowed writes to the source profile.

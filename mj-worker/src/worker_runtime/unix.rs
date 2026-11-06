@@ -1692,6 +1692,13 @@ async fn prepare_and_start_harness(
             let role = subagent_role;
             let mailboxes_enabled = config.agent_mailboxes_enabled;
             let subtle_subagents = config.subtle_subagents;
+            // `config.environment` keeps only overrides; the login shell's
+            // HOME, which the harness inherits, is in the base environment.
+            let user_home = config
+                .environment
+                .get("HOME")
+                .or_else(|| base_environment.get("HOME"))
+                .map(PathBuf::from);
             let (registered, mailbox_hook_available) =
                 bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                     if step_cancel.is_cancelled() {
@@ -1708,6 +1715,12 @@ async fn prepare_and_start_harness(
                     )?;
                     let mailbox_hook_available =
                         super::subagents::configure_claude_mailbox_hook(&root, &session_id, &home)?;
+                    super::subagents::exclude_default_claude_instructions(
+                        &root,
+                        &session_id,
+                        &home,
+                        user_home.as_deref(),
+                    )?;
                     Ok((true, mailbox_hook_available))
                 })
                 .await?;
