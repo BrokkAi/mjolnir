@@ -6783,7 +6783,7 @@ fn request_mailbox_drain_for_test(
     let response = relay.handle(relay_request(
         request_id,
         RelayRequest::DrainMailbox {
-            hook_event: "PostToolUse".into(),
+            hook_event: "PostToolBatch".into(),
         },
     ));
     let RelayResponseBody::Ok {
@@ -7064,6 +7064,54 @@ fn pending_mailbox_events_and_dedup_keys_survive_journal_replay() {
         "same-key resubmission after delivery is an accepted no-op"
     );
     assert_eq!(replayed.latest_ordinal(), frontier);
+}
+
+// Hard-won: #1277: leasing mailbox events to Codex's PostToolUse hook put a
+// developer message between a tool call and its output in the rollout, and
+// DeepSeek then rejected every later request, permanently killing the session.
+#[test]
+fn mailbox_post_tool_use_drains_stay_empty_and_leave_events_for_turn_boundaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let event = mailbox_fixture_event("codex-mid-turn", false);
+    submit_relay(
+        &mut relay,
+        "codex-event-command",
+        RelayCommand::DeliverMailboxEvent {
+            event: event.clone(),
+        },
+    );
+
+    let response = relay.handle(relay_request(
+        "post-tool-use-drain",
+        RelayRequest::DrainMailbox {
+            hook_event: "PostToolUse".into(),
+        },
+    ));
+    assert!(matches!(
+        response.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::MailboxDrained {
+                lease_id: None,
+                text: None,
+                count: 0,
+            }
+        }
+    ));
+    assert!(relay.snapshot.mailbox_hook_lease.is_none());
+    assert_eq!(
+        relay.snapshot.pending_mailbox_events.as_slice(),
+        std::slice::from_ref(&event)
+    );
+
+    let (text, count, lease_id) = drain_post_tool_batch(&mut relay);
+    assert_eq!(count, 1);
+    assert_eq!(
+        text.as_deref(),
+        Some(mj_core::mailbox::render_mailbox_events(std::slice::from_ref(&event)).as_str())
+    );
+    let lease_id = lease_id.expect("turn-boundary drain creates a lease");
+    acknowledge_mailbox_for_test(&mut relay, "post-tool-batch-ack", &lease_id);
 }
 
 #[test]

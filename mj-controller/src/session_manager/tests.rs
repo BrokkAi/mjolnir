@@ -2541,7 +2541,7 @@ async fn mailbox_delivery_serializes_clear_completion_and_rechecks_stale_batches
     connection.unwrap().detach().await.unwrap();
     let mut relay =
         mj_worker::relay::DurableRelay::open(root.path(), LEASED_RELAY_SESSION, "test").unwrap();
-    let (text, count) = match relay.drain_mailbox("PostToolUse").unwrap() {
+    let (text, count) = match relay.drain_mailbox("PostToolBatch").unwrap() {
         mj_core::relay::RelayResponsePayload::MailboxDrained { text, count, .. } => (text, count),
         other => panic!("unexpected drain: {other:?}"),
     };
