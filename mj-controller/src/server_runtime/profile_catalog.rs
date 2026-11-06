@@ -114,6 +114,31 @@ struct Inner {
     refreshing: BTreeMap<CacheKey, Attempt>,
 }
 
+impl Inner {
+    /// The `models` allow-list of the profile `identity` names: the live
+    /// configuration's when it has that profile, else the latest draft's.
+    /// Read at publication, so an edit applies without rediscovery.
+    fn allowed_models(&self, identity: &str) -> Vec<String> {
+        self.live
+            .iter()
+            .flat_map(Config::enabled_profiles)
+            .find(|(id, profile)| profile.capabilities_key(id) == identity)
+            .map(|(_, profile)| profile.models.clone())
+            .or_else(|| {
+                let definition = self.definitions.get(identity)?;
+                Some(
+                    definition
+                        .config
+                        .profiles
+                        .get(&definition.id)?
+                        .models
+                        .clone(),
+                )
+            })
+            .unwrap_or_default()
+    }
+}
+
 pub(crate) struct ProfileCatalog {
     cancellation: CancellationToken,
     inner: Mutex<Inner>,
@@ -231,10 +256,17 @@ impl ProfileCatalog {
                 .definitions
                 .keys()
                 .map(|identity| {
-                    let choices = inner
+                    let allowed = inner.allowed_models(identity);
+                    let choices = match inner
                         .entries
                         .get(&(identity.clone(), None))
-                        .map_or(CapabilityState::Pending, Entry::state);
+                        .map_or(CapabilityState::Pending, Entry::state)
+                    {
+                        CapabilityState::Ready(choices) => {
+                            CapabilityState::Ready(choices.restricted_to(&allowed))
+                        }
+                        other => other,
+                    };
                     // Only models whose efforts were claimed are listed.
                     let efforts = match &choices {
                         CapabilityState::Ready(choices) => choices
@@ -272,6 +304,18 @@ impl ProfileCatalog {
             let mut inner = self.lock();
             let first = inner.live.is_none();
             let changed = inner.live.as_ref() != Some(config);
+            // The allow-list is applied when the snapshot is built, so a
+            // cached snapshot would keep serving the old one.
+            let models = |config: &Config| {
+                config
+                    .profiles
+                    .iter()
+                    .map(|(id, profile)| (id.clone(), profile.models.clone()))
+                    .collect::<BTreeMap<_, _>>()
+            };
+            if inner.live.as_ref().map(models) != Some(models(config)) {
+                inner.publication = None;
+            }
             if let Some(old) = &inner.live {
                 for (id, profile) in old.enabled_profiles() {
                     let identity = profile.capabilities_key(id);
@@ -324,10 +368,7 @@ impl ProfileCatalog {
 
     async fn upgrade_legacy_review(self: &Arc<Self>, _attempt: usize) -> Result<()> {
         let discovery_config = self.live()?;
-        let definitions = discovery_config
-            .enabled_profiles()
-            .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
-            .collect::<Vec<_>>();
+        let definitions = upgrade_definitions(&discovery_config);
         let legacy = discovery_config
             .review
             .legacy
@@ -495,7 +536,7 @@ impl ProfileCatalog {
         path: &Path,
         reviewers: Vec<mj_core::config::SubagentChoice>,
         disable_auto: bool,
-        definitions: &[(String, String)],
+        definitions: &[UpgradeDefinition],
         legacy: &mj_core::config::LegacyReview,
     ) -> Result<bool> {
         if reviewers.is_empty() && !disable_auto {
@@ -508,11 +549,7 @@ impl ProfileCatalog {
             if config.review.legacy.as_ref() != Some(legacy) {
                 anyhow::bail!("legacy review settings changed during reviewer discovery");
             }
-            let current = config
-                .enabled_profiles()
-                .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
-                .collect::<Vec<_>>();
-            if current != definitions {
+            if upgrade_definitions(config) != definitions {
                 anyhow::bail!("profile definitions changed during reviewer discovery");
             }
             config.review.reviewers = reviewers;
@@ -549,8 +586,17 @@ impl ProfileCatalog {
                     if !live && !definition.cancellation.is_cancelled() {
                         // Keep successful entries and the in-flight attempt.
                         // A failed owner's next retry uses refreshed credentials.
+                        let models_changed = definition
+                            .config
+                            .profiles
+                            .get(&definition.id)
+                            .map(|old| &old.models)
+                            != Some(&profile.models);
                         definition.config = config.clone();
                         let definition = definition.clone();
+                        if models_changed {
+                            inner.publication = None;
+                        }
                         if let Some(Entry::Ready(choices)) =
                             inner.entries.get(&(identity.clone(), None)).cloned()
                         {
@@ -934,6 +980,8 @@ impl ProfileCatalog {
         })
     }
 
+    /// What `id` offers under its `models` allow-list. Every reader of a
+    /// profile's choices comes through here or through [`Self::snapshot`].
     async fn fetch(
         self: &Arc<Self>,
         config: &Config,
@@ -941,9 +989,61 @@ impl ProfileCatalog {
         model: Option<String>,
     ) -> Result<ProfileConfig> {
         let profile = config.enabled_profile(id).context("profile unavailable")?;
+        let identity = profile.capabilities_key(id);
+        // Model-specific probes select that model to discover its efforts. Only
+        // the default probe can grant the default-model exemption.
+        let specific = model.is_some();
+        let mut choices = self.fetch_unrestricted(config, id, model).await?;
+        let allowed = self.lock().allowed_models(&identity);
+        if allowed.is_empty() {
+            return Ok(choices);
+        }
+        let selected = choices.model.clone();
+        // A default read already carries the default model. A model-specific
+        // read uses the default entry it already depended on. Reading it must
+        // not start another live probe and replace concurrent readers.
+        let default = if specific {
+            let cached = self.lock().entries.get(&(identity.clone(), None)).cloned();
+            match cached {
+                Some(Entry::Ready(choices)) => choices.model,
+                Some(Entry::Pending(attempt)) => {
+                    attempt
+                        .await
+                        .map_err(|error| anyhow::anyhow!("{}", error.message))?
+                        .model
+                }
+                Some(Entry::Failed { error, .. }) => bail!("{error}"),
+                None => self.fetch_unrestricted(config, id, None).await?.model,
+            }
+        } else {
+            selected.clone()
+        };
+        choices.model = default;
+        // The list may have changed during the probes; apply the current one.
+        let allowed = self.lock().allowed_models(&identity);
+        choices = choices.restricted_to(&allowed);
+        choices.model = selected;
+        Ok(choices)
+    }
+
+    /// What `id`'s harness advertises, before the allow-list. Only `mj doctor`
+    /// asks for this, to compare the allow-list with the catalogue.
+    async fn fetch_unrestricted(
+        self: &Arc<Self>,
+        config: &Config,
+        id: &str,
+        model: Option<String>,
+    ) -> Result<ProfileConfig> {
+        let profile = config.enabled_profile(id).context("profile unavailable")?;
         let live = profile.kind == HarnessKind::Muse;
-        self.ensure(config);
-        let key = (profile.capabilities_key(id), model);
+        // A live read has its own fresh-probe admission in fetch_live. Re-
+        // ensuring an adopted definition would retire that owner and discard
+        // the default entry that model-specific reads depend on.
+        let identity = profile.capabilities_key(id);
+        if !live || !self.lock().definitions.contains_key(&identity) {
+            self.ensure(config);
+        }
+        let key = (identity, model);
         let cancellation = self.lock().definitions[&key.0].cancellation.clone();
         let mut revisions = self.revisions.subscribe();
         if live {
@@ -1059,6 +1159,16 @@ impl ProfileCatalog {
             .context("the profile catalogue has not adopted a configuration")
     }
 
+    /// The live `models` allow-list of profile `id`; empty offers everything.
+    pub(crate) fn allowed_models(&self, id: &str) -> Vec<String> {
+        self.lock()
+            .live
+            .as_ref()
+            .and_then(|config| config.enabled_profile(id))
+            .map(|profile| profile.models.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn candidates(&self) -> Result<Vec<(String, HarnessKind)>> {
         let config = self.live()?;
         Ok(config
@@ -1101,10 +1211,28 @@ impl ProfileCatalog {
         self.live_capabilities(&profile, Some(model)).await
     }
 
+    /// The catalogue `id`'s harness advertises, ignoring its `models`
+    /// allow-list. See [`Self::fetch_unrestricted`].
+    pub(crate) async fn unrestricted_capabilities(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> Result<ProfileConfig> {
+        self.read_live(id, None, true).await
+    }
+
     async fn live_capabilities(
         self: &Arc<Self>,
         id: &str,
         model: Option<String>,
+    ) -> Result<ProfileConfig> {
+        self.read_live(id, model, false).await
+    }
+
+    async fn read_live(
+        self: &Arc<Self>,
+        id: &str,
+        model: Option<String>,
+        unrestricted: bool,
     ) -> Result<ProfileConfig> {
         loop {
             let config = self.live()?;
@@ -1112,7 +1240,11 @@ impl ProfileCatalog {
                 .enabled_profile(id)
                 .context("profile unavailable")?
                 .capabilities_key(id);
-            let result = self.fetch(&config, id, model.clone()).await;
+            let result = if unrestricted {
+                self.fetch_unrestricted(&config, id, model.clone()).await
+            } else {
+                self.fetch(&config, id, model.clone()).await
+            };
             let current = self.live()?;
             if current
                 .enabled_profile(id)
@@ -1196,6 +1328,25 @@ impl ProfileCatalog {
     }
 }
 
+/// One enabled profile as the legacy review upgrade saw it: its id, its
+/// capability key, and its `models` list. The key leaves `models` out, so
+/// the save also compares the list: a profile that stopped offering a
+/// chosen model must not get it saved as a reviewer.
+type UpgradeDefinition = (String, String, Vec<String>);
+
+fn upgrade_definitions(config: &Config) -> Vec<UpgradeDefinition> {
+    config
+        .enabled_profiles()
+        .map(|(id, profile)| {
+            (
+                id.to_owned(),
+                profile.capabilities_key(id),
+                profile.models.clone(),
+            )
+        })
+        .collect()
+}
+
 /// A configuration with the named profiles enabled.
 #[cfg(test)]
 pub(crate) fn test_config(profiles: &[(&str, HarnessKind)]) -> Config {
@@ -1206,15 +1357,10 @@ pub(crate) fn test_config(profiles: &[(&str, HarnessKind)]) -> Config {
                 (
                     (*id).to_owned(),
                     HarnessProfile {
-                        enabled: true,
-                        kind: *kind,
-                        home: std::path::PathBuf::from("/home/agent").join(id),
-                        environment: Default::default(),
-                        context_window_bytes: None,
-                        legacy_subagents: Default::default(),
-                        guardian_review_model: None,
-                        codex_profile: None,
-                        muse_auto_review: None,
+                        ..mj_core::config::HarnessProfile::new(
+                            *kind,
+                            std::path::PathBuf::from("/home/agent").join(id),
+                        )
                     },
                 )
             })
@@ -2227,10 +2373,7 @@ mod tests {
         let path = directory.path().join("config.toml");
         legacy_review_file(&path);
         let original = Config::load_from(&path).unwrap();
-        let definitions = original
-            .enabled_profiles()
-            .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
-            .collect::<Vec<_>>();
+        let definitions = upgrade_definitions(&original);
         let mut changed = original.clone();
         changed
             .profiles
@@ -2255,15 +2398,37 @@ mod tests {
     }
 
     #[test]
+    fn legacy_upgrade_retries_when_a_profile_models_list_changes_before_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        legacy_review_file(&path);
+        let original = Config::load_from(&path).unwrap();
+        let definitions = upgrade_definitions(&original);
+        let mut changed = original.clone();
+        changed.profiles.get_mut("codex").unwrap().models = vec!["gpt-6.1-sol".into()];
+        changed.save_to(&path).unwrap();
+        let error = ProfileCatalog::persist_legacy_review_to(
+            &path,
+            vec![mj_core::config::SubagentChoice {
+                model: "gpt-6.1-terra".into(),
+                effort: None,
+            }],
+            false,
+            &definitions,
+            original.review.legacy.as_ref().unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("profile definitions changed"));
+        assert!(Config::load_from(&path).unwrap().review.is_legacy());
+    }
+
+    #[test]
     fn complete_legacy_auto_without_supported_models_turns_review_off() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         legacy_review_file(&path);
         let config = Config::load_from(&path).unwrap();
-        let definitions = config
-            .enabled_profiles()
-            .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
-            .collect::<Vec<_>>();
+        let definitions = upgrade_definitions(&config);
         assert!(
             ProfileCatalog::persist_legacy_review_to(
                 &path,
@@ -2313,6 +2478,198 @@ mod tests {
             !std::fs::read_to_string(&path)
                 .unwrap()
                 .contains("reviewers = []")
+        );
+    }
+
+    /// The `models` allow-list reaches every reader through the two exits of
+    /// the catalogue, and an edit applies without a new probe.
+    #[tokio::test]
+    async fn a_models_allow_list_filters_the_snapshot_and_reads_until_the_config_changes() {
+        let probes = calls();
+        let counted = probes.clone();
+        let catalog = ProfileCatalog::with_probe(Arc::new(move |profile| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let mut choices = test_choices(&profile);
+                choices
+                    .models
+                    .extend((1..4).map(|index| mj_core::acp::SessionConfigChoice {
+                        value: format!("m{index}"),
+                        name: format!("m{index}"),
+                        description: None,
+                    }));
+                Ok(choices)
+            })
+        }));
+        let values = |choices: &ProfileConfig| {
+            choices
+                .models
+                .iter()
+                .map(|choice| choice.value.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut config = test_config(&[("p", HarnessKind::Codex)]);
+        let key = config.profiles["p"].capabilities_key("p");
+        let snapshot_models =
+            |catalog: &Arc<ProfileCatalog>| match &catalog.snapshot().profiles[&key].choices {
+                CapabilityState::Ready(choices) => values(choices),
+                other => panic!("not ready: {other:?}"),
+            };
+        catalog.sync_now(&config).await;
+        assert_eq!(snapshot_models(&catalog), ["p-model", "m1", "m2", "m3"]);
+
+        // The current model stays offered although the list omits it.
+        config.profiles.get_mut("p").unwrap().models = vec!["m2".into(), "unadvertised".into()];
+        assert_eq!(
+            config.profiles["p"].capabilities_key("p"),
+            key,
+            "the allow-list is not part of the cache key"
+        );
+        let probed = probes.load(Ordering::SeqCst);
+        catalog.sync_now(&config).await;
+        assert_eq!(snapshot_models(&catalog), ["p-model", "m2"]);
+        let read = catalog.capabilities(&["p".into()]).await.unwrap();
+        assert_eq!(values(&read[0]), ["p-model", "m2"]);
+        let model_read = catalog
+            .model_capabilities("p".into(), "m2".into())
+            .await
+            .unwrap();
+        assert_eq!(values(&model_read), ["p-model", "m2"]);
+        let unrestricted = catalog.unrestricted_capabilities("p").await.unwrap();
+        assert_eq!(values(&unrestricted), ["p-model", "m1", "m2", "m3"]);
+        assert_eq!(catalog.allowed_models("p"), ["m2", "unadvertised"]);
+        assert_eq!(
+            probes.load(Ordering::SeqCst),
+            probed,
+            "editing the allow-list does not rediscover"
+        );
+
+        config.profiles.get_mut("p").unwrap().models.clear();
+        catalog.sync_now(&config).await;
+        assert_eq!(snapshot_models(&catalog), ["p-model", "m1", "m2", "m3"]);
+    }
+    // Hard-won: dfbb210a5: restricted Muse reads restarted default discovery.
+    #[tokio::test]
+    async fn restricted_live_model_read_reuses_cached_default() {
+        let probes = calls();
+        let counted = probes.clone();
+        let catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            counting_probe(probes.clone()),
+            Arc::new(move |id, model| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    let mut choices = test_choices(&id);
+                    choices.model = Some(model);
+                    Ok(choices)
+                })
+            }),
+        );
+        let mut config = test_config(&[("p", HarnessKind::Muse)]);
+        config.profiles.get_mut("p").unwrap().models = vec!["allowed".into()];
+        catalog.sync_now(&config).await;
+        probes.store(0, Ordering::SeqCst);
+        let choices = catalog
+            .model_capabilities("p".into(), "allowed".into())
+            .await
+            .unwrap();
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        assert!(
+            choices
+                .models
+                .iter()
+                .any(|choice| choice.value == "p-model")
+        );
+    }
+
+    // Hard-won: a2afafcb3: a model probe exempted its requested hidden model.
+    #[tokio::test]
+    async fn a_model_probe_cannot_exempt_a_hidden_requested_model() {
+        let probe: Arc<Probe> = Arc::new(|id| {
+            Box::pin(async move {
+                let mut choices = test_choices(&id);
+                choices.models.push(mj_core::acp::SessionConfigChoice {
+                    value: "hidden".into(),
+                    name: "hidden".into(),
+                    description: None,
+                });
+                Ok(choices)
+            })
+        });
+        let default_probe = probe.clone();
+        let catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            default_probe,
+            Arc::new(move |id, model| {
+                let probe = probe.clone();
+                Box::pin(async move {
+                    let mut choices = probe(id).await?;
+                    choices.model = Some(model);
+                    Ok(choices)
+                })
+            }),
+        );
+        let mut config = test_config(&[("p", HarnessKind::Codex)]);
+        config.profiles.get_mut("p").unwrap().models = vec!["allowed".into()];
+        catalog.sync_now(&config).await;
+        let choices = catalog
+            .model_capabilities("p".into(), "hidden".into())
+            .await
+            .unwrap();
+        assert!(crate::server::api::validate_selectors(&choices, Some("hidden"), None).is_err());
+        assert!(
+            choices
+                .models
+                .iter()
+                .any(|choice| choice.value == "p-model")
+        );
+    }
+
+    // Hard-won: a2afafcb3: a pending read applied its starting allowlist.
+    #[tokio::test]
+    async fn a_pending_discovery_uses_the_current_models_setting() {
+        let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+        let (release, gate) = tokio::sync::watch::channel(false);
+        let catalog = ProfileCatalog::with_probe(Arc::new(move |id| {
+            let mut gate = gate.clone();
+            let started = started_tx.clone();
+            Box::pin(async move {
+                started.send(()).unwrap();
+                if !*gate.borrow() {
+                    gate.changed().await.unwrap();
+                }
+                let mut choices = test_choices(&id);
+                choices.models.extend(["old", "new"].map(|value| {
+                    mj_core::acp::SessionConfigChoice {
+                        value: value.into(),
+                        name: value.into(),
+                        description: None,
+                    }
+                }));
+                Ok(choices)
+            })
+        }));
+        let mut config = test_config(&[("p", HarnessKind::Codex)]);
+        config.profiles.get_mut("p").unwrap().models = vec!["old".into()];
+        catalog.sync(&config);
+        started.recv().await.unwrap();
+        let reader = {
+            let catalog = catalog.clone();
+            let config = config.clone();
+            tokio::spawn(async move { catalog.fetch(&config, "p", None).await })
+        };
+        tokio::task::yield_now().await;
+        config.profiles.get_mut("p").unwrap().models = vec!["new".into()];
+        catalog.sync(&config);
+        release.send(true).unwrap();
+        let choices = reader.await.unwrap().unwrap();
+        assert_eq!(
+            choices
+                .models
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            ["p-model", "new"]
         );
     }
 }

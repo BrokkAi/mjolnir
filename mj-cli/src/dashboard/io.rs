@@ -36,7 +36,6 @@ use crate::daemon;
 use crate::dashboard::{CriticalOperationTracker, DashboardContext};
 use crate::import::{DashboardImportSuccess, PendingDashboardImport, persist_imported_session};
 use crate::pollers::{DashboardLifecycleUpdate, LifecycleSuccess};
-use crate::short_id;
 
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
@@ -921,7 +920,7 @@ impl DashboardContext {
                             chat.restore_transcript_position(position);
                         }
                         self.restore_question_draft(&session_id, &mut chat);
-                        for (prompt,inherited_draft) in chat.startup_retry_prompts() {self.startup_prompts.resume(session_id.clone(),prompt,inherited_draft,self.dashboard_io_tx.clone(),self.critical_operations.clone());}
+                        for (prompt,inherited_draft) in chat.startup_retry_prompts() {self.startup_prompts.resume(NamedSession { name: session_notice_name(&self.controller.state, &session_id), id: session_id.clone() },prompt,inherited_draft,self.dashboard_io_tx.clone(),self.critical_operations.clone());}
                         self.chats.insert(session_id.clone(), chat);
                         // The context travelled with the attach, which is
                         // asynchronous; anything the surface learned while it
@@ -2644,6 +2643,8 @@ mod tests {
 
     fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
         SessionRecord {
+            oracle_choice: None,
+            oracle: true,
             project: None,
             target_runtime: None,
             launch_base: None,

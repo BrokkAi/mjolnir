@@ -61,6 +61,7 @@ pub(super) async fn run_session_actor(
     view_tx: watch::Sender<ManagedSessionView>,
     updates: CoalescedUpdateSender,
 ) {
+    let mut policies = updates.model_policies.subscribe();
     let mut connection: Option<StandaloneSession> = None;
     let mut failures = 0_u32;
     let mut next_cpu_read = tokio::time::Instant::now();
@@ -82,6 +83,7 @@ pub(super) async fn run_session_actor(
         Returned(Option<Box<ReturnedConnection>>),
         Reviewer(Option<std::result::Result<(), tokio::task::JoinError>>),
         Tick,
+        Policy,
         Command(Option<Box<ActorCommand>>),
         Retirement(std::result::Result<(), watch::error::RecvError>),
         Storage(std::result::Result<(), watch::error::RecvError>),
@@ -110,6 +112,7 @@ pub(super) async fn run_session_actor(
                     // daemon owns persistence; a changed desired target
                     // retires this actor and starts a fresh one.
                     () = tokio::time::sleep_until(schedule.deadline), if !matches!(view_tx.borrow().error.as_ref(), Some(ViewError::TargetMissing(_))) => Event::Tick,
+                    _ = policies.changed() => Event::Policy,
                     command = commands.recv() => Event::Command(command.map(Box::new)),
                     changed = retirement.changed() => Event::Retirement(changed),
                     changed = storage.changed(), if storage_wait.is_some() => Event::Storage(changed),
@@ -117,6 +120,22 @@ pub(super) async fn run_session_actor(
             } => event,
         };
         match event {
+            Event::Policy => {
+                policies.borrow_and_update();
+                if let Some(connection) = &connection {
+                    publish_view(
+                        &target.session_id,
+                        ManagedSessionView {
+                            snapshot: Some(connection.snapshot()),
+                            connected: true,
+                            error: None,
+                        },
+                        &view_tx,
+                        &updates,
+                    );
+                }
+            }
+
             Event::Storage(changed) => {
                 storage.borrow_and_update();
                 let Some(host) = storage_wait.as_deref() else {
@@ -1100,6 +1119,22 @@ pub(super) async fn deliver_submit(
         command,
         reply,
     } = submission;
+    let refusal = updates
+        .model_policies
+        .borrow()
+        .get(&target.session_id)
+        .and_then(|policy| {
+            policy.refusal(
+                &command,
+                connection
+                    .as_ref()
+                    .map(|connection| &*connection.operational),
+            )
+        });
+    if let Some(refusal) = refusal {
+        let _ = reply.send(Err(refusal.into()));
+        return;
+    }
     if crate::controller::move_session::move_refuses_command(&target.session_id, &command) {
         let _ = reply.send(Err(
             "session is moving; keep the draft and retry after Move finishes".into(),
@@ -1638,7 +1673,7 @@ pub(super) fn view_is_unchanged(current: &ManagedSessionView, next: &ManagedSess
 
 pub(super) fn publish_view(
     session_id: &str,
-    view: ManagedSessionView,
+    mut view: ManagedSessionView,
     watch: &watch::Sender<ManagedSessionView>,
     updates: &CoalescedUpdateSender,
 ) {
@@ -1648,6 +1683,34 @@ pub(super) fn publish_view(
     tracing::debug!(target: "mj_controller::latency", %session_id,
         ordinal = ?view.snapshot.as_ref().map(|s| s.materialized.applied_event_ordinal),
         "session view publication");
+    // Capture cache input before projecting the single view shared by every reader.
+    // StandaloneSession retains the untouched relay state for future policy edits.
+    // Disconnected/error views retain the already projected watch snapshot;
+    // republishing them must never turn that snapshot into harness input.
+    let raw_observation = view
+        .snapshot
+        .as_ref()
+        .filter(|_| view.connected && view.error.is_none())
+        .and_then(|snapshot| {
+            let state = &snapshot.operational;
+            if !state.native_session_is_ready() {
+                return None;
+            }
+            let mut previous = updates
+                .last_raw_options
+                .lock()
+                .expect("raw options poisoned");
+            if previous.as_ref() == Some(&state.config_options) {
+                return None;
+            }
+            *previous = Some(state.config_options.clone());
+            Some(state.clone())
+        });
+    if let Some(snapshot) = &mut view.snapshot
+        && let Some(policy) = updates.model_policies.borrow().get(session_id)
+    {
+        policy.filter(&mut snapshot.operational);
+    }
     let changed = watch.send_if_modified(|current| {
         if view_is_unchanged(current, &view) {
             return false;
@@ -1655,8 +1718,9 @@ pub(super) fn publish_view(
         *current = view.clone();
         true
     });
-    if changed {
+    if changed || raw_observation.is_some() {
         updates.send(SessionManagerUpdate {
+            raw_observation,
             session_id: session_id.to_owned(),
             view,
         });

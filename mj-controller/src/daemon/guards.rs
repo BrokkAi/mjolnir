@@ -64,7 +64,7 @@ pub(super) fn workspace_snapshot(workspace_id: &str) -> Result<WorkspaceSnapshot
         .filter(|session| session.state.is_active() && ids.contains(&session.id))
         .map(|session| SessionPreview {
             id: session.id.clone(),
-            title: session.display_title().to_owned(),
+            title: session.listed_title().to_owned(),
             project: session.project_name(&controller.config),
             harness: session.harness_kind.display_name().to_owned(),
             state: session.state.as_str().to_owned(),

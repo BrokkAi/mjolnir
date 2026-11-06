@@ -484,6 +484,14 @@ An unavailable choice answers `422` with code `subagent_choice_unavailable`.
 Move can explicitly change the policy; omission retains it. Legacy `none`
 policies and child sessions remain readable. Per-profile defaults are ignored.
 
+`oracle` (boolean) and `oracle_choice` (`{"model": "...", "effort": "..."}`) set
+the session's read-only oracle on Create and Move, independently of `subagents`.
+On Create an omitted `oracle` uses the choice last made for the profile, and an
+`oracle_choice` implies `true`. On Move, omission retains the session's values,
+and `oracle: false` keeps the override. An explicit request with no oracle model
+configured or given creates or moves the session with the oracle off and a
+notice.
+
 `POST /api/v1/sessions/{session_id}/subagents` starts a child with `task_name`
 and `instructions`. Optional `task_type` is `straightforward` or `subtle`;
 omission uses Straightforward for older callers. `subtle` fails with `409` when
@@ -1128,7 +1136,9 @@ resuming do, and [security boundaries](/security/) for what the token reaches.
 `GET /api/v1/profiles/{profile_id}/config` returns `model`, `models`, `efforts`,
 and `observed_at` (Unix seconds). Each choice contains its exact `value`, display
 `name`, and optional `description`. Add `?model=<value>` to discover effort
-choices for that model. An empty cache is populated automatically with a
+choices for that model. The list contains only what the profile's `models`
+allow-list lets through (its current model is always listed); add
+`?unrestricted=true` for everything the harness advertises. An empty cache is populated automatically with a
 prompt-free harness probe; no project session or container is created. The
 first lookup may install the managed harness on the controller and take several
 minutes. Discovery currently requires a Unix controller with the harness's

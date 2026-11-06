@@ -40,7 +40,7 @@ pub(crate) fn surface_quota_report(report: &ProfileQuota) -> ProfileQuota {
     visible
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QuotaRefreshRequest {
     pub profile_id: String,
     pub harness: HarnessKind,
@@ -504,21 +504,29 @@ async fn refresh_profile_with_cache_root(
         codex_source,
         runtime,
     } = request;
-    // Only the checks that start a harness program consult the runtime.
-    let container = || -> Result<Option<crate::quota_runtime::ContainerCheck>> {
-        Ok(
-            match crate::quota_runtime::QuotaRuntime::current(&runtime)? {
-                crate::quota_runtime::QuotaRuntime::Host => None,
-                crate::quota_runtime::QuotaRuntime::Container(runtime) => {
-                    Some(crate::quota_runtime::ContainerCheck {
-                        runtime,
-                        home: source_home.clone(),
-                    })
-                }
-            },
-        )
-    };
+    // Only the checks that start a harness program consult the runtime, each
+    // saying whether this host already has the harness it would start.
+    let container =
+        |host_has_harness: bool| -> Result<Option<crate::quota_runtime::ContainerCheck>> {
+            Ok(
+                match crate::quota_runtime::QuotaRuntime::current(&runtime, host_has_harness)? {
+                    crate::quota_runtime::QuotaRuntime::Host => None,
+                    crate::quota_runtime::QuotaRuntime::Container(runtime) => {
+                        Some(crate::quota_runtime::ContainerCheck {
+                            runtime,
+                            home: source_home.clone(),
+                        })
+                    }
+                },
+            )
+        };
     let environment = environment.into_iter().collect::<HashMap<_, _>>();
+    // The PATH a host check's program is found on: the profile's own when it
+    // sets one, as the subprocess then receives it, else the daemon's.
+    let host_path = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"));
     let refreshed_at_epoch_seconds = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
@@ -587,7 +595,10 @@ async fn refresh_profile_with_cache_root(
                 "could not read the Codex configuration: {error}"
             )),
             CodexQuotaSource::ChatGptLogin => 'codex: {
-                let launcher = match container() {
+                let launcher = match container(codex_usage::host_has_codex(
+                    cache_root.as_deref(),
+                    host_path.as_deref(),
+                )) {
                     Ok(Some(check)) => codex_usage::CodexLauncher::Container(check),
                     Ok(None) => match mj_core::placement::local_harness_runtime() {
                         mj_core::worker_launch::HarnessRuntimePolicy::Image => {
@@ -676,7 +687,7 @@ async fn refresh_profile_with_cache_root(
         HarnessKind::Claude => match if cfg!(target_os = "macos") {
             Ok(None)
         } else {
-            container()
+            container(claude_usage::host_has_claude(host_path.as_deref()))
         } {
             Err(error) => Err(error),
             Ok(container) => claude_usage::query(source_home, environment, container)
@@ -778,7 +789,8 @@ async fn refresh_profile_with_cache_root(
         // Grok Build publishes no HTTP quota endpoint. Its own usage view polls
         // an ACP billing extension, and so does Mjolnir.
         HarnessKind::Grok => 'grok: {
-            let container = match container() {
+            let host_has_grok = grok_usage::host_has_grok(&source_home, host_path.as_deref());
+            let container = match container(host_has_grok) {
                 Ok(container) => container,
                 Err(error) => break 'grok Err(error),
             };

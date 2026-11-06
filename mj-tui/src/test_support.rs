@@ -249,43 +249,28 @@ pub(crate) fn config() -> Config {
             (
                 "claude-1".into(),
                 HarnessProfile {
-                    enabled: true,
-                    context_window_bytes: None,
-                    legacy_subagents: Default::default(),
-                    guardian_review_model: None,
-                    muse_auto_review: None,
-                    codex_profile: None,
-                    kind: HarnessKind::Claude,
-                    home: PathBuf::from("/profiles/claude"),
-                    environment: Default::default(),
+                    ..mj_core::config::HarnessProfile::new(
+                        HarnessKind::Claude,
+                        PathBuf::from("/profiles/claude"),
+                    )
                 },
             ),
             (
                 "codex-1".into(),
                 HarnessProfile {
-                    enabled: true,
-                    context_window_bytes: None,
-                    legacy_subagents: Default::default(),
-                    guardian_review_model: None,
-                    muse_auto_review: None,
-                    codex_profile: None,
-                    kind: HarnessKind::Codex,
-                    home: PathBuf::from("/profiles/codex"),
-                    environment: Default::default(),
+                    ..mj_core::config::HarnessProfile::new(
+                        HarnessKind::Codex,
+                        PathBuf::from("/profiles/codex"),
+                    )
                 },
             ),
             (
                 "codex-2".into(),
                 HarnessProfile {
-                    enabled: true,
-                    context_window_bytes: None,
-                    legacy_subagents: Default::default(),
-                    guardian_review_model: None,
-                    muse_auto_review: None,
-                    codex_profile: None,
-                    kind: HarnessKind::Codex,
-                    home: PathBuf::from("/profiles/codex-two"),
-                    environment: Default::default(),
+                    ..mj_core::config::HarnessProfile::new(
+                        HarnessKind::Codex,
+                        PathBuf::from("/profiles/codex-two"),
+                    )
                 },
             ),
         ]),
@@ -322,6 +307,8 @@ pub(crate) fn config() -> Config {
 
 pub(crate) fn stopped_session() -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -374,6 +361,7 @@ pub(crate) fn stopped_session() -> SessionRecord {
 /// actually on the dashboard.
 pub(crate) fn running_session() -> SessionRecord {
     SessionRecord {
+        oracle: true,
         project: None,
         state: SessionState::Running,
         ..stopped_session()
@@ -480,6 +468,7 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_oracle_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),

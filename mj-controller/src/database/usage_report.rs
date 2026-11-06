@@ -45,16 +45,23 @@ fn load_with(
         until_ms: now_ms,
         ..Default::default()
     };
-    let mut roots = tx.prepare("SELECT session_id, COALESCE(session_title_override, acp_session_title, title), last_profile, state
+    let mut roots = tx.prepare("SELECT session_id, title, session_title_override, acp_session_title, last_profile, state
         FROM sessions s WHERE NOT EXISTS(SELECT 1 FROM subagent_accounting a WHERE a.child_session_id=s.session_id) ORDER BY session_id")?;
     let roots = roots
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
+            let id = row.get::<_, String>(0)?;
+            let title = row.get::<_, String>(1)?;
+            let title_override = row.get::<_, Option<String>>(2)?;
+            let acp_title = row.get::<_, Option<String>>(3)?;
+            // Named as the session list names it.
+            let name = mj_core::state::listed_session_title(
+                &id,
+                &title,
+                title_override.as_deref(),
+                acp_title.as_deref(),
+            )
+            .to_owned();
+            Ok((id, name, row.get::<_, String>(4)?, row.get::<_, String>(5)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut profiles = roots

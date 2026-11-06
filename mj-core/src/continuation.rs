@@ -73,8 +73,10 @@ pub struct HarnessCompletion {
     pub settled_at_ms: i64,
 }
 
+const HARNESS_TURN_ID_PREFIX: &str = "harness-turn-";
+
 pub fn harness_turn_id(start_ordinal: u64) -> String {
-    format!("harness-turn-{start_ordinal}")
+    format!("{HARNESS_TURN_ID_PREFIX}{start_ordinal}")
 }
 
 /// Id prefix of the goal resume Mjolnir submits when a quota recovery comes

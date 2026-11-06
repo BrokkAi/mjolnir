@@ -1762,8 +1762,11 @@ async fn claude_plan_approval_form_selects_the_policy_mode_and_refuses_hidden_by
 
 /// Exercise the actual ACP callbacks, including the harness-specific plan
 /// envelopes, while keeping question ownership independent of harness kind.
+/// A parent agent answers questions with a message but cannot grant
+/// approvals, so tool permissions and plan reviews stay open for a person,
+/// and so do secrets, which a message would keep in plain text.
 #[tokio::test]
-async fn managed_children_cancel_questions_and_permissions_at_the_original_responder() {
+async fn managed_children_cancel_questions_and_keep_approvals_for_a_person() {
     for harness in HarnessKind::ALL {
         for policy in [
             ExecutionPolicy::ConfiguredApprovals,
@@ -1777,6 +1780,12 @@ async fn managed_children_cancel_questions_and_permissions_at_the_original_respo
             let question = json!({
                 "jsonrpc":"2.0", "id":"ask", "method":"elicitation/create", "params":{
                     "sessionId":"plan-session", "mode":"form", "message":"Which file?",
+                    "requestedSchema":{"type":"object", "properties":{"file":{"type":"string", "title":"File"}}}
+                }
+            });
+            let secret = json!({
+                "jsonrpc":"2.0", "id":"secret", "method":"elicitation/create", "params":{
+                    "sessionId":"plan-session", "mode":"form", "message":"Paste the token",
                     "requestedSchema":{"type":"object", "properties":{"token":{"type":"string", "title":"Secret token", "_meta":{"codex":{"isSecret":true}}}}}
                 }
             });
@@ -1787,7 +1796,7 @@ async fn managed_children_cancel_questions_and_permissions_at_the_original_respo
                 }
             });
             let plan = json!({"jsonrpc":"2.0", "id":"plan", "method":"session/request_permission", "params":permission("The proposed plan", &["bypassPermissions", "reject"])});
-            let mut asks = vec![question, plan];
+            let mut approvals = vec![plan, secret];
             if policy.is_unconstrained() {
                 probe.send(tool_ask).await;
                 let answer = probe.message().await;
@@ -1818,12 +1827,13 @@ async fn managed_children_cancel_questions_and_permissions_at_the_original_respo
                     }
                 }
             } else {
-                asks.push(tool_ask);
+                approvals.push(tool_ask);
             }
             if harness == HarnessKind::Grok {
-                asks.push(json!({"jsonrpc":"2.0", "id":"grok-plan", "method":"x.ai/exit_plan_mode", "params":{"sessionId":"plan-session", "plan":"Proposed plan"}}));
+                approvals.push(json!({"jsonrpc":"2.0", "id":"grok-plan", "method":"x.ai/exit_plan_mode", "params":{"sessionId":"plan-session", "plan":"Proposed plan"}}));
             }
-            for ask in asks {
+            {
+                let ask = question;
                 let id = ask["id"].clone();
                 probe.send(ask.clone()).await;
                 let request = loop {
@@ -1833,24 +1843,12 @@ async fn managed_children_cancel_questions_and_permissions_at_the_original_respo
                         _ => {}
                     }
                 };
-                if id == "ask" {
-                    assert!(
-                        request.fields[0].secret,
-                        "secret questions follow the same routing policy"
-                    );
-                }
                 let answer = probe.message().await;
                 assert_eq!(
                     answer["id"], id,
                     "{harness:?}: answer belongs to the original request"
                 );
-                match ask["method"].as_str().unwrap() {
-                    "elicitation/create" => assert_eq!(answer["result"]["action"], "cancel"),
-                    "session/request_permission" => {
-                        assert_eq!(answer["result"]["outcome"]["outcome"], "cancelled")
-                    }
-                    _ => assert_eq!(answer["result"]["outcome"], "cancelled"),
-                }
+                assert_eq!(answer["result"]["action"], "cancel");
                 loop {
                     if let RuntimeEvent::ElicitationResolved {
                         elicitation_id,
@@ -1870,6 +1868,37 @@ async fn managed_children_cancel_questions_and_permissions_at_the_original_respo
                         .await
                         .is_err(),
                     "the form must no longer be externally answerable"
+                );
+            }
+            // With the person present, nothing answers an approval but them.
+            probe.operator_away.set(mj_core::state::OperatorPresence {
+                away: false,
+                revision: 2,
+            });
+            for ask in approvals {
+                let id = ask["id"].clone();
+                probe.send(ask).await;
+                let request = loop {
+                    match probe.event().await {
+                        RuntimeEvent::ElicitationRequested { request } => break request,
+                        RuntimeEvent::Warning { message } => panic!("{harness:?}: {message}"),
+                        _ => {}
+                    }
+                };
+                assert!(
+                    !request.goes_to_parent(),
+                    "{harness:?}: {id} stays with a person"
+                );
+                probe
+                    .answer_with(&request.id, ElicitationResponse::Cancel)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{harness:?}: a person must be able to answer {id}: {error:#}")
+                    });
+                assert_eq!(
+                    probe.message().await["id"],
+                    id,
+                    "{harness:?}: the person's answer reaches the original request"
                 );
             }
             probe.close().await;

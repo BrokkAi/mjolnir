@@ -146,6 +146,9 @@ pub(crate) struct NewArgs {
     /// Omitted uses Native.
     #[arg(long)]
     subagents: Option<String>,
+    /// Oracle availability for this session.
+    #[arg(long, value_parser = ["enabled", "disabled"])]
+    oracle: Option<String>,
     /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
     subagent_straightforward: Option<String>,
@@ -158,6 +161,12 @@ pub(crate) struct NewArgs {
     /// Override subtle sub-agent effort (requires --subagent-subtle).
     #[arg(long)]
     subagent_subtle_effort: Option<String>,
+    /// Oracle model for this session, independent of delegation.
+    #[arg(long)]
+    subagent_oracle: Option<String>,
+    /// Oracle effort; requires --subagent-oracle.
+    #[arg(long, requires = "subagent_oracle")]
+    subagent_oracle_effort: Option<String>,
     /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_model: Option<String>,
@@ -1067,6 +1076,29 @@ fn new_subagent_policy(args: &NewArgs) -> Result<Option<mj_core::subagent::Subag
     )
 }
 
+pub(crate) fn oracle_override(
+    model: Option<&str>,
+    effort: Option<&str>,
+    enabled: Option<&str>,
+) -> Result<Option<mj_core::config::SubagentChoice>> {
+    if effort.is_some() && model.is_none() {
+        bail!("--subagent-oracle-effort requires --subagent-oracle");
+    }
+    if effort == Some("adaptive") {
+        bail!("adaptive oracle effort is not supported");
+    }
+    if model.is_some() && enabled == Some("disabled") {
+        bail!("--subagent-oracle cannot be used with --oracle disabled");
+    }
+    if model.is_some_and(|model| model.trim().is_empty()) {
+        bail!("--subagent-oracle requires a model name");
+    }
+    Ok(model.map(|model| mj_core::config::SubagentChoice {
+        model: model.to_owned(),
+        effort: effort.map(str::to_owned),
+    }))
+}
+
 pub(crate) fn subagent_policy(
     mode: Option<&str>,
     straightforward: Option<&str>,
@@ -1203,6 +1235,12 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let request = StartSessionRequest {
         remember_container_size: false,
         subagents: new_subagent_policy(&args)?,
+        oracle: args.oracle.as_deref().map(|choice| choice == "enabled"),
+        oracle_choice: oracle_override(
+            args.subagent_oracle.as_deref(),
+            args.subagent_oracle_effort.as_deref(),
+            args.oracle.as_deref(),
+        )?,
         review: new_session_review(&args)?,
         no_project_memory: args.no_project_memory,
         no_github_events: args.no_github_events,
@@ -1561,15 +1599,19 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
         ));
     }
     lines.push(summary);
-    // A wait for turn N answers with the latest turn that ended, which is a
-    // later turn when the session has moved on. Say so rather than let the
-    // reply read as turn N's.
-    if let (Some(requested), Some(answered)) = (response.requested_turn_id, response.turn_id)
-        && answered > requested
+    // A wait for turn N answers with the latest turn that ended, which can be
+    // another turn: a later one, an earlier one that ended after N was
+    // removed from the queue, or one the session ran without a prompt. Only
+    // an answer about a finished turn has a turn number.
+    if let Some(requested) = response.requested_turn_id
+        && response.turn_number.is_some()
+        && response.turn_id != Some(requested)
     {
-        lines.push(format!(
-            "this is turn {answered}, which ended after turn {requested}; a session keeps only its latest turn's outcome and reply"
-        ));
+        let answered = response.turn_id.map_or_else(
+            || "a turn the session ran without a prompt".to_owned(),
+            |turn| format!("turn {turn}"),
+        );
+        lines.push(format!("this is the outcome of {answered}, not of turn {requested}; a session keeps only its latest turn's outcome and reply"));
     }
     // The wait's message, the diagnostic and the agent's last message are
     // often one sentence (a Codex quota error was printed three times,
@@ -2396,6 +2438,10 @@ pub(crate) struct ModelsArgs {
     /// List the efforts this model offers instead of the default model's.
     #[arg(long)]
     model: Option<String>,
+    /// List every model the harness advertises, ignoring the profile's
+    /// `models` allow-list. Use it to find the exact values to put there.
+    #[arg(long, conflicts_with = "model")]
+    unrestricted: bool,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -2429,7 +2475,7 @@ pub(crate) async fn models(args: ModelsArgs) -> Result<()> {
         .unwrap_or(mj_client::quota::QuotaBilling::Unknown);
     let choices = ApiClient::connect()
         .await?
-        .models(&args.profile, args.model)
+        .models(&args.profile, args.model, args.unrestricted)
         .await?;
     let rendered = render_models(&choices, billing, args.json)?;
     println!("{rendered}");
@@ -3180,6 +3226,56 @@ mod tests {
         };
         for command in ["new", "move"] {
             let parse = |extra: &[&str]| parse_command(command, extra);
+            let oracle = |extra: &[&str]| {
+                let mut argv = vec!["mj", command, "--profile", "codex", "--target", "raw"];
+                if command == "new" {
+                    argv.extend(["--project-directory", "/srv/project"]);
+                } else {
+                    argv.extend(["--session", "session"]);
+                }
+                argv.extend_from_slice(extra);
+                let cli = Cli::try_parse_from(argv).map_err(anyhow::Error::from)?;
+                match cli.command {
+                    Some(Command::New(args)) => oracle_override(
+                        args.subagent_oracle.as_deref(),
+                        args.subagent_oracle_effort.as_deref(),
+                        args.oracle.as_deref(),
+                    ),
+                    Some(Command::Move(args)) => oracle_override(
+                        args.subagent_oracle.as_deref(),
+                        args.subagent_oracle_effort.as_deref(),
+                        args.oracle.as_deref(),
+                    ),
+                    _ => unreachable!(),
+                }
+            };
+            assert_eq!(
+                oracle(&[
+                    "--subagents",
+                    "native",
+                    "--subagent-oracle",
+                    "advisor",
+                    "--subagent-oracle-effort",
+                    "high"
+                ])
+                .unwrap(),
+                Some(mj_core::config::SubagentChoice {
+                    model: "advisor".into(),
+                    effort: Some("high".into())
+                })
+            );
+            assert!(oracle(&["--subagent-oracle-effort", "high"]).is_err());
+            assert!(
+                oracle(&[
+                    "--subagent-oracle",
+                    "advisor",
+                    "--subagent-oracle-effort",
+                    "adaptive"
+                ])
+                .is_err()
+            );
+            assert!(oracle(&["--oracle", "disabled", "--subagent-oracle", "advisor"]).is_err());
+            assert!(oracle(&["--oracle", "invalid"]).is_err());
             use mj_core::subagent::SubagentPolicy;
             assert_eq!(parse(&[]).unwrap(), None);
             assert_eq!(
@@ -3448,12 +3544,35 @@ mod tests {
         // A wait for an earlier turn answers about the later one, and says so.
         let later = wait_response(
             "finished",
-            serde_json::json!({"turn_id": 87, "requested_turn_id": 82}),
+            serde_json::json!({"turn_id": 87, "requested_turn_id": 82, "turn_number": 5}),
         );
         assert!(
-            wait_report_lines(&later)[1].contains("turn 87, which ended after turn 82"),
+            wait_report_lines(&later)[1].contains("outcome of turn 87, not of turn 82"),
             "{:?}",
             wait_report_lines(&later)
+        );
+        // Hard-won: #1450 review: autonomous outcomes hid which turn answered.
+        let autonomous = wait_response(
+            "finished",
+            serde_json::json!({"requested_turn_id":82, "turn_number":5}),
+        );
+        assert_eq!(
+            wait_report_lines(&autonomous)[1],
+            "this is the outcome of a turn the session ran without a prompt, not of turn 82; a session keeps only its latest turn's outcome and reply"
+        );
+        // An answer with no finished turn, such as a failed session, is not one.
+        let earlier = wait_response(
+            "finished",
+            serde_json::json!({"turn_id": 80, "requested_turn_id":82, "turn_number":5}),
+        );
+        assert!(wait_report_lines(&earlier)[1].contains("outcome of turn 80, not of turn 82"));
+        let failed = wait_response("error", serde_json::json!({"requested_turn_id":82}));
+        assert!(
+            !wait_report_lines(&failed)
+                .iter()
+                .any(|line| line.contains("this is the outcome")),
+            "{:?}",
+            wait_report_lines(&failed)
         );
         let same = wait_response(
             "finished",

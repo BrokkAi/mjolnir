@@ -590,17 +590,10 @@ fn an_api_key_profile_reports_that_it_has_no_interactive_login() {
     )
     .expect("write config");
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
         environment: [("ZAI_API_KEY".to_owned(), "key".to_owned())]
             .into_iter()
             .collect(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        muse_auto_review: None,
-        codex_profile: None,
+        ..HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
     let error = login_command(&profile)
         .expect_err("API-key profiles have no login")
@@ -757,15 +750,7 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
     let marker = harness_authentication_marker(HarnessKind::Codex, home.path());
     std::fs::write(&marker, codex_credentials("2026-09-25T20:00:00.000Z")).unwrap();
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        muse_auto_review: None,
-        codex_profile: None,
+        ..HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
     let result = |reason, outcomes: Vec<CredentialSyncOutcome>, failure: Option<&str>| {
         CredentialSyncResult {
@@ -895,6 +880,7 @@ fn a_kimi_token_refusal_is_an_auth_failure() {
     .unwrap();
     assert!(turn_diagnostic_reports_auth_failure(&diagnostic));
     let turn = crate::state::MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: Some(diagnostic),
         usage: None,
         command_id: "prompt-1".into(),

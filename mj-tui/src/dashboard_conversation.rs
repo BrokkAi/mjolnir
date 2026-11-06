@@ -359,6 +359,7 @@ impl DashboardState {
             .entry(workspace_id.to_owned())
             .or_insert_with(|| WorkspaceViewState {
                 sessions_scroll: 0,
+                sessions_wheel_scrolled_from: None,
                 targets_scroll: 0,
                 quota_scroll: 0,
                 capacity_index: 0,

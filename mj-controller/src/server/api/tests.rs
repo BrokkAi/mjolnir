@@ -2055,6 +2055,7 @@ fn model_candidate_with_efforts(
             observed_at: 1,
         },
         quota: crate::server::api::CandidateQuota::Subscription {
+            refreshed_at_epoch_seconds: 0,
             paid_credits: None,
             windows: vec![crate::quota::QuotaWindow {
                 label: "Week".into(),
@@ -2231,6 +2232,8 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     assert_eq!(
         request.action,
         ControllerAction::New {
+            oracle: None,
+            oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: true,
             review: None,
@@ -3135,6 +3138,7 @@ async fn wait_for_an_earlier_turn_names_the_later_turn_it_answers_about() {
             execution: MaterializedExecutionState::Idle,
             active_turn: None,
             last_turn_outcome: Some(MaterializedTurnOutcome {
+                answered_through: None,
                 diagnostic: None,
                 usage: None,
                 command_id: "prompt-2".into(),
@@ -3182,6 +3186,7 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
     })).unwrap();
     let mut turn = completed(5, "QuotaLimit");
     turn.diagnostic = Some(diagnostic.clone());
+    turn.answered_through = Some(9);
     let backend = Arc::new(FakeBackend {
         turn_states: Mutex::new(vec![Some(TurnState {
             execution: MaterializedExecutionState::Idle,
@@ -3215,6 +3220,11 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
     assert_eq!(body["diagnostic"]["reset_at"], "23:00 UTC");
     assert_eq!(body["session"]["last_turn_diagnostic"], body["diagnostic"]);
     assert!(body["capacity_retry"].is_null());
+    assert!(
+        body["session"]["last_turn_outcome"]
+            .get("answered_through")
+            .is_none()
+    );
     assert!(
         body["session"]["last_turn_outcome"]
             .get("diagnostic")
@@ -3476,6 +3486,7 @@ fn an_unanswered_turn_reaches_wait_as_a_named_error() {
 
 fn completed(accepted_ordinal: u64, stop_reason: &str) -> MaterializedTurnOutcome {
     MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: format!("prompt-{accepted_ordinal}"),
@@ -3813,6 +3824,7 @@ fn a_stored_expect_continuation_verdict_holds_no_wait_on_an_idle_session() {
     use mj_core::activity::{ActivityState, verdict};
     use mj_core::assessment::{Action, Status};
     let turn = MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "api-b098".into(),
@@ -4120,6 +4132,7 @@ fn rejections_stopped_sessions_and_an_empty_session_each_end_the_wait() {
 
     let mut rejected = idle(None);
     rejected.last_turn_outcome = Some(MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "prompt-1".into(),
@@ -4862,6 +4875,8 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
     let mut session = snapshot.sessions[0].clone();
     session.lifecycle = ViewerLifecycleCategory::Failed;
     session.move_recovery = Some(crate::server::ViewerMoveRecovery {
+        oracle: None,
+        oracle_choice: None,
         operation_id: "move-a".into(),
         source_profile_id: "destination".into(),
         source_target_template_id: "destination".into(),
@@ -5671,7 +5686,16 @@ async fn earlier_history_authenticates_validates_the_cursor_and_renders_stored_m
         }),
         ..FakeBackend::default()
     });
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+        // A stopped sub-agent has no live conversation, but its stored history
+        // is what the viewer's `read_history` capability opens.
+        let mut stopped = snapshot.sessions.get("session-1").unwrap().clone();
+        stopped.id = "stopped-child".into();
+        stopped.subagent_parent_id = Some("session-1".into());
+        stopped.lifecycle = crate::server::ViewerLifecycleCategory::Suspended;
+        stopped.capabilities.open = false;
+        snapshot.sessions.push(stopped);
+    });
     let unauthenticated = app
         .clone()
         .oneshot(
@@ -5710,7 +5734,25 @@ async fn earlier_history_authenticates_validates_the_cursor_and_renders_stored_m
     assert_eq!(body["items"][0]["role"], "agent");
     assert_eq!(body["before"], serde_json::to_value(&cursor).unwrap());
     assert_eq!(body["frontier"], 20);
-    assert_eq!(*backend.history_cursors.lock().unwrap(), vec![Some(cursor)]);
+    assert_eq!(
+        *backend.history_cursors.lock().unwrap(),
+        vec![Some(cursor.clone())]
+    );
+    let stopped = app
+        .clone()
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/stopped-child/history"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(stopped).await["items"][0]["text"],
+        "stored answer",
+        "a stopped child's stored history is served like a live session's"
+    );
     let missing = app
         .oneshot(
             bearer(Request::get("/api/v1/sessions/missing/history"))
@@ -5767,6 +5809,7 @@ async fn missing_target_access_returns_actionable_conflict_for_branch_and_bundle
 
 fn finished_child_turn(command_id: &str) -> MaterializedTurnOutcome {
     MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: command_id.into(),
@@ -6511,5 +6554,84 @@ async fn session_review_api_accepts_inherit_and_forwards_its_settings() {
     assert_eq!(
         response.await.unwrap().unwrap().status(),
         StatusCode::CONFLICT
+    );
+}
+
+// Hard-won: #1450: a harness completion without an accepted ordinal reopened the first prompt wait.
+#[test]
+fn harness_completion_answers_started_prompts_but_not_queued_prompts() {
+    let mut outcome = completed(20, "end_turn");
+    outcome.command_id = mj_core::continuation::harness_turn_id(15);
+    outcome.accepted_ordinal = None;
+    outcome.turn_start_position = Some(15);
+    outcome.answered_through = Some(15);
+    let mut observation = idle(Some(outcome));
+    observation.activity = mj_core::activity::ActivityState::Idle { since_ms: None };
+    observation.start_status = Some(StartStatus::Submitted { turn_id: 7 });
+    assert!(resolve_wait(&observation, &WaitRequest::default()).is_some());
+    let request = WaitRequest {
+        turn_id: Some(7),
+        ..Default::default()
+    };
+    assert!(resolve_wait(&observation, &request).is_some());
+    observation
+        .last_turn_outcome
+        .as_mut()
+        .unwrap()
+        .answered_through = Some(6);
+    // Stored answers do not change when the queue changes.
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let durable = TurnState {
+        execution: MaterializedExecutionState::Idle,
+        active_turn: None,
+        last_turn_outcome: observation.last_turn_outcome.clone(),
+    };
+    let durable_observation =
+        build_observation(&snapshot, &snapshot.sessions[0], None, Some(&durable), None);
+    assert!(resolve_wait(&durable_observation, &request).is_none());
+    observation.queued.push("queued-prompt".into());
+    assert!(resolve_wait(&observation, &request).is_none());
+    // Hard-won: #1450 review: a queued prompt that started read as answered by the older harness turn.
+    observation.queued.clear();
+    observation.active_turn = Some(MaterializedTurn {
+        command_id: "queued-prompt".into(),
+        accepted_ordinal: Some(7),
+        turn_start_position: 21,
+        started_at_ms: 0,
+        steered_into: None,
+    });
+    assert!(resolve_wait(&observation, &request).is_none());
+}
+
+// Hard-won: #1450 review: a wait for a running prompt ended on a queued prompt's rejection
+#[test]
+fn queued_rejection_does_not_finish_the_running_prompt_wait() {
+    let mut outcome = completed(7, "error");
+    outcome.answered_through = Some(4);
+    outcome.outcome = TurnOutcomeKind::Rejected {
+        reason: None,
+        message: "transport failed".into(),
+    };
+    let observation = idle(Some(outcome));
+    assert!(
+        resolve_wait(
+            &observation,
+            &WaitRequest {
+                turn_id: Some(5),
+                ..Default::default()
+            }
+        )
+        .is_none()
+    );
+    assert!(
+        resolve_wait(
+            &observation,
+            &WaitRequest {
+                turn_id: Some(7),
+                ..Default::default()
+            }
+        )
+        .is_some()
     );
 }

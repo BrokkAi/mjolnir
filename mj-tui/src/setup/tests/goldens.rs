@@ -1002,7 +1002,7 @@ fn golden_global_subagent_discovery_and_save() {
     assert!(!setup_dialog_mut(&mut dashboard.mode).unwrap().is_dirty());
     let mut output = String::new();
     append_setup_state(&mut output, "global task choices", &mut dashboard, 140, 40);
-    for task in ["straightforward", "subtle"] {
+    for task in ["straightforward", "subtle", "oracle"] {
         assert!(
             setup_dialog_mut(&mut dashboard.mode).unwrap().draft["subagents"][task]["model"]
                 .is_null()
@@ -1013,7 +1013,11 @@ fn golden_global_subagent_discovery_and_save() {
         setup_dialog_mut(&mut dashboard.mode).unwrap().draft["subagents"]["subtle"]["effort"]
             .is_null()
     );
-    for (task, model) in [("straightforward", "shared"), ("subtle", "smarter")] {
+    for (task, model) in [
+        ("straightforward", "shared"),
+        ("subtle", "smarter"),
+        ("oracle", "smarter"),
+    ] {
         let model_path = vec!["subagents".into(), task.into(), "model".into()];
         {
             let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
@@ -1047,6 +1051,7 @@ fn golden_global_subagent_discovery_and_save() {
     let saved: Config = serde_json::from_str(&updated).unwrap();
     assert!(saved.subagents.is_configured());
     assert_eq!(saved.subagents.subtle.unwrap().model, "smarter");
+    assert_eq!(saved.subagents.oracle.unwrap().model, "smarter");
     dialog.saving = false;
     dialog.path = vec!["subagents".into()];
     // Discovery arriving while the picker is open must retain a saved selection.

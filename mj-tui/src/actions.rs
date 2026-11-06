@@ -510,7 +510,7 @@ fn interrupt_available(dashboard: &DashboardState) -> Availability {
     let Some(session) = dashboard.command_session_id() else {
         return Availability::Hidden;
     };
-    if dashboard.attention_level(session) == crate::AttentionLevel::Working {
+    if dashboard.own_turn_is_running(session) {
         Availability::Ready
     } else {
         Availability::Blocked("no turn is running")
@@ -1760,8 +1760,7 @@ impl DashboardState {
                     // A suspend stops the sub-agents without a checkpoint.
                     // Only the ones still at their task lose anything.
                     let children_not_handed_back = self.subagents_not_handed_back(&session.id);
-                    let interrupting =
-                        self.attention_level(&session.id) == crate::AttentionLevel::Working;
+                    let interrupting = self.own_turn_is_running(&session.id);
                     let unverified_clone = session.publication_state().is_some();
                     if !interrupting && children_not_handed_back.is_empty() && !unverified_clone {
                         return DashboardAction::Suspend {
@@ -1811,7 +1810,7 @@ impl DashboardState {
                 }
                 // Mid-turn work is lost by a restart, so that case asks first;
                 // an idle session restarts at once.
-                if self.attention_level(&session_id) == crate::AttentionLevel::Working {
+                if self.own_turn_is_running(&session_id) {
                     self.mode = crate::Mode::Confirm(
                         ConfirmDialog::new(Confirmation::InterruptWork {
                             session_id,
@@ -2439,6 +2438,8 @@ mod tests {
             source_unavailable: false,
             conversion: None,
             selection: mj_core::state::MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
                 session_id: "session-1".into(),

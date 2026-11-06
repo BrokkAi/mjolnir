@@ -750,6 +750,12 @@ impl DurableRelay {
             .active_prompt
             .as_ref()
             .map(|prompt| prompt.command_id.clone())
+            .or_else(|| {
+                self.snapshot
+                    .autonomous_harness_turn()
+                    .as_ref()
+                    .map(|turn| mj_core::continuation::harness_turn_id(turn.first_ordinal))
+            })
     }
 
     pub fn operational_state(&self) -> RelayOperationalState {
@@ -958,6 +964,10 @@ impl DurableRelay {
     /// Choose whether agent output with no prompt in flight opens a turn.
     pub fn set_harness_turn_policy(&mut self, policy: HarnessTurnPolicy) {
         self.harness_turns = policy;
+    }
+
+    pub(crate) fn uses_claude_harness_turns(&self) -> bool {
+        self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
     }
 
     /// Whether a `Continue` verdict may be parked for the daemon to act on.
@@ -1210,7 +1220,7 @@ impl DurableRelay {
         // cycle produced no assistant usage.
         if codex && native_before && !native_after.running() && self.snapshot.harness_turn.is_some()
         {
-            self.settle_harness_turn(Some("codex".into()))?;
+            self.settle_harness_turn(Some("codex".into()), "end_turn")?;
         }
         Ok(ordinal)
     }
@@ -1239,12 +1249,19 @@ impl DurableRelay {
         {
             return Ok(());
         }
-        self.settle_harness_turn(Some(
-            result
-                .origin_kind
-                .clone()
-                .unwrap_or_else(|| "human".to_owned()),
-        ))
+        self.settle_harness_turn(
+            Some(
+                result
+                    .origin_kind
+                    .clone()
+                    .unwrap_or_else(|| "human".to_owned()),
+            ),
+            if result.is_error {
+                crate::acp::drive::PROMPT_ERROR_STOP_REASON
+            } else {
+                "end_turn"
+            },
+        )
     }
 
     /// Remember a stop applied during a Claude harness turn, so the turn can
@@ -1279,7 +1296,7 @@ impl DurableRelay {
             first_ordinal,
             "Claude Code did not answer a stop of the turn it started on its own; ending the turn"
         );
-        self.settle_harness_turn(Some("stop_unanswered".to_owned()))?;
+        self.settle_harness_turn(Some("stop_unanswered".to_owned()), "cancelled")?;
         Ok(true)
     }
 
@@ -1300,10 +1317,18 @@ impl DurableRelay {
         })
     }
 
-    fn settle_harness_turn(&mut self, origin: Option<String>) -> Result<()> {
+    fn settle_harness_turn(&mut self, origin: Option<String>, stop_reason: &str) -> Result<()> {
         self.append_relay_event(
             None,
             RelayObservation::HarnessTurnSettled {
+                autonomous: self
+                    .snapshot
+                    .autonomous_harness_turn()
+                    .filter(|_| self.snapshot.active_prompt.is_none())
+                    .map(|turn| mj_core::relay::SettledHarnessTurn {
+                        start_ordinal: turn.first_ordinal,
+                        stop_reason: stop_reason.into(),
+                    }),
                 origin,
                 // The projection cannot see `active_prompt`, so the event has
                 // to carry whether a prompt of ours is still running.
@@ -1376,7 +1401,7 @@ impl DurableRelay {
     }
 
     /// Open the one durable boundary shared by output and turn announcements.
-    fn open_harness_turn_if_allowed(&mut self) -> Result<()> {
+    pub(crate) fn open_harness_turn_if_allowed(&mut self) -> Result<()> {
         if !self.can_open_harness_turn() {
             return Ok(());
         }

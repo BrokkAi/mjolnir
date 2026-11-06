@@ -103,7 +103,7 @@ mj review status --session <id>
 
 ## Follow a review
 
-The parent conversation and its prompt remain available while reviewers work. A short status appears above the prompt. Open **Reviewers** to inspect reviewer sessions in the virtual workspace; close the workspace or press Escape in the Sessions list to return.
+The parent conversation and its prompt remain available while reviewers work. A short status appears above the prompt. Open **Reviewers** to inspect reviewer sessions in the virtual workspace; close the workspace or press Escape in the Sessions list to return. The web viewer works the same way: **Reviewers · n**, with the number of reviewers still open, sits beside **Subagents · n** once a session has any reviewer, and opens the same list filtered to reviewers. **Subagents** lists only the other children.
 
 A clean review advances the reviewed boundary automatically. Findings are sent to the primary agent as a corrective prompt, and a failed review reports its reason. `mj review status` shows the current state and verdict.
 

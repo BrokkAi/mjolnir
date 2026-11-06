@@ -147,6 +147,9 @@ struct AcpPreparationSetup {
     resume_session: Option<String>,
     native_session_may_have_history: bool,
     profile_registration: bool,
+    /// Read from the launch before preparation strips the marker from the
+    /// harness environment, so the ACP runtime knows the session is a child.
+    managed_subagent: bool,
     subagent_role: Option<mj_core::subagent::SubagentMcpRole>,
     runtime: tokio::runtime::Handle,
     managed_cache_root: Option<PathBuf>,
@@ -234,6 +237,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         resume_session,
         native_session_may_have_history,
         profile_registration,
+        managed_subagent,
         subagent_role,
         runtime,
         managed_cache_root,
@@ -315,7 +319,6 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         &session_environment,
         &mut additional_directories,
     );
-    let managed_subagent = config.is_managed_subagent();
     let acp_spec = LaunchSpec {
         operator_away: relay
             .lock()
@@ -1434,7 +1437,8 @@ async fn prepare_and_start_harness(
         resume_session,
         native_session_may_have_history,
     } = setup;
-    if config.is_managed_subagent() {
+    let managed_subagent = config.is_managed_subagent();
+    if managed_subagent {
         config.review_trigger = Default::default();
     }
     let review_gate = config.review_gate();
@@ -1662,6 +1666,7 @@ async fn prepare_and_start_harness(
                         role,
                         policy,
                         crate::subagent_mcp::ParentTools {
+                            oracle: false,
                             agent_mailboxes_enabled: mailboxes_enabled,
                             subtle_subagents,
                             review_gate,
@@ -1692,6 +1697,13 @@ async fn prepare_and_start_harness(
             let role = subagent_role;
             let mailboxes_enabled = config.agent_mailboxes_enabled;
             let subtle_subagents = config.subtle_subagents;
+            // `config.environment` keeps only overrides; the login shell's
+            // HOME, which the harness inherits, is in the base environment.
+            let user_home = config
+                .environment
+                .get("HOME")
+                .or_else(|| base_environment.get("HOME"))
+                .map(PathBuf::from);
             let (registered, mailbox_hook_available) =
                 bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                     if step_cancel.is_cancelled() {
@@ -1708,6 +1720,12 @@ async fn prepare_and_start_harness(
                     )?;
                     let mailbox_hook_available =
                         super::subagents::configure_claude_mailbox_hook(&root, &session_id, &home)?;
+                    super::subagents::exclude_default_claude_instructions(
+                        &root,
+                        &session_id,
+                        &home,
+                        user_home.as_deref(),
+                    )?;
                     Ok((true, mailbox_hook_available))
                 })
                 .await?;
@@ -1790,7 +1808,7 @@ async fn prepare_and_start_harness(
     }
 
     if config.review_trigger == mj_core::config::ReviewTrigger::Push
-        && !config.is_managed_subagent()
+        && !managed_subagent
         && !config.handback_tool
         && config.reviewer_launch.is_none()
     {
@@ -1861,6 +1879,7 @@ async fn prepare_and_start_harness(
         resume_session,
         native_session_may_have_history,
         profile_registration,
+        managed_subagent,
         subagent_role,
         runtime: tokio::runtime::Handle::current(),
         managed_cache_root,

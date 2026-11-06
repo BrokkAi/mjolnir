@@ -897,15 +897,8 @@ mod tests {
         environment.insert("PATH".into(), format!("{}:/usr/bin:/bin", tools.display()));
         environment.insert("XDG_CACHE_HOME".into(), xdg_cache.display().to_string());
         let profile = HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Claude,
-            home: root.join("claude-profile"),
             environment: environment.into(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            legacy_subagents: Default::default(),
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, root.join("claude-profile"))
         };
         std::fs::create_dir_all(&profile.home).unwrap();
 
@@ -955,15 +948,7 @@ mod tests {
         let _guard = TEST_LOCK.lock().await;
         let directory = tempfile::tempdir().unwrap();
         let mut profile = HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Dsh,
-            home: directory.path().to_path_buf(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            legacy_subagents: Default::default(),
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Dsh, directory.path().to_path_buf())
         };
         profile
             .environment

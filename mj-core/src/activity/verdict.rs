@@ -251,7 +251,7 @@ pub enum Decision {
     KeepCurrent,
 }
 
-/// The latest prompt that ended: its command and the ordinal of its
+/// The latest prompt or harness turn that ended: its command and the ordinal of its
 /// completion event. `HandbackReminder` names a turn by this identity, and its
 /// sender takes `completed_ordinal` from the projected turn outcome, so the two
 /// must stay equal.

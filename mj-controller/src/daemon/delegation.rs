@@ -83,6 +83,7 @@ async fn run(
                                     | SubagentToolAction::SendMessage { .. }
                                     | SubagentToolAction::Spawn { .. }
                                     | SubagentToolAction::RequestReview { .. }
+                                    | SubagentToolAction::AskOracle { .. }
                                     | SubagentToolAction::OverrideReview { .. }
                                     // Its lifecycle persists Closing before yielding
                                     // admission; the next daemon finishes the close.
@@ -437,6 +438,7 @@ mod tests {
             in_flight: Vec::new(),
             credential_signal: None,
             outcome: Some(mj_core::state::MaterializedTurnOutcome {
+                answered_through: None,
                 diagnostic: None,
                 usage: None,
                 command_id: "turn".into(),

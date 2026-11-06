@@ -1239,6 +1239,9 @@ pub enum RelayObservation {
     /// The harness reached a turn boundary on its own. `origin` is the
     /// adapter's reported origin kind, kept for diagnostics.
     HarnessTurnSettled {
+        /// Present only for an autonomous turn; absent in older journals to preserve digests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        autonomous: Option<SettledHarnessTurn>,
         origin: Option<String>,
         /// Whether a prompt of ours was still running when the turn settled.
         /// The relay keeps `Running` for it; the projection cannot see
@@ -1551,7 +1554,18 @@ pub struct RelaySnapshot {
     pub dispatches: BTreeMap<String, RelayDispatchRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettledHarnessTurn {
+    pub start_ordinal: u64,
+    pub stop_reason: String,
+}
+
 impl RelaySnapshot {
+    /// The open turn that began without a prompt.
+    pub fn autonomous_harness_turn(&self) -> Option<StoredHarnessTurn> {
+        self.harness_turn
+            .filter(|turn| self.continuation.autonomous_turn_started == Some(turn.first_ordinal))
+    }
     pub fn new(session_id: String) -> Self {
         Self {
             assessment_questions: Default::default(),

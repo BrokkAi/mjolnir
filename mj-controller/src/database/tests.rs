@@ -505,6 +505,8 @@ fn live_sessions(database: &Path, sessions: &[(&str, &str)]) {
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -2950,6 +2952,7 @@ fn interruption_summary_matches_full_projection_and_legacy_outcomes() {
     save_session_to(&database, &session("session-1", "project-1")).unwrap();
     let mut materialized = materialized_session("session-1");
     materialized.last_turn_outcome = Some(MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "prompt".into(),
@@ -4906,6 +4909,7 @@ fn a_projection_page_persists_the_turn_outcome_and_the_queue_acceptance_ordinal(
         execution: Some(MaterializedExecutionState::Idle),
         active_turn: Some(None),
         last_turn_outcome: Some(MaterializedTurnOutcome {
+            answered_through: None,
             diagnostic: None,
             usage: None,
             command_id: "prompt-1".into(),
@@ -5175,6 +5179,7 @@ fn a_finished_turn_reports_its_own_answer_and_not_a_later_harness_notice() {
             execution: Some(MaterializedExecutionState::Idle),
             active_turn: Some(None),
             last_turn_outcome: Some(MaterializedTurnOutcome {
+                answered_through: None,
                 diagnostic: None,
                 usage: None,
                 command_id: "prompt-1".into(),
@@ -6852,6 +6857,37 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     assert_eq!(
         load_state_from(&database).unwrap().sessions["old-session"].state,
         SessionState::Parked
+    );
+}
+
+#[test]
+fn oracle_choice_and_profile_preference_survive_reopen_and_rename() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("oracle-choice.sqlite3");
+    let mut record = session("advisor-parent", "project");
+    record.oracle = false;
+    record.oracle_choice = Some(mj_core::config::SubagentChoice {
+        model: "advisor".into(),
+        effort: Some("high".into()),
+    });
+    save_new_session_to(&path, &record, None, true, false).unwrap();
+    let state = load_state_from(&path).unwrap();
+    assert_eq!(
+        state.last_oracle_choices.get(&record.last_profile),
+        Some(&false)
+    );
+    assert!(!state.sessions[&record.id].oracle);
+    assert_eq!(
+        state.sessions[&record.id].oracle_choice,
+        record.oracle_choice
+    );
+    rename_profile_references_at(&path, &record.last_profile, "renamed").unwrap();
+    let renamed = load_state_from(&path).unwrap();
+    assert_eq!(renamed.last_oracle_choices.get("renamed"), Some(&false));
+    assert!(
+        !renamed
+            .last_oracle_choices
+            .contains_key(&record.last_profile)
     );
 }
 

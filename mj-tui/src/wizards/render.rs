@@ -1015,7 +1015,14 @@ pub(crate) fn render_review_wizard(
         }
         row
     });
-    let last_control_row = [worktree_row, subagent_row]
+    let oracle_row = subagents
+        .filter(|wizard| wizard.oracle_available())
+        .map(|_| {
+            let row = lines.len() as u16;
+            lines.push(Line::raw(""));
+            row
+        });
+    let last_control_row = [worktree_row, subagent_row, oracle_row]
         .into_iter()
         .flatten()
         .map(|row| usize::from(row) + 1)
@@ -1038,6 +1045,7 @@ pub(crate) fn render_review_wizard(
     let map_row = |row: u16| offsets[usize::from(row)];
     let worktree_row = worktree_row.map(map_row);
     let subagent_row = subagent_row.map(map_row);
+    let oracle_row = oracle_row.map(map_row);
     let summary_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let list_height = if can_attach {
         u16::try_from(mounts.mounts.len()).unwrap_or(u16::MAX)
@@ -1062,6 +1070,7 @@ pub(crate) fn render_review_wizard(
     let focused_row = match form.focused() {
         Some(WizardControl::CreateManagedWorktree) => worktree_row,
         Some(WizardControl::Subagents) => subagent_row,
+        Some(WizardControl::Oracle) => oracle_row,
         Some(WizardControl::ReviewAttachments) => Some(
             summary_height.saturating_add(
                 mounts
@@ -1092,7 +1101,7 @@ pub(crate) fn render_review_wizard(
     }
     let mut expanded_subagent_combo = None;
     if let Some((wizard, row)) = subagents.zip(subagent_row) {
-        let selectors = vec![(
+        let mut selectors = vec![(
             WizardControl::Subagents,
             "Delegation",
             row,
@@ -1100,6 +1109,16 @@ pub(crate) fn render_review_wizard(
             wizard.policy_index(),
             true,
         )];
+        if let Some(oracle_row) = oracle_row {
+            selectors.push((
+                WizardControl::Oracle,
+                "Oracle",
+                oracle_row,
+                vec!["enabled".to_owned(), "disabled".to_owned()],
+                usize::from(!wizard.oracle),
+                true,
+            ));
+        }
         for (id, label, row, values, committed, enabled) in selectors {
             let area = viewport.row(row, 1);
             let label_width = 11.min(area.width);

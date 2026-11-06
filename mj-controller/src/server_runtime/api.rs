@@ -31,6 +31,7 @@ use mj_checkpoint::archive::{FetchMode, FetchedPath};
 use mj_client::session::{BoxFuture, SessionControl, SessionHandle, new_command_id};
 use mj_core::relay::RelayCommand;
 
+mod oracle;
 mod subagent_input;
 
 use crate::daemon::RuntimeState;
@@ -860,6 +861,13 @@ impl ApiBackend {
                 path,
                 ls,
             } => {
+                ensure!(
+                    crate::database::load_subagent(session_id)?.is_none_or(|relation| {
+                        relation.kind != mj_core::subagent::SubagentKind::Oracle
+                            || relation.parent_session_id != parent_session_id
+                    }),
+                    "session {session_id} does not belong to parent {parent_session_id}"
+                );
                 let fetch_error = |error| match error {
                     ExportError::Refused(reason) => anyhow!(reason),
                     ExportError::Failed(error) => error,
@@ -915,6 +923,10 @@ impl ApiBackend {
             SubagentToolAction::RequestReview { path } => {
                 self.exports
                     .request_review(parent_session_id.to_owned(), path.clone())
+                    .await
+            }
+            SubagentToolAction::AskOracle { message } => {
+                self.ask_oracle(parent_session_id, request, prepared, message)
                     .await
             }
             SubagentToolAction::OverrideReview { reason } => {
@@ -1014,9 +1026,16 @@ impl ApiBackend {
                 })
                 .await?
                 .report_dir;
+                let name = live_child_name(
+                    self.exports
+                        .session_record(&relation.child_session_id)
+                        .as_ref(),
+                    &relation.task_name,
+                );
                 Ok(serde_json::json!({
                     "child_session_id":relation.child_session_id,
                     "task_name":relation.task_name,
+                    "name":name,
                     "profile_id":relation.profile_id,
                     "model":relation.model,
                     "effort":relation.effort,
@@ -1029,7 +1048,7 @@ impl ApiBackend {
                     .list_subagents(parent_session_id.to_owned())
                     .await?
                     .into_iter()
-                    .filter(|relation| relation.kind != mj_core::subagent::SubagentKind::Reviewer)
+                    .filter(|relation| relation.kind == mj_core::subagent::SubagentKind::Worker)
                     .collect::<Vec<_>>();
                 let child_ids = relations
                     .iter()
@@ -1051,7 +1070,7 @@ impl ApiBackend {
                             last_completed_ordinal: None,
                             report: ReportState::Fallback,
                             awaited_ordinal: None,
-                            answered_ordinal: None,
+                            answer: None,
                             failed_turn: None,
                             login_failure: None,
                             provider_failure: None,
@@ -1073,9 +1092,11 @@ impl ApiBackend {
                                 progress,
                             ),
                         );
+                        let name = live_child_name(record.as_ref(), &relation.task_name);
                         let mut entry = serde_json::json!({
                             "child_session_id":relation.child_session_id,
                             "task_name":relation.task_name,
+                            "name":name,
                             "profile_id":relation.profile_id,
                             "effort":relation.effort,
                             "state":state,
@@ -1199,7 +1220,8 @@ impl ApiBackend {
                 .filter(|record| record.handback_tool)
                 .context("handback is only for a Mjolnir sub-agent that was given the tool")?;
                 let maximum = match record.kind {
-                    mj_core::subagent::SubagentKind::Worker => {
+                    mj_core::subagent::SubagentKind::Worker
+                    | mj_core::subagent::SubagentKind::Oracle => {
                         mj_core::subagent::MAX_HANDBACK_CHARS
                     }
                     mj_core::subagent::SubagentKind::Reviewer => {
@@ -1475,14 +1497,17 @@ impl ApiBackend {
                 // Older turns may predate stored selections. Prefer the
                 // session's current profile, with the child model as fallback.
                 let child = crate::database::load_subagent(&id)?;
+                let oracle = child
+                    .as_ref()
+                    .is_some_and(|child| child.kind == mj_core::subagent::SubagentKind::Oracle);
                 Ok(match selection {
-                    Some((profile, model @ Some(_))) => Some((profile, model)),
-                    Some((profile, None)) => child.map(|child| (profile, child.model)),
-                    None => child.map(|child| (child.profile_id, child.model)),
+                    Some((profile, model @ Some(_))) => Some((profile, model, oracle)),
+                    Some((profile, None)) => child.map(|child| (profile, child.model, oracle)),
+                    None => child.map(|child| (child.profile_id, child.model, oracle)),
                 })
             })
             .await?;
-            let Some((profile, model)) = selection else {
+            let Some((profile, model, oracle)) = selection else {
                 continue;
             };
             let health = crate::profile_health::shared()
@@ -1505,10 +1530,17 @@ impl ApiBackend {
                     format!("profile {profile} {fault}: {}", diagnostic.message)
                 });
             if let Some((_, message)) = &mut progress.failed_turn {
-                *message = format!(
-                    "{}. A new spawn will choose another eligible profile; send_message would run this child on {profile} again.",
-                    description.trim_end_matches('.')
-                );
+                *message = if oracle {
+                    format!(
+                        "{}. Ask again with ask_oracle to start a fresh oracle.",
+                        description.trim_end_matches('.')
+                    )
+                } else {
+                    format!(
+                        "{}. A new spawn will choose another eligible profile; send_message would run this child on {profile} again.",
+                        description.trim_end_matches('.')
+                    )
+                };
             }
         }
         Ok(())
@@ -1615,8 +1647,17 @@ impl ApiBackend {
             } else {
                 child.output
             };
-            let mut entry =
-                wait_agent_entry(id, &child.state, output, child.finished, &child.progress);
+            let oracle = child.relation.kind == mj_core::subagent::SubagentKind::Oracle;
+            let mut entry = wait_agent_entry(
+                id,
+                &child.state,
+                output,
+                child.finished,
+                &child.progress,
+                oracle,
+            );
+            entry["child_name"] =
+                live_child_name(child.record.as_ref(), &child.relation.task_name).into();
             entry["task_name"] = child.relation.task_name.into();
             inputs.annotate(id, &mut entry);
             mark_parked(&mut entry, child.record.as_ref());
@@ -1639,7 +1680,8 @@ impl ApiBackend {
             self.list_subagents(parent_id.to_owned())
                 .await?
                 .iter()
-                .any(|child| child.child_session_id == child_id),
+                .any(|child| child.child_session_id == child_id
+                    && child.kind == mj_core::subagent::SubagentKind::Worker),
             "session {child_id} does not belong to parent {parent_id}"
         );
         Ok(())
@@ -1653,10 +1695,10 @@ impl ApiBackend {
             let child_id =
                 subagent_input::resolve_session_target(&state, Some(&parent_id), &requested_id)?;
             anyhow::ensure!(
-                state
-                    .subagents
-                    .get(&child_id)
-                    .is_some_and(|relation| { relation.parent_session_id == parent_id }),
+                state.subagents.get(&child_id).is_some_and(|relation| {
+                    relation.parent_session_id == parent_id
+                        && relation.kind == mj_core::subagent::SubagentKind::Worker
+                }),
                 "session {requested_id} does not belong to parent {parent_id}"
             );
             Ok(child_id)
@@ -1980,9 +2022,8 @@ pub(crate) struct ChildProgress {
     pub report: ReportState,
     /// The newest prompt the parent gave the child, by acceptance ordinal.
     pub awaited_ordinal: Option<u64>,
-    /// The newest prompt the child's last finished turn answers; see
-    /// [`mj_core::subagent::answered_ordinal`].
-    pub answered_ordinal: Option<u64>,
+    /// The outcome owning the child's answer.
+    pub answer: Option<mj_core::state::MaterializedTurnOutcome>,
     /// How that turn failed, when it did: `failed` or `interrupted`, and why.
     pub failed_turn: Option<(&'static str, String)>,
     /// The child's profile, when that turn failed because the provider
@@ -2006,7 +2047,7 @@ impl ChildProgress {
             last_completed_ordinal: Some(1),
             report,
             awaited_ordinal: None,
-            answered_ordinal: None,
+            answer: None,
             failed_turn: None,
             login_failure: None,
             provider_failure: None,
@@ -2020,10 +2061,15 @@ impl ChildProgress {
     /// `submitted` is the first prompt's ordinal while startup remembers it.
     fn awaiting_prompt(&self, submitted: Option<u64>) -> bool {
         self.last_completed_ordinal.is_none()
-            || mj_core::subagent::prompt_unanswered(
-                self.awaited_ordinal.max(submitted),
-                self.answered_ordinal,
-            )
+            || self
+                .awaited_ordinal
+                .into_iter()
+                .chain(submitted)
+                .any(|ordinal| {
+                    self.answer
+                        .as_ref()
+                        .is_none_or(|turn| !turn.answers(ordinal))
+                })
     }
 }
 
@@ -2054,7 +2100,7 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
             mj_core::clock::epoch_millis(),
         ),
         awaited_ordinal: recorded.awaited_ordinal,
-        answered_ordinal: last.and_then(mj_core::subagent::answered_ordinal),
+        answer: last.cloned(),
         failed_turn: last.and_then(|last| {
             mj_core::subagent::failed_turn(
                 last,
@@ -2123,7 +2169,7 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         last_completed_ordinal: last.as_ref().map(|turn| turn.completed_ordinal),
         report,
         awaited_ordinal: recorded.awaited_ordinal,
-        answered_ordinal: last.as_ref().and_then(mj_core::subagent::answered_ordinal),
+        answer: last.clone(),
         failed_turn,
         login_failure,
         provider_failure: last.as_ref().and_then(provider_failure),
@@ -2140,8 +2186,15 @@ fn wait_agent_entry(
     output: Option<String>,
     finished: bool,
     progress: &ChildProgress,
+    oracle: bool,
 ) -> serde_json::Value {
-    let output = output.map(|output| bounded_report(&output));
+    let output = output.map(|output| {
+        if oracle {
+            mj_core::subagent::bounded_oracle_report(&output)
+        } else {
+            bounded_report(&output)
+        }
+    });
     let mut agent = serde_json::json!({
         "child_session_id":id,
         "report_source":report_source(state, &progress.report),
@@ -2152,6 +2205,9 @@ fn wait_agent_entry(
     });
     if output.is_some_and(|(_, truncated)| truncated) {
         agent["truncated"] = serde_json::Value::Bool(true);
+    }
+    if oracle {
+        agent["oracle"] = serde_json::Value::Bool(true);
     }
     if state == "failed"
         && let Some(profile_id) = &progress.login_failure
@@ -2168,6 +2224,16 @@ fn wait_agent_entry(
         agent["failure"] = serde_json::json!({"kind": "provider_failure", "summary": summary});
     }
     agent
+}
+
+/// What the session list calls a child now, bounded to one line, or the task
+/// name it was spawned with when the daemon holds no record. A person may
+/// have renamed the child since it was spawned.
+fn live_child_name(record: Option<&mj_core::state::SessionRecord>, task_name: &str) -> String {
+    record.map_or_else(
+        || mj_core::state::bounded_one_line(task_name, mj_core::state::MESSAGE_NAME_CHARS),
+        mj_core::state::SessionRecord::message_name,
+    )
 }
 
 /// Say in a notification or `list_agents` entry that the child is parked: its turn
@@ -2793,8 +2859,33 @@ impl SubagentBackend for ApiBackend {
                     .capabilities(&[profile])
                     .await?
                     .remove(0)),
-                model => crate::controller::profile_config::discover(profile, model, refresh).await,
+                model => {
+                    // A forced refresh bypasses the catalogue's cache, not its
+                    // allow-list: an explicit request cannot select a model the
+                    // picker hides.
+                    let (mut choices, default) = refreshed_profile_choices(model, |model| {
+                        crate::controller::profile_config::discover(profile.clone(), model, refresh)
+                    })
+                    .await?;
+                    let selected = choices.model.clone();
+                    choices.model = default;
+                    let allowed = self.profile_catalog.allowed_models(&profile);
+                    choices = choices.restricted_to(&allowed);
+                    choices.model = selected;
+                    Ok(choices)
+                }
             }
+        })
+    }
+
+    fn unrestricted_profile_config(
+        &self,
+        profile: String,
+    ) -> BoxFuture<'_, Result<mj_core::worker_launch::ProfileConfig>> {
+        Box::pin(async move {
+            self.profile_catalog
+                .unrestricted_capabilities(&profile)
+                .await
         })
     }
 
@@ -3446,6 +3537,25 @@ impl SubagentBackend for ApiBackend {
             })
         })
     }
+}
+
+// Refresh the default before selecting a model, so the exemption belongs to
+// this discovery rather than the catalogue from before the refresh.
+async fn refreshed_profile_choices<F, Fut>(
+    model: Option<String>,
+    mut discover: F,
+) -> Result<(mj_core::worker_launch::ProfileConfig, Option<String>)>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<mj_core::worker_launch::ProfileConfig>>,
+{
+    let choices = discover(None).await?;
+    let default = choices.model.clone();
+    let choices = match model {
+        Some(model) => discover(Some(model)).await?,
+        None => choices,
+    };
+    Ok((choices, default))
 }
 
 #[cfg(test)]

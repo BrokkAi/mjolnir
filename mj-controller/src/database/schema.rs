@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 110;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 113;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2005,6 +2005,88 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older writers would drop a session's Oracle choice on update,
+    // and older daemons cannot decode AskOracle actions or Oracle-kind children.
+    if version < 111 {
+        connection.execute_batch("BEGIN IMMEDIATE;")?;
+        if !legacy_schema::table_has_column(connection, "sessions", "oracle")? {
+            connection.execute_batch("ALTER TABLE sessions ADD COLUMN oracle INTEGER NOT NULL DEFAULT 1 CHECK(oracle IN (0, 1));")?;
+        }
+        if !legacy_schema::table_has_column(connection, "sessions", "oracle_choice")? {
+            connection.execute_batch("ALTER TABLE sessions ADD COLUMN oracle_choice TEXT CHECK(oracle_choice IS NULL OR json_valid(oracle_choice));")?;
+        }
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS oracle_preference (
+                 profile_id TEXT PRIMARY KEY,
+                 enabled INTEGER NOT NULL CHECK(enabled IN (0, 1))
+             );
+             UPDATE schema_compatibility SET minimum_compatible_version = 111 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (111, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 111;
+             COMMIT;",
+        )?;
+    }
+
+    // Compatible: clearing a nullable override changes no stored shape; older
+    // readers and writers already support absent manual titles (as in the compatible
+    // turn-profile backfill). Keep the existing compatibility floor.
+    if version < 112 {
+        let transaction = rusqlite::Transaction::new_unchecked(
+            connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        {
+            let mut candidates = transaction.prepare(
+                "SELECT s.session_id, s.title FROM sessions s
+                 WHERE s.session_title_override = s.title
+                   AND NOT EXISTS (SELECT 1 FROM subagent_sessions a
+                                   WHERE a.child_session_id = s.session_id)",
+            )?;
+            let rows = candidates.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (id, title) = row?;
+                // Creation inputs change during provisioning, moves and bundle
+                // renames. Match the approved placeholder shape instead.
+                if title.split_once(" via ").is_some_and(|(project, profile)| {
+                    !project.is_empty()
+                        && !profile.is_empty()
+                        && !project.chars().any(char::is_whitespace)
+                        && !profile.chars().any(char::is_whitespace)
+                }) {
+                    // Advance updated_at as a rename does, so SessionWiki's
+                    // change token moves and an indexed archive is refreshed.
+                    transaction.execute(
+                        "UPDATE sessions SET session_title_override = NULL,
+                             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                         WHERE session_id = ?1",
+                        [id],
+                    )?;
+                }
+            }
+        }
+        transaction.execute_batch(
+            "INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (112, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 112;",
+        )?;
+        transaction.commit()?;
+    }
+
+    // Breaking: older daemons reject answered_through in persisted outcome JSON.
+    if version < 113 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 113 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (113, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 113;
+             COMMIT;",
+        )?;
+    }
+
     // Compatible: limits `prompt_history` to prompts of top-level sessions
     // that still exist, and adds a full-text index over it. The migration
     // deletes the spawn instructions recorded for sub-agent children and the
@@ -2022,7 +2104,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     // A later migration that recreates `prompt_history`, `sessions` or
     // `subagent_sessions`, as revision 77 recreated `prompt_history`, drops
     // the triggers on that table and must create them again.
-    if version < 111 {
+    if version < 114 {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
              DELETE FROM prompt_history
@@ -2064,8 +2146,8 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
                  END;
              INSERT INTO prompt_history_text(prompt_history_text) VALUES ('rebuild');
              INSERT INTO schema_migrations(version, applied_at)
-                 VALUES (111, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
-             PRAGMA user_version = 111;
+                 VALUES (114, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 114;
              COMMIT;",
         )?;
     }
@@ -2544,7 +2626,7 @@ pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
 /// Historical fixtures must remove review columns introduced afterward.
 #[cfg(test)]
 pub(super) fn restore_review_state_schema(connection: &Connection, version: i64) {
-    restore_pre111_prompt_history(connection, version);
+    restore_pre114_prompt_history(connection, version);
     if version < 109 {
         for column in ["pending_followup", "forward_attempts"] {
             if legacy_schema::table_has_column(connection, "turn_review_state", column).unwrap() {
@@ -2573,12 +2655,12 @@ pub(super) fn restore_review_state_schema(connection: &Connection, version: i64)
     }
 }
 
-/// Historical fixtures must remove revision 111's prompt-history triggers and
+/// Historical fixtures must remove revision 114's prompt-history triggers and
 /// index. Revision 77 recreates `prompt_history`, and SQLite refuses that
 /// rename while triggers on other tables still name the dropped table.
 #[cfg(test)]
-pub(super) fn restore_pre111_prompt_history(connection: &Connection, version: i64) {
-    if version < 111 {
+pub(super) fn restore_pre114_prompt_history(connection: &Connection, version: i64) {
+    if version < 114 {
         connection
             .execute_batch(
                 "DROP TRIGGER IF EXISTS prompt_history_top_level_only;
@@ -2626,6 +2708,11 @@ mod reader_tests {
         ).unwrap();
         migrate_schema(&connection).unwrap();
         let state = read_schema_state(&connection).unwrap();
+        assert!(
+            state
+                .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION - 1)
+                .is_err()
+        );
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         let revisions = connection
@@ -2737,6 +2824,96 @@ mod reader_tests {
             read_schema_state(&upgraded).unwrap().revision,
             SCHEMA_VERSION
         );
+    }
+
+    // Hard-won: 0d648876: web New saved generated placeholders as manual overrides.
+    #[test]
+    fn default_title_override_repair_runs_once_and_preserves_manual_names() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_baseline_schema(&connection).unwrap();
+        connection.execute_batch("CREATE TRIGGER stop_repair BEFORE INSERT ON schema_migrations WHEN NEW.version=112 BEGIN SELECT RAISE(ABORT,'fixture boundary'); END;").unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        if !connection.is_autocommit() {
+            connection.execute_batch("ROLLBACK").unwrap();
+        }
+        connection
+            .execute_batch("DROP TRIGGER stop_repair;")
+            .unwrap();
+        for (id, title, manual, directory) in [
+            (
+                "project",
+                "repo via fake",
+                "repo via fake",
+                Some(Path::new("/work/repo/.mj/clones/session-id/")),
+            ),
+            ("bundle", "bundle via fake", "bundle via fake", None),
+            ("rename", "bundle via fake", "My manual name", None),
+            ("custom", "Fix the parser", "Fix the parser", None),
+            ("moved", "bundle via original", "bundle via original", None),
+            ("words", "a b via c", "a b via c", None),
+            ("repeated", "a via b via c", "a via b via c", None),
+            ("unicode", "a via b\u{2003}c", "a via b\u{2003}c", None),
+            ("empty", "a via ", "a via ", None),
+            ("child", "bundle via fake", "bundle via fake", None),
+        ] {
+            connection.execute("INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES (?1,'bundle','now')", [id]).unwrap();
+            connection.execute("INSERT INTO sessions(session_id,title,session_title_override,harness_kind,last_profile,target_template_id,state,updated_at,project_directory) VALUES (?1,?2,?3,'codex','fake','local','error','now',?4)", params![id,title,manual,directory.map(path_to_blob)]).unwrap();
+        }
+        connection.execute_batch("INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES ('child','project','task','{}');").unwrap();
+        migrate_schema(&connection).unwrap();
+        let overrides = || {
+            let mut statement = connection
+                .prepare(
+                    "SELECT session_id,session_title_override FROM sessions ORDER BY session_id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(
+            overrides(),
+            vec![
+                ("bundle".into(), None),
+                ("child".into(), Some("bundle via fake".into())),
+                ("custom".into(), Some("Fix the parser".into())),
+                ("empty".into(), Some("a via ".into())),
+                ("moved".into(), None),
+                ("project".into(), None),
+                ("rename".into(), Some("My manual name".into())),
+                ("repeated".into(), Some("a via b via c".into())),
+                ("unicode".into(), Some("a via b\u{2003}c".into())),
+                ("words".into(), Some("a b via c".into()))
+            ]
+        );
+        let mut statement = connection
+            .prepare(
+                "SELECT session_id FROM sessions WHERE updated_at <> 'now' ORDER BY session_id",
+            )
+            .unwrap();
+        let touched = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        drop(statement);
+        assert_eq!(touched, ["bundle", "moved", "project"]);
+        let schema = read_schema_state(&connection).unwrap();
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        connection
+            .execute(
+                "UPDATE sessions SET session_title_override=title WHERE session_id='bundle'",
+                [],
+            )
+            .unwrap();
+        let before = overrides();
+        migrate_schema(&connection).unwrap();
+        assert_eq!(overrides(), before);
     }
 
     fn assert_divergent_history_upgrades(revision: i64, project_history: bool, interrupt: bool) {
@@ -3399,6 +3576,15 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 111 {
+            connection
+                .execute_batch(
+                    "ALTER TABLE sessions DROP COLUMN oracle_choice;
+                ALTER TABLE sessions DROP COLUMN oracle;
+                DROP TABLE IF EXISTS oracle_preference;",
+                )
+                .unwrap();
+        }
         if version < 86 {
             connection
                 .execute_batch("DROP TABLE IF EXISTS mailbox_reset_frontiers;")
@@ -3532,6 +3718,48 @@ mod reader_tests {
         }
         drop(connection);
         forget_verified_schema(path);
+    }
+
+    #[test]
+    fn oracle_migration_enables_existing_sessions_and_persists_override() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oracle.sqlite3");
+        let mut session = super::super::tests::session("existing", "project");
+        save_session_to(&path, &session).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE sessions DROP COLUMN oracle_choice;
+             ALTER TABLE sessions DROP COLUMN oracle;
+             DROP TABLE oracle_preference;
+             DELETE FROM schema_migrations WHERE version >= 111;
+             UPDATE schema_compatibility SET minimum_compatible_version = 110 WHERE singleton = 1;
+             PRAGMA user_version = 110;",
+            )
+            .unwrap();
+        drop(connection);
+        forget_verified_schema(&path);
+        let connection = open_writer(&path).unwrap();
+        assert!(
+            read_schema_state(&connection)
+                .unwrap()
+                .ensure_supported_by(110)
+                .is_err()
+        );
+        drop(connection);
+        assert!(load_state_from(&path).unwrap().sessions["existing"].oracle);
+        session.oracle = false;
+        session.oracle_choice = Some(mj_core::config::SubagentChoice {
+            model: "advisor".into(),
+            effort: Some("high".into()),
+        });
+        save_session_to(&path, &session).unwrap();
+        let loaded = load_state_from(&path).unwrap();
+        assert!(!loaded.sessions["existing"].oracle);
+        assert_eq!(
+            loaded.sessions["existing"].oracle_choice,
+            session.oracle_choice
+        );
     }
 
     #[test]
@@ -3967,14 +4195,14 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
         let connection = open_writer(&path).unwrap();
-        // Rewind to revision 110, then store what a revision-110 build kept:
+        // Rewind to revision 113, then store what a revision-113 build kept:
         // a top-level prompt, a child's spawn instructions and a destroyed
         // session's prompt.
-        restore_pre111_prompt_history(&connection, 110);
+        restore_pre114_prompt_history(&connection, 113);
         connection
             .execute_batch(
-                "DELETE FROM schema_migrations WHERE version >= 111;
-                 PRAGMA user_version = 110;",
+                "DELETE FROM schema_migrations WHERE version >= 114;
+                 PRAGMA user_version = 113;",
             )
             .unwrap();
         let session = |id: &str| {
@@ -4017,7 +4245,7 @@ mod reader_tests {
         assert_eq!(state.revision, SCHEMA_VERSION);
         state
             .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
-            .expect("a revision-110 build still reads and writes the store");
+            .expect("a revision-113 build still reads and writes the store");
         let matching = |query: &str| -> Vec<String> {
             connection
                 .prepare(
@@ -4043,7 +4271,7 @@ mod reader_tests {
             "child and destroyed-session prompts are deleted"
         );
 
-        // The writes a revision-110 build makes, in plain SQL.
+        // The writes a revision-113 build makes, in plain SQL.
         connection
             .execute_batch(&format!(
                 "{}{}
@@ -4288,8 +4516,30 @@ mod reader_tests {
                 |row| row.get::<_, bool>(0),
             )
             .unwrap());
+        connection.execute_batch("CREATE TRIGGER stop_before_stored_answers BEFORE INSERT ON schema_migrations WHEN NEW.version=113 BEGIN SELECT RAISE(ABORT,'stored answers migration'); END;").unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection
+            .execute_batch("ROLLBACK; DROP TRIGGER stop_before_stored_answers;")
+            .unwrap();
+        let before_answers = read_schema_state(&connection).unwrap();
+        assert_eq!(before_answers.revision, 112);
+        assert_eq!(before_answers.minimum_compatible, Some(111));
+        before_answers.ensure_supported_by(112).unwrap();
         migrate_schema(&connection).unwrap();
         let schema = read_schema_state(&connection).unwrap();
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert_eq!(schema.minimum_compatible, Some(113));
+        assert!(matches!(
+            schema
+                .ensure_supported_by(112)
+                .unwrap_err()
+                .downcast_ref::<StoreSchemaMismatch>()
+                .unwrap()
+                .reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: 113
+            }
+        ));
         let error = schema.ensure_supported_by(98).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<StoreSchemaMismatch>().unwrap().reason,

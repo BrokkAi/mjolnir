@@ -307,14 +307,14 @@ impl PhoneActionControl {
         }
     }
 
-    pub(super) fn request_cancel(&self) -> bool {
+    pub(super) fn request_cancel(&self, cause: &'static str) -> bool {
         let accepted = self.lifecycle.as_ref().map_or_else(
             || {
                 self.cancelled
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
             },
-            |control| control.request_cancel(),
+            |control| control.request_cancel(cause),
         );
         if accepted {
             self.cancelled.store(true, Ordering::Release);

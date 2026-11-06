@@ -376,6 +376,55 @@ pub(super) fn configure_claude_mailbox_hook(
     Ok(true)
 }
 
+/// Keep the person's `~/.claude/CLAUDE.md` out of the session's project
+/// instructions. The session's configuration lives in the staged profile, so
+/// Claude Code finds that file only as an ancestor of any checkout under the
+/// home directory: it loads the person's instructions a second time as
+/// project files, and the project then counts as having a CLAUDE.md, so its
+/// AGENTS.md is not loaded (anthropics/claude-code#80580). `user_home` is the
+/// HOME the harness runs with. Exclusions the person already has are kept.
+pub(super) fn exclude_default_claude_instructions(
+    root: &Path,
+    session_id: &str,
+    home: &Path,
+    user_home: Option<&Path>,
+) -> Result<()> {
+    let Some(default_config) = user_home
+        .filter(|user_home| user_home.is_absolute())
+        .map(|user_home| user_home.join(".claude"))
+        .filter(|default_config| default_config != home)
+    else {
+        return Ok(());
+    };
+    let path = home.join("settings.json");
+    if !(private_staged_home(root, session_id, home) && regular_file_or_absent(&path)) {
+        return Ok(());
+    }
+    let excluded = default_config
+        .join("CLAUDE.md")
+        .to_string_lossy()
+        .into_owned();
+    edit_profile_json(&path, "staged Claude settings", |settings| {
+        let excludes = settings
+            .entry("claudeMdExcludes")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .with_context(|| {
+                format!(
+                    "claudeMdExcludes in {} must be a JSON array",
+                    path.display()
+                )
+            })?;
+        if !excludes
+            .iter()
+            .any(|entry| entry.as_str() == Some(&excluded))
+        {
+            excludes.push(excluded.into());
+        }
+        Ok(())
+    })
+}
+
 /// Register the owned server in Codex's session-private profile. The ACP bridge
 /// cannot carry omit_tools_from. Do this on the worker before launching the
 /// harness so an upgraded worker also repairs an older staged profile.
@@ -891,13 +940,10 @@ impl SubagentEndpoint {
     ) -> Result<(bool, Option<SubagentToolResult>, u64)> {
         // One owner selects the originating turn and keeps it selected until
         // the request is durable; a later daemon never reconstructs this fact.
-        let relay = self
+        let mut relay = self
             .relay
             .as_ref()
             .map(|relay| relay.lock().expect("relay lock poisoned"));
-        if let Some(relay) = &relay {
-            request.originating_command_id = relay.originating_command_id();
-        }
         let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
         let mark = state.collections.count;
         if let Some(result) = self.read_result(&state, &request.request_id)? {
@@ -930,6 +976,20 @@ impl SubagentEndpoint {
                 is_error: true,
                 message: "Sub-agent request was not accepted: this session is replacing its harness (Move). Retry after the Move finishes.".into(),
             }), mark));
+        }
+        if let Some(relay) = &mut relay {
+            // A report is harness work, like output or an autonomous spawn.
+            // The MCP socket can deliver it before the adapter's tool-call
+            // update, so it opens the turn itself (#1450). Only an admitted
+            // request opens one: a retry or a refusal must not.
+            if matches!(
+                request.action,
+                mj_core::subagent::SubagentToolAction::Handback { .. }
+            ) && relay.uses_claude_harness_turns()
+            {
+                relay.open_harness_turn_if_allowed()?;
+            }
+            request.originating_command_id = relay.originating_command_id();
         }
         let mut next = state.clone();
         next.requests
@@ -1125,7 +1185,8 @@ mod tests {
                 serde_json::json!([
                     "mcp__mj-agents__send_message",
                     "mcp__mj-agents__fetch",
-                    "mcp__mj-agents__request_review"
+                    "mcp__mj-agents__request_review",
+                    "mcp__mj-agents__ask_oracle"
                 ])
             );
             let command = settings["hooks"]["PostToolBatch"][0]["hooks"][0]["command"]
@@ -1275,6 +1336,42 @@ mod tests {
         let elsewhere = login.path().join("session-7");
         std::fs::create_dir(&elsewhere).unwrap();
         assert!(!configure_claude_mailbox_hook(&root, "session-7", &elsewhere).unwrap());
+    }
+
+    #[test]
+    fn claude_settings_exclude_the_default_config_instructions_once() {
+        let login = tempfile::tempdir().unwrap();
+        let root = login.path().join("worker");
+        let home = root.join("profile");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("settings.json"),
+            br#"{"model":"opus","claudeMdExcludes":["/work/CLAUDE.md"]}"#,
+        )
+        .unwrap();
+
+        for _ in 0..2 {
+            exclude_default_claude_instructions(&root, "session", &home, Some(login.path()))
+                .unwrap();
+        }
+        let settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(
+            settings,
+            serde_json::json!({
+                "model": "opus",
+                "claudeMdExcludes": [
+                    "/work/CLAUDE.md",
+                    login.path().join(".claude/CLAUDE.md"),
+                ]
+            })
+        );
+
+        // A home that is not this session's staged profile is never edited.
+        let own = login.path().join(".claude");
+        std::fs::create_dir_all(&own).unwrap();
+        exclude_default_claude_instructions(&root, "session", &own, Some(login.path())).unwrap();
+        assert!(!own.join("settings.json").exists());
     }
 
     // Hard-won: #1302: a nested staging link allowed writes to the source profile.
@@ -1585,7 +1682,8 @@ print(sys.argv[sys.argv.index('--role') + 1])
             serde_json::json!([
                 "mcp__mj-agents__send_message",
                 "mcp__mj-agents__fetch",
-                "mcp__mj-agents__request_review"
+                "mcp__mj-agents__request_review",
+                "mcp__mj-agents__ask_oracle"
             ])
         );
 
@@ -2256,6 +2354,43 @@ enabled = false
             pending[0].originating_command_id.as_deref(),
             Some("original-turn")
         );
+    }
+
+    // Hard-won: #1450: a handback from a Monitor-woken turn was refused for lack of a turn id.
+    #[test]
+    fn handback_admission_owns_the_harness_turn_in_either_order() {
+        for opened in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let relay = Arc::new(Mutex::new(
+                crate::relay::DurableRelay::open(root.path(), "session-123", "test").unwrap(),
+            ));
+            {
+                let mut owner = relay.lock().unwrap();
+                owner.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
+                owner
+                    .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+                        config_options: vec![],
+                    })
+                    .unwrap();
+                if opened {
+                    owner.open_harness_turn_if_allowed().unwrap();
+                }
+            }
+            let mut endpoint = SubagentEndpoint::open(root.path()).unwrap();
+            endpoint.relay = Some(relay.clone());
+            let mut report = request("harness-handback");
+            report.action = SubagentToolAction::Handback {
+                message: "report".into(),
+            };
+            endpoint.enqueue(report).unwrap();
+            let owner = relay.lock().unwrap();
+            let expected = owner.originating_command_id().unwrap();
+            assert!(expected.starts_with("harness-turn-"));
+            assert_eq!(
+                endpoint.snapshot().0[0].originating_command_id.as_deref(),
+                Some(expected.as_str())
+            );
+        }
     }
 
     #[test]

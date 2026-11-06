@@ -272,15 +272,10 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
     config.profiles.insert(
         "claude".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Claude,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Claude,
+                profile_home,
+            )
         },
     );
     let mut controller = Controller {
@@ -770,15 +765,10 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                profile_home,
+            )
         },
     );
     config
@@ -1143,6 +1133,8 @@ fn cross_harness_provision_cancellation_stops_the_next_command() {
 #[test]
 fn failed_resume_rolls_back_only_after_target_cleanup() {
     let previous = SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: Some((&TargetTemplate::LocalBare).into()),
         launch_base: None,
@@ -1345,15 +1337,10 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                profile_home,
+            )
         },
     );
     config.bundles.insert(
@@ -1503,15 +1490,10 @@ fn failed_resume_retires_a_checkout_it_recreated() {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                profile_home,
+            )
         },
     );
     let mut controller = Controller {
@@ -1718,15 +1700,10 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: profile_home,
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                profile_home,
+            )
         },
     );
     config.save().unwrap();
@@ -1981,15 +1958,8 @@ exit 0
         config.profiles.insert(
             profile_id.into(),
             HarnessProfile {
-                enabled: true,
-                kind: harness,
-                home: home.clone(),
-                environment: Default::default(),
-                context_window_bytes: None,
                 legacy_subagents: None,
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(harness, home.clone())
             },
         );
         config

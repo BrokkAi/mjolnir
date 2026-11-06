@@ -286,6 +286,32 @@ pub(crate) fn retire_legacy_wait(parent: String, request: String) -> Result<bool
                         })
                         .cloned()
                         .context("legacy wait is missing its marked child report")?;
+                    // Name the child as the session list does now; a child whose
+                    // record is gone keeps the task name.
+                    let live_name: Option<String> = transaction
+                        .query_row(
+                            "SELECT title, session_title_override, acp_session_title
+                             FROM sessions WHERE session_id=?1",
+                            [&child],
+                            |row| {
+                                let title: String = row.get(0)?;
+                                let title_override: Option<String> = row.get(1)?;
+                                let acp_title: Option<String> = row.get(2)?;
+                                Ok(mj_core::state::bounded_one_line(
+                                    mj_core::state::listed_session_title(
+                                        &child,
+                                        &title,
+                                        title_override.as_deref(),
+                                        acp_title.as_deref(),
+                                    ),
+                                    mj_core::state::MESSAGE_NAME_CHARS,
+                                ))
+                            },
+                        )
+                        .optional()?;
+                    if let Some(name) = live_name {
+                        entry["child_name"] = name.into();
+                    }
                     entry["task_name"] = relation.task_name.into();
                     let report = serde_json::from_value(entry)?;
                     let key = subagent_report_key(&parent, &child, &identity)?;

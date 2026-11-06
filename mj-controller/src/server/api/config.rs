@@ -6,10 +6,13 @@ pub(super) async fn profile_config(
     Query(query): Query<ProfileConfigQuery>,
 ) -> Result<Json<mj_core::worker_launch::ProfileConfig>, ApiFailure> {
     crate::server::require_profile(&state.snapshot_rx.borrow(), &profile_id)?;
-    let choices = backend(&state)?
-        .profile_config(profile_id, query.model, false)
-        .await
-        .map_err(|error| ApiFailure::unavailable(format!("profile discovery failed: {error:#}")))?;
+    let backend = backend(&state)?;
+    let choices = if query.unrestricted {
+        backend.unrestricted_profile_config(profile_id).await
+    } else {
+        backend.profile_config(profile_id, query.model, false).await
+    }
+    .map_err(|error| ApiFailure::unavailable(format!("profile discovery failed: {error:#}")))?;
     Ok(Json(choices))
 }
 

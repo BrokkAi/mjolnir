@@ -91,6 +91,7 @@ const FORCE_DESTROY_PREEMPT_TIMEOUT: Duration = Duration::from_secs(8);
 pub struct LifecycleControl {
     state: Arc<AtomicU8>,
     pub cancelled: Arc<AtomicBool>,
+    cancel_cause: Arc<Mutex<Option<&'static str>>>,
 }
 
 const LIFECYCLE_OPEN: u8 = 0;
@@ -100,17 +101,21 @@ const LIFECYCLE_COMMITTED: u8 = 2;
 const LIFECYCLE_CANCELLED_FOR_SHUTDOWN: u8 = 3;
 
 impl LifecycleControl {
-    pub fn request_cancel(&self) -> bool {
-        self.cancel_as(LIFECYCLE_CANCELLED)
+    pub fn request_cancel(&self, cause: &'static str) -> bool {
+        self.cancel_as(LIFECYCLE_CANCELLED, cause)
     }
 
     fn cancel_for_shutdown(&self) -> bool {
-        self.cancel_as(LIFECYCLE_CANCELLED_FOR_SHUTDOWN)
+        self.cancel_as(LIFECYCLE_CANCELLED_FOR_SHUTDOWN, "server shutdown")
     }
 
     /// The state is written before the flag the executor reads, so an
     /// operation that sees its cancel also sees which cancel it was.
-    fn cancel_as(&self, cancelled: u8) -> bool {
+    fn cancel_as(&self, cancelled: u8, cause: &'static str) -> bool {
+        let mut cancel_cause = self
+            .cancel_cause
+            .lock()
+            .expect("lifecycle cancel cause poisoned");
         let accepted = self
             .state
             .compare_exchange(
@@ -121,6 +126,7 @@ impl LifecycleControl {
             )
             .is_ok();
         if accepted {
+            *cancel_cause = Some(cause);
             self.cancelled.store(true, Ordering::Release);
         }
         accepted
@@ -152,6 +158,13 @@ impl LifecycleControl {
             self.state.load(Ordering::Acquire),
             LIFECYCLE_CANCELLED | LIFECYCLE_CANCELLED_FOR_SHUTDOWN
         )
+    }
+
+    pub(crate) fn cancel_cause(&self) -> Option<&'static str> {
+        *self
+            .cancel_cause
+            .lock()
+            .expect("lifecycle cancel cause poisoned")
     }
 
     /// Stop the operation's commands because the daemon is exiting, whether
@@ -588,11 +601,15 @@ impl ActiveLifecycle {
             )
     }
 
-    fn request_cancel(&mut self) -> bool {
-        self.cancel_with(LifecycleControl::request_cancel)
+    fn request_cancel(&mut self, session_id: &str, cause: &'static str) -> bool {
+        let accepted = self.cancel_with(|control| control.request_cancel(cause));
+        if accepted {
+            tracing::info!(session_id, kind = self.kind.label(), reference = %self.operation_id, cause, "lifecycle cancellation accepted");
+        }
+        accepted
     }
 
-    fn cancel_with(&mut self, cancel: fn(&LifecycleControl) -> bool) -> bool {
+    fn cancel_with(&mut self, cancel: impl FnOnce(&LifecycleControl) -> bool) -> bool {
         if !self.pending_upgrade_failed()
             && !matches!(
                 self.phase,

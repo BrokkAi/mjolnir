@@ -15,10 +15,10 @@ To see it working, open a session in the terminal and press Ctrl-R. Type three o
 ## Progress
 
 - [x] (2026-11-06) Research and prototype: confirmed trigram FTS5 behaviour on SQLite 3.46 and the bundled 3.53.2, measured index build time and size on a copy of the live store.
-- [x] (2026-11-06) Milestone 1: schema revision 111 adds the `prompt_history_text` index and its triggers; `prompt_text_index_covers_existing_rows_and_follows_previous_writers` passes.
+- [x] (2026-11-06) Milestone 1: schema revision 114 adds the `prompt_history_text` index and its triggers; `prompt_text_index_covers_existing_rows_and_follows_previous_writers` passes.
 - [x] (2026-11-06) Milestone 2: `search_prompt_page_from` serves the terminal (`client_backend.rs`) and the web route (`run.rs`); the session tier's filter is written `+p.session_id` so the full-text index drives it; store tests cover ordering, paging with `limit = 2`, short queries and quotes.
 - [x] (2026-11-06) Milestone 3: `HistorySearch` keeps eight matches queued and refills from `next`; `history_search_keeps_eight_matches_queued_and_refills_from_the_cursor` passes; the web palette explains queries shorter than 3 characters.
-- [x] (2026-11-06) Revision 111 also limits `prompt_history` to top-level sessions that still exist (see the Decision Log); `prompt_history_keeps_top_level_prompts_and_its_index_follows_previous_writers` and the `database::`, prompt and history filters (326 tests) pass.
+- [x] (2026-11-06) Revision 114 also limits `prompt_history` to top-level sessions that still exist (see the Decision Log); `prompt_history_keeps_top_level_prompts_and_its_index_follows_previous_writers` and the `database::`, prompt and history filters (326 tests) pass.
 - [x] (2026-11-06) Milestone 4: docs, workspace clippy, and the Ctrl-R step in `tests/e2e/tui_components_chat.py` passed against a real daemon and TUI (seed 61113, captures `008-history-search` and `009-history-search-scope`). The rest of that scenario is stale on master: it waited for a composer titled "Prompt" (fixed to the `╭  mic` border) and for a "Choose a model" dialog that is now a "model" menu (not fixed). `Lab.environment()` no longer passes the host session's `CLAUDE*`, `CODEX_*` and `MJ_*` variables to lab daemons. The full suites ran once with 11 worker-startup timeouts in resume, move and proxy tests, which the user chose not to rerun.
 - [ ] Commit, review, push.
 
@@ -40,7 +40,7 @@ To see it working, open a session in the terminal and press Ctrl-R. Type three o
 - Observation: on the real schema, SQLite planned the session tier from the `prompt_history_session_recent` index and probed the full-text index once per row. That took 75 ms for a 291-prompt session. Writing the filter as `+p.session_id = ?` hides it from index selection, so the full-text index drives the query, and the same page took 6 ms. The project and other-project tiers already let the full-text index drive, because their filters are correlated `EXISTS` subqueries.
   Evidence: `EXPLAIN QUERY PLAN` showed `SEARCH p USING INDEX prompt_history_session_recent ... SCAN f VIRTUAL TABLE INDEX 192:=M1 ... USE TEMP B-TREE FOR ORDER BY` before the change and `SCAN f VIRTUAL TABLE INDEX 192:M1< ; SEARCH p USING INTEGER PRIMARY KEY` after it, on a copy of the live store.
 
-- Observation: SQLite refuses `ALTER TABLE ... RENAME` while a trigger on another table names a table that has just been dropped. Revision 77 recreates `prompt_history` this way, so test fixtures that rewind a current store below revision 111 and rerun older migrations failed with "error in trigger prompt_history_child_registered: no such table: main.prompt_history". Real stores below revision 111 have no such triggers. The fix is the fixture helper `restore_pre111_prompt_history` in `mj-controller/src/database/schema.rs`, called from `restore_review_state_schema`. A future migration that recreates `prompt_history`, `sessions` or `subagent_sessions` must drop and recreate these triggers itself.
+- Observation: SQLite refuses `ALTER TABLE ... RENAME` while a trigger on another table names a table that has just been dropped. Revision 77 recreates `prompt_history` this way, so test fixtures that rewind a current store below revision 114 and rerun older migrations failed with "error in trigger prompt_history_child_registered: no such table: main.prompt_history". Real stores below revision 114 have no such triggers. The fix is the fixture helper `restore_pre114_prompt_history` in `mj-controller/src/database/schema.rs`, called from `restore_review_state_schema`. A future migration that recreates `prompt_history`, `sessions` or `subagent_sessions` must drop and recreate these triggers itself.
   Evidence: 13 schema and store tests failed with that message before the helper and passed after it.
 
 - Observation: building the index on a copy of the live store's prompt text (61 MB) took 10.9 s and grew the file from 64 MB to 206 MB. Queries on that copy took under 5 ms.
@@ -73,7 +73,7 @@ To see it working, open a session in the terminal and press Ctrl-R. Type three o
   Rationale: older readers ignore the new table. Older writers insert into `prompt_history`, and the triggers live in the database, so they keep the index current. Every shipped build links SQLite through `rusqlite` with the `bundled` feature, and the bundled `libsqlite3-sys` builds 0.26, 0.30 and 0.38 all compile with `SQLITE_ENABLE_FTS5`, so older builds can run the triggers.
   Date/Author: 2026-11-06, agent.
 
-- Decision: `prompt_history` holds only prompts of top-level sessions that still exist. Revision 111 deletes the rows of sub-agent children and of destroyed sessions, and triggers keep the rule for every writer: `prompt_history_top_level_only` ignores inserts for sessions in `subagent_sessions`, `prompt_history_child_registered` deletes a child's rows when it is registered, and `prompt_history_session_destroyed` deletes a session's rows when its `sessions` row is deleted. The index then covers the whole table.
+- Decision: `prompt_history` holds only prompts of top-level sessions that still exist. Revision 114 deletes the rows of sub-agent children and of destroyed sessions, and triggers keep the rule for every writer: `prompt_history_top_level_only` ignores inserts for sessions in `subagent_sessions`, `prompt_history_child_registered` deletes a child's rows when it is registered, and `prompt_history_session_destroyed` deletes a session's rows when its `sessions` row is deleted. The index then covers the whole table.
   Rationale: on the live store, 5,333 child sessions held one row each (their spawn instructions, 45.5 MB of 62.3 MB), and destroyed sessions held 3,908 rows (12.9 MB). Neither is text a person typed into a conversation they can still open. Only Ctrl-R, Up/Ctrl-P and the web palette read the table, so nothing else loses data. This reverses the earlier rule in `delete_session` that kept a destroyed session's prompts. With about 4 MB of text left, building the index inside the migration takes about a second, so the build stays synchronous. The user confirmed the deletion.
   Date/Author: 2026-11-06, user.
 
@@ -93,7 +93,7 @@ The project is a Rust workspace. The parts involved are these.
 
 `prompt_history` is a table in the daemon's SQLite store (the daemon is the background process `mj daemon-run`; its store code is in `mj-controller/src/database/`). Each row has `history_id INTEGER PRIMARY KEY`, `session_id`, a nullable `event_ordinal`, `submitted_at` and `text`. Rows are written by `record_prompt_to`, when a prompt is delivered to a session, and by `record_abandoned_prompt_to`, when the user clears a typed draft with Ctrl-C. Both functions are in `mj-controller/src/database/prompts.rs`. The table `session_contexts(session_id, bundle_id, ...)` maps each session to its project. A "bundle" is mj's word for a project. `super::projects::session_project_id` turns a bundle ID into its canonical ID after projects are merged.
 
-Schema changes are numbered revisions in `migrate_schema` in `mj-controller/src/database/schema.rs`, guarded by `if version < N`. The current number is the constant `SCHEMA_VERSION` in `mj-controller/src/database.rs` (110 before this plan). AGENTS.md requires every migration to be classified as compatible or breaking, with a comment beside it saying why. A compatible migration does not update `schema_compatibility.minimum_compatible_version`.
+Schema changes are numbered revisions in `migrate_schema` in `mj-controller/src/database/schema.rs`, guarded by `if version < N`. The current number is the constant `SCHEMA_VERSION` in `mj-controller/src/database.rs` (113 when this plan merged; it was 110 when the plan began, and revisions 111 to 113 landed upstream meanwhile). AGENTS.md requires every migration to be classified as compatible or breaking, with a comment beside it saying why. A compatible migration does not update `schema_compatibility.minimum_compatible_version`.
 
 FTS5 is SQLite's full-text index. An "external content" FTS5 table stores only the index and reads the text from another table by rowid. Here that is `prompt_history`, with `content_rowid='history_id'`. The trigram tokenizer indexes every three-character sequence, so a quoted query such as `"the parser"` matches any row containing that substring, ignoring case. Triggers on `prompt_history` must insert and delete index entries, because an external-content table does not follow its source automatically.
 
@@ -106,7 +106,7 @@ The web viewer calls `GET /api/sessions/{id}/history?q=...&scope=project` (`prom
 
 ## Plan of Work
 
-Milestone 1 adds the index. In `mj-controller/src/database/schema.rs`, after the `version < 110` block, add a `version < 111` block in one `BEGIN IMMEDIATE` transaction:
+Milestone 1 adds the index. In `mj-controller/src/database/schema.rs`, after the last existing block, add a `version < 114` block in one `BEGIN IMMEDIATE` transaction:
 
     CREATE VIRTUAL TABLE IF NOT EXISTS prompt_history_text USING fts5(
         text, content='prompt_history', content_rowid='history_id', tokenize='trigram');
@@ -121,7 +121,7 @@ Milestone 1 adds the index. In `mj-controller/src/database/schema.rs`, after the
               INSERT INTO prompt_history_text(rowid, text) VALUES (new.history_id, new.text); END;
     INSERT INTO prompt_history_text(prompt_history_text) VALUES ('rebuild');
 
-It then records revision 111 in `schema_migrations` and sets `PRAGMA user_version = 111`, without touching the compatibility floor. Place a "Compatible:" comment above it giving the reasoning in the Decision Log. Raise `SCHEMA_VERSION` to 111. Also check whether a fresh database is created from `baseline.sql` and then migrated; if so, the new block covers fresh stores too. Note in the comment that a future migration that recreates `prompt_history` (as revision 77 did) must recreate the triggers.
+It then records revision 114 in `schema_migrations` and sets `PRAGMA user_version = 114`, without touching the compatibility floor. Place a "Compatible:" comment above it giving the reasoning in the Decision Log. Raise `SCHEMA_VERSION` to 114. Also check whether a fresh database is created from `baseline.sql` and then migrated; if so, the new block covers fresh stores too. Note in the comment that a future migration that recreates `prompt_history` (as revision 77 did) must recreate the triggers.
 
 Milestone 2 replaces the two search functions in `mj-controller/src/database/prompts.rs` (`search_prompts_from`, the unbounded one, and `search_prompts_bounded_from`, the one capped at 4,096 rows) with one function:
 
@@ -156,7 +156,7 @@ Run all commands from the repository root. Run every `cargo test` outside the re
 
 ## Validation and Acceptance
 
-Milestone 1 is accepted when a migration test shows two things. Rows already in `prompt_history` before revision 111 are found through `prompt_history_text` afterwards. A row inserted, updated or deleted with plain SQL afterwards, as an older writer would do, is reflected in the index.
+Milestone 1 is accepted when a migration test shows two things. Rows already in `prompt_history` before revision 114 are found through `prompt_history_text` afterwards. A row inserted, updated or deleted with plain SQL afterwards, as an older writer would do, is reflected in the index.
 
 Milestone 2 is accepted when a store test with prompts in three sessions across two projects shows four things. `All` returns this session's matches, then the project's, then other projects', each newest first, with repeated text shown once at the smallest scope. Paging with `limit = 2` through the whole result, following `next`, returns the same sequence as one large page, with no gaps and no repeats. A two-character query returns an empty page. A query containing a double quote does not fail.
 
@@ -167,7 +167,7 @@ End to end: build, start a test instance (`--instance <name>`, never the default
 
 ## Idempotence and Recovery
 
-The migration runs in one transaction and uses `IF NOT EXISTS`, so a failed run leaves revision 110 intact and can be retried. Rebuilding the index is safe to repeat: `INSERT INTO prompt_history_text(prompt_history_text) VALUES ('rebuild')` regenerates it from `prompt_history`. Never run migration tests against the default instance's store.
+The migration runs in one transaction and uses `IF NOT EXISTS`, so a failed run leaves revision 113 intact and can be retried. Rebuilding the index is safe to repeat: `INSERT INTO prompt_history_text(prompt_history_text) VALUES ('rebuild')` regenerates it from `prompt_history`. Never run migration tests against the default instance's store.
 
 
 ## Artifacts and Notes
@@ -203,4 +203,6 @@ In `mj-client/src/session.rs`, on `SessionHandleBackend` and `SessionHandle`:
     fn session_prompts(&self) -> BoxFuture<'_, Result<Vec<PromptHistoryEntry>>>;
 
 
-Revision note (2026-11-06): the user decided that prompt history keeps only top-level sessions that still exist, so revision 111 now deletes child and destroyed-session rows and adds three triggers that keep that rule. The build stays synchronous because the remaining text is small. Progress, Decision Log and Surprises were updated.
+Revision note (2026-11-06): the user decided that prompt history keeps only top-level sessions that still exist, so revision 114 now deletes child and destroyed-session rows and adds three triggers that keep that rule. The build stays synchronous because the remaining text is small. Progress, Decision Log and Surprises were updated.
+
+Revision note (2026-11-06): upstream took revisions 111 to 113 while this plan was in review, so the merge renumbered this plan's migration to 114, its fixture helper to `restore_pre114_prompt_history`, and its migration test to rewind to 113.

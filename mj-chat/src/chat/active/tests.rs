@@ -823,6 +823,8 @@ const CONTEXT_TEST_WORKSPACE: &str = "workspace-for-chat-session-context-tests";
 
 fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -873,15 +875,10 @@ fn config_with_profiles(profiles: &[(&str, mj_core::config::HarnessKind)]) -> Co
                 (
                     (*id).to_owned(),
                     mj_core::config::HarnessProfile {
-                        enabled: true,
-                        kind: *kind,
-                        home: std::path::PathBuf::from("/profiles").join(id),
-                        environment: Default::default(),
-                        context_window_bytes: None,
-                        legacy_subagents: Default::default(),
-                        guardian_review_model: None,
-                        muse_auto_review: None,
-                        codex_profile: None,
+                        ..mj_core::config::HarnessProfile::new(
+                            *kind,
+                            std::path::PathBuf::from("/profiles").join(id),
+                        )
                     },
                 )
             })
