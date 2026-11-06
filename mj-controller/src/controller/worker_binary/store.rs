@@ -12,19 +12,28 @@ pub(super) fn store_root(locator: &targets::TargetLocator, session_id: &str) -> 
     ))
 }
 
-// One owner serializes preparation and collection on a target in this daemon.
-// The upload's unique name and atomic publication also protect different
-// daemons targeting the same host. Waiting observes the supervising executor cancellation.
-pub(super) fn store_gate(locator: &targets::TargetLocator, root: &str) -> Arc<Mutex<()>> {
-    type Gates = Mutex<HashMap<String, Weak<Mutex<()>>>>;
-    static GATES: OnceLock<Gates> = OnceLock::new();
+/// Key of one target store: this daemon's data directory, the target's command
+/// prefix and the store path.
+fn store_key(locator: &targets::TargetLocator, root: &str) -> String {
     let command = targets::locator_command(locator, vec!["true".into()]);
-    let key = format!(
+    format!(
         "{:?}:{}:{:?}:{root}",
         data_dir(),
         command.program,
         command.args
-    );
+    )
+}
+
+/// One owner per `root` string in this daemon. Callers choose the string: the
+/// store gate is never taken for a whole store. An upload takes `{store}/{digest}`
+/// so one build is transferred once, and a session's staging registry takes its
+/// own root. Cached installs of a published build take none of these. Other
+/// daemons targeting the same host are protected by the upload's unique name
+/// and its atomic publication. Waiting observes the executor cancellation.
+pub(super) fn store_gate(locator: &targets::TargetLocator, root: &str) -> Arc<Mutex<()>> {
+    type Gates = Mutex<HashMap<String, Weak<Mutex<()>>>>;
+    static GATES: OnceLock<Gates> = OnceLock::new();
+    let key = store_key(locator, root);
     let mut gates = GATES
         .get_or_init(Default::default)
         .lock()
@@ -116,8 +125,6 @@ for file in "$store"/*/hel; do
     rmdir -- "$retired"
 done"#;
 
-/// Called under the same store owner as staging. The one-day grace avoids
-/// collecting newly uploaded entries before another session can use them.
 fn collect(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
@@ -134,6 +141,64 @@ fn collect(
         ),
     )?;
     Ok(())
+}
+
+/// Collection only retires entries older than a day, so one run per store and
+/// interval is enough; running it for every install queued hours of commands.
+const COLLECT_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// Claim this daemon's collection for `store`; at most one caller per interval
+/// wins and runs it inline, so the run has exactly one owner.
+///
+/// Why this cannot starve this daemon's own installs: one run retires an
+/// entry at most once, and a republished entry has a fresh modification time
+/// (the publish script touches each upload), so no later run within the day
+/// retires it again.
+/// A run therefore forces at most one retry of an install, and the install
+/// loop allows three. Entries pinned by a link are restored, never removed.
+fn claim_collection(locator: &targets::TargetLocator, store: &str) -> bool {
+    let mut last = collections().lock().unwrap_or_else(|e| e.into_inner());
+    match last.entry(store_key(locator, store)) {
+        std::collections::hash_map::Entry::Occupied(mut entry) => {
+            if entry.get().elapsed() < COLLECT_INTERVAL {
+                return false;
+            }
+            entry.insert(Instant::now());
+        }
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(Instant::now());
+        }
+    }
+    true
+}
+
+fn collections() -> &'static Mutex<HashMap<String, Instant>> {
+    static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    LAST.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+pub(super) fn forget_collections() {
+    collections()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+/// A failed or skipped run is reported and not retried before the next
+/// interval; the next daemon starts with no claim and collects again.
+fn collect_if_due(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    store: &str,
+    keep: Option<&str>,
+) {
+    if executor.cancellation_requested() || !claim_collection(locator, store) {
+        return;
+    }
+    if let Err(error) = collect(executor, locator, store, keep) {
+        tracing::warn!(%store, error = %format!("{error:#}"), "worker binary store collection failed");
+    }
 }
 
 pub(super) fn install_worker_binary(
@@ -158,6 +223,12 @@ pub(super) fn install_worker_binary(
     )
 }
 
+// Exit statuses of the link script that mean "this entry cannot serve": the
+// path is gone (or retired by a collector), or its bytes do not match.
+const LINK_MISSING: i32 = 75;
+const LINK_NO_HARD_LINKS: i32 = 76;
+const LINK_DIGEST_MISMATCH: i32 = 77;
+
 fn install_worker_binary_at(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
@@ -177,8 +248,6 @@ fn install_worker_binary_at(
         WorkerInstall::Image => None,
     };
     let store = mj_core::target_path::text(&store_root(locator, session_id)?);
-    let gate = store_gate(locator, &store);
-    let _guard = lock_gate(executor, &gate)?;
     // Register before any pin can be created. Registration and sweeping share
     // one session owner, so no sweep can use a snapshot predating a live pin.
     let name = format!(
@@ -201,97 +270,22 @@ fn install_worker_binary_at(
             .execute(executor)?;
         // Switching to an image link can release the last session reference
         // to a host-copied build. Image installs must collect that store too.
-        if let Err(error) = collect(executor, locator, &store, None) {
-            tracing::warn!(%store, error = %format!("{error:#}"), "worker binary store collection failed");
-        }
+        collect_if_due(executor, locator, &store, None);
         return Ok(());
     };
-    if let Err(error) = collect(executor, locator, &store, Some(&digest)) {
-        tracing::warn!(%store, error = %format!("{error:#}"), "worker binary store collection failed");
-    }
     let directory = format!("{store}/{digest}");
     let cached = format!("{directory}/hel");
-    // A collector in another daemon can retire an entry between the probe and
-    // the link. Retry that explicitly unaccepted installation with fresh bytes.
+    // A published build needs no store lock: the link script verifies the
+    // digest of the private pin it creates. Only a missing or corrupt entry
+    // takes the upload lock below. A collector in another daemon can retire
+    // an entry before the link, so that explicitly unaccepted installation
+    // retries with fresh bytes.
+    let mut publish = false;
     for _ in 0..3 {
-        if !crate::session_manager::installed_digest_matches(
-            executor,
-            &super::upgrade::installed_file_digest_command(
-                locator,
-                &cached,
-                "verify shared Mjolnir worker",
-            ),
-            &digest,
-        ) {
-            let upload = format!(
-                "{store}/.upload-{}",
-                crate::session_manager::new_command_id("worker-store")?
-            );
-            let temporary = format!("{upload}/hel");
-            crate::target_storage::ensure_room_for(
-                locator,
-                [upload.as_str()],
-                || super::upgrade::file_size(source),
-                "stage the replacement Mjolnir worker",
+        if publish {
+            ensure_published(
+                executor, locator, session_id, worker, source, &store, &digest,
             )?;
-            let transfer = (|| -> Result<()> {
-                execute_checked(
-                    executor,
-                    targets::locator_command(
-                        locator,
-                        vec!["mkdir".into(), "-p".into(), upload.clone()],
-                    )
-                    .purpose("create private worker store upload"),
-                )?;
-                transfer_binary(executor, locator, session_id, worker, &temporary)?;
-                execute_checked(
-                    executor,
-                    script(
-                        locator,
-                        r#"set -eu
-case $(uname -s) in Darwin) actual=$(shasum -a 256 -- "$1");; *) actual=$(sha256sum -- "$1");; esac
-[ "${actual%% *}" = "$2" ] || { echo 'uploaded Mjolnir worker digest mismatch' >&2; exit 1; }
-"#,
-                        &[&temporary, &digest],
-                        "verify uploaded Mjolnir worker",
-                    ),
-                )?;
-                execute_checked(
-                    executor,
-                    script(
-                        locator,
-                        r#"set -eu
-mkdir -p -- "$2"
-# Atomic creation converges independent uploaders on the winning inode.
-if [ ! -e "$2/hel" ]; then
-    if ! ln -- "$1" "$2/hel" 2>/dev/null; then
-        [ -f "$2/hel" ] || mv -n -- "$1" "$2/hel"
-    fi
-fi
-case $(uname -s) in Darwin) actual=$(shasum -a 256 -- "$2/hel");; *) actual=$(sha256sum -- "$2/hel");; esac
-if [ "${actual%% *}" != "$3" ]; then
-    # A corrupt entry is replaced, never written through its existing inode.
-    mv -f -- "$1" "$2/hel"
-fi
-"#,
-                        &[&temporary, &directory, &digest],
-                        "publish shared Mjolnir worker",
-                    ),
-                )?;
-                Ok(())
-            })();
-            let cleanup = executor.execute_cleanup(
-                &targets::locator_command(
-                    locator,
-                    vec!["rm".into(), "-rf".into(), "--".into(), upload],
-                )
-                .purpose("discard private worker store upload"),
-            );
-            match cleanup {
-                Ok(output) if output.status == 0 => {}
-                other => tracing::warn!(result = ?other, "worker store upload cleanup failed"),
-            }
-            transfer?;
         }
         let command = |mode| {
             script(
@@ -314,7 +308,7 @@ else
 fi
 # The private link pins the inode even if another daemon collects the entry.
 case $(uname -s) in Darwin) actual=$(shasum -a 256 -- "$temporary");; *) actual=$(sha256sum -- "$temporary");; esac
-[ "${actual%% *}" = "$4" ] || { echo 'shared worker digest mismatch' >&2; exit 1; }
+[ "${actual%% *}" = "$4" ] || { echo 'shared worker digest mismatch' >&2; exit 77; }
 promote_worker_binary "$temporary" "$destination"
 "#,
                 &[&cached, &temporary, destination, &digest, mode],
@@ -322,7 +316,7 @@ promote_worker_binary "$temporary" "$destination"
             )
         };
         let mut linked = executor.execute(&command("link"))?;
-        if linked.status == 76 {
+        if linked.status == LINK_NO_HARD_LINKS {
             crate::target_storage::ensure_room_for(
                 locator,
                 [temporary.as_str()],
@@ -331,17 +325,121 @@ promote_worker_binary "$temporary" "$destination"
             )?;
             linked = executor.execute(&command("copy"))?;
         }
-        if linked.status == 75 {
-            continue;
+        match linked.status {
+            0 => {
+                // After the pin exists, so this install's own entry is linked.
+                collect_if_due(executor, locator, &store, Some(&digest));
+                return Ok(());
+            }
+            LINK_MISSING | LINK_DIGEST_MISMATCH => publish = true,
+            _ => bail!(
+                "install shared Mjolnir worker: {}",
+                String::from_utf8_lossy(&linked.stderr)
+            ),
         }
-        ensure!(
-            linked.status == 0,
-            "install shared Mjolnir worker: {}",
-            String::from_utf8_lossy(&linked.stderr)
-        );
-        return Ok(());
     }
     bail!("shared Mjolnir worker repeatedly retired during installation")
+}
+
+/// Make `{store}/{digest}/hel` exist with the right bytes. The lock is per
+/// build: the first holder uploads, verifies and publishes, and every later
+/// holder finds it published after acquiring and returns without a transfer.
+/// Builds that are already published never reach this function, and different
+/// builds do not wait for each other.
+fn ensure_published(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    worker: &WorkerInstall,
+    source: &Path,
+    store: &str,
+    digest: &str,
+) -> Result<()> {
+    let directory = format!("{store}/{digest}");
+    let gate = store_gate(locator, &directory);
+    let _guard = lock_gate(executor, &gate)?;
+    if crate::session_manager::installed_digest_matches(
+        executor,
+        &super::upgrade::installed_file_digest_command(
+            locator,
+            &format!("{directory}/hel"),
+            "verify shared Mjolnir worker",
+        ),
+        digest,
+    ) {
+        return Ok(());
+    }
+    // Reclaim old builds before the capacity check below can refuse the upload.
+    collect_if_due(executor, locator, store, Some(digest));
+    let upload = format!(
+        "{store}/.upload-{}",
+        crate::session_manager::new_command_id("worker-store")?
+    );
+    let temporary = format!("{upload}/hel");
+    crate::target_storage::ensure_room_for(
+        locator,
+        [upload.as_str()],
+        || super::upgrade::file_size(source),
+        "stage the replacement Mjolnir worker",
+    )?;
+    let transfer = (|| -> Result<()> {
+        execute_checked(
+            executor,
+            targets::locator_command(locator, vec!["mkdir".into(), "-p".into(), upload.clone()])
+                .purpose("create private worker store upload"),
+        )?;
+        transfer_binary(executor, locator, session_id, worker, &temporary)?;
+        execute_checked(
+            executor,
+            script(
+                locator,
+                r#"set -eu
+case $(uname -s) in Darwin) actual=$(shasum -a 256 -- "$1");; *) actual=$(sha256sum -- "$1");; esac
+[ "${actual%% *}" = "$2" ] || { echo 'uploaded Mjolnir worker digest mismatch' >&2; exit 1; }
+"#,
+                &[&temporary, digest],
+                "verify uploaded Mjolnir worker",
+            ),
+        )?;
+        execute_checked(
+            executor,
+            script(
+                locator,
+                r#"set -eu
+mkdir -p -- "$2"
+# Copies such as docker cp keep the source build's age; collection must see a
+# fresh entry.
+touch -- "$1"
+# Atomic creation converges independent uploaders on the winning inode.
+if [ ! -e "$2/hel" ]; then
+    if ! ln -- "$1" "$2/hel" 2>/dev/null; then
+        [ -f "$2/hel" ] || mv -n -- "$1" "$2/hel"
+    fi
+fi
+case $(uname -s) in Darwin) actual=$(shasum -a 256 -- "$2/hel");; *) actual=$(sha256sum -- "$2/hel");; esac
+if [ "${actual%% *}" != "$3" ]; then
+    # A corrupt entry is replaced, never written through its existing inode.
+    mv -f -- "$1" "$2/hel"
+fi
+"#,
+                &[&temporary, &directory, digest],
+                "publish shared Mjolnir worker",
+            ),
+        )?;
+        Ok(())
+    })();
+    let cleanup = executor.execute_cleanup(
+        &targets::locator_command(
+            locator,
+            vec!["rm".into(), "-rf".into(), "--".into(), upload],
+        )
+        .purpose("discard private worker store upload"),
+    );
+    match cleanup {
+        Ok(output) if output.status == 0 => {}
+        other => tracing::warn!(result = ?other, "worker store upload cleanup failed"),
+    }
+    transfer
 }
 
 /// SSH containers reuse the host store as their transport cache, then publish
