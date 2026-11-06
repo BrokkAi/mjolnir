@@ -819,91 +819,66 @@ fn a_daemon_that_dies_during_the_handoff_wait_is_replaced() {
 }
 
 // Hard-won: #1457: a container daemon's store guard is in its volume, so a free host guard and an unanswered ping made a live, busy container daemon look gone.
-#[cfg(unix)]
 #[test]
-fn a_container_daemon_that_does_not_answer_is_not_replaced_while_the_engine_runs_it() {
+fn a_container_daemon_that_does_not_answer_is_not_replaced() {
     use std::time::{Duration, Instant};
-    // The engine says the container runs; the engine itself fails. Neither
-    // is evidence that the daemon exited.
-    for (case, engine) in [
-        ("running", "printf 'mj-daemon-x-y\\n'; exit 0"),
-        ("unanswered", "printf 'engine is down\\n' >&2; exit 1"),
-    ] {
-        let storage = upgrade_storage();
-        current_store(&storage);
-        let config = storage.path().join("config/config.toml");
-        fs::write(
-            &config,
-            "version = 1\n[phone]\nenabled = false\n[daemon]\nruntime = \"docker\"\n",
-        )
-        .unwrap();
-        let tools = storage.path().join("bin");
-        fs::create_dir(&tools).unwrap();
-        let calls = storage.path().join("engine-calls.log");
-        mj_core::test_hooks::install_fake_command(
-            &tools,
-            "docker",
-            &format!(
-                "printf '%s\\n' \"$*\" >> \"$MJ_TEST_ENGINE_LOG\"\n\
-                 if [ \"$1\" = ps ]; then {engine}; fi\nexit 1\n"
-            ),
-        );
-        // A container daemon's record: no host PID, and an endpoint that does
-        // not answer (it refused a connection a moment ago).
-        let address = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
-        let stale = mj_client::daemon::DaemonMetadata {
-            protocol_version: mj_client::daemon::PROTOCOL_VERSION,
-            pid: 0,
-            address,
-            token: "busy-in-its-container".into(),
-            started_at: chrono::Utc::now().to_rfc3339(),
-            build_version: "2.21.0".into(),
-            instance_id: String::new(),
-            placement: mj_client::daemon::DaemonPlacement::Host,
-        };
-        let metadata_path = storage.path().join("data/daemon.json");
-        fs::write(&metadata_path, serde_json::to_vec(&stale).unwrap()).unwrap();
-        let log = storage.path().join("client.log");
-        let mut command = upgrade_command(&storage);
-        command
-            .env("MJ_TEST_ENGINE_LOG", &calls)
-            .env("PATH", format!("{}:/usr/bin:/bin", tools.display()))
-            .stdin(std::process::Stdio::null())
-            .stdout(fs::File::create(&log).unwrap())
-            .stderr(fs::File::create(&log).unwrap());
-        let mut client = command.spawn().unwrap();
-        // The handoff loop asks again each round; several asks without a
-        // replacement show that the record is kept, not that the client is slow.
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            let asked = fs::read_to_string(&calls)
-                .unwrap_or_default()
-                .lines()
-                .filter(|line| line.starts_with("ps "))
-                .count();
-            if asked >= 3 {
-                break;
+    let storage = upgrade_storage();
+    current_store(&storage);
+    // A busy container daemon: its endpoint takes connections and answers none.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let connections = connections.clone();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                connections.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                held.push(stream);
             }
-            assert!(
-                client.try_wait().unwrap().is_none(),
-                "{case}: the client gave up: {}",
-                fs::read_to_string(&log).unwrap_or_default()
-            );
-            assert!(
-                Instant::now() < deadline,
-                "{case}: the engine was not asked"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let kept: mj_client::daemon::DaemonMetadata =
-            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
-        assert_eq!(kept.token, stale.token, "{case}: the record was replaced");
-        client.kill().unwrap();
-        client.wait().unwrap();
+        });
     }
+    // A container daemon's record: PID 0, an older build, and no host store
+    // guard, which lives in the container's volume.
+    let stale = mj_client::daemon::DaemonMetadata {
+        protocol_version: mj_client::daemon::PROTOCOL_VERSION,
+        pid: 0,
+        address,
+        token: "busy-in-its-container".into(),
+        started_at: chrono::Utc::now().to_rfc3339(),
+        build_version: "2.21.0".into(),
+        instance_id: String::new(),
+        placement: mj_client::daemon::DaemonPlacement::Host,
+    };
+    let metadata_path = storage.path().join("data/daemon.json");
+    fs::write(&metadata_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+    let log = storage.path().join("client.log");
+    let mut command = upgrade_command(&storage);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(fs::File::create(&log).unwrap())
+        .stderr(fs::File::create(&log).unwrap());
+    let mut client = command.spawn().unwrap();
+    // The handoff asks again each round; several asks with the record in place
+    // show that the client waits for the daemon instead of replacing it.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while connections.load(std::sync::atomic::Ordering::SeqCst) < 3 {
+        assert!(
+            client.try_wait().unwrap().is_none(),
+            "the client gave up: {}",
+            fs::read_to_string(&log).unwrap_or_default()
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the client did not ask the daemon"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let kept: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    assert_eq!(kept.token, stale.token, "the record was replaced");
+    client.kill().unwrap();
+    client.wait().unwrap();
 }
 
 #[test]

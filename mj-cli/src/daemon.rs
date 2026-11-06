@@ -767,27 +767,26 @@ async fn inspect_existing_daemon(_held: &SharedStartGuard) -> Result<ExistingDae
 /// check below can only rule the daemon in; the record is gone when none finds
 /// it, and any check that cannot be answered leaves the record in place.
 ///
-/// 1. The host controller store guard is held: a host daemon owns the store.
+/// 1. The record is a host daemon's. A container daemon's record carries PID
+///    0, and nothing on the host can show that it exited: its guard is in the
+///    container's volume, the record does not name the engine that ran it,
+///    and a running container may or may not still run its daemon. It is
+///    never called gone here, so its handoff waits as it always has (#1458).
+/// 2. The host controller store guard is held: a host daemon owns the store.
 ///    The operating system releases it when the process ends however it ends,
 ///    so a free guard cannot be a reused process id.
-/// 2. The recorded PID is a live `mj daemon-run`. A PID that is another
+/// 3. The recorded PID is a live `mj daemon-run`. A PID that is another
 ///    program is not this daemon. This also covers a 2.65 container daemon,
 ///    which shared the host's process namespace and so shows up here;
 ///    `legacy_placement` reads the same PID and can say nothing more once the
 ///    process is gone.
-/// 3. The engine reports the instance's daemon container running. A container
-///    daemon holds its guard in the container's volume, which the host cannot
-///    probe, and its record carries PID 0. For such a record every installed
-///    engine is asked, the configured one first: the record does not name the
-///    engine that ran it, and the configuration may have changed since. An
-///    engine that fails to answer is "unknown", which keeps the record. A
-///    container whose daemon died inside it still counts as running; telling
-///    the two apart needs a probe inside the container. The container is found
-///    by the instance label, not by its name: the name digests the image id,
-///    and learning that would resolve or pull images.
 /// 4. The endpoint answers `Ping`. An answer is more evidence of life; a
 ///    failure to answer proves nothing.
 async fn recorded_daemon_is_gone(metadata: &DaemonMetadata) -> Result<bool> {
+    let pid = metadata.pid;
+    if pid == 0 {
+        return Ok(false);
+    }
     let unowned = tokio::task::spawn_blocking(ControllerStoreGuard::try_acquire)
         .await
         .context("probe controller ownership task failed")??;
@@ -795,60 +794,13 @@ async fn recorded_daemon_is_gone(metadata: &DaemonMetadata) -> Result<bool> {
         return Ok(false);
     };
     drop(guard);
-    let pid = metadata.pid;
-    // PID 0 is a container daemon's record, not a host process.
-    if pid != 0
-        && tokio::task::spawn_blocking(move || daemon_still_runs(pid))
-            .await
-            .context("probe daemon process task failed")?
-            // Another program owns the PID now; that is not this daemon.
-            .unwrap_or(false)
+    if tokio::task::spawn_blocking(move || daemon_still_runs(pid))
+        .await
+        .context("probe daemon process task failed")?
+        // Another program owns the PID now; that is not this daemon.
+        .unwrap_or(false)
     {
         return Ok(false);
-    }
-    // Only a container daemon's record carries PID 0; a nonzero PID is a host
-    // process, which the guard and the PID already answered for. The record
-    // does not name the engine that ran it, and the configuration may name
-    // another engine since, so every engine is asked, the configured one first.
-    let engines = if pid == 0 {
-        let configured = load_daemon_config().await.unwrap_or_default().runtime;
-        let mut engines = vec![configured];
-        for runtime in [
-            mj_core::config::DaemonRuntime::Podman,
-            mj_core::config::DaemonRuntime::Docker,
-        ] {
-            if !engines.contains(&runtime) {
-                engines.push(runtime);
-            }
-        }
-        engines.retain(|runtime| runtime.engine().is_some());
-        engines
-    } else {
-        Vec::new()
-    };
-    for runtime in engines {
-        let program = runtime
-            .engine()
-            .expect("only container runtimes are listed");
-        // No engine program means no container of that engine can run.
-        if mj_core::program_path::find_program_on_path(program, std::env::var_os("PATH").as_deref())
-            .is_none()
-        {
-            continue;
-        }
-        match container::instance_container_is_running(runtime).await {
-            Ok(false) => {}
-            Ok(true) => return Ok(false),
-            Err(error) => {
-                tracing::warn!(
-                    engine = program,
-                    error = %format!("{error:#}"),
-                    "cannot tell whether the recorded daemon's container still runs; \
-                     treating the daemon as alive"
-                );
-                return Ok(false);
-            }
-        }
     }
     let answered = tokio::time::timeout(Duration::from_secs(3), async {
         let mut client = DaemonClient::connect(metadata.clone()).await?;
@@ -862,7 +814,7 @@ async fn recorded_daemon_is_gone(metadata: &DaemonMetadata) -> Result<bool> {
         pid,
         build = %metadata.build_version,
         "the recorded daemon is gone: no process owns the store, none runs the recorded PID, \
-         no container of this instance runs, and its endpoint does not answer"
+         and its endpoint does not answer"
     );
     Ok(true)
 }
