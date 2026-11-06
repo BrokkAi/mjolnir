@@ -1238,15 +1238,27 @@ pull_policy = "never"
         # review needs no reviewer and closes again on its own. The answer can
         # wait up to two minutes behind the recovery copy the finished turn
         # started, as `mj review start` allows for.
-        started = time.monotonic()
-        status, value = self.request(
-            "POST",
-            "/api/actions",
-            {"action": "start-review", "session_id": session_id},
-            timeout=150,
+        # The reply can render before the turn's teardown marks the session
+        # idle; a review start in that window is refused with 409. Wait for
+        # the idle chat phase and retry the refusal, as submit_prompt does.
+        self.wait_snapshot(
+            lambda value: (self.session(value, session_id) or {}).get("chat_phase") == "idle",
+            "session idle for a review",
         )
-        if status != 202:
-            raise ScenarioFailure(f"start-review action returned {status}: {value!r}")
+        started = time.monotonic()
+        deadline = time.monotonic() + TIMEOUT
+        while True:
+            status, value = self.request(
+                "POST",
+                "/api/actions",
+                {"action": "start-review", "session_id": session_id},
+                timeout=150,
+            )
+            if status == 202:
+                break
+            if status != 409 or time.monotonic() >= deadline:
+                raise ScenarioFailure(f"start-review action returned {status}: {value!r}")
+            time.sleep(0.2)
         self.record_action(
             "review-started", session_id=session_id, seconds=round(time.monotonic() - started, 3)
         )
