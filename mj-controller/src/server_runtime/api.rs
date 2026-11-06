@@ -2055,10 +2055,11 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
         ),
         awaited_ordinal: recorded.awaited_ordinal,
         answered_ordinal: last.and_then(|last| {
-            last.answered_ordinal(
+            last.answered_ordinal(mj_core::state::OutstandingPrompts::new(
+                active,
                 turn.into_iter()
                     .flat_map(|turn| turn.queued_ordinals.iter().copied()),
-            )
+            ))
         }),
         failed_turn: last.and_then(|last| {
             mj_core::subagent::failed_turn(
@@ -2130,7 +2131,10 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         report,
         awaited_ordinal: recorded.awaited_ordinal,
         answered_ordinal: last.as_ref().and_then(|last| {
-            last.answered_ordinal(queued.iter().map(|prompt| prompt.accepted_ordinal))
+            last.answered_ordinal(mj_core::state::OutstandingPrompts::new(
+                active.as_ref(),
+                queued.iter().map(|prompt| prompt.accepted_ordinal),
+            ))
         }),
         failed_turn,
         login_failure,

@@ -6548,4 +6548,15 @@ fn harness_completion_answers_started_prompts_but_not_queued_prompts() {
     observation.queued.push("queued-prompt".into());
     observation.queued_ordinals.push(Some(7));
     assert!(resolve_wait(&observation, &request).is_none());
+    // Hard-won: #1450 review: a queued prompt that started read as answered by the older harness turn.
+    observation.queued.clear();
+    observation.queued_ordinals.clear();
+    observation.active_turn = Some(MaterializedTurn {
+        command_id: "queued-prompt".into(),
+        accepted_ordinal: Some(7),
+        turn_start_position: 21,
+        started_at_ms: 0,
+        steered_into: None,
+    });
+    assert!(resolve_wait(&observation, &request).is_none());
 }

@@ -324,10 +324,38 @@ pub struct MaterializedTurnOutcome {
     pub outcome: TurnOutcomeKind,
 }
 
+/// Prompts a session accepted that no finished turn can have answered: the
+/// one running and those queued behind it. A turn the harness started can end
+/// after a prompt was accepted without having run it, so a finished turn's own
+/// ordinal is not enough on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutstandingPrompts {
+    earliest: Option<u64>,
+}
+
+impl OutstandingPrompts {
+    /// Readers pass both facts: when a queued prompt starts it leaves the
+    /// queue and becomes the active turn, and it stays outstanding across
+    /// that step.
+    pub fn new(
+        active: Option<&MaterializedTurn>,
+        queued: impl IntoIterator<Item = Option<u64>>,
+    ) -> Self {
+        Self {
+            earliest: active
+                .and_then(|turn| turn.accepted_ordinal)
+                .into_iter()
+                .chain(queued.into_iter().flatten())
+                .min(),
+        }
+    }
+}
+
 impl MaterializedTurnOutcome {
-    /// The newest prompt acceptance this finished turn can answer.
-    pub fn answered_ordinal(&self, queued: impl IntoIterator<Item = Option<u64>>) -> Option<u64> {
-        let first = queued.into_iter().flatten().min();
+    /// The newest prompt acceptance this finished turn can answer, capped
+    /// below the earliest prompt still outstanding.
+    pub fn answered_ordinal(&self, outstanding: OutstandingPrompts) -> Option<u64> {
+        let first = outstanding.earliest;
         let answer = {
             if let Some(ordinal) = crate::subagent::reminded_turn_ordinal(&self.command_id) {
                 Some(ordinal)

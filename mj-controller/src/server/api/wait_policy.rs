@@ -189,6 +189,13 @@ impl WaitObservation {
             || self.queued.iter().any(|command_id| retries(command_id))
     }
 
+    fn outstanding_prompts(&self) -> mj_core::state::OutstandingPrompts {
+        mj_core::state::OutstandingPrompts::new(
+            self.active_turn.as_ref(),
+            self.queued_ordinals.iter().copied(),
+        )
+    }
+
     /// Whether the session has settled. The worker's activity state owns this.
     /// The rest are facts the worker cannot know: whether the daemon can hand
     /// the session a prompt, a prompt queued behind the active turn, and a
@@ -200,7 +207,7 @@ impl WaitObservation {
             Some(StartStatus::Submitted { turn_id }) => self
                 .last_turn_outcome
                 .as_ref()
-                .and_then(|turn| turn.answered_ordinal(self.queued_ordinals.iter().copied()))
+                .and_then(|turn| turn.answered_ordinal(self.outstanding_prompts()))
                 .is_none_or(|ordinal| ordinal < *turn_id),
             _ => false,
         };
@@ -437,7 +444,7 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
             .as_ref()
             .filter(|outcome| {
                 outcome
-                    .answered_ordinal(observation.queued_ordinals.iter().copied())
+                    .answered_ordinal(observation.outstanding_prompts())
                     .is_some_and(|ordinal| ordinal >= target)
             })
             .and_then(|outcome| observation.turn_end(outcome));
