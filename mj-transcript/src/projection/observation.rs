@@ -923,34 +923,46 @@ pub(super) fn project_observation(
     Ok(())
 }
 
-/// The projection alone decides which accepted prompts a completion answers.
+/// The projection alone decides which accepted prompts a completion answers:
+/// every prompt accepted before it, unless one is still queued or running,
+/// and never fewer than the previous outcome answered.
+///
+/// While another turn runs, its own prompt is still owed and every earlier
+/// prompt settled before it started, so the outcome adds nothing. The running
+/// turn's ordinal is never read: steering replaces it with the steered
+/// prompt's (#1450 review). The answer is always recorded, `0` meaning none,
+/// so a reader never falls back to the outcome's own acceptance ordinal.
 fn answered_through(
     current: &MaterializedSession,
     event: &RelayEvent,
     ending: &str,
 ) -> Option<u64> {
-    let owed = current
-        .queued_prompts
-        .iter()
-        .filter(|prompt| prompt.command_id != ending)
-        .filter_map(|prompt| prompt.accepted_ordinal)
-        .chain(
-            current
-                .active_turn
-                .as_ref()
-                .filter(|turn| !turn.belongs_to(ending))
-                .and_then(|turn| turn.accepted_ordinal),
-        )
-        .min();
-    let own = match owed {
-        Some(first) => first.checked_sub(1).map(|cap| cap.min(event.ordinal)),
-        None => Some(event.ordinal),
-    };
-    current
-        .last_turn_outcome
+    let another_running = current
+        .active_turn
         .as_ref()
-        .and_then(|turn| turn.answered_ordinal())
-        .max(own)
+        .is_some_and(|turn| !turn.belongs_to(ending));
+    let own = if another_running {
+        None
+    } else {
+        match current
+            .queued_prompts
+            .iter()
+            .filter(|prompt| prompt.command_id != ending)
+            .filter_map(|prompt| prompt.accepted_ordinal)
+            .min()
+        {
+            Some(first) => first.checked_sub(1).map(|cap| cap.min(event.ordinal)),
+            None => Some(event.ordinal),
+        }
+    };
+    Some(
+        current
+            .last_turn_outcome
+            .as_ref()
+            .and_then(|turn| turn.answered_ordinal())
+            .max(own)
+            .unwrap_or(0),
+    )
 }
 
 /// The row that lists one delivery's external events, such as GitHub activity.

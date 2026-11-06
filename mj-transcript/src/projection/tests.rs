@@ -1275,6 +1275,32 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
     assert_eq!(turn.command_id, "prompt-2");
     assert_eq!(turn.steered_into.as_deref(), Some("prompt-1"));
 
+    // Hard-won: #1450 review: a queued prompt rejected under a steered turn marked the running prompt answered
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "prompt-3".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("third")],
+            },
+            created_at_ms: 31,
+        },
+    );
+    let third = session.applied_event_ordinal;
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandRejected {
+            reason: None,
+            command_id: "prompt-3".into(),
+            command: RelayCommandKind::Prompt,
+            message: "refused".into(),
+        },
+    );
+    let rejected = session.last_turn_outcome.clone().expect("the rejection");
+    assert!(rejected.answers(third));
+    assert!(!rejected.answers(first));
+    assert!(!rejected.answers(second));
+
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
