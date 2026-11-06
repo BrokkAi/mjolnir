@@ -303,6 +303,66 @@ fn a_guardian_mode_selector_stays_owned_without_auto_on_offer() {
     assert!(policy_permits(guardian, &options, Some("mode"), "plan"));
 }
 
+/// A model whose catalogue omits Auto has refused it as plainly as an error
+/// answer: leaving Plan takes Claude's default mode with a warning.
+// Hard-won: d33f5a5: an unadvertised policy mode failed the command instead of keeping the session usable
+#[tokio::test]
+async fn leaving_plan_without_auto_on_offer_takes_claudes_default_mode() {
+    let without_auto = json!([{
+        "id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": "plan",
+        "options": [
+            {"value": "default", "name": "Default"}, {"value": "plan", "name": "Plan"},
+            {"value": "acceptEdits", "name": "Accept edits"}
+        ]
+    }]);
+    let mut probe = PlanProbe::config_only(ExecutionPolicy::ConfiguredApprovals).await;
+    probe
+        .commands
+        .send(CommandRequest::SetConfig {
+            request_id: "enter-plan".into(),
+            key: "mode".into(),
+            value: "plan".into(),
+        })
+        .await
+        .unwrap();
+    let entering = probe.message().await;
+    probe
+        .result(&entering, json!({"configOptions": without_auto}))
+        .await;
+    probe
+        .commands
+        .send(CommandRequest::RestoreExecutionMode {
+            request_id: "exit-plan".into(),
+        })
+        .await
+        .unwrap();
+    let default = probe.message().await;
+    assert_eq!(default["params"]["value"], "default");
+    let mut left = without_auto.clone();
+    left[0]["currentValue"] = json!("default");
+    probe.result(&default, json!({"configOptions": left})).await;
+    let mut warned = false;
+    loop {
+        match probe.event().await {
+            RuntimeEvent::Warning { message } if message.contains("does not offer") => {
+                warned = true;
+            }
+            RuntimeEvent::ConfigApplied {
+                request_id, value, ..
+            } if request_id == "exit-plan" => {
+                assert_eq!(value, "default");
+                break;
+            }
+            RuntimeEvent::CommandRejected { message, .. } => panic!("{message}"),
+            RuntimeEvent::Stopped => panic!("leaving Plan ended the session"),
+            _ => {}
+        }
+    }
+    assert!(warned);
+    probe.no_message().await;
+    probe.close().await;
+}
+
 /// Kimi carries its execution mode on the Plan selector, like Claude, so it
 /// leaves Plan through the worker, which restores the policy's own mode.
 // Hard-won: ac3b724: refusing every mode but Plan and the policy's left Kimi stuck in Plan
@@ -569,7 +629,13 @@ impl PlanProbe {
         harness: HarnessKind,
         managed_subagent: bool,
     ) -> Self {
-        Self::open(policy, config, harness, managed_subagent, false).await
+        Self::open(policy, config, harness, managed_subagent, false, true).await
+    }
+
+    /// A Claude probe whose bridge carries its modes only on the `mode`
+    /// config option, with no legacy mode list.
+    async fn config_only(policy: ExecutionPolicy) -> Self {
+        Self::open(policy, true, HarnessKind::Claude, false, false, false).await
     }
 
     /// A probe whose bridge answers the startup request for the policy mode
@@ -579,7 +645,7 @@ impl PlanProbe {
         config: bool,
         harness: HarnessKind,
     ) -> Self {
-        Self::open(policy, config, harness, false, true).await
+        Self::open(policy, config, harness, false, true, true).await
     }
 
     async fn open(
@@ -588,6 +654,7 @@ impl PlanProbe {
         harness: HarnessKind,
         managed_subagent: bool,
         refuse_mode: bool,
+        legacy_modes: bool,
     ) -> Self {
         let (client, agent) = tokio::io::duplex(4096);
         let (client_read, client_write) = tokio::io::split(client);
@@ -680,15 +747,19 @@ impl PlanProbe {
         probe
             .result(
                 &new,
-                json!({"sessionId": "plan-session", "configOptions": options.clone(), "modes": {
-                    "currentModeId": "plan", "availableModes": [
-                        {"id": "plan", "name": "Plan"}, {"id": "auto", "name": "Auto"},
-                        {"id": "bypassPermissions", "name": "Bypass"},
-                        {"id": "agent", "name": "Agent"},
-                        {"id": "agent-full-access", "name": "Full access"},
-                        {"id": "allowAll", "name": "Allow all"}
-                    ]
-                }}),
+                if legacy_modes {
+                    json!({"sessionId": "plan-session", "configOptions": options.clone(), "modes": {
+                        "currentModeId": "plan", "availableModes": [
+                            {"id": "plan", "name": "Plan"}, {"id": "auto", "name": "Auto"},
+                            {"id": "bypassPermissions", "name": "Bypass"},
+                            {"id": "agent", "name": "Agent"},
+                            {"id": "agent-full-access", "name": "Full access"},
+                            {"id": "allowAll", "name": "Allow all"}
+                        ]
+                    }})
+                } else {
+                    json!({"sessionId": "plan-session", "configOptions": options.clone()})
+                },
             )
             .await;
         // A harness that carries its approval policy on a config selector

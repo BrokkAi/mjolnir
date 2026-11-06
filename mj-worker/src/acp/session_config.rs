@@ -718,8 +718,33 @@ pub(super) async fn reassert_execution_policy(
         )
         .and_then(|option| surface::config_current_value(config_options, &option.id.to_string()))
         .or_else(|| current_session_mode(config_options, modes));
-        if (sync == PolicySync::Always
-            || (current.as_deref() != Some(desired) && current.as_deref() != Some("plan")))
+        // A bridge whose catalogue omits the policy mode, as Claude's does
+        // for Auto on some models, has refused it as plainly as one that
+        // answers the request with an error.
+        let offered = mj_core::acp::execution_mode_option(
+            config_options,
+            enforcement.acp_mode_selector(),
+            desired,
+        )
+        .is_some()
+            || modes.as_ref().is_some_and(|modes| {
+                modes
+                    .available_modes
+                    .iter()
+                    .any(|mode| mode.id.to_string() == desired)
+            });
+        let needed = sync == PolicySync::Always
+            || (current.as_deref() != Some(desired) && current.as_deref() != Some("plan"));
+        if needed && !offered {
+            let text = format!(
+                "{} does not offer the {desired} mode here",
+                harness.display_name()
+            );
+            refused = Some(ModeRefusal {
+                error: anyhow!("{text}"),
+                text,
+            });
+        } else if needed
             && let Err(error) = enforce_execution_mode(
                 connection,
                 session_id,
@@ -922,9 +947,16 @@ pub(super) fn policy_permits(
             .map_or_else(|| key.to_owned(), |option| option.id.to_string())
     });
     match resolved.as_deref() {
+        // The legacy mode list mirrors the Mode selector, which carries the
+        // policy unless the bridge has the policy's own named selector
+        // (Muse images before muse-acp 0.10 do not).
         None => {
             enforcement.acp_mode().is_none()
-                || enforcement.acp_mode_selector().is_some()
+                || enforcement.acp_mode_selector().is_some_and(|selector| {
+                    options
+                        .iter()
+                        .any(|option| option.id.to_string() == selector)
+                })
                 || policy_mode(value)
         }
         Some(key)
