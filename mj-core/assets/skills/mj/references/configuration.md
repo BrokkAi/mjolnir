@@ -82,7 +82,7 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |
-| `review` | table | no | default `[review]` values | Automatic review trigger and reviewer settings. |
+| `review` | table | no | default `[review]` values | Reviewer settings for push review. |
 | `continuation` | table | no | enabled | Automatic continuation of already-requested unfinished work; also requires Jev. |
 | `jev` | table | no | enabled | Hosted turn classification, continuation checks, and semantic help search. |
 | `daemon` | table | no | runs on the host | Where the daemon runs: on this computer or in a Podman or Docker container. |
@@ -337,8 +337,6 @@ precedence. See [Web viewer and desktop app](/web-viewer/) for access and login.
 
 ```toml
 [review]
-trigger = "turn"
-
 [[review.reviewers]]
 model = "gpt-6.10-terra"
 effort = "xhigh"
@@ -350,16 +348,15 @@ effort = "medium"
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `trigger` | string enum | no | `"off"` | `"off"` disables automatic review, `"turn"` reviews completed turns, and `"push"` reviews commits before push. |
 | `reviewers` | array of tables | no | empty | Up to three choices, each with a nonempty `model` and optional `effort`. Each choice is served by an enabled profile offering that model and effort. |
 
 An empty reviewer list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers from enabled profiles' advertised models. The first available combination wins: Terra, Sol, and Haiku; Terra and Sol; two Haiku; two DeepSeek Flash; Grok; or Kimi K3.1 or newer. Within a family, the newest advertised version wins. If no match exists, choose reviewers in **Settings → Code Review**. Reviewers run as hidden child sessions with independent conversations. See [Code review](/turn-review/).
 
 Push review is available for Claude Code, Codex, and DSH primaries, the harnesses that receive Mjolnir delegation tools. They receive `request_review` and a pre-push gate; other harnesses run without review and receive a transcript notice.
 
-Older `enabled`, `count`, `profile`, `model`, `effort`, and `tier` settings remain readable. Saving writes the new reviewer list and trigger. An old explicit model becomes up to three reviewer choices. On daemon startup, an old Auto selection is upgraded once after capability discovery and saved as chosen reviewer rows, or as an empty list when no model qualifies.
+Older `enabled`, `count`, `profile`, `model`, `effort`, and `tier` settings remain readable. Saving writes the new reviewer list. An old explicit model becomes up to three reviewer choices. On daemon startup, an old Auto selection is upgraded once after capability discovery and saved as chosen reviewer rows, or as an empty list when no model qualifies.
 
-`mj new` and `mj import <harness>` accept `--review off|turn|push` and repeatable `--reviewer MODEL[:EFFORT]` (up to three). The list replaces `[review]` for that session. `/review` remains available when the trigger is `off`.
+`mj new` and `mj import <harness>` accept `--review off|push` and repeatable `--reviewer MODEL[:EFFORT]` (up to three). A session-level reviewer choice replaces `[review]` for that session and enables review unless the session uses `--review off`. `/review` starts a push review of committed work.
 
 In the terminal, these review fields are edited inside **Settings** so one Save or
 Cancel applies to the entire configuration draft. Settings can discover the
