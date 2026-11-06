@@ -1,0 +1,105 @@
+//! OpenCode's prompt-response usage, converted to the convention `mj usage` totals use.
+use anyhow::{Context, Result, ensure};
+use mj_core::usage::{TokenUsage, UsageScope};
+
+/// OpenCode 2.2.1 sums its model steps into one per-prompt figure but does not
+/// declare a scope, and it counts differently from the rest of mj: `input`
+/// excludes cache reads and writes, and `output` excludes reasoning. Fold both
+/// back in so input and output are the full counts, then mark the report as a
+/// whole turn. A report that does not add up to its own total is left
+/// unspecified and unchanged, so it never enters the totals or the pricing.
+pub fn normalize(usage: &mut TokenUsage) -> Result<()> {
+    if usage.scope != UsageScope::Unspecified {
+        // An adapter that declares its scope already follows mj's convention.
+        return Ok(());
+    }
+    let cache = usage
+        .cached_read_tokens
+        .unwrap_or(0)
+        .checked_add(usage.cached_write_tokens.unwrap_or(0))
+        .context("OpenCode cache token overflow")?;
+    let input = usage
+        .input_tokens
+        .checked_add(cache)
+        .context("OpenCode input token overflow")?;
+    let output = usage
+        .output_tokens
+        .checked_add(usage.thought_tokens.unwrap_or(0))
+        .context("OpenCode output token overflow")?;
+    ensure!(
+        input.checked_add(output) == Some(usage.total_tokens),
+        "OpenCode reported {input} input and {output} output tokens including cache and reasoning, \
+         but {} in total",
+        usage.total_tokens
+    );
+    usage.input_tokens = input;
+    usage.output_tokens = output;
+    usage.scope = UsageScope::Turn;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::v1::schema::Usage;
+    use mj_core::config::HarnessKind;
+    use mj_core::storage::UsageCounterTotal;
+    use mj_core::usage::pricing;
+    use std::collections::BTreeMap;
+
+    /// `usage` of a recorded OpenCode 2.2.1 `session/prompt` response (a
+    /// three-step turn with reasoning and cache reads), as it crosses ACP.
+    const RECORDED: &str = r#"{"inputTokens":15434,"outputTokens":468,"totalTokens":43649,
+        "thoughtTokens":99,"cachedReadTokens":27648}"#;
+
+    fn parse(report: &str) -> TokenUsage {
+        let usage: Usage = serde_json::from_str(report).expect("ACP usage");
+        TokenUsage::from_acp(HarnessKind::OpenCode, usage)
+    }
+
+    #[test]
+    fn the_recorded_opencode_report_becomes_a_priceable_turn_and_a_mismatch_stays_out() {
+        let mut usage = parse(RECORDED);
+        assert_eq!(usage.scope, UsageScope::Unspecified);
+        normalize(&mut usage).expect("recorded report adds up");
+        assert_eq!(usage.scope, UsageScope::Turn);
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (43_082, 567, 43_649)
+        );
+        assert_eq!(
+            (usage.thought_tokens, usage.cached_read_tokens),
+            (Some(99), Some(27_648))
+        );
+
+        // The shape pricing accepts: full input and output, cache as a subset.
+        let totals: BTreeMap<_, _> = [
+            ("input_tokens", usage.input_tokens),
+            ("output_tokens", usage.output_tokens),
+            ("total_tokens", usage.total_tokens),
+            ("cached_read_tokens", 27_648),
+        ]
+        .into_iter()
+        .map(|(name, tokens)| {
+            (
+                name.to_string(),
+                UsageCounterTotal {
+                    tokens,
+                    reported_turns: 1,
+                },
+            )
+        })
+        .collect();
+        assert!(
+            pricing::estimate(Some("deepseek-v4-flash"), &totals)
+                .expect("estimate")
+                .is_some()
+        );
+
+        let mut mismatched = parse(&RECORDED.replace("43649", "43650"));
+        let before = mismatched.clone();
+        assert!(normalize(&mut mismatched).is_err());
+        assert_eq!(mismatched, before);
+        assert_eq!(mismatched.scope, UsageScope::Unspecified);
+    }
+}

@@ -969,6 +969,14 @@ pub(super) async fn serve_session(
                                     if spec.harness == HarnessKind::Muse {
                                         usage = usage.map(|usage| muse_usage::attach_provider_details(usage, usage_meta.as_ref()));
                                     }
+                                    if spec.harness == HarnessKind::OpenCode
+                                        && let Some(usage) = usage.as_mut()
+                                        && let Err(error) = opencode_usage::normalize(usage)
+                                    {
+                                        emit_runtime_event(events, RuntimeEvent::Warning {
+                                            message: format!("OpenCode usage could not be reconciled; turn accounting is incomplete: {error:#}"),
+                                        }).await?;
+                                    }
                                     if spec.harness == HarnessKind::Grok {
                                         match grok_usage.complete(response.meta.as_ref(), usage.clone()).await {
                                             Ok(reported) => usage = reported,
