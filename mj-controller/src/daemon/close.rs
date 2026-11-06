@@ -476,7 +476,7 @@ impl RuntimeState {
                 })
                 .map(|operation| {
                     let restart_intent = operation.restart_intent.clone();
-                    operation.request_cancel();
+                    operation.request_cancel(session_id, "close superseded the operation");
                     (restart_intent, operation.result.clone())
                 })
         };

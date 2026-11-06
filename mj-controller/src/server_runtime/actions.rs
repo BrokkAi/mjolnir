@@ -40,7 +40,7 @@ pub(super) fn request_phone_action_cancellation(
                 .flatten()
         });
     if let Some(control) = control {
-        return control.request_cancel();
+        return control.request_cancel("person cancel from phone action");
     }
     false
 }

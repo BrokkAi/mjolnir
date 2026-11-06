@@ -2097,3 +2097,37 @@ async fn a_remote_handle_exists_exactly_while_the_daemon_publishes_its_view() {
         .await
         .unwrap();
 }
+
+#[test]
+fn cancelled_operation_leaves_the_running_recovery_copy_alone() {
+    let (observations, _receiver) = crate::recovery_gate::observation_channel();
+    let observer = crate::recovery_gate::RecoveryObserver {
+        observations,
+        gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+    };
+    let copy = observer.gate.try_start("session").unwrap();
+
+    let cancelled = AtomicBool::new(true);
+    let error = reserve_recovery_or_cancel(&observer, "session", &cancelled)
+        .err()
+        .expect("a cancelled operation does not reserve");
+    assert!(error.to_string().contains("operation cancelled"));
+    assert!(observer.is_busy("session"));
+    assert!(!copy.load(Ordering::Acquire));
+    // The failed call also left no reservation behind.
+    drop(copy);
+    assert!(observer.gate.try_start("session").is_some());
+
+    // An operation cancelled while it waits still preempts the copy first.
+    let copy = observer.gate.try_start("session").unwrap();
+    let cancelled = AtomicBool::new(false);
+    let reservation = std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| reserve_recovery_or_cancel(&observer, "session", &cancelled));
+        while !copy.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(copy);
+        waiting.join().unwrap()
+    });
+    assert!(reservation.is_ok());
+}
