@@ -114,6 +114,18 @@ fn grok_programs(home: &Path) -> Vec<PathBuf> {
     vec![PathBuf::from(name), home.join("bin").join(name)]
 }
 
+/// Whether this host has a `grok` a host check would start: one on `path`, or
+/// the copy the official installer leaves inside the profile home.
+pub(crate) fn host_has_grok(home: &Path, path: Option<&std::ffi::OsStr>) -> bool {
+    grok_programs(home).iter().any(|program| {
+        if program.is_absolute() {
+            program.is_file()
+        } else {
+            mj_core::program_path::find_program_on_path(&program.to_string_lossy(), path).is_some()
+        }
+    })
+}
+
 struct GrokUsageSession {
     child: crate::streamed_child::ProxyChild,
     /// The container the agent runs in, removed at shutdown.
@@ -360,6 +372,35 @@ fn epoch_seconds(timestamp: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A directory holding an executable named `name`.
+    #[cfg(unix)]
+    fn directory_with_program(name: &str) -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join(name);
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        directory
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_has_grok_on_path_or_in_the_profile_home() {
+        let empty = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        assert!(!host_has_grok(home.path(), Some(empty.path().as_os_str())));
+        assert!(!host_has_grok(home.path(), None));
+
+        let on_path = directory_with_program("grok");
+        assert!(host_has_grok(home.path(), Some(on_path.path().as_os_str())));
+
+        let installed = directory_with_program("grok");
+        let home_bin = home.path().join("bin");
+        std::fs::create_dir(&home_bin).unwrap();
+        std::fs::copy(installed.path().join("grok"), home_bin.join("grok")).unwrap();
+        assert!(host_has_grok(home.path(), Some(empty.path().as_os_str())));
+    }
 
     fn report(result: serde_json::Value) -> GrokUsageReport {
         parse(&result).unwrap()

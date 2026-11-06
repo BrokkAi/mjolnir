@@ -1,8 +1,10 @@
 //! Where a quota check runs the harness program it starts.
 //!
 //! Codex, Grok and Claude Code quota checks start the harness itself. With
-//! `[quota] runtime` at its default, the daemon runs that program inside the
-//! release's agent-dev image, which carries every harness at its pinned
+//! `[quota] runtime` at its default, the check runs on the host when the host
+//! already has that harness installed. Only when it does not, and a local
+//! Podman or Docker engine is available, the daemon runs the program inside
+//! the release's agent-dev image, which carries every harness at its pinned
 //! version, so a host that runs its sessions in containers needs no harness of
 //! its own. The profile's home is mounted at the same path, so the check reads
 //! the person's login and a refreshed token lands where the host expects it.
@@ -70,12 +72,23 @@ impl QuotaRuntime {
     /// image is the agent-dev image this module would otherwise start, and
     /// the container has no engine to start one with.
     ///
-    /// `Auto` uses a container only for an enabled local Podman or Docker
-    /// runtime whose engine is installed, and runs that runtime's image,
+    /// `host_has_harness` says whether this host can already run the harness
+    /// the check needs (see [`crate::codex_usage::host_has_codex`],
+    /// [`crate::grok_usage::host_has_grok`] and
+    /// [`crate::claude_usage::host_has_claude`]).
+    ///
+    /// `Auto` runs the check on this host when `host_has_harness` is true.
+    /// Otherwise it uses a container for an enabled local Podman or Docker
+    /// runtime whose engine is installed, running that runtime's image,
     /// which the daemon already keeps downloaded. With no such runtime the
-    /// check runs on this host, by design. A named engine that is missing is
-    /// an error the check reports.
-    pub(crate) fn resolve(config: &QuotaRuntimeConfig, path: Option<&OsStr>) -> Result<Self> {
+    /// check runs on this host, by design, and reports the missing harness.
+    /// A named engine that is missing is an error the check reports; a named
+    /// engine is used whether or not the host has the harness.
+    pub(crate) fn resolve(
+        config: &QuotaRuntimeConfig,
+        path: Option<&OsStr>,
+        host_has_harness: bool,
+    ) -> Result<Self> {
         if config.in_daemon_container {
             return Ok(Self::Host);
         }
@@ -88,6 +101,9 @@ impl QuotaRuntime {
         let (engine, program, image) = match config.choice {
             QuotaRuntimeChoice::Host => return Ok(Self::Host),
             QuotaRuntimeChoice::Auto => {
+                if host_has_harness {
+                    return Ok(Self::Host);
+                }
                 let found = [Engine::Podman, Engine::Docker]
                     .into_iter()
                     .find_map(|engine| Some((engine, installed(engine)?, image(engine)?)));
@@ -121,8 +137,12 @@ impl QuotaRuntime {
     }
 
     /// Resolve against this process's `PATH`.
-    pub(crate) fn current(config: &QuotaRuntimeConfig) -> Result<Self> {
-        Self::resolve(config, std::env::var_os("PATH").as_deref())
+    pub(crate) fn current(config: &QuotaRuntimeConfig, host_has_harness: bool) -> Result<Self> {
+        Self::resolve(
+            config,
+            std::env::var_os("PATH").as_deref(),
+            host_has_harness,
+        )
     }
 }
 
@@ -420,13 +440,14 @@ impl ContainerCheck {
 
 /// Add the image quota checks run in to the daemon's background downloads,
 /// unless a configured runtime already downloads it from the same engine, as
-/// it does whenever `auto` chose that runtime.
+/// it does whenever `auto` chose that runtime. The image is wanted whenever a
+/// check could fall back to it, so this assumes the host lacks the harness.
 pub(crate) fn add_quota_image(
     plan: &mut Vec<mj_core::targets::ImageRefresh>,
     config: &QuotaRuntimeConfig,
     path: Option<&OsStr>,
 ) {
-    let Ok(QuotaRuntime::Container(runtime)) = QuotaRuntime::resolve(config, path) else {
+    let Ok(QuotaRuntime::Container(runtime)) = QuotaRuntime::resolve(config, path, false) else {
         return;
     };
     let host = match runtime.engine {
@@ -470,13 +491,14 @@ mod tests {
     /// engines installed, as the daemon loads it: the loader adds the
     /// standard `podman` and `docker` runtimes the file does not name.
     fn auto_decision(targets: &str, engines: &[&str]) -> Option<(Engine, String)> {
-        decision(targets, engines, false)
+        decision(targets, engines, false, false)
     }
 
     fn decision(
         targets: &str,
         engines: &[&str],
         in_daemon_container: bool,
+        host_has_harness: bool,
     ) -> Option<(Engine, String)> {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("config.toml");
@@ -494,7 +516,7 @@ mod tests {
         let (_bin, path) = path_with(engines);
         let mut runtime = QuotaRuntimeConfig::of(&config);
         runtime.in_daemon_container = in_daemon_container;
-        match QuotaRuntime::resolve(&runtime, Some(&path)).unwrap() {
+        match QuotaRuntime::resolve(&runtime, Some(&path), host_has_harness).unwrap() {
             QuotaRuntime::Host => None,
             QuotaRuntime::Container(runtime) => {
                 assert_eq!(
@@ -540,10 +562,49 @@ mod tests {
         // config has the standard runtimes, but it has no engine to reach:
         // its checks run beside the daemon on the image's harnesses, even
         // when a named engine is chosen.
-        assert_eq!(decision("", &["podman", "docker"], true), None);
+        assert_eq!(decision("", &["podman", "docker"], true, false), None);
         assert_eq!(
-            decision("[quota]\nruntime = \"podman\"\n", &["podman"], true),
+            decision("[quota]\nruntime = \"podman\"\n", &["podman"], true, false),
             None
         );
+    }
+
+    #[test]
+    fn auto_prefers_a_harness_the_host_already_has_over_any_engine() {
+        let standard = mj_core::config::DEFAULT_CONTAINER_IMAGE.to_owned();
+        // Engine installed, harness on the host: no container.
+        assert_eq!(decision("", &["podman", "docker"], false, true), None);
+        assert_eq!(decision("", &["docker"], false, true), None);
+        // Engine installed, harness missing from the host: the engine's image.
+        assert_eq!(
+            decision("", &["podman"], false, false),
+            Some((Engine::Podman, standard))
+        );
+        // No engine: the host either way.
+        assert_eq!(decision("", &[], false, false), None);
+        assert_eq!(decision("", &[], false, true), None);
+    }
+
+    #[test]
+    fn named_runtimes_ignore_what_the_host_has() {
+        let named = |runtime: &str, engines: &[&str], host_has_harness: bool| {
+            decision(
+                &format!("[quota]\nruntime = \"{runtime}\"\n"),
+                engines,
+                false,
+                host_has_harness,
+            )
+        };
+        for host_has_harness in [false, true] {
+            assert_eq!(
+                named("podman", &["podman", "docker"], host_has_harness).map(|(engine, _)| engine),
+                Some(Engine::Podman)
+            );
+            assert_eq!(
+                named("docker", &["podman", "docker"], host_has_harness).map(|(engine, _)| engine),
+                Some(Engine::Docker)
+            );
+            assert_eq!(named("host", &["podman", "docker"], host_has_harness), None);
+        }
     }
 }
