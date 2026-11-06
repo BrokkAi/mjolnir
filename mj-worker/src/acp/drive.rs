@@ -406,10 +406,6 @@ where
                     let value = serde_json::to_value(&request)
                         .map_err(|_| agent_client_protocol::Error::internal_error())?;
                     let review = normalized_plan_review(id.clone(), &value);
-                    if managed_subagent {
-                        record_delegated_question(&permission_events, review).await?;
-                        return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
-                    }
                     let approved_plan = plan_review_proposal(&review).unwrap_or_default().to_owned();
                     let implementation = permission_implementation_slot
                         .lock().expect("plan implementation lock poisoned").clone();
@@ -560,10 +556,6 @@ where
                     }}
                 })).map_err(|_| agent_client_protocol::Error::invalid_params())?;
                 form.tool_permission = Some(ToolPermissionForm { skip: skip.is_some() });
-                if managed_subagent {
-                    record_delegated_question(&permission_events, form).await?;
-                    return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
-                }
                 let identity = if plan_permission || claude_plan_approval {
                     AwayRequest::Plan
                 } else {
@@ -807,7 +799,9 @@ where
                     if let Some(child) = child {
                         request.message = format!("Native agent {child}: {}", request.message);
                     }
-                    if managed_subagent {
+                    // A parent agent can answer a question with a message, but it
+                    // cannot grant an approval, so approvals stay open for a person.
+                    if managed_subagent && request.goes_to_parent() {
                         record_delegated_question(&elicitation_events, request).await?;
                         return responder.respond(serde_json::json!({"action":"cancel"}));
                     }
@@ -904,10 +898,6 @@ where
                 if grok::handles_exit_plan_mode(ext_harness, &method) {
                     let id = grok::plan_review_id(ext_review_ids.fetch_add(1, Ordering::Relaxed));
                     let review = normalized_plan_review(id.clone(), request.params());
-                    if managed_subagent {
-                        record_delegated_question(&ext_events, review).await?;
-                        return responder.respond(serde_json::json!({"outcome":"cancelled"}));
-                    }
                     let requesting_agent = request.params().get("sessionId")
                         .and_then(serde_json::Value::as_str)
                         .filter(|id| ext_parent_router.lock().expect("native agent router poisoned").is_child(id))

@@ -356,6 +356,7 @@ fn drawn_session_rows_in_range(
                             unreachable,
                             disk_full,
                             attention,
+                            dashboard.waiting_child_kind(&session.id),
                             operation,
                             now_epoch_seconds,
                             target,
@@ -380,6 +381,7 @@ fn drawn_session_rows_in_range(
                             unreachable,
                             disk_full,
                             attention,
+                            dashboard.waiting_child_kind(&session.id),
                             operation,
                             now_epoch_seconds,
                             target,
@@ -552,6 +554,7 @@ pub(crate) fn expanded_session_lines(
     unreachable: bool,
     disk_full: bool,
     attention: AttentionLevel,
+    waiting_child: Option<mj_core::subagent::SubagentKind>,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
@@ -587,6 +590,7 @@ pub(crate) fn expanded_session_lines(
         unreachable,
         disk_full,
         attention,
+        waiting_child,
         operation,
         now_epoch_seconds,
         target,
@@ -695,6 +699,7 @@ pub(crate) fn session_activity_line(
     unreachable: bool,
     disk_full: bool,
     attention: AttentionLevel,
+    waiting_child: Option<mj_core::subagent::SubagentKind>,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
@@ -745,9 +750,13 @@ pub(crate) fn session_activity_line(
         label.to_owned()
     } else if attention == AttentionLevel::Waiting {
         // Waiting with no question or review of its own: one of its Mjolnir
-        // sub-agents is waiting on a question (see
-        // `DashboardState::attention_level`).
-        "Sub-agent question".to_owned()
+        // children holds an open form (see `DashboardState::attention_level`).
+        // Reviewers live in their own workspace, so the row says which.
+        match waiting_child {
+            Some(mj_core::subagent::SubagentKind::Reviewer) => "Reviewer question",
+            _ => "Sub-agent question",
+        }
+        .to_owned()
     } else if detail.is_some_and(|detail| {
         matches!(
             detail.activity.state().last_known(),
@@ -871,6 +880,7 @@ pub(crate) fn compact_session_lines(
     unreachable: bool,
     disk_full: bool,
     attention: AttentionLevel,
+    waiting_child: Option<mj_core::subagent::SubagentKind>,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
@@ -907,6 +917,7 @@ pub(crate) fn compact_session_lines(
         unreachable,
         disk_full,
         attention,
+        waiting_child,
         operation,
         now_epoch_seconds,
         target,
