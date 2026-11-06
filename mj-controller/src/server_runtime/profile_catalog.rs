@@ -368,10 +368,7 @@ impl ProfileCatalog {
 
     async fn upgrade_legacy_review(self: &Arc<Self>, _attempt: usize) -> Result<()> {
         let discovery_config = self.live()?;
-        let definitions = discovery_config
-            .enabled_profiles()
-            .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
-            .collect::<Vec<_>>();
+        let definitions = upgrade_definitions(&discovery_config);
         let legacy = discovery_config
             .review
             .legacy
@@ -539,7 +536,7 @@ impl ProfileCatalog {
         path: &Path,
         reviewers: Vec<mj_core::config::SubagentChoice>,
         disable_auto: bool,
-        definitions: &[(String, String)],
+        definitions: &[UpgradeDefinition],
         legacy: &mj_core::config::LegacyReview,
     ) -> Result<bool> {
         if reviewers.is_empty() && !disable_auto {
@@ -552,11 +549,7 @@ impl ProfileCatalog {
             if config.review.legacy.as_ref() != Some(legacy) {
                 anyhow::bail!("legacy review settings changed during reviewer discovery");
             }
-            let current = config
-                .enabled_profiles()
-                .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
-                .collect::<Vec<_>>();
-            if current != definitions {
+            if upgrade_definitions(config) != definitions {
                 anyhow::bail!("profile definitions changed during reviewer discovery");
             }
             config.review.reviewers = reviewers;
@@ -1001,15 +994,21 @@ impl ProfileCatalog {
         // the default probe can grant the default-model exemption.
         let specific = model.is_some();
         let mut choices = self.fetch_unrestricted(config, id, model).await?;
+        let allowed = self.lock().allowed_models(&identity);
+        if allowed.is_empty() {
+            return Ok(choices);
+        }
         let selected = choices.model.clone();
-        // A default read already carries the default model; probing again
-        // would run Muse's fresh probe twice.
+        // A default read already carries the default model. A model-specific
+        // read needs the default probe for the exemption, and only when a
+        // list applies: Muse probes fresh on every read.
         let default = if specific {
             self.fetch_unrestricted(config, id, None).await?.model
         } else {
             selected.clone()
         };
         choices.model = default;
+        // The list may have changed during the probes; apply the current one.
         let allowed = self.lock().allowed_models(&identity);
         choices = choices.restricted_to(&allowed);
         choices.model = selected;
@@ -1310,6 +1309,25 @@ impl ProfileCatalog {
         });
         join_all(discoveries).await;
     }
+}
+
+/// One enabled profile as the legacy review upgrade saw it: its id, its
+/// capability key, and its `models` list. The key leaves `models` out, so
+/// the save also compares the list: a profile that stopped offering a
+/// chosen model must not get it saved as a reviewer.
+type UpgradeDefinition = (String, String, Vec<String>);
+
+fn upgrade_definitions(config: &Config) -> Vec<UpgradeDefinition> {
+    config
+        .enabled_profiles()
+        .map(|(id, profile)| {
+            (
+                id.to_owned(),
+                profile.capabilities_key(id),
+                profile.models.clone(),
+            )
+        })
+        .collect()
 }
 
 /// A configuration with the named profiles enabled.
@@ -2344,10 +2362,7 @@ mod tests {
         let path = directory.path().join("config.toml");
         legacy_review_file(&path);
         let original = Config::load_from(&path).unwrap();
-        let definitions = original
-            .enabled_profiles()
-            .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
-            .collect::<Vec<_>>();
+        let definitions = upgrade_definitions(&original);
         let mut changed = original.clone();
         changed
             .profiles
@@ -2372,15 +2387,37 @@ mod tests {
     }
 
     #[test]
+    fn legacy_upgrade_retries_when_a_profile_models_list_changes_before_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        legacy_review_file(&path);
+        let original = Config::load_from(&path).unwrap();
+        let definitions = upgrade_definitions(&original);
+        let mut changed = original.clone();
+        changed.profiles.get_mut("codex").unwrap().models = vec!["gpt-6.1-sol".into()];
+        changed.save_to(&path).unwrap();
+        let error = ProfileCatalog::persist_legacy_review_to(
+            &path,
+            vec![mj_core::config::SubagentChoice {
+                model: "gpt-6.1-terra".into(),
+                effort: None,
+            }],
+            false,
+            &definitions,
+            original.review.legacy.as_ref().unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("profile definitions changed"));
+        assert!(Config::load_from(&path).unwrap().review.is_legacy());
+    }
+
+    #[test]
     fn complete_legacy_auto_without_supported_models_turns_review_off() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         legacy_review_file(&path);
         let config = Config::load_from(&path).unwrap();
-        let definitions = config
-            .enabled_profiles()
-            .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
-            .collect::<Vec<_>>();
+        let definitions = upgrade_definitions(&config);
         assert!(
             ProfileCatalog::persist_legacy_review_to(
                 &path,
