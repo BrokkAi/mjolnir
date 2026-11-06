@@ -32,30 +32,38 @@ pub struct ProfileCapabilitiesSnapshot {
 }
 
 impl ProfileCapabilitiesSnapshot {
-    /// None means required hydration is still in flight, including effort
-    /// discovery. A model's efforts are discovered only once it is selected
-    /// or asked for, so an absent entry is not yet discovered either.
-    /// Successful empty choices and failures are terminal states.
+    /// Completed profiles contribute choices while pending profiles remain
+    /// unknown. None means no profile has completed discovery yet.
     pub fn options(&self, config: &Config, model: Option<&str>) -> Option<SubagentOptions> {
         let mut options = SubagentOptions::default();
+        let mut completed = false;
         for (id, profile) in config.enabled_profiles() {
-            let entry = self.profiles.get(&profile.capabilities_key(id))?;
+            let Some(entry) = self.profiles.get(&profile.capabilities_key(id)) else {
+                options.unavailable.push(format!("{id}: discovery pending"));
+                continue;
+            };
             match &entry.choices {
-                CapabilityState::Pending => return None,
+                CapabilityState::Pending => {
+                    options.unavailable.push(format!("{id}: discovery pending"))
+                }
                 CapabilityState::Failed(error) => {
+                    completed = true;
                     options.unavailable.push(format!("{id}: {error}"))
                 }
                 CapabilityState::Ready(choices) => {
+                    completed = true;
                     merge_choices(&mut options.models, &choices.models);
                     if let Some(model) = model
                         .filter(|model| choices.models.iter().any(|choice| choice.value == *model))
                     {
-                        match entry.efforts.get(model)? {
-                            CapabilityState::Pending => return None,
-                            CapabilityState::Ready(efforts) => {
+                        match entry.efforts.get(model) {
+                            None | Some(CapabilityState::Pending) => options
+                                .unavailable
+                                .push(format!("{id}: effort discovery pending")),
+                            Some(CapabilityState::Ready(efforts)) => {
                                 merge_choices(&mut options.efforts, efforts)
                             }
-                            CapabilityState::Failed(error) => {
+                            Some(CapabilityState::Failed(error)) => {
                                 options.unavailable.push(format!("{id}: {error}"))
                             }
                         }
@@ -63,7 +71,7 @@ impl ProfileCapabilitiesSnapshot {
                 }
             }
         }
-        Some(options)
+        completed.then_some(options)
     }
 
     /// Limit a public projection to saved enabled profiles. Draft identities
@@ -152,5 +160,27 @@ mod tests {
         config.profiles.get_mut("parent").unwrap().home = "/another/home".into();
         assert_ne!(config.profiles_discovery_key(), original);
         assert!(snapshot.options(&config, None).is_none());
+    }
+
+    #[test]
+    fn completed_profile_remains_usable_while_another_profile_is_pending() {
+        let (mut config, snapshot) = fixture();
+        let second = config.profiles["parent"].clone();
+        config.profiles.insert("other".into(), second);
+        let models = snapshot.options(&config, None).unwrap();
+        assert!(models.models.iter().any(|choice| choice.value == "a"));
+        assert!(
+            models
+                .unavailable
+                .iter()
+                .any(|reason| reason.contains("other: discovery pending"))
+        );
+        let efforts = snapshot.options(&config, Some("a")).unwrap();
+        assert!(
+            efforts
+                .unavailable
+                .iter()
+                .any(|reason| reason.contains("other: discovery pending"))
+        );
     }
 }

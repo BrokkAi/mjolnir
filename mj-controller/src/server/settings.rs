@@ -192,6 +192,22 @@ fn render(
     {
         page.notices.push(unreachable.to_owned());
     }
+    if path == ["review"] {
+        let failures = draft["_reviewer_options"]
+            .as_object()
+            .into_iter()
+            .flat_map(|options| options.values())
+            .flat_map(|options| options["unavailable"].as_array().into_iter().flatten())
+            .filter_map(Value::as_str)
+            .filter(|reason| !reason.contains("discovery pending"))
+            .collect::<std::collections::BTreeSet<_>>();
+        if !failures.is_empty() {
+            page.notices.push(format!(
+                "Reviewer effort discovery failed: {}",
+                failures.into_iter().collect::<Vec<_>>().join("; ")
+            ));
+        }
+    }
     Ok(page)
 }
 
@@ -286,9 +302,6 @@ async fn autoconfigure_settings(
         .subagent
         .clone()
         .ok_or_else(|| ApiError::bad_request("Reviewer discovery is unavailable."))?;
-    let snapshot = backend
-        .profile_capabilities_snapshot()
-        .unwrap_or_else(|| capabilities(&state));
     let (mut draft, config) = tokio::task::spawn_blocking(move || {
         let mut draft = request.draft;
         let stored =
@@ -300,6 +313,10 @@ async fn autoconfigure_settings(
     })
     .await
     .map_err(unreadable)??;
+    backend.warm_profile_capabilities(&config);
+    let snapshot = backend
+        .profile_capabilities_snapshot()
+        .unwrap_or_else(|| capabilities(&state));
     let available = config
         .enabled_profiles()
         .filter_map(|(id, profile)| {
@@ -318,16 +335,57 @@ async fn autoconfigure_settings(
             ))
         })
         .collect::<Vec<_>>();
-    let (mut reviewers, known) = crate::review_selection::autoconfigure_with_efforts(
+    let profile_keys = config
+        .enabled_profiles()
+        .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let (configured, known) = crate::review_selection::autoconfigure_with_efforts(
         &available,
         |profile, model| {
             let backend = backend.clone();
-            async move { backend.profile_config(profile, Some(model), false).await }
+            let mut demand = config.clone();
+            demand.review.reviewers = vec![mj_core::config::SubagentChoice {
+                model: model.clone(),
+                effort: None,
+            }];
+            demand.review.clear_legacy();
+            backend.warm_profile_capabilities(&demand);
+            let initial_snapshot = snapshot.clone();
+            let key = profile_keys.get(&profile).cloned();
+            async move {
+                let key =
+                    key.ok_or_else(|| anyhow::anyhow!("draft profile {profile:?} disappeared"))?;
+                loop {
+                    let latest = backend.profile_capabilities_snapshot();
+                    if let Some(entry) = latest
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.profiles.get(&key))
+                        .or_else(|| initial_snapshot.profiles.get(&key))
+                    {
+                        match entry.efforts.get(&model) {
+                            Some(CapabilityState::Ready(efforts)) => {
+                                let CapabilityState::Ready(mut choices) = entry.choices.clone()
+                                else {
+                                    anyhow::bail!(
+                                        "draft profile {profile:?} discovery is unavailable"
+                                    )
+                                };
+                                choices.efforts = efforts.clone();
+                                return Ok(choices);
+                            }
+                            Some(CapabilityState::Failed(error)) => anyhow::bail!("{error}"),
+                            _ => {}
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
         },
         None,
     )
     .await
     .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let mut reviewers = configured.reviewers;
     if reviewers.is_empty() {
         return Err(ApiError::bad_request(
             "Autoconfigure unavailable: no supported models",
@@ -342,10 +400,27 @@ async fn autoconfigure_settings(
             reviewer.effort = None;
         }
     }
-    let notice = (!unknown.is_empty()).then(|| format!(
-        "Could not confirm reviewer efforts for {} (discovery failed or timed out); using defaults.",
-        unknown.join(", ")
-    ));
+    let mut notices = Vec::new();
+    if !unknown.is_empty() {
+        notices.push(format!("Could not confirm reviewer efforts for {} (discovery failed or timed out); using defaults.", unknown.join(", ")));
+    }
+    if !configured.adjusted.is_empty() {
+        notices.push(format!(
+            "Adjusted reviewer efforts: {}",
+            configured
+                .adjusted
+                .iter()
+                .map(|item| format!(
+                    "{}: {} → {}",
+                    item.model,
+                    item.requested,
+                    item.used.as_deref().unwrap_or("default")
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let notice = (!notices.is_empty()).then(|| notices.join(" "));
     draft["review"]["reviewers"] = serde_json::to_value(reviewers).map_err(unreadable)?;
     for key in ["count", "profile", "effort"] {
         draft["review"].as_object_mut().unwrap().remove(key);

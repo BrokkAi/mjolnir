@@ -56,6 +56,12 @@ impl Policy {
                 state.publish_revision();
             }
         }));
+        let weak_state = Arc::downgrade(&state);
+        catalog.set_notice(Arc::new(move |message| {
+            if let Some(state) = weak_state.upgrade() {
+                state.push_notice("", message);
+            }
+        }));
         assert!(
             state.profile_catalog.set(catalog.clone()).is_ok(),
             "daemon catalogue installed once"

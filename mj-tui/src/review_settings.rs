@@ -62,6 +62,7 @@ pub(crate) struct ReviewSettingsDialog {
     efforts_known: Vec<bool>,
     efforts_partial: Vec<bool>,
     suggested: Option<Vec<SubagentChoice>>,
+    suggested_adjustments: Vec<mj_core::review::autoconfigure::EffortAdjustment>,
     pending_autoconfigure: Option<(Vec<SubagentChoice>, Instant)>,
     effort_notice: Option<String>,
     pub(crate) saving: bool,
@@ -82,6 +83,7 @@ impl ReviewSettingsDialog {
             efforts_known: Vec::new(),
             efforts_partial: Vec::new(),
             suggested: None,
+            suggested_adjustments: Vec::new(),
             pending_autoconfigure: None,
             effort_notice: None,
             saving: false,
@@ -116,7 +118,7 @@ impl ReviewSettingsDialog {
         if let Some(options) = models {
             self.models_partial = !options.unavailable.is_empty();
             self.models = options.models;
-            self.suggested = mj_core::review::autoconfigure::autoconfigure(&self.models, |model| {
+            let configured = mj_core::review::autoconfigure::autoconfigure(&self.models, |model| {
                 snapshot.options(config, Some(model)).and_then(|options| {
                     if options.unavailable.is_empty() {
                         Some(options.efforts)
@@ -125,10 +127,16 @@ impl ReviewSettingsDialog {
                     }
                 })
             });
+            self.suggested_adjustments = configured
+                .as_ref()
+                .map(|configured| configured.adjusted.clone())
+                .unwrap_or_default();
+            self.suggested = configured.map(|configured| configured.reviewers);
         } else {
             self.models.clear();
             self.models_partial = false;
             self.suggested = None;
+            self.suggested_adjustments.clear();
         }
         if let Some((draft, started)) = &self.pending_autoconfigure {
             let ready = draft.iter().all(|choice| {
@@ -166,6 +174,7 @@ impl ReviewSettingsDialog {
                     .iter()
                     .filter_map(|choice| snapshot.options(config, Some(&choice.model)))
                     .flat_map(|options| options.unavailable)
+                    .filter(|reason| !reason.contains("discovery pending"))
                     .collect::<Vec<_>>();
                 if !failures.is_empty() {
                     self.effort_notice = Some(format!(
@@ -460,7 +469,21 @@ impl ReviewSettingsDialog {
             }
             Some(Interaction::Activate(Autoconfigure)) => {
                 if let Some(reviewers) = self.suggested() {
-                    self.effort_notice = None;
+                    self.effort_notice = (!self.suggested_adjustments.is_empty()).then(|| {
+                        format!(
+                            "Adjusted reviewer efforts: {}",
+                            self.suggested_adjustments
+                                .iter()
+                                .map(|item| format!(
+                                    "{}: {} → {}",
+                                    item.model,
+                                    item.requested,
+                                    item.used.as_deref().unwrap_or("default")
+                                ))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    });
                     let mut config = config.clone();
                     config.review.reviewers = reviewers.clone();
                     config.review.clear_legacy();

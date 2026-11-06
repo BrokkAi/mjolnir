@@ -28,6 +28,7 @@ pub(crate) type Probe = dyn Fn(String) -> BoxFuture<'static, Result<ProfileConfi
 type ModelProbe = dyn Fn(String, String) -> BoxFuture<'static, Result<ProfileConfig>> + Send + Sync;
 type Attempt = Shared<BoxFuture<'static, Result<ProfileConfig, AttemptError>>>;
 type CacheKey = (String, Option<String>);
+type NoticeCallback = Arc<dyn Fn(String) + Send + Sync>;
 
 /// How often ready entries are checked against the choice lifetime. An
 /// entry is probed again at most this long after it expires.
@@ -110,6 +111,7 @@ pub(crate) struct ProfileCatalog {
     cancellation: CancellationToken,
     inner: Mutex<Inner>,
     publisher: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    notice: Mutex<Option<NoticeCallback>>,
     revisions: tokio::sync::watch::Sender<u64>,
     legacy_review_upgrade_started: AtomicBool,
     config_path: Option<PathBuf>,
@@ -122,6 +124,7 @@ impl ProfileCatalog {
             cancellation,
             inner: Mutex::new(Inner::default()),
             publisher: Mutex::new(None),
+            notice: Mutex::new(None),
             revisions: tokio::sync::watch::channel(0).0,
             legacy_review_upgrade_started: AtomicBool::new(false),
             config_path: None,
@@ -144,6 +147,10 @@ impl ProfileCatalog {
             .publisher
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(publisher);
+    }
+
+    pub(crate) fn set_notice(&self, notice: NoticeCallback) {
+        *self.notice.lock().unwrap_or_else(PoisonError::into_inner) = Some(notice);
     }
 
     fn publish(&self) {
@@ -325,7 +332,14 @@ impl ProfileCatalog {
         if !known {
             anyhow::bail!("reviewer efforts remain unknown");
         }
-        if reviewers.is_empty() {
+        let disable_auto = reviewers.is_empty();
+        if disable_auto
+            && (legacy
+                .profile
+                .as_ref()
+                .is_some_and(|profile| available.iter().any(|(id, _)| id == profile))
+                || !omitted.is_empty())
+        {
             anyhow::bail!("legacy review upgrade found no reviewers; waiting for matching models");
         }
         let count = reviewers.len();
@@ -334,10 +348,22 @@ impl ProfileCatalog {
             .clone()
             .context("catalog has no config path for review upgrade")?;
         let wrote = tokio::task::spawn_blocking(move || {
-            Self::persist_legacy_review_to(&path, reviewers, &definitions, &legacy)
+            Self::persist_legacy_review_to(&path, reviewers, disable_auto, &definitions, &legacy)
         })
         .await??;
         if wrote {
+            if disable_auto {
+                let message = "Automatic code review was turned off: none of your profiles offers a model Autoconfigure supports. Choose reviewers in Settings › Code Review.";
+                tracing::warn!("{message}");
+                if let Some(notice) = self
+                    .notice
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone()
+                {
+                    notice(message.to_owned());
+                }
+            }
             tracing::info!(
                 count,
                 "persisted legacy Auto review configuration to config.toml"
@@ -349,10 +375,11 @@ impl ProfileCatalog {
     fn persist_legacy_review_to(
         path: &Path,
         reviewers: Vec<mj_core::config::SubagentChoice>,
+        disable_auto: bool,
         definitions: &[(String, String)],
         legacy: &mj_core::config::LegacyReview,
     ) -> Result<bool> {
-        if reviewers.is_empty() {
+        if reviewers.is_empty() && !disable_auto {
             anyhow::bail!("cannot persist an empty reviewer upgrade");
         }
         let (_, wrote) = Config::update_to(path, |config| {
@@ -370,6 +397,9 @@ impl ProfileCatalog {
                 anyhow::bail!("profile definitions changed during reviewer discovery");
             }
             config.review.reviewers = reviewers;
+            if disable_auto {
+                config.review.trigger = mj_core::config::ReviewTrigger::Off;
+            }
             config.review.clear_legacy();
             Ok(true)
         })?;
@@ -1207,7 +1237,14 @@ mod tests {
         };
         assert_eq!(started.recv().await.as_deref(), Some("parent"));
         assert!(catalog.snapshot().options(&config, None).is_some());
-        assert!(catalog.snapshot().options(&config, Some("other")).is_none());
+        let partial = catalog.snapshot().options(&config, Some("other")).unwrap();
+        assert!(partial.efforts.is_empty());
+        assert!(
+            partial
+                .unavailable
+                .iter()
+                .any(|reason| reason.contains("effort discovery pending"))
+        );
         // Adding a different profile must leave this model's pending owner intact.
         config.profiles.insert(
             "sibling".into(),
@@ -1854,6 +1891,7 @@ mod tests {
             ProfileCatalog::persist_legacy_review_to(
                 &path,
                 vec![choice.clone()],
+                false,
                 &[],
                 &mj_core::config::LegacyReview::default()
             )
@@ -1869,6 +1907,7 @@ mod tests {
             ProfileCatalog::persist_legacy_review_to(
                 &path,
                 Vec::new(),
+                false,
                 &[],
                 &mj_core::config::LegacyReview::default()
             )
@@ -1901,12 +1940,39 @@ mod tests {
                 model: "haiku".into(),
                 effort: None,
             }],
+            false,
             &definitions,
             original.review.legacy.as_ref().unwrap(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("profile definitions changed"));
         assert!(Config::load_from(&path).unwrap().review.is_legacy());
+    }
+
+    #[test]
+    fn complete_legacy_auto_without_supported_models_turns_review_off() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        legacy_review_file(&path);
+        let config = Config::load_from(&path).unwrap();
+        let definitions = config
+            .enabled_profiles()
+            .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
+            .collect::<Vec<_>>();
+        assert!(
+            ProfileCatalog::persist_legacy_review_to(
+                &path,
+                Vec::new(),
+                true,
+                &definitions,
+                config.review.legacy.as_ref().unwrap(),
+            )
+            .unwrap()
+        );
+        let upgraded = Config::load_from(&path).unwrap();
+        assert!(!upgraded.review.is_legacy());
+        assert_eq!(upgraded.review.trigger, mj_core::config::ReviewTrigger::Off);
+        assert!(upgraded.review.reviewers.is_empty());
     }
 
     #[test]
@@ -1931,6 +1997,7 @@ mod tests {
             ProfileCatalog::persist_legacy_review_to(
                 &path,
                 Vec::new(),
+                false,
                 &[],
                 &mj_core::config::LegacyReview::default()
             )

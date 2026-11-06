@@ -10,7 +10,7 @@ use futures::future::join_all;
 use mj_core::config::{
     LegacyReview, ReviewConfig, SessionReview, SubagentChoice, apply_legacy_override,
 };
-use mj_core::review::autoconfigure::autoconfigure;
+use mj_core::review::autoconfigure::{Autoconfigured, autoconfigure};
 use mj_core::review::settings::{ResolvedReviewSettings, ReviewModelSettings};
 use mj_core::worker_launch::ProfileConfig;
 use std::collections::{BTreeMap, BTreeSet};
@@ -228,7 +228,7 @@ where
         ));
     }
     let (choices, known) = autoconfigure_with_efforts(available, probe, cancelled).await?;
-    Ok((choices, known.values().all(|known| *known)))
+    Ok((choices.reviewers, known.values().all(|known| *known)))
 }
 
 /// Compute the ordered legacy Auto preset using the same model and effort
@@ -237,7 +237,7 @@ pub(crate) async fn autoconfigure_with_efforts<F, Fut>(
     available: &[(String, ProfileConfig)],
     probe: F,
     cancelled: Option<&AtomicBool>,
-) -> Result<(Vec<SubagentChoice>, BTreeMap<String, bool>)>
+) -> Result<(Autoconfigured, BTreeMap<String, bool>)>
 where
     F: Fn(String, String) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<ProfileConfig>>,
@@ -246,7 +246,9 @@ where
         .iter()
         .flat_map(|(_, choices)| choices.models.iter().cloned())
         .collect::<Vec<_>>();
-    let draft = autoconfigure(&models, |_| None).unwrap_or_default();
+    let draft = autoconfigure(&models, |_| None)
+        .unwrap_or_default()
+        .reviewers;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut pairs = Vec::new();
     for model in draft
@@ -302,8 +304,33 @@ where
             *model_known = false;
         }
     }
-    let choices = autoconfigure(&models, |model| efforts.get(model).cloned()).unwrap_or_default();
-    for choice in &choices {
+    let choices = autoconfigure(&models, |model| {
+        let complete = known.get(model) == Some(&true);
+        let offered = efforts.get(model);
+        if complete {
+            return Some(offered.cloned().unwrap_or_default());
+        }
+        if offered.is_some_and(|offered| {
+            draft
+                .iter()
+                .filter(|choice| choice.model == model)
+                .all(|choice| {
+                    choice
+                        .effort
+                        .as_ref()
+                        .is_some_and(|effort| offered.iter().any(|item| &item.value == effort))
+                })
+        }) {
+            offered.cloned()
+        } else {
+            None
+        }
+    })
+    .unwrap_or_default();
+    for adjustment in &choices.adjusted {
+        tracing::warn!(model = %adjustment.model, requested = %adjustment.requested, used = ?adjustment.used, "legacy reviewer preset effort adjusted");
+    }
+    for choice in &choices.reviewers {
         if let Some(effort) = &choice.effort
             && efforts
                 .get(&choice.model)
@@ -448,9 +475,40 @@ mod tests {
         assert!(known.values().all(|known| *known));
         assert!(
             choices
+                .reviewers
                 .iter()
                 .all(|choice| choice.effort.as_deref() == Some("xhigh"))
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_auto_known_empty_efforts_use_default_and_remain_persistable() {
+        let model = SessionConfigChoice {
+            value: "claude-haiku-4.5".into(),
+            name: "Haiku".into(),
+            description: None,
+        };
+        let available = vec![(
+            "haiku".into(),
+            ProfileConfig {
+                model: Some(model.value.clone()),
+                models: vec![model],
+                efforts: Vec::new(),
+                observed_at: 1,
+            },
+        )];
+        let (configured, known) =
+            autoconfigure_with_efforts(&available, |_, _| async { unreachable!() }, None)
+                .await
+                .unwrap();
+        assert_eq!(known.get("claude-haiku-4.5"), Some(&true));
+        assert!(
+            configured
+                .reviewers
+                .iter()
+                .all(|choice| choice.effort.is_none())
+        );
+        assert_eq!(configured.adjusted.len(), 2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -478,7 +536,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(choices.len(), 2);
+        assert_eq!(choices.reviewers.len(), 2);
         assert_eq!(known.get("claude-haiku-4.5"), Some(&false));
         assert_eq!(
             tokio::time::Instant::now().duration_since(start),

@@ -38,7 +38,15 @@ pub fn fill_subagent_options(
                     unreachable = Some(format!("Discovery: {}", options.unavailable.join("; ")));
                 }
                 let mut options = serde_json::to_value(options).expect("options serialize");
-                if efforts_pending {
+                if efforts_pending
+                    || options["unavailable"].as_array().is_some_and(|reasons| {
+                        reasons.iter().any(|reason| {
+                            reason
+                                .as_str()
+                                .is_some_and(|reason| reason.contains("pending"))
+                        })
+                    })
+                {
                     options[EFFORTS_PENDING] = Value::Bool(true);
                 }
                 options
@@ -65,7 +73,10 @@ pub fn fill_reviewer_options(
         let mut current = models.clone();
         if let Some(current) = &mut current {
             match capabilities.options(&config, model) {
-                Some(efforts) => current.efforts = efforts.efforts,
+                Some(efforts) => {
+                    current.efforts = efforts.efforts;
+                    current.unavailable = efforts.unavailable;
+                }
                 None => {
                     let mut value = serde_json::to_value(current).expect("options serialize");
                     value[EFFORTS_PENDING] = Value::Bool(true);
@@ -74,10 +85,17 @@ pub fn fill_reviewer_options(
                 }
             }
         }
-        options.insert(
-            index.to_string(),
-            serde_json::to_value(current).expect("options serialize"),
-        );
+        let mut value = serde_json::to_value(current).expect("options serialize");
+        if value["unavailable"].as_array().is_some_and(|reasons| {
+            reasons.iter().any(|reason| {
+                reason
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("pending"))
+            })
+        }) {
+            value[EFFORTS_PENDING] = Value::Bool(true);
+        }
+        options.insert(index.to_string(), value);
     }
     draft["_reviewer_options"] = Value::Object(options);
     Ok(())

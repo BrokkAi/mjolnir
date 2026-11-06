@@ -3,11 +3,24 @@ use crate::acp::SessionConfigChoice;
 use crate::config::SubagentChoice;
 use crate::review::settings::{ReviewModelFamily, model_version_cmp};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffortAdjustment {
+    pub model: String,
+    pub requested: String,
+    pub used: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Autoconfigured {
+    pub reviewers: Vec<SubagentChoice>,
+    pub adjusted: Vec<EffortAdjustment>,
+}
+
 /// Choose review slots from the union of enabled profiles' model choices.
 pub fn autoconfigure(
     models: &[SessionConfigChoice],
     efforts: impl Fn(&str) -> Option<Vec<SessionConfigChoice>>,
-) -> Option<Vec<SubagentChoice>> {
+) -> Option<Autoconfigured> {
     // Each family keeps its best (identity, advertised value) pair; identities
     // decide, values are what the reviewer is launched with.
     let mut selected: [Option<(String, String)>; 6] = Default::default();
@@ -38,36 +51,76 @@ pub fn autoconfigure(
             *current = Some((id, choice.value.clone()));
         }
     }
-    let choice = |index: usize, effort: &str| {
+    let choice = |index: usize, effort: &str, adjusted: &mut Vec<EffortAdjustment>| {
         let model = selected[index].as_ref().unwrap().1.clone();
         let offered = efforts(&model);
+        let rank = |value: &str| {
+            ["minimal", "low", "medium", "high", "xhigh", "max"]
+                .iter()
+                .position(|item| *item == value)
+        };
+        let used = offered
+            .map(|choices| {
+                if choices.iter().any(|choice| choice.value == effort) {
+                    return Some(effort.to_owned());
+                }
+                let requested_rank = rank(effort).expect("preset effort has a rank");
+                let ranked = choices
+                    .iter()
+                    .filter_map(|choice| rank(&choice.value).map(|rank| (rank, &choice.value)));
+                ranked
+                    .clone()
+                    .filter(|(rank, _)| *rank < requested_rank)
+                    .max_by_key(|(rank, _)| *rank)
+                    .or_else(|| ranked.min_by_key(|(rank, _)| *rank))
+                    .map(|(_, value)| value.clone())
+            })
+            .unwrap_or_else(|| Some(effort.to_owned()));
+        if used.as_deref() != Some(effort) {
+            adjusted.push(EffortAdjustment {
+                model: model.clone(),
+                requested: effort.to_owned(),
+                used: used.clone(),
+            });
+        }
         SubagentChoice {
             model,
-            effort: offered
-                .filter(|choices| !choices.iter().any(|choice| choice.value == effort))
-                .map(|_| None)
-                .unwrap_or_else(|| Some(effort.into())),
+            effort: used,
         }
     };
-    if selected[0].is_some() && selected[1].is_some() && selected[2].is_some() {
-        Some(vec![
-            choice(0, "xhigh"),
-            choice(1, "medium"),
-            choice(2, "high"),
-        ])
+    let mut adjusted = Vec::new();
+    let reviewers = if selected[0].is_some() && selected[1].is_some() && selected[2].is_some() {
+        vec![
+            choice(0, "xhigh", &mut adjusted),
+            choice(1, "medium", &mut adjusted),
+            choice(2, "high", &mut adjusted),
+        ]
     } else if selected[0].is_some() && selected[1].is_some() {
-        Some(vec![choice(0, "xhigh"), choice(1, "medium")])
+        vec![
+            choice(0, "xhigh", &mut adjusted),
+            choice(1, "medium", &mut adjusted),
+        ]
     } else if selected[2].is_some() {
-        Some(vec![choice(2, "xhigh"), choice(2, "xhigh")])
+        vec![
+            choice(2, "xhigh", &mut adjusted),
+            choice(2, "xhigh", &mut adjusted),
+        ]
     } else if selected[3].is_some() {
-        Some(vec![choice(3, "high"), choice(3, "high")])
+        vec![
+            choice(3, "high", &mut adjusted),
+            choice(3, "high", &mut adjusted),
+        ]
     } else if selected[4].is_some() {
-        Some(vec![choice(4, "high")])
+        vec![choice(4, "high", &mut adjusted)]
     } else if selected[5].is_some() {
-        Some(vec![choice(5, "high")])
+        vec![choice(5, "high", &mut adjusted)]
     } else {
-        None
-    }
+        return None;
+    };
+    Some(Autoconfigured {
+        reviewers,
+        adjusted,
+    })
 }
 
 #[cfg(test)]
@@ -83,9 +136,10 @@ mod tests {
             })
             .collect()
     }
-    fn models(result: Option<Vec<SubagentChoice>>) -> Vec<(String, String)> {
+    fn models(result: Option<Autoconfigured>) -> Vec<(String, String)> {
         result
             .unwrap_or_default()
+            .reviewers
             .into_iter()
             .map(|choice| (choice.model, choice.effort.unwrap()))
             .collect()
@@ -96,12 +150,33 @@ mod tests {
         let models = choices(&["claude-haiku-4.5"]);
         let known = autoconfigure(&models, |_| Some(Vec::new())).unwrap();
         let unknown = autoconfigure(&models, |_| None).unwrap();
-        assert!(known.iter().all(|choice| choice.effort.is_none()));
+        assert!(known.reviewers.iter().all(|choice| choice.effort.is_none()));
         assert!(
             unknown
+                .reviewers
                 .iter()
                 .all(|choice| choice.effort.as_deref() == Some("xhigh"))
         );
+    }
+
+    #[test]
+    fn known_efforts_choose_nearest_lower_then_lowest_and_report_adjustments() {
+        let models = choices(&["gpt-6-terra", "gpt-6-sol"]);
+        let configured = autoconfigure(&models, |model| {
+            Some(if model.ends_with("terra") {
+                choices(&["low", "high", "max"])
+            } else {
+                choices(&["high", "xhigh"])
+            })
+        })
+        .unwrap();
+        assert_eq!(configured.reviewers[0].effort.as_deref(), Some("high"));
+        assert_eq!(configured.reviewers[1].effort.as_deref(), Some("high"));
+        assert_eq!(configured.adjusted.len(), 2);
+        assert_eq!(configured.adjusted[0].requested, "xhigh");
+        assert_eq!(configured.adjusted[0].used.as_deref(), Some("high"));
+        assert_eq!(configured.adjusted[1].requested, "medium");
+        assert_eq!(configured.adjusted[1].used.as_deref(), Some("high"));
     }
 
     #[test]
