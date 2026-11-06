@@ -521,6 +521,12 @@ async fn refresh_profile_with_cache_root(
             )
         };
     let environment = environment.into_iter().collect::<HashMap<_, _>>();
+    // The PATH a host check's program is found on: the profile's own when it
+    // sets one, as the subprocess then receives it, else the daemon's.
+    let host_path = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"));
     let refreshed_at_epoch_seconds = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
@@ -678,9 +684,7 @@ async fn refresh_profile_with_cache_root(
         HarnessKind::Claude => match if cfg!(target_os = "macos") {
             Ok(None)
         } else {
-            container(claude_usage::host_has_claude(
-                std::env::var_os("PATH").as_deref(),
-            ))
+            container(claude_usage::host_has_claude(host_path.as_deref()))
         } {
             Err(error) => Err(error),
             Ok(container) => claude_usage::query(source_home, environment, container)
@@ -782,8 +786,7 @@ async fn refresh_profile_with_cache_root(
         // Grok Build publishes no HTTP quota endpoint. Its own usage view polls
         // an ACP billing extension, and so does Mjolnir.
         HarnessKind::Grok => 'grok: {
-            let host_has_grok =
-                grok_usage::host_has_grok(&source_home, std::env::var_os("PATH").as_deref());
+            let host_has_grok = grok_usage::host_has_grok(&source_home, host_path.as_deref());
             let container = match container(host_has_grok) {
                 Ok(container) => container,
                 Err(error) => break 'grok Err(error),

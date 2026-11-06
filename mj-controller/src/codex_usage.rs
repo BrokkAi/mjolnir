@@ -597,7 +597,7 @@ fn managed_codex_launcher(install: &Path) -> Result<PathBuf, QueryError> {
         });
     }
     let launcher = install.join(CODEX_CLI_ENTRYPOINT);
-    if !is_executable_file(&launcher) {
+    if !mj_core::program_path::is_executable_file(&launcher) {
         return Err(QueryError::NotInstalled {
             expected: Some(install.to_path_buf()),
             detail: Some(format!(
@@ -703,13 +703,6 @@ fn open_managed_codex_lease(install: &Path) -> Result<FileLock, QueryError> {
             detail: Some(format!("could not lock {}: {error}", lease_path.display())),
         }),
     }
-}
-
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 #[derive(Debug)]

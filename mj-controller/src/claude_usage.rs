@@ -107,7 +107,7 @@ fn claude_program() -> &'static str {
 
 /// Whether `path` holds the `claude` a host login refresh would start.
 pub(crate) fn host_has_claude(path: Option<&std::ffi::OsStr>) -> bool {
-    mj_core::program_path::find_program_on_path(claude_program(), path).is_some()
+    mj_core::program_path::find_executable_on_path(claude_program(), path).is_some()
 }
 
 /// Read the quota out of Claude Code's own `/usage` output.
@@ -802,6 +802,10 @@ mod tests {
         assert!(!host_has_claude(None));
         let on_path = directory_with_program("claude");
         assert!(host_has_claude(Some(on_path.path().as_os_str())));
+        // A file the system would not run does not count.
+        let plain = tempfile::tempdir().unwrap();
+        std::fs::write(plain.path().join("claude"), "").unwrap();
+        assert!(!host_has_claude(Some(plain.path().as_os_str())));
     }
 
     /// Captured verbatim from `claude -p /usage --no-session-persistence`.

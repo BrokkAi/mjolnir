@@ -119,9 +119,10 @@ fn grok_programs(home: &Path) -> Vec<PathBuf> {
 pub(crate) fn host_has_grok(home: &Path, path: Option<&std::ffi::OsStr>) -> bool {
     grok_programs(home).iter().any(|program| {
         if program.is_absolute() {
-            program.is_file()
+            mj_core::program_path::is_executable_file(program)
         } else {
-            mj_core::program_path::find_program_on_path(&program.to_string_lossy(), path).is_some()
+            mj_core::program_path::find_executable_on_path(&program.to_string_lossy(), path)
+                .is_some()
         }
     })
 }
