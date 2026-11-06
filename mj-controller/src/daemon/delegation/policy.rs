@@ -140,21 +140,23 @@ impl Policy {
         };
         self.catalog.sync(&controller.config);
         self.catalog_config = Some(controller.config.clone());
+        if force {
+            self.batch.generation = self.batch.generation.saturating_add(1);
+            self.batch.profiles = quota_refresh_profiles(&controller);
+            self.batch.refresh = true;
+            self.profiles_tx.send_replace(self.batch.clone());
+            // Only this request is a refresh; a later profile-set change is not.
+            self.batch.refresh = false;
+        }
+        // A changed quota setting reaches the refresher even when the profiles
+        // did not change.
+        crate::server_runtime::republish_quota_profiles(
+            &controller,
+            &mut self.batch,
+            &self.profiles_tx,
+        );
         if force || self.published != controller.config.profiles {
-            if force {
-                self.batch.generation = self.batch.generation.saturating_add(1);
-                self.batch.profiles = quota_refresh_profiles(&controller);
-                self.batch.refresh = true;
-                self.profiles_tx.send_replace(self.batch.clone());
-                // Only this request is a refresh; a later profile-set change is not.
-                self.batch.refresh = false;
-            }
-            crate::server_runtime::republish_quota_profiles(
-                &controller,
-                &mut self.published,
-                &mut self.batch,
-                &self.profiles_tx,
-            );
+            self.published.clone_from(&controller.config.profiles);
             let removed = {
                 let mut reports = self.reports.lock().expect("quota reports poisoned");
                 let removed = reports
