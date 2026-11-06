@@ -169,9 +169,8 @@ pub struct CommandSpec {
     #[serde(skip)]
     preserve_children_on_cancel: bool,
     /// The SSH destination this command opens a connection to, when it does.
-    /// Tagged commands pass through [`SshAdmission`] so the daemon never
-    /// exceeds the remote `sshd`'s `MaxStartups` budget, and a transport
-    /// rejection is retried rather than reported as a command failure.
+    /// Tagged commands retry a server refusal before authentication rather
+    /// than reporting it as a command failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_destination: Option<String>,
     /// The shared SSH connection this command runs on as one session, when it
@@ -821,22 +820,18 @@ impl<E: CommandExecutor + ?Sized> Drop for ProvisionStageGuard<'_, E> {
 
 pub struct ProcessExecutor;
 
-/// Run one `ssh` invocation under process-wide admission control, retrying it
+/// Run one `ssh` invocation, retrying it
 /// when the server turned the connection away before authentication.
 ///
-/// A permit is held only while a child is actually running and is released
-/// between attempts, because a waiting retry occupies no connection slot. A
-/// transport rejection means the remote command never started, so re-running
+/// A transport rejection means the remote command never started, so re-running
 /// the whole invocation cannot repeat a side effect.
 ///
 /// A command that asks for a shared-connection session leases it on each
-/// attempt, before taking its permit: opening a master takes a permit of its
-/// own, and waiting for that while holding one could exhaust the gate. A
-/// session turned away by the transport usually means its master died, so
-/// the lease is invalidated and the retry checks and reopens the master.
+/// attempt. A session turned away by the transport usually means its master
+/// died, so the lease is invalidated and the retry checks and reopens the master.
 ///
 /// Commands that are not tagged with a destination run untouched.
-fn with_ssh_admission(
+fn with_ssh_refusal_retry(
     command: &CommandSpec,
     executor: &dyn CommandExecutor,
     is_cancelled: &dyn Fn() -> bool,
@@ -847,10 +842,7 @@ fn with_ssh_admission(
     };
     for attempt in 1..=SSH_RETRY_ATTEMPTS {
         let session = command.open_ssh_session(executor)?;
-        let output = {
-            let _permit = SshAdmission::acquire_unless(destination, is_cancelled)?;
-            run(session.command())?
-        };
+        let output = run(session.command())?;
         let refusal = ssh_refusal(output.status, &String::from_utf8_lossy(&output.stderr));
         // A refused session found its master alive; any other refusal may
         // mean the master is gone.
@@ -961,7 +953,7 @@ impl CommandExecutor for ProcessExecutor {
             if let Some(host) = command_host(command) {
                 return host.run(command, None, &|| false);
             }
-            with_ssh_admission(command, self, &|| false, |command| self.run_once(command))
+            with_ssh_refusal_retry(command, self, &|| false, |command| self.run_once(command))
         })
     }
 
@@ -976,12 +968,8 @@ impl CommandExecutor for ProcessExecutor {
                 return host.run(command, Some(input), &|| false);
             }
             // A caller's stream cannot be replayed, so this path takes a
-            // session and a permit but never retries.
+            // session but never retries.
             let session = command.open_ssh_session(self)?;
-            let _permit = command
-                .ssh_destination
-                .as_deref()
-                .map(SshAdmission::acquire);
             let command = session.command();
             let process = cancellable_command(command);
             // Plain process execution is not cancellable, so the transfer only
@@ -1484,7 +1472,7 @@ impl CommandExecutor for CancellableProcessExecutor {
             }
             self.describe_cancellation(
                 command,
-                with_ssh_admission(command, self, &|| self.is_cancelled(), |command| {
+                with_ssh_refusal_retry(command, self, &|| self.is_cancelled(), |command| {
                     self.run_once(command)
                 }),
             )
@@ -1504,15 +1492,8 @@ impl CommandExecutor for CancellableProcessExecutor {
                     return host.run(command, Some(input), &|| self.is_cancelled());
                 }
                 // A caller's stream cannot be replayed, so this path takes a
-                // session and a permit but never retries.
+                // session but never retries.
                 let session = command.open_ssh_session(self)?;
-                let _permit = command
-                    .ssh_destination
-                    .as_deref()
-                    .map(|destination| {
-                        SshAdmission::acquire_unless(destination, &|| self.is_cancelled())
-                    })
-                    .transpose()?;
                 let command = session.command();
                 // The child runs in its own process group so cancellation can kill
                 // the whole group, which is what releases a writer blocked on a
@@ -2850,7 +2831,7 @@ mod executor_tests {
             };
             if command.ssh_session.is_some() {
                 // A session. The first one arrives just after its master died.
-                return with_ssh_admission(command, self, &|| false, |spawned| {
+                return with_ssh_refusal_retry(command, self, &|| false, |spawned| {
                     self.sessions.borrow_mut().push(spawned.args.clone());
                     if self.sessions.borrow().len() == 1 {
                         self.running.borrow_mut().clear();

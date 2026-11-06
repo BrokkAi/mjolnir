@@ -3,7 +3,7 @@ use super::*;
 #[cfg(unix)]
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// The connectivity probe `mj doctor` runs against an SSH target.
@@ -1032,23 +1032,26 @@ pub fn ssh_refusal(status: i32, stderr: &str) -> Option<SshRefusal> {
         .then_some(SshRefusal::BeforeAuthentication)
 }
 
-/// Default number of `ssh` processes this daemon will have in flight against
-/// one destination at a time.
+/// Default number of sessions the daemon places on one shared connection.
 ///
-/// `sshd` counts *unauthenticated* connections against `MaxStartups`, whose
-/// stock value is `10:30:100`: from the eleventh concurrent pre-auth connection
-/// it starts dropping them, and past a hundred it drops all of them. A daemon
-/// that spawns one fresh `ssh` per operation reaches that during startup, so it
-/// admits its own connections instead of letting the server refuse them.
-const DEFAULT_MAX_CONCURRENT_SSH: usize = 6;
+/// A stock `sshd` refuses the eleventh session on one connection
+/// (`MaxSessions 10`). Two are left free for `ssh` commands from other
+/// Mjolnir processes on this machine, such as `mj doctor` and Tab completion,
+/// which join a master without being counted here.
+#[cfg(unix)]
+const DEFAULT_SESSIONS_PER_CONNECTION: usize = 8;
 
-/// Environment override for [`DEFAULT_MAX_CONCURRENT_SSH`].
-pub const MAX_CONCURRENT_SSH_ENV: &str = "MJ_SSH_MAX_CONCURRENT";
+/// Environment override for [`DEFAULT_SESSIONS_PER_CONNECTION`].
+pub const SESSIONS_PER_CONNECTION_ENV: &str = "MJ_SSH_SESSIONS_PER_CONNECTION";
 
-fn max_concurrent_ssh() -> usize {
-    static LIMIT: OnceLock<usize> = OnceLock::new();
-    *LIMIT.get_or_init(|| positive_env_limit(MAX_CONCURRENT_SSH_ENV, DEFAULT_MAX_CONCURRENT_SSH))
-}
+/// How long a successful `ssh -O check` of a master is trusted before the
+/// next lease on that shard checks again.
+#[cfg(unix)]
+const MASTER_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Per-command deadline for checking or opening a master from code that has
+/// no executor of its own, such as the relay and the resource pollers.
+pub const SSH_MASTER_OPEN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A positive whole number from the environment variable `name`, or
 /// `default` when it is unset or invalid.
@@ -1072,131 +1075,6 @@ fn positive_env_limit(name: &str, default: usize) -> usize {
         }
     }
 }
-
-/// A counting semaphore per SSH destination.
-///
-/// Deliberately built on `std::sync` rather than a runtime primitive: the
-/// blocking process executors are called from plain threads as well as from
-/// `spawn_blocking`, and both must share one gate.
-struct DestinationGate {
-    limit: usize,
-    in_flight: Mutex<usize>,
-    released: Condvar,
-}
-
-impl DestinationGate {
-    fn new(limit: usize) -> Arc<Self> {
-        Arc::new(Self {
-            limit,
-            in_flight: Mutex::new(0),
-            released: Condvar::new(),
-        })
-    }
-
-    fn acquire(self: &Arc<Self>) -> SshPermit {
-        self.acquire_unless(&|| false)
-            .expect("unconditional SSH admission cannot be cancelled")
-    }
-
-    fn acquire_unless(self: &Arc<Self>, cancelled: &dyn Fn() -> bool) -> Result<SshPermit> {
-        let mut in_flight = self
-            .in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        loop {
-            ensure!(
-                !cancelled(),
-                "operation cancelled while waiting for SSH admission"
-            );
-            if *in_flight < self.limit {
-                break;
-            }
-            (in_flight, _) = self
-                .released
-                .wait_timeout(in_flight, Duration::from_millis(25))
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-        *in_flight += 1;
-        drop(in_flight);
-        Ok(SshPermit {
-            gate: Arc::clone(self),
-        })
-    }
-}
-
-/// One admitted `ssh` connection. The slot is returned on drop.
-pub struct SshPermit {
-    gate: Arc<DestinationGate>,
-}
-
-impl std::fmt::Debug for SshPermit {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("SshPermit")
-    }
-}
-
-impl Drop for SshPermit {
-    fn drop(&mut self) {
-        let mut in_flight = self
-            .gate
-            .in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *in_flight = in_flight.saturating_sub(1);
-        drop(in_flight);
-        self.gate.released.notify_one();
-    }
-}
-
-/// Process-wide admission control for outbound `ssh` connections.
-pub struct SshAdmission;
-
-impl SshAdmission {
-    /// Block until this process may open another `ssh` connection to
-    /// `destination`. The returned permit holds the slot until it is dropped.
-    pub fn acquire(destination: &str) -> SshPermit {
-        Self::gate(destination).acquire()
-    }
-
-    /// Wait for admission without outliving the command's cancellation or deadline.
-    pub fn acquire_unless(destination: &str, cancelled: &dyn Fn() -> bool) -> Result<SshPermit> {
-        Self::gate(destination).acquire_unless(cancelled)
-    }
-
-    fn gate(destination: &str) -> Arc<DestinationGate> {
-        static GATES: OnceLock<Mutex<BTreeMap<String, Arc<DestinationGate>>>> = OnceLock::new();
-        let mut gates = GATES
-            .get_or_init(|| Mutex::new(BTreeMap::new()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Arc::clone(
-            gates
-                .entry(destination.to_owned())
-                .or_insert_with(|| DestinationGate::new(max_concurrent_ssh())),
-        )
-    }
-}
-
-/// Default number of sessions the daemon places on one shared connection.
-///
-/// A stock `sshd` refuses the eleventh session on one connection
-/// (`MaxSessions 10`). Two are left free for `ssh` commands from other
-/// Mjolnir processes on this machine, such as `mj doctor` and Tab completion,
-/// which join a master without being counted here.
-#[cfg(unix)]
-const DEFAULT_SESSIONS_PER_CONNECTION: usize = 8;
-
-/// Environment override for [`DEFAULT_SESSIONS_PER_CONNECTION`].
-pub const SESSIONS_PER_CONNECTION_ENV: &str = "MJ_SSH_SESSIONS_PER_CONNECTION";
-
-/// How long a successful `ssh -O check` of a master is trusted before the
-/// next lease on that shard checks again.
-#[cfg(unix)]
-const MASTER_CHECK_INTERVAL: Duration = Duration::from_secs(5);
-
-/// Per-command deadline for checking or opening a master from code that has
-/// no executor of its own, such as the relay and the resource pollers.
-pub const SSH_MASTER_OPEN_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[cfg(unix)]
 fn sessions_per_connection() -> usize {
@@ -1668,8 +1546,8 @@ pub struct SshSessions;
 
 impl SshSessions {
     /// Reserve a session on a shard for `ssh`, opening that shard's master if
-    /// it is not running. Blocks like [`SshAdmission::acquire`], so it is
-    /// callable from plain threads and `spawn_blocking`. Returns an error only
+    /// it is not running. Uses a blocking lock, so it is callable from plain threads and
+    /// `spawn_blocking`. Returns an error only
     /// when a master could not be opened or verified.
     pub fn lease(ssh: &SshTarget, executor: &dyn CommandExecutor) -> Result<SshSessionLease> {
         #[cfg(unix)]
@@ -3025,75 +2903,6 @@ mod tests {
                 "status {status} stderr {stderr:?}"
             );
         }
-    }
-
-    #[test]
-    fn admission_never_admits_more_than_the_limit() {
-        let gate = DestinationGate::new(2);
-        let in_flight = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
-        let threads: Vec<_> = (0..12)
-            .map(|_| {
-                let gate = Arc::clone(&gate);
-                let in_flight = Arc::clone(&in_flight);
-                let peak = Arc::clone(&peak);
-                std::thread::spawn(move || {
-                    for _ in 0..25 {
-                        let permit = gate.acquire();
-                        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                        peak.fetch_max(now, Ordering::SeqCst);
-                        std::thread::yield_now();
-                        in_flight.fetch_sub(1, Ordering::SeqCst);
-                        drop(permit);
-                    }
-                })
-            })
-            .collect();
-        for thread in threads {
-            thread.join().expect("admission worker must not panic");
-        }
-        assert!(
-            peak.load(Ordering::SeqCst) <= 2,
-            "admission let {} connections run against a 2-permit gate",
-            peak.load(Ordering::SeqCst)
-        );
-        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn admission_blocks_once_every_permit_is_held() {
-        let gate = DestinationGate::new(2);
-        let first = gate.acquire();
-        let second = gate.acquire();
-        let waiter = {
-            let gate = Arc::clone(&gate);
-            std::thread::spawn(move || {
-                let permit = gate.acquire();
-                drop(permit);
-            })
-        };
-        // The third acquire has nothing to take until a permit comes back.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(!waiter.is_finished());
-        drop(first);
-        waiter
-            .join()
-            .expect("waiter must be admitted once a permit frees");
-        drop(second);
-    }
-
-    #[test]
-    fn cancelled_admission_does_not_wait_for_the_holder_or_consume_a_slot() {
-        let gate = DestinationGate::new(1);
-        let held = gate.acquire();
-        let executor = CancellableProcessExecutor::with_timeout(Duration::from_millis(50));
-        let error = gate
-            .acquire_unless(&|| executor.is_cancelled())
-            .unwrap_err();
-        assert!(error.to_string().contains("cancelled"));
-        assert_eq!(*gate.in_flight.lock().unwrap(), 1);
-        drop(held);
-        assert!(gate.acquire_unless(&|| false).is_ok());
     }
 
     #[cfg(unix)]

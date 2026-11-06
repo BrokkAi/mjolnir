@@ -495,21 +495,13 @@ async fn serve_stream(
         .body(())
         .expect("static response");
     let mut send = respond.send_response(response, false)?;
-    // A command over a shared SSH connection leases its session and an
-    // admission slot here, where SSH runs, exactly as a local launch does.
+    // A command over a shared SSH connection leases its session here, where
+    // SSH runs, exactly as a local launch does.
     let prepared = tokio::task::spawn_blocking(move || -> Result<SshPrepared> {
-        let destination = command.ssh_destination.clone();
         let (command, lease) = command
             .open_ssh_session(&crate::targets::ProcessExecutor)?
             .into_parts();
-        let permit = destination
-            .as_deref()
-            .map(crate::targets::SshAdmission::acquire);
-        Ok(SshPrepared {
-            command,
-            lease,
-            permit,
-        })
+        Ok(SshPrepared { command, lease })
     })
     .await
     .context("node SSH preparation task failed")?;
@@ -650,12 +642,10 @@ impl std::io::Read for ChannelReader {
     }
 }
 
-/// A command ready to spawn, with the SSH session it runs on and the
-/// admission slot it holds until it is past authentication.
+/// A command ready to spawn, with the SSH session it runs on.
 struct SshPrepared {
     command: crate::targets::CommandSpec,
     lease: Option<crate::targets::SshSessionLease>,
-    permit: Option<crate::targets::SshPermit>,
 }
 
 fn spawn(command: &crate::targets::CommandSpec) -> Result<tokio::process::Child> {
@@ -697,11 +687,7 @@ async fn run_child(
     mut body: h2::RecvStream,
     send: &mut h2::SendStream<Bytes>,
 ) -> Result<()> {
-    let SshPrepared {
-        command,
-        lease,
-        mut permit,
-    } = prepared;
+    let SshPrepared { command, lease } = prepared;
     let command = &command;
     let stderr_tail = std::sync::Mutex::new(Vec::<u8>::new());
     let group = (!command.detaches).then(|| crate::subprocess::ProcessGroupGuard::new(child.id()));
@@ -762,10 +748,7 @@ async fn run_child(
             match next {
                 Some(framed) => {
                     match framed.first() {
-                        // The first output is the far side answering: the
-                        // session is past authentication and no longer
-                        // counts against the server's startup budget.
-                        Some(&FRAME_STDOUT) => drop(permit.take()),
+                        Some(&FRAME_STDOUT) => {}
                         Some(&FRAME_STDERR) => {
                             let mut tail = stderr_tail
                                 .lock()

@@ -135,14 +135,11 @@ impl RelayClient {
             crate::targets::CancellableProcessExecutor::with_timeout(SSH_MASTER_OPEN_TIMEOUT);
         let _cancel_preparation = executor.cancel_on_drop();
         let prepared = tokio::task::spawn_blocking(move || {
-            // Lease before taking the permit: opening a master takes a
-            // permit of its own.
             let (spec, lease) = requested.open_ssh_session(&executor)?.into_parts();
-            let permit = SshAdmission::acquire_unless(&destination, &|| executor.is_cancelled())?;
-            Ok::<_, anyhow::Error>((spec, lease, permit))
+            Ok::<_, anyhow::Error>((spec, lease))
         })
         .await;
-        let (spec, lease, permit) = match prepared {
+        let (spec, lease) = match prepared {
             Ok(Ok(prepared)) => prepared,
             Ok(Err(error)) => {
                 return Err(ConnectFailure::plain(
@@ -151,7 +148,7 @@ impl RelayClient {
             }
             Err(error) => {
                 return Err(ConnectFailure::plain(anyhow!(
-                    "SSH admission for the relay proxy was cancelled: {error}"
+                    "SSH session preparation for the relay proxy failed: {error}"
                 )));
             }
         };
@@ -160,7 +157,6 @@ impl RelayClient {
             expected_session_id,
             request_timeout,
             handshake_timeout,
-            Some(permit),
             lease,
         )
         .await
@@ -171,7 +167,6 @@ impl RelayClient {
         expected_session_id: &str,
         request_timeout: Duration,
         handshake_timeout: Duration,
-        permit: Option<SshPermit>,
         ssh_session: Option<SshSessionLease>,
     ) -> std::result::Result<Self, ConnectFailure> {
         let proxy::ProxyStdio {
@@ -242,9 +237,6 @@ impl RelayClient {
             .await
         {
             Ok(()) => {
-                // Hello succeeded, so this connection is past authentication
-                // and no longer counts against the server's startup budget.
-                drop(permit);
                 handshake_done.store(true, Ordering::Release);
                 // The drain task keeps logging for the life of the connection.
                 Ok(client)
@@ -279,7 +271,6 @@ impl RelayClient {
                     .as_ref()
                     .and(status)
                     .and_then(|status| ssh_refusal(status, &stderr));
-                drop(permit);
                 // A session turned away by the transport usually means its
                 // master died; make the retry check and reopen it.
                 if refusal == Some(SshRefusal::BeforeAuthentication)

@@ -92,28 +92,15 @@ opened. To turn sharing off entirely, set `MJ_SSH_CONTROL_MASTER=0` (`off`,
 opens its own connection. Sharing is unix-only; Windows OpenSSH does not
 implement it.
 
-## Limiting concurrent connections
+## Connection concurrency
 
-Mjolnir starts one `ssh` or `scp` process per remote operation, so a daemon
-restart with many sessions opens a burst of connections to the same host at
-once. To keep that burst from being refused, Mjolnir admits at most **6
-concurrent connections per destination** and makes the rest wait. Set
-`MJ_SSH_MAX_CONCURRENT` in the daemon's environment to change the limit; an
-unset or invalid value falls back to 6.
-
-The number to compare it to is the remote `sshd`'s `MaxStartups`, which counts
-*unauthenticated* connections. Its stock value, `10:30:100`, starts randomly
-dropping connections at the eleventh concurrent pre-auth connection and drops
-all of them past a hundred. Keep `MJ_SSH_MAX_CONCURRENT` comfortably below the
-first number, or raise `MaxStartups` on the host. A dropped connection exits
-255 with `Connection closed by <host> port 22` or
-`kex_exchange_identification: read: Connection reset by peer`; Mjolnir
-recognizes those and retries the invocation rather than reporting a failure,
-because the remote command never ran.
-
-Connection sharing removes most of this pressure, because a master
-authenticates once for up to 8 sessions. The concurrency limit still applies
-to opening masters, and to every command when sharing is off.
+Mjolnir does not impose a client-side cap on concurrent SSH commands or
+connections. On Unix, commands normally use channels over a shared OpenSSH
+connection; only opening a connection authenticates and counts against the
+remote `sshd`'s `MaxStartups`. When a server refuses a connection before
+authentication, Mjolnir recognizes the refusal and retries the invocation,
+because the remote command never ran. Commands on platforms without connection
+sharing open their own connection and use the same refusal retry.
 
 ## Prerequisites you set up by hand
 

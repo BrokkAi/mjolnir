@@ -13,8 +13,8 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, watch};
 
 use crate::targets::{
-    CommandSpec, SSH_MASTER_OPEN_TIMEOUT, SSH_RETRY_ATTEMPTS, SshAdmission, SshPermit, SshRefusal,
-    SshSessionLease, ssh_refusal,
+    CommandSpec, SSH_MASTER_OPEN_TIMEOUT, SSH_RETRY_ATTEMPTS, SshRefusal, SshSessionLease,
+    ssh_refusal,
 };
 use mj_core::config::harness_authentication_marker;
 use mj_core::credentials::{
@@ -168,9 +168,8 @@ pub struct RelayClient {
     /// Invalidated under this connection's exclusive borrow before applying
     /// queue changes; partial-page failures cannot leave a valid stale view.
     subagent_publication: Option<SubagentQueueSnapshot>,
-    /// The shared-connection session the proxy runs on. Unlike the admission
-    /// permit, which is released once hello completes, the session is in use
-    /// for as long as the proxy runs, so the lease lives as long as `child`.
+    /// The shared-connection session the proxy runs on, held for as long as
+    /// the proxy runs.
     ssh_session: Option<SshSessionLease>,
 }
 
