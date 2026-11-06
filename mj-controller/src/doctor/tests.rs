@@ -1948,3 +1948,42 @@ fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
         check.remediation
     );
 }
+
+/// A host that does not answer has one problem, not two: its GitHub check
+/// waits for the SSH check to pass, and then runs on the host under the same
+/// strict host-key checking.
+#[test]
+fn ssh_bare_github_check_runs_only_on_a_reachable_host() {
+    let unreachable = FakeExecutor::new([Ok(failed(
+        b"ssh: connect to host example.test port 22: Connection timed out",
+    ))]);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &unreachable);
+    assert_eq!(
+        checks
+            .iter()
+            .map(|check| check.id.as_str())
+            .collect::<Vec<_>>(),
+        ["runtime.ssh-bare.builder"]
+    );
+
+    let reachable = FakeExecutor::new([
+        Ok(output(b"")),
+        Ok(failed(
+            b"Hi octocat! You've successfully authenticated, but GitHub does not provide shell access.",
+        )),
+    ]);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &reachable);
+    assert_eq!(checks[1].id, "github.ssh-bare.builder");
+    assert_eq!(checks[1].status, CheckStatus::Ready);
+    let commands = reachable.commands.borrow();
+    assert_eq!(&commands[1].args[..2], ["-o", "StrictHostKeyChecking=yes"]);
+    assert!(
+        commands[1]
+            .args
+            .last()
+            .unwrap()
+            .contains("'StrictHostKeyChecking=yes' '-o' 'ConnectTimeout=5' 'git@github.com'"),
+        "{:?}",
+        commands[1].args
+    );
+}
