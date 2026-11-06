@@ -183,7 +183,7 @@ static SHARING_OVERRIDE: Mutex<Option<SshSharingForTest>> = Mutex::new(None);
 /// The connection-sharing override is process-wide, so the tests that set it
 /// take turns.
 #[cfg(all(test, unix))]
-pub(super) static SHARING_TEST_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static SHARING_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Pin connection sharing for a test, or restore the real resolution with
 /// `None`. Tests must not depend on the developer's `$XDG_RUNTIME_DIR` or home
@@ -1032,8 +1032,9 @@ const SSH_PERSISTENT_REFUSAL: Duration = Duration::from_secs(60);
 /// A connection closed before authentication means `sshd` is up and asking
 /// the client to come back (`MaxStartups`), and the command never ran, so a
 /// caller that can be cancelled retries until it succeeds or is cancelled.
-/// A refusal that taught the ledger a new capacity retries at once on another
-/// master. Everything else is bounded by [`SSH_BOUNDED_RETRY_ATTEMPTS`].
+/// A refusal after which the next lease lands on another master (it taught the
+/// ledger a capacity, or the capacity was learned after the lease was placed)
+/// retries at once. Everything else is bounded by [`SSH_BOUNDED_RETRY_ATTEMPTS`].
 pub struct SshRefusalRetry {
     cancellable: bool,
     started: Instant,
@@ -1057,9 +1058,9 @@ impl SshRefusalRetry {
     }
 
     /// The wait before the next attempt, or `None` when the caller should
-    /// stop retrying and report the refusal. `learned` is whether the lease
-    /// took a new capacity from it ([`SshSessionLease::note_refusal`]). This
-    /// logs the retry or the exhaustion.
+    /// stop retrying and report the refusal. `learned` is what
+    /// [`SshSessionLease::note_refusal`] returned: whether the next lease
+    /// lands on another master. This logs the retry or the exhaustion.
     pub fn next(
         &mut self,
         refusal: SshRefusal,
@@ -1125,6 +1126,229 @@ pub fn ssh_refusal(status: i32, stderr: &str) -> Option<SshRefusal> {
         .then_some(SshRefusal::BeforeAuthentication)
 }
 
+/// The first line every remote command mj sends over `ssh` prints on stdout,
+/// before the command itself runs (see [`with_start_marker`]).
+///
+/// Stdout is empty exactly when the session never got as far as running the
+/// command's shell: a server that refuses a session or drops a connection
+/// before authentication prints nothing there. So a session that ended with
+/// no stdout byte at all provably never started and is always safe to
+/// retry, and one that printed even a byte is a real result, whatever its
+/// exit status. The ledger also counts a session as open only from this byte.
+pub const SSH_START_MARKER: &str = "MJOLNIR-SSH-SESSION-STARTED\n";
+
+/// The remote command line with the start marker printed first. `;` joins them
+/// because callers prepend compound statements to the line (`read`, `export`,
+/// `exec`), and it is valid in sh, bash, zsh, fish and csh alike.
+pub(crate) fn with_start_marker(remote_command: &str) -> String {
+    format!(
+        "printf '%s\\n' '{}'; {remote_command}",
+        SSH_START_MARKER.trim_end()
+    )
+}
+
+/// Removes [`SSH_START_MARKER`] from the front of a session's stdout and tells
+/// when the session has started.
+///
+/// The first stdout byte of any kind proves the session started. A stream
+/// that begins with the marker has it removed. A stream that does not (a
+/// login shell's rc file printing first, or a forced command) passes through
+/// unchanged and still counts as started. A marker split across reads is held
+/// until the next chunk decides which of the two it is.
+pub struct StartScan {
+    /// The stream so far: still a prefix of the marker, or decided.
+    state: ScanState,
+    /// Bytes held while they could still be the start of the marker.
+    held: Vec<u8>,
+    started: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanState {
+    Matching,
+    Passing,
+}
+
+impl Default for StartScan {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StartScan {
+    pub fn new() -> Self {
+        Self {
+            state: ScanState::Matching,
+            held: Vec::new(),
+            started: false,
+        }
+    }
+
+    /// Feed one chunk. The bytes to pass on are appended to `out`. Returns
+    /// `true` the first time a byte arrives, which is the session's start.
+    pub fn push(&mut self, chunk: &[u8], out: &mut Vec<u8>) -> bool {
+        if chunk.is_empty() {
+            return false;
+        }
+        let first = !std::mem::replace(&mut self.started, true);
+        match self.state {
+            ScanState::Passing => out.extend_from_slice(chunk),
+            ScanState::Matching => {
+                self.held.extend_from_slice(chunk);
+                let marker = SSH_START_MARKER.as_bytes();
+                let compared = self.held.len().min(marker.len());
+                if self.held[..compared] != marker[..compared] {
+                    self.state = ScanState::Passing;
+                    out.append(&mut self.held);
+                } else if self.held.len() >= marker.len() {
+                    self.state = ScanState::Passing;
+                    out.extend_from_slice(&self.held[marker.len()..]);
+                    self.held.clear();
+                }
+            }
+        }
+        first
+    }
+
+    /// The stream ended. Bytes held as a possible marker were ordinary output.
+    pub fn finish(&mut self, out: &mut Vec<u8>) {
+        out.append(&mut self.held);
+        self.state = ScanState::Passing;
+    }
+}
+
+/// Where one SSH session stands: Waiting until its stdout shows a byte,
+/// Started after that, Ended when stdout closed without any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartPhase {
+    Waiting,
+    Started,
+    Ended,
+}
+
+/// How a blocking wait on a [`StartGate`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartWait {
+    Started,
+    Ended,
+    Cancelled,
+}
+
+/// The owner of the fact "this SSH session started its command", one per
+/// lease. The reader of the session's stdout reports into it; the writer of its
+/// stdin, the retry decision and the ledger ask it.
+pub struct StartGate {
+    phase: Mutex<StartPhase>,
+    changed: std::sync::Condvar,
+    watch: tokio::sync::watch::Sender<StartPhase>,
+    confirm: Option<SessionConfirm>,
+}
+
+impl std::fmt::Debug for StartGate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StartGate")
+            .field("phase", &self.phase())
+            .finish()
+    }
+}
+
+impl StartGate {
+    /// A gate no lease owns: the start is known, but no ledger counts it.
+    pub fn standalone() -> Arc<Self> {
+        Self::new(None)
+    }
+
+    pub(crate) fn new(confirm: Option<SessionConfirm>) -> Arc<Self> {
+        Arc::new(Self {
+            phase: Mutex::new(StartPhase::Waiting),
+            changed: std::sync::Condvar::new(),
+            watch: tokio::sync::watch::channel(StartPhase::Waiting).0,
+            confirm,
+        })
+    }
+
+    pub fn phase(&self) -> StartPhase {
+        *self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn settle(&self, next: StartPhase) -> bool {
+        let mut phase = self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *phase != StartPhase::Waiting {
+            return false;
+        }
+        *phase = next;
+        self.watch.send_replace(next);
+        self.changed.notify_all();
+        true
+    }
+
+    /// The session's stdout produced its first byte: the command's shell ran.
+    /// The lease becomes an open session in the ledger.
+    pub fn mark_started(&self) {
+        if self.settle(StartPhase::Started)
+            && let Some(confirm) = &self.confirm
+        {
+            confirm.confirm();
+        }
+    }
+
+    /// The session's stdout closed. Without an earlier byte, the session never
+    /// started.
+    pub fn mark_ended(&self) {
+        self.settle(StartPhase::Ended);
+    }
+
+    /// Wait until the session has started or ended, polling `cancelled`.
+    pub fn wait_blocking(&self, cancelled: &dyn Fn() -> bool) -> StartWait {
+        let mut phase = self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            match *phase {
+                StartPhase::Started => return StartWait::Started,
+                StartPhase::Ended => return StartWait::Ended,
+                StartPhase::Waiting => {}
+            }
+            if cancelled() {
+                return StartWait::Cancelled;
+            }
+            phase = self
+                .changed
+                .wait_timeout(phase, Duration::from_millis(25))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// Wait until the session has started (`true`) or ended without starting.
+    pub async fn wait(&self) -> bool {
+        let mut watch = self.watch.subscribe();
+        match watch.wait_for(|phase| *phase != StartPhase::Waiting).await {
+            Ok(phase) => *phase == StartPhase::Started,
+            Err(_) => false,
+        }
+    }
+
+    /// Whether the server turned the session away. A session that printed a
+    /// byte started, so its exit status is its own whatever stderr says. One
+    /// that printed nothing, including one that never carried the marker
+    /// (`scp`), is judged by the exit status and stderr alone.
+    pub fn refusal(&self, status: i32, stderr: &str) -> Option<SshRefusal> {
+        if self.phase() == StartPhase::Started {
+            return None;
+        }
+        ssh_refusal(status, stderr)
+    }
+}
+
 /// How long a successful `ssh -O check` of a master is trusted before the
 /// next lease on that shard checks again.
 #[cfg(unix)]
@@ -1135,14 +1359,24 @@ const MASTER_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 pub const SSH_MASTER_OPEN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// One master connection and the sessions the daemon has placed on it.
+///
+/// The counts and `capacity` belong to the running master: a reopened master
+/// starts a new `generation` with all of them reset, and only leases that
+/// joined that generation are counted in it.
 #[cfg(unix)]
 struct Shard {
-    leased: usize,
-    /// How many sessions the server let this master carry, learned from its
-    /// refusal (see [`SshSessionLease::note_refusal`]). `None` means no
-    /// refusal has shown a limit yet. It belongs to the running master: a
-    /// reopened master starts unknown again, because the server's
-    /// `MaxSessions` may have changed.
+    generation: u64,
+    /// Leases placed here whose command has not shown a byte of output yet.
+    reserved: usize,
+    /// Leases whose session started (see [`StartGate`]) and has not ended.
+    open: usize,
+    /// The most sessions that were open at once on this master. The server
+    /// carried that many together, so it is a lower bound on its limit.
+    high_water: usize,
+    /// How many sessions the server lets this master carry, learned from its
+    /// first refusal and raised whenever more sessions are seen open at once
+    /// (see [`SshSessionLease::note_refusal`]). `None` means no refusal has
+    /// shown a limit yet.
     capacity: Option<usize>,
     /// When `ssh -O check` last found this shard's master running.
     verified_at: Option<Instant>,
@@ -1155,7 +1389,10 @@ struct Shard {
 impl Shard {
     fn new() -> Self {
         Self {
-            leased: 0,
+            generation: 0,
+            reserved: 0,
+            open: 0,
+            high_water: 0,
             capacity: None,
             verified_at: None,
             opening: Arc::new(Mutex::new(())),
@@ -1164,8 +1401,47 @@ impl Shard {
 
     /// Whether one more session is not known to exceed what the server allows.
     fn has_room(&self) -> bool {
-        self.capacity.is_none_or(|capacity| self.leased < capacity)
+        self.capacity
+            .is_none_or(|capacity| self.open + self.reserved < capacity)
     }
+
+    /// A new master replaced the old one: what the server did with the old
+    /// one's sessions says nothing about it.
+    fn restart(&mut self) {
+        self.generation += 1;
+        self.reserved = 0;
+        self.open = 0;
+        self.high_water = 0;
+        self.capacity = None;
+    }
+}
+
+/// Where a lease stands in its shard's counts.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SlotPhase {
+    Reserved,
+    Open,
+    Released,
+}
+
+/// A lease's own record, shared with the handle that confirms its start. It is
+/// read and changed only while the ledger's lock is held, so the ledger is the
+/// one owner of whether a session is reserved or open.
+#[cfg(unix)]
+struct SlotState {
+    generation: u64,
+    phase: SlotPhase,
+}
+
+/// A shard slot a lease took at placement.
+#[cfg(unix)]
+struct Reservation {
+    shard: usize,
+    generation: u64,
+    opening: Arc<Mutex<()>>,
+    /// The shard's capacity was not yet known when the lease was placed.
+    capacity_unknown: bool,
 }
 
 /// The daemon's count of sessions per shard, keyed by connection.
@@ -1193,14 +1469,14 @@ impl SessionLedger {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Count one session on the lowest shard of `key` that is not known to be
-    /// full, adding a shard when every one is. Returns the shard and its
-    /// opening lock.
+    /// Reserve one session on the lowest shard of `key` whose open and
+    /// reserved sessions are below its known capacity, adding a shard when
+    /// every one is full.
     ///
     /// This is the only placement rule. No number is assumed for what a
     /// server allows: a shard takes sessions until the server refuses one,
     /// and the refusal sets its capacity.
-    fn reserve(&self, key: &str) -> (usize, Arc<Mutex<()>>) {
+    fn reserve(&self, key: &str) -> Reservation {
         let mut connections = self.connections();
         let shards = connections.entry(key.to_owned()).or_default();
         let index = match shards.iter().position(Shard::has_room) {
@@ -1210,8 +1486,33 @@ impl SessionLedger {
                 shards.len() - 1
             }
         };
-        shards[index].leased += 1;
-        (index, Arc::clone(&shards[index].opening))
+        let shard = &mut shards[index];
+        shard.reserved += 1;
+        Reservation {
+            shard: index,
+            generation: shard.generation,
+            opening: Arc::clone(&shard.opening),
+            capacity_unknown: shard.capacity.is_none(),
+        }
+    }
+
+    fn slot(
+        self: &Arc<Self>,
+        key: String,
+        reservation: &Reservation,
+        socket: PathBuf,
+    ) -> LeasedSlot {
+        LeasedSlot {
+            ledger: Arc::clone(self),
+            key,
+            shard: reservation.shard,
+            socket,
+            capacity_unknown: reservation.capacity_unknown,
+            state: Arc::new(Mutex::new(SlotState {
+                generation: reservation.generation,
+                phase: SlotPhase::Reserved,
+            })),
+        }
     }
 
     /// Lease a session on the lowest shard not known to be full, opening that
@@ -1223,21 +1524,20 @@ impl SessionLedger {
         executor: &dyn CommandExecutor,
     ) -> Result<SshSessionLease> {
         let key = connection_key(ssh);
-        let (shard, opening) = self.reserve(&key);
+        let reservation = self.reserve(&key);
         // From here on the slot is released on drop, including on error.
-        let slot = LeasedSlot {
-            ledger: Arc::clone(self),
+        let slot = self.slot(
             key,
-            shard,
-            socket: dir.join(control_socket_name(ssh, shard)),
-        };
+            &reservation,
+            dir.join(control_socket_name(ssh, reservation.shard)),
+        );
         if slot.needs_check() {
             let _opening = loop {
                 ensure!(
                     !executor.cancellation_requested(),
                     "operation cancelled while waiting for SSH master"
                 );
-                match opening.try_lock() {
+                match reservation.opening.try_lock() {
                     Ok(guard) => break guard,
                     Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
                     Err(std::sync::TryLockError::WouldBlock) => {
@@ -1251,14 +1551,13 @@ impl SessionLedger {
                 let opened = ensure_master(ssh, &slot.socket, executor)?;
                 slot.set_verified(Some(Instant::now()));
                 if opened {
-                    slot.forget_capacity();
+                    slot.restart_shard();
                 }
             }
         }
-        Ok(SshSessionLease {
-            slot: Some(slot),
-            probe: false,
-        })
+        // A master reopened while this lease waited carries it too.
+        slot.join_current_generation();
+        Ok(SshSessionLease::new(Some(slot), false))
     }
 
     /// Count a fail-fast probe on the lowest shard not known to be full,
@@ -1271,16 +1570,9 @@ impl SessionLedger {
     /// promised.
     fn lease_probe(self: &Arc<Self>, ssh: &SshTarget, dir: &Path) -> SshSessionLease {
         let key = connection_key(ssh);
-        let (shard, _) = self.reserve(&key);
-        SshSessionLease {
-            slot: Some(LeasedSlot {
-                ledger: Arc::clone(self),
-                key,
-                shard,
-                socket: dir.join(control_socket_name(ssh, shard)),
-            }),
-            probe: true,
-        }
+        let reservation = self.reserve(&key);
+        let socket = dir.join(control_socket_name(ssh, reservation.shard));
+        SshSessionLease::new(Some(self.slot(key, &reservation, socket)), true)
     }
 }
 
@@ -1514,6 +1806,66 @@ struct LeasedSlot {
     key: String,
     shard: usize,
     socket: PathBuf,
+    /// The shard's capacity was unknown when this lease was placed.
+    capacity_unknown: bool,
+    state: Arc<Mutex<SlotState>>,
+}
+
+/// Lets the reader of a session's stdout tell the ledger that the session
+/// started, from any thread and after the lease itself has moved or gone.
+#[cfg(unix)]
+pub(crate) struct SessionConfirm {
+    ledger: Arc<SessionLedger>,
+    key: String,
+    shard: usize,
+    state: Arc<Mutex<SlotState>>,
+}
+
+/// Stands in on platforms without connection sharing, where no lease counts.
+#[cfg(not(unix))]
+pub(crate) struct SessionConfirm;
+
+#[cfg(unix)]
+fn lock_slot(state: &Mutex<SlotState>) -> std::sync::MutexGuard<'_, SlotState> {
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(unix)]
+impl SessionConfirm {
+    /// The session started: it stops being a reservation and counts as open.
+    /// A lease that was already dropped, or that belongs to a master since
+    /// reopened, changes nothing.
+    pub(crate) fn confirm(&self) {
+        let mut connections = self.ledger.connections();
+        let Some(shard) = connections
+            .get_mut(&self.key)
+            .and_then(|shards| shards.get_mut(self.shard))
+        else {
+            return;
+        };
+        let mut state = lock_slot(&self.state);
+        if state.phase != SlotPhase::Reserved || state.generation != shard.generation {
+            return;
+        }
+        state.phase = SlotPhase::Open;
+        shard.reserved = shard.reserved.saturating_sub(1);
+        shard.open += 1;
+        shard.high_water = shard.high_water.max(shard.open);
+        // Sessions the server carried together prove its limit is at least
+        // that many; a refusal that raced their start may have learned less.
+        if let Some(capacity) = &mut shard.capacity
+            && shard.high_water > *capacity
+        {
+            *capacity = shard.high_water;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+impl SessionConfirm {
+    pub(crate) fn confirm(&self) {}
 }
 
 #[cfg(unix)]
@@ -1540,24 +1892,55 @@ impl LeasedSlot {
         }
     }
 
-    /// A new master replaced the old one, so what the server refused the old
-    /// one says nothing about it.
-    fn forget_capacity(&self) {
+    /// A new master replaced the old one, so what the server did with the old
+    /// one's sessions says nothing about it.
+    fn restart_shard(&self) {
         let mut connections = self.ledger.connections();
         if let Some(shard) = connections
             .get_mut(&self.key)
             .and_then(|shards| shards.get_mut(self.shard))
         {
-            shard.capacity = None;
+            shard.restart();
         }
     }
 
-    /// The server refused this session on its master. Everything else the
-    /// master carries at this moment was accepted, so the capacity is the
-    /// count of the other leases, and at least one. Capacity only ever goes
-    /// down here: refusals that arrive together each see a count that still
-    /// includes sessions about to be refused, so the lowest one is the
-    /// closest. Returns whether the ledger learned something new.
+    /// Count this reservation in the shard's current generation. A lease
+    /// finishes `lease()` here, so one that waited while another reopened the
+    /// master joins the new master's counts; one that was running on the old
+    /// master never does and stays out of them.
+    fn join_current_generation(&self) {
+        let mut connections = self.ledger.connections();
+        let Some(shard) = connections
+            .get_mut(&self.key)
+            .and_then(|shards| shards.get_mut(self.shard))
+        else {
+            return;
+        };
+        let mut state = lock_slot(&self.state);
+        if state.generation != shard.generation && state.phase == SlotPhase::Reserved {
+            state.generation = shard.generation;
+            shard.reserved += 1;
+        }
+    }
+
+    fn confirm_handle(&self) -> SessionConfirm {
+        SessionConfirm {
+            ledger: Arc::clone(&self.ledger),
+            key: self.key.clone(),
+            shard: self.shard,
+            state: Arc::clone(&self.state),
+        }
+    }
+
+    /// The server refused this session on its master, which was alive.
+    ///
+    /// The first refusal on a master records its capacity: the most sessions
+    /// it was seen carrying open at once (at least one), a lower bound that
+    /// later confirmations can only raise. Returns whether retrying at once
+    /// can land on a different master: when this refusal taught the capacity,
+    /// when the capacity was learned after this lease was placed, and when the
+    /// master was reopened since. A refusal on a master whose capacity was
+    /// already known at placement teaches nothing and returns `false`.
     fn record_session_limit(&self) -> bool {
         let mut connections = self.ledger.connections();
         let Some(shard) = connections
@@ -1566,15 +1949,18 @@ impl LeasedSlot {
         else {
             return false;
         };
-        let open = shard.leased.saturating_sub(1).max(1);
-        if shard.capacity.is_some_and(|known| known <= open) {
-            return false;
+        if lock_slot(&self.state).generation != shard.generation {
+            return true;
         }
-        shard.capacity = Some(open);
+        if shard.capacity.is_some() {
+            return self.capacity_unknown;
+        }
+        let capacity = shard.high_water.max(1);
+        shard.capacity = Some(capacity);
         tracing::info!(
             destination = self.key.split('\0').next().unwrap_or_default(),
             shard = self.shard,
-            capacity = open,
+            capacity,
             "the SSH server limits a shared connection to this many sessions; placing the rest on another connection"
         );
         true
@@ -1585,12 +1971,19 @@ impl LeasedSlot {
 impl Drop for LeasedSlot {
     fn drop(&mut self) {
         let mut connections = self.ledger.connections();
+        let mut state = lock_slot(&self.state);
         if let Some(shard) = connections
             .get_mut(&self.key)
             .and_then(|shards| shards.get_mut(self.shard))
+            && state.generation == shard.generation
         {
-            shard.leased = shard.leased.saturating_sub(1);
+            match state.phase {
+                SlotPhase::Reserved => shard.reserved = shard.reserved.saturating_sub(1),
+                SlotPhase::Open => shard.open = shard.open.saturating_sub(1),
+                SlotPhase::Released => {}
+            }
         }
+        state.phase = SlotPhase::Released;
     }
 }
 
@@ -1608,6 +2001,7 @@ pub struct SshSessionLease {
     /// otherwise connects directly, so it carries no `ProxyCommand=false`.
     #[cfg(unix)]
     probe: bool,
+    gate: Arc<StartGate>,
 }
 
 impl std::fmt::Debug for SshSessionLease {
@@ -1620,13 +2014,31 @@ impl std::fmt::Debug for SshSessionLease {
 }
 
 impl SshSessionLease {
+    #[cfg(unix)]
+    fn new(slot: Option<LeasedSlot>, probe: bool) -> Self {
+        let confirm = slot.as_ref().map(LeasedSlot::confirm_handle);
+        Self {
+            slot,
+            probe,
+            gate: StartGate::new(confirm),
+        }
+    }
+
     fn unshared() -> Self {
         Self {
             #[cfg(unix)]
             slot: None,
             #[cfg(unix)]
             probe: false,
+            gate: StartGate::new(None),
         }
+    }
+
+    /// Where this session stands: the owner of whether its command started.
+    /// The reader of the session's stdout feeds it, and everything that asks
+    /// whether the session was refused or has started asks it.
+    pub fn gate(&self) -> &Arc<StartGate> {
+        &self.gate
     }
 
     /// The control socket this session must use, or `None` when the command
@@ -1653,16 +2065,17 @@ impl SshSessionLease {
     ///
     /// A connection closed before authentication suggests the master is gone,
     /// so the next lease checks it. A refused session found its master alive
-    /// but full: the ledger records how many sessions it carried and places
-    /// the next lease elsewhere. Call this while the lease is still held,
-    /// because the count includes it.
+    /// but full: the ledger records the capacity it learned (see
+    /// `LeasedSlot::record_session_limit`) and places the next lease
+    /// elsewhere. Call this while the lease is still held.
     ///
-    /// Returns `true` when the ledger learned a new capacity. The next lease
-    /// then lands on a different master, so retrying the command at once can
-    /// succeed without waiting. A refusal that teaches nothing new (a
-    /// connection dropped before authentication, a capacity already known,
-    /// or a lease with no shared master) returns `false`, and the retry has
-    /// to wait and count as an attempt.
+    /// Returns `true` when retrying at once can land on a different master
+    /// (the ledger learned the capacity from this refusal, or already had it
+    /// when the lease was placed on a stale view). A refusal that teaches
+    /// nothing (a connection dropped before authentication, a master whose
+    /// capacity was known when this lease was placed, or a lease with no
+    /// shared master) returns `false`, and the retry has to wait and count as
+    /// an attempt.
     pub fn note_refusal(&self, refusal: SshRefusal) -> bool {
         match refusal {
             SshRefusal::BeforeAuthentication => {
@@ -2112,7 +2525,7 @@ mod tests {
                 "-o".to_owned(),
                 "ProxyCommand=nc %h %p".to_owned(),
                 "session-options-host".to_owned(),
-                remote,
+                with_start_marker(&remote),
             ]
         );
         assert_eq!(masters.openers(), 1);
@@ -2387,7 +2800,7 @@ mod tests {
             args,
             [
                 "long-path-host".to_owned(),
-                remote_command_line(&["true".to_owned()])
+                with_start_marker(&remote_command_line(&["true".to_owned()]))
             ]
         );
         assert_eq!(masters.commands(), 0);
@@ -2565,10 +2978,14 @@ mod tests {
 
     /// Against a real `sshd` that allows two sessions per connection: more
     /// concurrent commands than one connection can carry all succeed, because
-    /// the server's refusal teaches the ledger that connection's capacity and
-    /// each refused command (which never started) is retried on another
-    /// connection at once. A guarded session with no master still fails
-    /// instead of connecting on its own.
+    /// the server's refusal teaches the ledger that connection's capacity
+    /// from the sessions confirmed open and each refused command (which never
+    /// started) is retried on another connection at once. That includes
+    /// commands that stream more than a pipe's worth of stdin: nothing of
+    /// their input is read until the session has started, so a refusal never
+    /// loses any of it. A guarded session with no master still fails instead
+    /// of connecting on its own.
+    // Hard-won: 5cb64e019: a streamed command returned the MaxSessions refusal instead of retrying, and capacity was guessed from the lease count.
     #[test]
     #[cfg(unix)]
     fn sessions_past_the_servers_max_sessions_succeed_across_masters_on_a_real_sshd() {
@@ -2586,11 +3003,37 @@ mod tests {
         )));
         // Long enough that none of the sessions ends while the others are
         // refused; the retry must not lean on a freed slot.
-        let command = ssh_command(&ssh, ["sleep", "3"]);
+        let sleeper = ssh_command(&ssh, ["sleep", "3"]);
+        let counter = ssh_command(&ssh, ["wc", "-c"]);
+        let payload = vec![b'x'; 192 * 1024];
+        let open_sessions = || -> usize {
+            SessionLedger::global()
+                .connections()
+                .get(&connection_key(&ssh))
+                .and_then(|shards| shards.first().map(|shard| shard.open))
+                .unwrap_or(0)
+        };
         let outputs: Vec<Result<CommandOutput>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..7)
-                .map(|_| scope.spawn(|| ProcessExecutor.execute(&command)))
+            let mut handles: Vec<_> = (0..2)
+                .map(|_| scope.spawn(|| ProcessExecutor.execute(&sleeper)))
                 .collect();
+            // The first master carries two confirmed sessions before the rest
+            // arrive, so the first refusal sees exactly what it carried.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while open_sessions() < 2 {
+                assert!(
+                    Instant::now() < deadline,
+                    "the first sessions never started"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            handles.extend((0..3).map(|_| scope.spawn(|| ProcessExecutor.execute(&sleeper))));
+            handles.extend((0..2).map(|_| {
+                scope.spawn(|| {
+                    ProcessExecutor
+                        .execute_with_stdin(&counter, &mut std::io::Cursor::new(payload.clone()))
+                })
+            }));
             handles
                 .into_iter()
                 .map(|handle| handle.join().expect("session thread"))
@@ -2601,23 +3044,25 @@ mod tests {
             .get(&connection_key(&ssh))
             .map(|shards| shards.iter().map(|shard| shard.capacity).collect())
             .unwrap_or_default();
+        let ledger = SessionLedger::new();
+        let orphan_reservation = Reservation {
+            shard: 99,
+            generation: 0,
+            opening: Arc::new(Mutex::new(())),
+            capacity_unknown: true,
+        };
+        let orphan_lease = SshSessionLease::new(
+            Some(ledger.slot(
+                connection_key(&ssh),
+                &orphan_reservation,
+                socket_dir.path().join(control_socket_name(&ssh, 99)),
+            )),
+            false,
+        );
         let orphan = ProcessExecutor.execute(
             &CommandSpec::new(
                 "ssh",
-                session_command_args(
-                    "ssh",
-                    &command.args,
-                    &ssh,
-                    &SshSessionLease {
-                        slot: Some(LeasedSlot {
-                            ledger: SessionLedger::new(),
-                            key: connection_key(&ssh),
-                            shard: 99,
-                            socket: socket_dir.path().join(control_socket_name(&ssh, 99)),
-                        }),
-                        probe: false,
-                    },
-                ),
+                session_command_args("ssh", &sleeper.args, &ssh, &orphan_lease),
             )
             .purpose("run a guarded session with no master"),
         );
@@ -2631,6 +3076,15 @@ mod tests {
                 "session {index} failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            if index >= 5 {
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    payload.len().to_string(),
+                    "streamed session {index} received its whole input exactly once"
+                );
+            } else {
+                assert_eq!(output.stdout, b"", "the start marker is stripped");
+            }
         }
         assert_eq!(
             capacities.first(),
@@ -2656,7 +3110,12 @@ mod tests {
         ledger
             .connections()
             .get(&connection_key(ssh))
-            .map(|shards| shards.iter().map(|shard| shard.leased).collect())
+            .map(|shards| {
+                shards
+                    .iter()
+                    .map(|shard| shard.reserved + shard.open)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -2743,6 +3202,47 @@ mod tests {
         name.rsplit('-').next().unwrap().to_owned()
     }
 
+    /// The marker can arrive in any split of reads, and a stream that does not
+    /// begin with it passes through whole: the first byte of anything proves
+    /// the session started.
+    #[test]
+    fn the_start_marker_is_stripped_however_it_is_split_across_reads() {
+        let stream = format!("{SSH_START_MARKER}payload\nmore");
+        for split in 1..stream.len() {
+            let mut scan = StartScan::new();
+            let mut out = Vec::new();
+            let (head, tail) = stream.as_bytes().split_at(split);
+            assert!(
+                scan.push(head, &mut out),
+                "the first byte starts the session"
+            );
+            assert!(!scan.push(tail, &mut out));
+            scan.finish(&mut out);
+            assert_eq!(out, b"payload\nmore", "split at {split}");
+        }
+        // One byte at a time, as a slow pipe delivers it.
+        let mut scan = StartScan::new();
+        let mut out = Vec::new();
+        for byte in stream.as_bytes() {
+            scan.push(&[*byte], &mut out);
+        }
+        assert_eq!(out, b"payload\nmore");
+
+        // A stream that diverges from the marker, and one that ends inside it.
+        let mut scan = StartScan::new();
+        let mut out = Vec::new();
+        assert!(scan.push(b"MJOLNIR-x", &mut out));
+        assert_eq!(out, b"MJOLNIR-x");
+        let mut scan = StartScan::new();
+        let mut out = Vec::new();
+        assert!(scan.push(b"MJOLN", &mut out));
+        assert!(out.is_empty(), "held until the next chunk decides");
+        scan.finish(&mut out);
+        assert_eq!(out, b"MJOLN");
+        let mut scan = StartScan::new();
+        assert!(!scan.push(b"", &mut Vec::new()), "no byte, no start");
+    }
+
     fn plain_target(destination: &str) -> SshTarget {
         SshTarget {
             destination: destination.to_owned(),
@@ -2796,77 +3296,124 @@ mod tests {
     }
 
     /// Capacity is unknown until the server refuses a session, so leases pile
-    /// onto the first master. The refusal records how many sessions it had
-    /// accepted, later leases go to the next master, and a reopened master
-    /// starts unknown again.
+    /// onto the first master. The first refusal records how many sessions were
+    /// confirmed open at once, whatever has ended since, and later refusals
+    /// and ended sessions never lower it. A reopened master starts unknown
+    /// again, and a late refusal from the old master teaches the new one
+    /// nothing.
+    // Hard-won: 5cb64e019: capacity was inferred as `leased - 1`, so sessions that ended around a refusal lowered it for good.
     #[test]
     #[cfg(unix)]
-    fn a_refusal_sets_the_shards_capacity_until_its_master_is_reopened() {
+    fn a_refusal_records_the_confirmed_sessions_and_a_reopened_master_forgets_it() {
         let dir = sharing_socket_dir();
         let ledger = SessionLedger::new();
         let ssh = plain_target("host");
         let masters = FakeMasters::default();
+        let capacity = |ledger: &SessionLedger| {
+            ledger
+                .connections()
+                .get(&connection_key(&ssh))
+                .map(|shards| {
+                    shards
+                        .iter()
+                        .map(|shard| shard.capacity)
+                        .collect::<Vec<_>>()
+                })
+        };
 
-        let first = ledger.lease(&ssh, dir.path(), &masters).expect("first");
-        // Check, open, check again.
+        let [first, second, third, fourth] =
+            [(); 4].map(|()| ledger.lease(&ssh, dir.path(), &masters).expect("lease"));
+        // Check, open, check again; a master verified moments ago is not
+        // checked again.
         assert_eq!(masters.commands(), 3);
-        let second = ledger.lease(&ssh, dir.path(), &masters).expect("second");
-        assert_eq!(
-            masters.commands(),
-            3,
-            "a master verified moments ago is not checked again"
-        );
-        let third = ledger.lease(&ssh, dir.path(), &masters).expect("third");
-        let fourth = ledger.lease(&ssh, dir.path(), &masters).expect("fourth");
         assert_eq!(
             [&first, &second, &third, &fourth].map(shard_of),
             ["0"; 4].map(str::to_owned),
             "no limit is assumed before a refusal"
         );
 
-        // Four leases were counted when the server refused two of them, so the
-        // first refusal sees a count that still includes the second, and only
-        // the lower number is right: the capacity never goes back up.
+        // Two sessions started; the server refuses the third, then the first
+        // session ends before the fourth is refused.
+        first.gate().mark_started();
+        second.gate().mark_started();
         assert!(third.note_refusal(SshRefusal::SessionLimit));
+        assert_eq!(capacity(&ledger), Some(vec![Some(2)]));
         drop(third);
+        drop(first);
+        assert!(
+            fourth.note_refusal(SshRefusal::SessionLimit),
+            "placed before the capacity was known: retry at once"
+        );
+        assert_eq!(
+            capacity(&ledger),
+            Some(vec![Some(2)]),
+            "an ended session never lowers what the server was seen to carry"
+        );
+        drop(fourth);
+
+        // One session is open, so one more fits; after that the shard is full.
+        let fifth = ledger.lease(&ssh, dir.path(), &masters).expect("fifth");
+        assert_eq!(shard_of(&fifth), "0");
         assert_eq!(
             shard_of(&ledger.lease(&ssh, dir.path(), &masters).unwrap()),
-            "1"
-        );
-        assert!(fourth.note_refusal(SshRefusal::SessionLimit));
-        drop(fourth);
-        assert_eq!(
-            ledger
-                .connections()
-                .get(&connection_key(&ssh))
-                .map(|shards| shards
-                    .iter()
-                    .map(|shard| shard.capacity)
-                    .collect::<Vec<_>>()),
-            Some(vec![Some(2), None]),
-        );
-        let fifth = ledger.lease(&ssh, dir.path(), &masters).expect("fifth");
-        assert_eq!(
-            shard_of(&fifth),
             "1",
-            "two sessions fill a shard whose capacity is two"
+            "a shard with a reserved and an open session is full at two"
+        );
+        assert!(
+            !fifth.note_refusal(SshRefusal::SessionLimit),
+            "a refusal on a shard whose capacity was known at placement teaches nothing"
         );
         assert_eq!(masters.openers(), 2, "one master per shard");
 
         // A master that is gone is reopened, and the new master is unknown.
-        first.invalidate();
-        masters.kill(&dir.path().join(control_socket_name(&ssh, 0)));
-        drop(first);
-        drop(second);
-        let reopened: Vec<_> = (0..3)
-            .map(|_| ledger.lease(&ssh, dir.path(), &masters).expect("reopened"))
-            .collect();
-        assert_eq!(
-            reopened.iter().map(shard_of).collect::<Vec<_>>(),
-            ["0"; 3].map(str::to_owned),
-            "a reopened master forgets what the old one refused"
-        );
         drop(fifth);
+        second.invalidate();
+        masters.kill(&dir.path().join(control_socket_name(&ssh, 0)));
+        let reopened = ledger.lease(&ssh, dir.path(), &masters).expect("reopened");
+        assert_eq!(shard_of(&reopened), "0");
+        assert_eq!(capacity(&ledger).unwrap()[0], None);
+        assert!(
+            second.note_refusal(SshRefusal::SessionLimit),
+            "a late refusal from the old master is retried at once"
+        );
+        assert_eq!(
+            capacity(&ledger).unwrap()[0],
+            None,
+            "and teaches the new master nothing"
+        );
+        drop(second);
+        assert_eq!(
+            leases_per_shard(&ledger, &ssh)[0],
+            1,
+            "only the lease on the new master is counted there"
+        );
+        drop(reopened);
+    }
+
+    /// A refusal that races the start of the sessions the server accepted sees
+    /// fewer confirmed than it will have; the capacity it records rises as
+    /// they are confirmed, to what the server was seen to carry together.
+    #[test]
+    #[cfg(unix)]
+    fn a_capacity_learned_early_rises_when_more_sessions_are_confirmed() {
+        let dir = sharing_socket_dir();
+        let ledger = SessionLedger::new();
+        let ssh = plain_target("host");
+        let masters = FakeMasters::default();
+        let leases: Vec<_> = (0..3)
+            .map(|_| ledger.lease(&ssh, dir.path(), &masters).expect("lease"))
+            .collect();
+        // The refusal arrives before any marker.
+        assert!(leases[2].note_refusal(SshRefusal::SessionLimit));
+        let capacity = || {
+            ledger.connections()[&connection_key(&ssh)][0]
+                .capacity
+                .unwrap()
+        };
+        assert_eq!(capacity(), 1);
+        leases[0].gate().mark_started();
+        leases[1].gate().mark_started();
+        assert_eq!(capacity(), 2);
     }
 
     /// A refusal at the floor of one teaches nothing the second time, which is
@@ -2916,6 +3463,8 @@ mod tests {
         assert_eq!(masters.openers(), 1, "a probe never opens a master");
 
         // The server carried the session and the first probe and refused this one.
+        session.gate().mark_started();
+        probe.gate().mark_started();
         assert!(refused_probe.note_refusal(SshRefusal::SessionLimit));
         drop(refused_probe);
         let next_probe = ledger.lease_probe(&ssh, dir.path());
@@ -3128,8 +3677,10 @@ mod tests {
         let started = Instant::now();
         // Exercise one open: the retry loop around it separately retries
         // pre-authentication timeouts with backoff.
-        let result = CancellableProcessExecutor::with_timeout(Duration::from_secs(3))
-            .run_once(&master_open_command(&ssh, &directory.path().join("master")));
+        let result = CancellableProcessExecutor::with_timeout(Duration::from_secs(3)).run_once(
+            &master_open_command(&ssh, &directory.path().join("master")),
+            None,
+        );
         let _ = finish.send(());
         server.join().unwrap();
         let output = result.expect("SSH's handshake timeout must beat the executor deadline");
@@ -3229,11 +3780,11 @@ mod tests {
 
         let ledger = SessionLedger::new();
         let ssh = plain_target("cancelled-master-host");
-        let (_, opening) = ledger.reserve(&connection_key(&ssh));
-        let _opening = opening.lock().unwrap();
+        let reservation = ledger.reserve(&connection_key(&ssh));
+        let _opening = reservation.opening.lock().unwrap();
         let executor = CancellableProcessExecutor::with_timeout(Duration::from_millis(50));
         assert!(ledger.lease(&ssh, dir.path(), &executor).is_err());
-        assert_eq!(ledger.connections()[&connection_key(&ssh)][0].leased, 1);
+        assert_eq!(ledger.connections()[&connection_key(&ssh)][0].reserved, 1);
     }
 
     /// Fails the test if a lease runs any command, such as opening a master.
@@ -3275,7 +3826,14 @@ mod tests {
             let lease = session.lease().expect("an SSH command takes a lease");
             assert_eq!(lease.control_path(), None);
             lease.invalidate();
-            assert_eq!(session.command().args, command.args, "{}", command.purpose);
+            // Only the remote line of an `ssh` command changes: it starts by
+            // printing the start marker. `scp` has no remote line.
+            let mut expected = command.args.clone();
+            if command.program == "ssh" {
+                let line = expected.last_mut().unwrap();
+                *line = with_start_marker(line);
+            }
+            assert_eq!(session.command().args, expected, "{}", command.purpose);
         }
         #[cfg(unix)]
         set_ssh_connection_sharing_for_test(None);

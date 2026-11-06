@@ -169,16 +169,18 @@ impl RelayClient {
             stdin: input,
             stdout: output,
             stderr: errors,
-        } = proxy::spawn_proxy(spec).await.map_err(|error| {
-            tracing::warn!(
-                session_id = %expected_session_id,
-                operation = "connect",
-                purpose = %spec.purpose,
-                error = %format!("{error:#}"),
-                "could not start relay proxy"
-            );
-            error
-        })?;
+        } = proxy::spawn_session_proxy(spec, ssh_session.as_ref())
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    session_id = %expected_session_id,
+                    operation = "connect",
+                    purpose = %spec.purpose,
+                    error = %format!("{error:#}"),
+                    "could not start relay proxy"
+                );
+                error
+            })?;
         let stderr_tail: ProxyStderrTail = Default::default();
         let handshake_done = Arc::new(AtomicBool::new(false));
         let draining = Some({
@@ -260,12 +262,17 @@ impl RelayClient {
                 };
                 let tail = Self::proxy_stderr_tail(draining, &stderr_tail).await;
                 let stderr = tail.join("\n");
-                // Only an SSH launch can be turned away by the transport.
+                // Only an SSH launch can be turned away by the transport, and a
+                // session whose command printed the start marker has started:
+                // its exit 255 is a failure of the worker, not a refusal.
                 let refusal = spec
                     .ssh_destination
                     .as_ref()
                     .and(status)
-                    .and_then(|status| ssh_refusal(status, &stderr));
+                    .and_then(|status| match &client.ssh_session {
+                        Some(lease) => lease.gate().refusal(status, &stderr),
+                        None => ssh_refusal(status, &stderr),
+                    });
                 // The lease tells the ledger what the refusal means: a dead
                 // master is rechecked, a full one is not leased again.
                 let learned = match (refusal, &client.ssh_session) {

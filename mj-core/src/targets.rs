@@ -185,6 +185,12 @@ pub struct CommandSpec {
     /// opens a master (see [`CommandSpec::ssh_probe_session`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ssh_session_probe: bool,
+    /// The remote command line starts by printing [`SSH_START_MARKER`], so the
+    /// reader of this command's stdout strips it and the command's start is
+    /// known from it. Set only by [`CommandSpec::open_ssh_session`], on the
+    /// command it returns.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) ssh_start_marker: bool,
     /// Input that must reach the child without becoming part of its arguments,
     /// environment, serialized plan, or debug representation.
     #[serde(skip)]
@@ -220,6 +226,7 @@ impl CommandSpec {
             ssh_destination: None,
             ssh_session: None,
             ssh_session_probe: false,
+            ssh_start_marker: false,
             sensitive_stdin: None,
             in_daemon: false,
         }
@@ -285,9 +292,32 @@ impl CommandSpec {
     /// Lease the SSH session this command asks for and return the command as
     /// it must be spawned, with the lease that must outlive the child.
     ///
-    /// A command without a session request is returned unchanged. `executor`
-    /// runs the master check and, when needed, the opener.
+    /// An `ssh` command's remote line is prefixed to print [`SSH_START_MARKER`]
+    /// first. The reader of its stdout must strip it and report the start to
+    /// the lease's [`StartGate`] (see [`SessionCommand::gate`]); the executors,
+    /// the node and `spawn_session_proxy` do. A command without a session
+    /// request is returned unchanged. `executor` runs the master check and,
+    /// when needed, the opener.
     pub fn open_ssh_session(&self, executor: &dyn CommandExecutor) -> Result<SessionCommand<'_>> {
+        self.lease_ssh_session(executor, true)
+    }
+
+    /// [`Self::open_ssh_session`] for a command whose `ssh` is run by another
+    /// program that reads its stdout as its own protocol, such as the shell
+    /// wrapper Move gives `rsync --rsh`: no marker is added, and nothing
+    /// reports the session's start, so it counts only as a reservation.
+    pub fn open_ssh_session_without_marker(
+        &self,
+        executor: &dyn CommandExecutor,
+    ) -> Result<SessionCommand<'_>> {
+        self.lease_ssh_session(executor, false)
+    }
+
+    fn lease_ssh_session(
+        &self,
+        executor: &dyn CommandExecutor,
+        marker: bool,
+    ) -> Result<SessionCommand<'_>> {
         let Some(ssh) = &self.ssh_session else {
             return Ok(SessionCommand {
                 command: std::borrow::Cow::Borrowed(self),
@@ -310,10 +340,24 @@ impl CommandSpec {
         command.ssh_session = None;
         command.ssh_session_probe = false;
         command.args = session_command_args(&self.program, &self.args, ssh, &lease);
+        // The remote command line is the last argument of every `ssh` session
+        // the builders in `targets/ssh.rs` make; `scp` has none.
+        if marker
+            && self.program == "ssh"
+            && let Some(line) = command.args.last_mut()
+        {
+            *line = with_start_marker(line);
+            command.ssh_start_marker = true;
+        }
         Ok(SessionCommand {
             command: std::borrow::Cow::Owned(command),
             lease: Some(lease),
         })
+    }
+
+    /// Whether the command's stdout starts with [`SSH_START_MARKER`].
+    pub fn expects_ssh_start_marker(&self) -> bool {
+        self.ssh_start_marker
     }
 
     /// Mark this command as the one that creates the session's target.
@@ -340,6 +384,95 @@ impl CommandSpec {
     pub fn in_daemon(mut self) -> Self {
         self.in_daemon = true;
         self
+    }
+}
+
+/// A stand-in `ssh` for tests: a script on `PATH` that refuses the first
+/// attempts as a plan says and otherwise runs the remote command line in a
+/// shell, as the remote side would, so the start marker is printed by the
+/// real line.
+#[cfg(all(test, unix))]
+pub(crate) mod fake_ssh {
+    use super::*;
+    use std::fs;
+
+    static FAST_RETRIES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) struct FastRetries(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl FastRetries {
+        pub(crate) fn new() -> Self {
+            let guard = FAST_RETRIES_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+            Self(guard)
+        }
+    }
+
+    impl Drop for FastRetries {
+        fn drop(&mut self) {
+            set_ssh_retry_backoff_for_test(None);
+        }
+    }
+
+    pub(crate) struct FakeSsh {
+        directory: tempfile::TempDir,
+    }
+
+    impl FakeSsh {
+        /// `plan` has one word per attempt: `refuse-session`, `refuse-auth`,
+        /// or `run-then-255` (runs the command, then fails like a dropped
+        /// connection). Attempts past the plan just run.
+        pub(crate) fn new(plan: &[&str]) -> Self {
+            let directory = tempfile::tempdir().expect("fake ssh directory");
+            let script = r#"#!/bin/sh
+dir=$(dirname "$0")
+count=$(cat "$dir/attempts" 2>/dev/null || echo 0)
+echo $((count + 1)) > "$dir/attempts"
+for last; do :; done
+case "$(sed -n "$((count + 1))p" "$dir/plan")" in
+  refuse-session)
+    echo 'mux_client_request_session: session request failed: Session open refused by peer' >&2
+    exit 255 ;;
+  refuse-auth)
+    echo 'kex_exchange_identification: Connection closed by 10.0.0.1 port 22' >&2
+    exit 255 ;;
+  run-then-255)
+    sh -c "$last"
+    echo 'Read from remote host fake-host: Connection reset by peer' >&2
+    exit 255 ;;
+  *) exec sh -c "$last" ;;
+esac
+"#;
+            let path = directory.path().join("ssh");
+            fs::write(&path, script).unwrap();
+            fs::write(directory.path().join("plan"), plan.join("\n")).unwrap();
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            Self { directory }
+        }
+
+        /// An `ssh` session command for `remote` on the fake host.
+        pub(crate) fn command(&self, remote: &[&str]) -> CommandSpec {
+            let ssh = SshTarget {
+                destination: "fake-host".to_owned(),
+                ssh_args: Vec::new(),
+            };
+            let mut command = ssh_command(&ssh, remote).purpose("run through the fake ssh");
+            let path = std::env::var("PATH").unwrap_or_default();
+            command.env.insert(
+                "PATH".to_owned(),
+                format!("{}:{path}", self.directory.path().display()),
+            );
+            command
+        }
+
+        pub(crate) fn attempts(&self) -> u32 {
+            fs::read_to_string(self.directory.path().join("attempts"))
+                .map(|text| text.trim().parse().expect("attempt count"))
+                .unwrap_or(0)
+        }
     }
 }
 
@@ -384,6 +517,15 @@ impl SessionCommand<'_> {
 
     pub fn lease(&self) -> Option<&SshSessionLease> {
         self.lease.as_ref()
+    }
+
+    /// Where the session stands, when its command prints the start marker:
+    /// the reader of its stdout reports into it.
+    pub fn gate(&self) -> Option<&Arc<StartGate>> {
+        self.command
+            .ssh_start_marker
+            .then(|| self.lease.as_ref().map(SshSessionLease::gate))
+            .flatten()
     }
 
     pub fn into_parts(self) -> (CommandSpec, Option<SshSessionLease>) {
@@ -824,12 +966,15 @@ pub struct ProcessExecutor;
 /// Run one `ssh` invocation, retrying it
 /// when the server turned it away before the remote command started.
 ///
-/// A refusal means the remote command never started, so re-running the whole
-/// invocation cannot repeat a side effect. [`SshRefusalRetry`] decides each
-/// wait and when to stop: with `is_cancelled`, a connection closed before
-/// authentication is retried until the command succeeds or the caller's
-/// cancellation or deadline ends it; without one, nothing outside could stop
-/// the loop, so the retries are bounded.
+/// A refusal means the remote command never started (no byte of its stdout,
+/// not even the start marker, ever arrived), so re-running the whole
+/// invocation cannot repeat a side effect, whether or not the command
+/// streams stdin: nothing of the caller's input is read before the start.
+/// [`SshRefusalRetry`] decides each wait and when to stop: with
+/// `is_cancelled`, a connection closed before authentication is retried until
+/// the command succeeds or the caller's cancellation or deadline ends it;
+/// without one, nothing outside could stop the loop, so the retries are
+/// bounded.
 ///
 /// A command that asks for a shared-connection session leases it on each
 /// attempt, and the lease tells the ledger what the refusal means
@@ -839,20 +984,23 @@ pub struct ProcessExecutor;
 /// retry lands on another master at once: the recorded capacity is the state
 /// change that ends that loop, so it needs no wait and uses no attempt.
 ///
+/// `run` receives the leased command and the gate its stdout reader must
+/// report into (`None` when the command prints no start marker).
+///
 /// Commands that are not tagged with a destination run untouched.
 fn with_ssh_refusal_retry(
     command: &CommandSpec,
     executor: &dyn CommandExecutor,
     is_cancelled: Option<&dyn Fn() -> bool>,
-    mut run: impl FnMut(&CommandSpec) -> Result<CommandOutput>,
+    mut run: impl FnMut(&CommandSpec, Option<&Arc<StartGate>>) -> Result<CommandOutput>,
 ) -> Result<CommandOutput> {
     let Some(destination) = command.ssh_destination.as_deref() else {
-        return run(command);
+        return run(command, None);
     };
     let mut retry = SshRefusalRetry::new(is_cancelled.is_some());
     loop {
         let session = command.open_ssh_session(executor)?;
-        let output = run(session.command())?;
+        let output = run(session.command(), session.gate())?;
         let refusal = note_session_refusal(&session, &output);
         drop(session);
         let Some((refusal, learned)) = refusal else {
@@ -870,17 +1018,19 @@ fn with_ssh_refusal_retry(
 }
 
 /// Classify a finished command's refusal by the server and tell the session's
-/// lease what it means. Returns the refusal and whether the ledger learned a
-/// new capacity from it (see [`SshSessionLease::note_refusal`]).
+/// lease what it means. Returns the refusal and whether retrying at once can
+/// land elsewhere (see [`SshSessionLease::note_refusal`]). A command that
+/// printed the start marker was not refused, whatever its exit status.
 fn note_session_refusal(
     session: &SessionCommand<'_>,
     output: &CommandOutput,
 ) -> Option<(SshRefusal, bool)> {
-    let refusal = ssh_refusal(output.status, &String::from_utf8_lossy(&output.stderr))?;
-    let learned = session
-        .lease()
-        .is_some_and(|lease| lease.note_refusal(refusal));
-    Some((refusal, learned))
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let Some(lease) = session.lease() else {
+        return ssh_refusal(output.status, &stderr).map(|refusal| (refusal, false));
+    };
+    let refusal = lease.gate().refusal(output.status, &stderr)?;
+    Some((refusal, lease.note_refusal(refusal)))
 }
 
 /// Wait out `delay`, giving up early if the supervising operation is
@@ -929,16 +1079,16 @@ fn finished_command(
 
 impl ProcessExecutor {
     /// One attempt, with no retry of its own.
-    fn run_once(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        if let Some(input) = &command.sensitive_stdin {
-            let mut input = std::io::Cursor::new(input.0.as_slice());
-            // Owned bytes, so each attempt gets its own reader.
-            return stream_command_with_stdin(
-                cancellable_command(command),
-                command,
-                &mut input,
-                &|| false,
-            );
+    fn run_once(
+        &self,
+        command: &CommandSpec,
+        gate: Option<&Arc<StartGate>>,
+    ) -> Result<CommandOutput> {
+        if gate.is_some() || command.sensitive_stdin.is_some() {
+            // A session that reports its start is read through the shared
+            // collector; with no cancellation it only ends when the child does.
+            return CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
+                .run_once(command, gate);
         }
         let started = Instant::now();
         let output = configured_command(command)
@@ -967,7 +1117,9 @@ impl CommandExecutor for ProcessExecutor {
             if let Some(host) = command_host(command) {
                 return host.run(command, None, &|| false);
             }
-            with_ssh_refusal_retry(command, self, None, |command| self.run_once(command))
+            with_ssh_refusal_retry(command, self, None, |command, gate| {
+                self.run_once(command, gate)
+            })
         })
     }
 
@@ -981,17 +1133,19 @@ impl CommandExecutor for ProcessExecutor {
             if let Some(host) = command_host(command) {
                 return host.run(command, Some(input), &|| false);
             }
-            // A caller's stream cannot be replayed, so this path takes a
-            // session but never retries. A refused session still tells the
-            // ledger, so the next lease goes to another master.
-            let session = command.open_ssh_session(self)?;
-            let command = session.command();
-            let process = cancellable_command(command);
-            // Plain process execution is not cancellable, so the transfer only
-            // ends when the child does.
-            let output = stream_command_with_stdin(process, command, input, &|| false)?;
-            note_session_refusal(&session, &output);
-            Ok(output)
+            // The stream is not read until the session has started, so a
+            // refused session is retried with the same stream. Plain process
+            // execution is not cancellable, so a transfer only ends when the
+            // child does.
+            with_ssh_refusal_retry(command, self, None, |command, gate| {
+                stream_command_with_stdin(
+                    cancellable_command(command),
+                    command,
+                    &mut *input,
+                    &|| false,
+                    gate,
+                )
+            })
         })
     }
 }
@@ -1004,11 +1158,17 @@ impl CommandExecutor for ProcessExecutor {
 /// `is_cancelled` reports whether the supervising operation wants the transfer
 /// abandoned; [`ProcessExecutor`] passes a check that is never true, which also
 /// makes the kill path below unreachable for it.
+///
+/// With a `gate`, the command prints a start marker that is stripped from the
+/// collected stdout, and `input` is not read, nor anything written to the
+/// child, until the marker arrives. A session the server refused therefore
+/// leaves `input` untouched for the caller to retry with.
 fn stream_command_with_stdin(
     mut process: Command,
     command: &CommandSpec,
     input: &mut (dyn Read + Send),
     is_cancelled: &(dyn Fn() -> bool + Sync),
+    gate: Option<&Arc<StartGate>>,
 ) -> Result<CommandOutput> {
     let started = Instant::now();
     if is_cancelled() {
@@ -1036,13 +1196,22 @@ fn stream_command_with_stdin(
         .context("streamed command stderr missing")?;
     // Reader threads keep the child's output pipes drained; a child that fills
     // one while nobody reads would block instead of exiting.
-    let stdout_reader = PipeCollector::spawn(stdout);
+    let stdout_reader = PipeCollector::spawn_scanning(stdout, gate.cloned());
     let stderr_reader = PipeCollector::spawn(stderr);
     let process_result = std::thread::scope(|scope| -> Result<_> {
         // Pipe writes can block forever when a remote helper stops reading.
         // Keep the writer off the supervising thread so cancellation can kill
         // the process group and thereby close the blocked pipe.
-        let input_writer = scope.spawn(move || -> Result<()> {
+        let input_writer = scope.spawn(move || -> Result<bool> {
+            if let Some(gate) = gate {
+                match gate.wait_blocking(is_cancelled) {
+                    StartWait::Started => {}
+                    // The session ended without starting. Nothing was read,
+                    // and the exit status says why.
+                    StartWait::Ended => return Ok(false),
+                    StartWait::Cancelled => bail!("operation cancelled"),
+                }
+            }
             // Owning `stdin` here is what closes the pipe's write end once the
             // transfer finishes. A child that reads to EOF, such as
             // `mj worker export-checkpoint --spec -`, never exits while any
@@ -1064,7 +1233,8 @@ fn stream_command_with_stdin(
                     .write_all(&buffer[..count])
                     .context("stream command input")?;
             }
-            stdin.flush().context("flush command input")
+            stdin.flush().context("flush command input")?;
+            Ok(true)
         });
         let mut status = None;
         let mut exited_at = None;
@@ -1131,7 +1301,12 @@ fn stream_command_with_stdin(
         // A child that exited first explains the failure through its own
         // status and stderr; the broken pipe that exit caused would only hide
         // it. A successful child must not hide an input error.
-        input_result?;
+        let delivered = input_result?;
+        ensure!(
+            delivered,
+            "{} exited successfully without reporting that its command started, so its input was never sent",
+            command.purpose
+        );
     }
     let status = status.code().unwrap_or(-1);
     Ok(finished_command(command, started, status, stdout, stderr))
@@ -1305,27 +1480,62 @@ struct PipeCollector {
 }
 
 impl PipeCollector {
-    fn spawn(mut pipe: impl PollablePipe) -> Self {
+    fn spawn(pipe: impl PollablePipe) -> Self {
+        Self::spawn_scanning(pipe, None)
+    }
+
+    /// Collect a session's stdout. With a `gate` the start marker is removed
+    /// from the front, the first byte reports the session's start, and the end
+    /// of the pipe reports that it ended; the gate settles however the thread
+    /// stops.
+    fn spawn_scanning(mut pipe: impl PollablePipe, gate: Option<Arc<StartGate>>) -> Self {
         let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let (collected, stopped) = (bytes.clone(), stop.clone());
         let thread = std::thread::spawn(move || {
+            let mut scan = gate.as_ref().map(|_| StartScan::new());
             let mut chunk = [0_u8; 8192];
-            while !stopped.load(Ordering::Acquire) {
-                if !pipe.readable(Duration::from_millis(25)) {
-                    continue;
+            let mut passed = Vec::new();
+            let result = (|| {
+                while !stopped.load(Ordering::Acquire) {
+                    if !pipe.readable(Duration::from_millis(25)) {
+                        continue;
+                    }
+                    match pipe.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(count) => {
+                            let mut collected = collected
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            match (&mut scan, &gate) {
+                                (Some(scan), Some(gate)) => {
+                                    passed.clear();
+                                    if scan.push(&chunk[..count], &mut passed) {
+                                        gate.mark_started();
+                                    }
+                                    collected.extend_from_slice(&passed);
+                                }
+                                _ => collected.extend_from_slice(&chunk[..count]),
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(error) => return Err(error),
+                    }
                 }
-                match pipe.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(count) => collected
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .extend_from_slice(&chunk[..count]),
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(error) => return Err(error),
-                }
+                Ok(())
+            })();
+            if let Some(scan) = &mut scan {
+                passed.clear();
+                scan.finish(&mut passed);
+                collected
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(&passed);
             }
-            Ok(())
+            if let Some(gate) = &gate {
+                gate.mark_ended();
+            }
+            result
         });
         Self {
             bytes,
@@ -1394,8 +1604,13 @@ fn terminate_cancellable_child(child: &mut std::process::Child, preserve_childre
 }
 
 impl CancellableProcessExecutor {
-    /// One attempt, with no retry of its own.
-    fn run_once(&self, command: &CommandSpec) -> Result<CommandOutput> {
+    /// One attempt, with no retry of its own. A `gate` makes the attempt read
+    /// the start marker from stdout and report the session's start.
+    fn run_once(
+        &self,
+        command: &CommandSpec,
+        gate: Option<&Arc<StartGate>>,
+    ) -> Result<CommandOutput> {
         if let Some(input) = &command.sensitive_stdin {
             let mut input = std::io::Cursor::new(input.0.as_slice());
             // Owned bytes, so each attempt gets its own reader.
@@ -1404,6 +1619,7 @@ impl CancellableProcessExecutor {
                 command,
                 &mut input,
                 &|| self.is_cancelled(),
+                gate,
             );
         }
         let started = Instant::now();
@@ -1418,7 +1634,7 @@ impl CancellableProcessExecutor {
             .then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
         let stdout = child.stdout.take().context("command stdout missing")?;
         let stderr = child.stderr.take().context("command stderr missing")?;
-        let stdout_reader = PipeCollector::spawn(stdout);
+        let stdout_reader = PipeCollector::spawn_scanning(stdout, gate.cloned());
         let stderr_reader = PipeCollector::spawn(stderr);
         let mut status = None;
         let mut exited_at = None;
@@ -1489,9 +1705,12 @@ impl CommandExecutor for CancellableProcessExecutor {
             }
             self.describe_cancellation(
                 command,
-                with_ssh_refusal_retry(command, self, Some(&|| self.is_cancelled()), |command| {
-                    self.run_once(command)
-                }),
+                with_ssh_refusal_retry(
+                    command,
+                    self,
+                    Some(&|| self.is_cancelled()),
+                    |command, gate| self.run_once(command, gate),
+                ),
             )
         })
     }
@@ -1508,22 +1727,25 @@ impl CommandExecutor for CancellableProcessExecutor {
                 if let Some(host) = command_host(command) {
                     return host.run(command, Some(input), &|| self.is_cancelled());
                 }
-                // A caller's stream cannot be replayed, so this path takes a
-                // session but never retries. A refused session still tells the
-                // ledger, so the next lease goes to another master.
-                let session = command.open_ssh_session(self)?;
-                let command = session.command();
-                // The child runs in its own process group so cancellation can kill
-                // the whole group, which is what releases a writer blocked on a
+                // The stream is not read until the session has started, so a
+                // refused session is retried with the same stream. The child
+                // runs in its own process group so cancellation can kill the
+                // whole group, which is what releases a writer blocked on a
                 // full pipe.
-                let output = stream_command_with_stdin(
-                    cancellable_command(command),
+                with_ssh_refusal_retry(
                     command,
-                    input,
-                    &|| self.is_cancelled(),
-                )?;
-                note_session_refusal(&session, &output);
-                Ok(output)
+                    self,
+                    Some(&|| self.is_cancelled()),
+                    |command, gate| {
+                        stream_command_with_stdin(
+                            cancellable_command(command),
+                            command,
+                            &mut *input,
+                            &|| self.is_cancelled(),
+                            gate,
+                        )
+                    },
+                )
             }),
         )
     }
@@ -2624,25 +2846,7 @@ mod executor_tests {
     /// The retry backoff override is process-wide, so tests that shorten it
     /// take turns: one test restoring the real delay mid-run would stretch
     /// another's retries past its deadline.
-    static FAST_RETRIES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct FastRetries(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
-
-    impl FastRetries {
-        fn new() -> Self {
-            let guard = FAST_RETRIES_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
-            Self(guard)
-        }
-    }
-
-    impl Drop for FastRetries {
-        fn drop(&mut self) {
-            set_ssh_retry_backoff_for_test(None);
-        }
-    }
+    use fake_ssh::FastRetries;
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -2878,7 +3082,7 @@ mod executor_tests {
             };
             if command.ssh_session.is_some() {
                 // A session. The first one arrives just after its master died.
-                return with_ssh_refusal_retry(command, self, None, |spawned| {
+                return with_ssh_refusal_retry(command, self, None, |spawned, _gate| {
                     self.sessions.borrow_mut().push(spawned.args.clone());
                     if self.sessions.borrow().len() == 1 {
                         self.running.borrow_mut().clear();
@@ -3013,5 +3217,90 @@ mod executor_tests {
             attempts(directory.path()),
             SSH_BOUNDED_RETRY_ATTEMPTS as u32
         );
+    }
+
+    /// Pins both defects of an exit-255 rule without a start proof: a command
+    /// that ran and printed its marker, then lost its connection (exit 255
+    /// with "Connection reset" on stderr), was retried as a transport
+    /// rejection and so could run twice.
+    // Hard-won: 5cb64e019: exit 255 after the command started was retried as a refusal.
+    #[test]
+    fn a_session_that_printed_the_marker_is_never_retried_even_at_exit_255() {
+        let _guard = ssh::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _fast_retries = FastRetries::new();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        for cancellable in [false, true] {
+            let fake = fake_ssh::FakeSsh::new(&["run-then-255"]);
+            let command = fake.command(&["echo", "ran"]);
+            let output = if cancellable {
+                CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false))).execute(&command)
+            } else {
+                ProcessExecutor.execute(&command)
+            }
+            .expect("ssh runs");
+            assert_eq!(output.status, 255);
+            assert_eq!(output.stdout, b"ran\n", "the marker is stripped");
+            assert_eq!(fake.attempts(), 1, "cancellable: {cancellable}");
+        }
+        set_ssh_connection_sharing_for_test(None);
+    }
+
+    /// A streamed command the server refuses is retried like any other, and
+    /// the whole input (more than a pipe buffers) arrives once, on the attempt
+    /// that started: nothing is read from the caller's stream before that.
+    // Hard-won: 5cb64e019: streamed commands returned the refusal instead of retrying.
+    #[test]
+    fn a_refused_streamed_command_is_retried_and_receives_all_its_input_once() {
+        let _guard = ssh::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _fast_retries = FastRetries::new();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let payload = vec![b'x'; 300 * 1024];
+        for cancellable in [false, true] {
+            let fake = fake_ssh::FakeSsh::new(&["refuse-session", "refuse-auth"]);
+            let command = fake.command(&["wc", "-c"]);
+            let mut input = std::io::Cursor::new(payload.clone());
+            let output = if cancellable {
+                CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
+                    .execute_with_stdin(&command, &mut input)
+            } else {
+                ProcessExecutor.execute_with_stdin(&command, &mut input)
+            }
+            .expect("the third attempt starts");
+            assert_eq!(
+                output.status,
+                0,
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                payload.len().to_string()
+            );
+            assert_eq!(fake.attempts(), 3, "cancellable: {cancellable}");
+        }
+        set_ssh_connection_sharing_for_test(None);
+    }
+
+    /// A caller's sensitive stdin is part of the command, so each attempt
+    /// sends it afresh.
+    #[test]
+    fn sensitive_stdin_is_sent_again_on_each_retry() {
+        let _guard = ssh::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _fast_retries = FastRetries::new();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let fake = fake_ssh::FakeSsh::new(&["refuse-session"]);
+        let command = fake
+            .command(&["cat"])
+            .with_sensitive_stdin(b"secret\n".to_vec());
+        let output = ProcessExecutor.execute(&command).expect("ssh runs");
+        assert_eq!(output.stdout, b"secret\n");
+        assert_eq!(fake.attempts(), 2);
+        set_ssh_connection_sharing_for_test(None);
     }
 }

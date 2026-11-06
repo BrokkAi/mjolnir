@@ -340,8 +340,13 @@ pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<Co
             return Ok(output);
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // A probe that printed the start marker ran, so its status is its own.
+        let refusal = match &ssh_session {
+            Some(lease) => lease.gate().refusal(output.status, &stderr),
+            None => ssh_refusal(output.status, &stderr),
+        };
         if let Some(destination) = command.ssh_destination.as_deref()
-            && let Some(refusal) = ssh_refusal(output.status, &stderr)
+            && let Some(refusal) = refusal
         {
             // The lease learns what the refusal means while it is still held.
             let learned = ssh_session
@@ -371,31 +376,34 @@ pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<Co
 async fn run_resource_command(
     command: &CommandSpec,
 ) -> Result<(CommandOutput, Option<crate::targets::SshSessionLease>)> {
-    // A remote probe runs as one session on a shared SSH connection; the
-    // lease is held until the probe has exited.
-    let (command, ssh_session) = if command.ssh_session.is_some() {
-        let requested = command.clone();
-        let executor = crate::targets::CancellableProcessExecutor::with_timeout(
-            crate::targets::SSH_MASTER_OPEN_TIMEOUT,
-        );
-        let _cancel_preparation = executor.cancel_on_drop();
-        tokio::task::spawn_blocking(move || {
-            requested
-                .open_ssh_session(&executor)
-                .map(crate::targets::SessionCommand::into_parts)
-        })
-        .await
-        .context("join the SSH session lease for a resource probe")??
-    } else {
-        (command.clone(), None)
-    };
+    // A remote probe the daemon runs itself is one session on a shared SSH
+    // connection; the lease is held until the probe has exited. A probe that
+    // runs on the node is leased, retried and stripped of the start marker
+    // there, beside the connection it shares.
+    let (command, ssh_session) =
+        if command.ssh_session.is_some() && crate::targets::command_host(command).is_none() {
+            let requested = command.clone();
+            let executor = crate::targets::CancellableProcessExecutor::with_timeout(
+                crate::targets::SSH_MASTER_OPEN_TIMEOUT,
+            );
+            let _cancel_preparation = executor.cancel_on_drop();
+            tokio::task::spawn_blocking(move || {
+                requested
+                    .open_ssh_session(&executor)
+                    .map(crate::targets::SessionCommand::into_parts)
+            })
+            .await
+            .context("join the SSH session lease for a resource probe")??
+        } else {
+            (command.clone(), None)
+        };
     let command = &command;
     let crate::streamed_child::ProxyStdio {
         mut child,
         stdin,
         stdout,
         stderr,
-    } = crate::streamed_child::spawn_proxy(command)
+    } = crate::streamed_child::spawn_session_proxy(command, ssh_session.as_ref())
         .await
         .with_context(|| format!("start {}", command.purpose))?;
     // Resource probes do not read input; closing the writer gives a child

@@ -483,9 +483,13 @@ async fn read_description(body: &mut h2::RecvStream) -> Result<(Bytes, Bytes)> {
 async fn serve_stream(
     description: Bytes,
     stdin_prefix: Bytes,
-    body: h2::RecvStream,
+    mut body: h2::RecvStream,
     mut respond: h2::server::SendResponse<Bytes>,
 ) -> Result<()> {
+    use crate::targets::{CancellableProcessExecutor, SshRefusalRetry};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     let run: crate::targets::NodeRun =
         serde_json::from_slice(&description).context("decode node exec")?;
     let command = run.into_spec();
@@ -495,27 +499,92 @@ async fn serve_stream(
         .body(())
         .expect("static response");
     let mut send = respond.send_response(response, false)?;
-    // A command over a shared SSH connection leases its session here, where
-    // SSH runs, exactly as a local launch does.
-    let prepared = tokio::task::spawn_blocking(move || -> Result<SshPrepared> {
-        let (command, lease) = command
-            .open_ssh_session(&crate::targets::ProcessExecutor)?
-            .into_parts();
-        Ok(SshPrepared { command, lease })
-    })
-    .await
-    .context("node SSH preparation task failed")?;
-    match prepared.and_then(|prepared| spawn(&prepared.command).map(|child| (child, prepared))) {
-        Ok((child, prepared)) => run_child(child, prepared, stdin_prefix, body, &mut send).await,
-        Err(error) => {
-            let exit = NodeExit {
-                status: None,
-                error: Some(format!("{error:#}")),
-            };
-            send_all(&mut send, frame(FRAME_EXIT, &serde_json::to_vec(&exit)?)).await?;
-            send.send_data(Bytes::new(), true)?;
-            Ok(())
+    // A reset of this stream, or an end of this function, cancels the SSH
+    // preparation below.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let _cancel_on_exit = CancelOnDrop(cancelled.clone());
+    let mut retry = SshRefusalRetry::new(true);
+    loop {
+        // A command over a shared SSH connection leases its session here,
+        // where SSH runs, exactly as a local launch does. The executor opens
+        // a master that the server keeps refusing until the stream is reset.
+        let preparation = {
+            let command = command.clone();
+            let executor = CancellableProcessExecutor::new(cancelled.clone());
+            tokio::task::spawn_blocking(move || -> Result<SshPrepared> {
+                let (command, lease) = command.open_ssh_session(&executor)?.into_parts();
+                Ok(SshPrepared { command, lease })
+            })
+        };
+        tokio::pin!(preparation);
+        let prepared = tokio::select! {
+            joined = &mut preparation => joined.context("node SSH preparation task failed")?,
+            reset = poll_fn(|cx| send.poll_reset(cx)) => {
+                cancelled.store(true, Ordering::Release);
+                let _ = preparation.await;
+                bail!("the daemon reset the exec during SSH preparation: {reset:?}");
+            }
+        };
+        let spawned =
+            prepared.and_then(|prepared| spawn(&prepared.command).map(|child| (child, prepared)));
+        let (child, prepared) = match spawned {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                let exit = NodeExit {
+                    status: None,
+                    error: Some(format!("{error:#}")),
+                };
+                send_all(&mut send, frame(FRAME_EXIT, &serde_json::to_vec(&exit)?)).await?;
+                send.send_data(Bytes::new(), true)?;
+                return Ok(());
+            }
+        };
+        let destination = command.ssh_destination.clone().unwrap_or_default();
+        match run_child(child, prepared, stdin_prefix.clone(), &mut body, &mut send).await? {
+            ChildEnd::Exited => return Ok(()),
+            // The server turned the session away before its command started,
+            // so nothing of the daemon's input was read and nothing was
+            // printed: the whole attempt is discarded and retried here, where
+            // the lease lives, instead of being reported to the daemon.
+            ChildEnd::Refused(refused) => {
+                let stderr = String::from_utf8_lossy(&refused.stderr_tail).into_owned();
+                let delay = retry.next(
+                    refused.refusal,
+                    refused.redirected,
+                    &destination,
+                    &command.purpose,
+                    &stderr,
+                );
+                let Some(delay) = delay else {
+                    // Out of attempts: the daemon gets the last answer.
+                    for held in refused.held_stderr {
+                        send_all(&mut send, held).await?;
+                    }
+                    send_all(
+                        &mut send,
+                        frame(FRAME_EXIT, &serde_json::to_vec(&refused.exit)?),
+                    )
+                    .await?;
+                    send.send_data(Bytes::new(), true)?;
+                    return Ok(());
+                };
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    reset = poll_fn(|cx| send.poll_reset(cx)) => {
+                        bail!("the daemon reset the exec while it waited to retry SSH: {reset:?}");
+                    }
+                }
+            }
         }
+    }
+}
+
+/// Cancels the SSH preparation of one node stream when the stream ends.
+struct CancelOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -677,29 +746,71 @@ fn spawn(command: &crate::targets::CommandSpec) -> Result<tokio::process::Child>
         .with_context(|| format!("run {} for {}", command.program, command.purpose))
 }
 
+/// How one run of a node child ended.
+enum ChildEnd {
+    /// The exit was sent to the daemon and the stream closed.
+    Exited,
+    /// The server refused the SSH session before its command started.
+    Refused(Refused),
+}
+
+/// An attempt the SSH server refused, with what the daemon would have been
+/// told had the node not retried it.
+struct Refused {
+    refusal: crate::targets::SshRefusal,
+    /// Whether the next lease can land on another master at once.
+    redirected: bool,
+    stderr_tail: Vec<u8>,
+    held_stderr: Vec<Bytes>,
+    exit: NodeExit,
+}
+
 /// Feed stdin, drain stdout and stderr, and report the exit, all at once.
 /// Output is sent as it arrives; stdin is written only as fast as the child
 /// reads it. Pipes are never written before they are drained.
+///
+/// A session whose command prints the SSH start marker is held to it: stdin,
+/// including `stdin_prefix`, is not read or written until the marker arrives;
+/// the marker is removed from stdout; and stderr is withheld until the session
+/// starts or ends. If the server refused the session (exit 255 with no stdout
+/// byte), nothing has reached the daemon and nothing of its input was taken,
+/// so the caller retries with the same `body`.
 async fn run_child(
     mut child: tokio::process::Child,
     prepared: SshPrepared,
     stdin_prefix: Bytes,
-    mut body: h2::RecvStream,
+    body: &mut h2::RecvStream,
     send: &mut h2::SendStream<Bytes>,
-) -> Result<()> {
+) -> Result<ChildEnd> {
+    use crate::targets::{StartGate, StartScan};
     let SshPrepared { command, lease } = prepared;
     let command = &command;
+    let gate: Option<std::sync::Arc<StartGate>> = lease
+        .as_ref()
+        .filter(|_| command.expects_ssh_start_marker())
+        .map(|lease| lease.gate().clone());
     let stderr_tail = std::sync::Mutex::new(Vec::<u8>::new());
     let group = (!command.detaches).then(|| crate::subprocess::ProcessGroupGuard::new(child.id()));
     let mut stdin = child.stdin.take().context("node child stdin missing")?;
     let stdout = child.stdout.take().context("node child stdout missing")?;
     let stderr = child.stderr.take().context("node child stderr missing")?;
 
+    let feed_gate = gate.clone();
+    let body = &mut *body;
+    // The feed owns the child's stdin: dropping it is what closes the pipe,
+    // which `shutdown` on a child's stdin does not.
     let feed = async move {
+        if let Some(gate) = &feed_gate
+            && !gate.wait().await
+        {
+            // The session ended without starting. The daemon's input was not
+            // touched, and the exit says why.
+            return anyhow::Ok(());
+        }
         if !stdin_prefix.is_empty() {
             stdin.write_all(&stdin_prefix).await?;
         }
-        while let Some(chunk) = next_chunk(&mut body).await? {
+        while let Some(chunk) = next_chunk(body).await? {
             if let Err(error) = stdin.write_all(&chunk).await {
                 // A child that closed its stdin has stopped reading; that is
                 // its business, and its output still matters.
@@ -716,24 +827,56 @@ async fn run_child(
     let (frames_tx, mut frames_rx) = tokio::sync::mpsc::channel::<Bytes>(4);
     let pump = |mut pipe: Box<dyn AsyncRead + Unpin + Send>, tag: u8| {
         let frames = frames_tx.clone();
+        // Only stdout carries the start marker.
+        let gate = gate.clone().filter(|_| tag == FRAME_STDOUT);
         async move {
             let mut buffer = vec![0; READ_CHUNK];
-            loop {
-                let read = pipe.read(&mut buffer).await?;
-                if read == 0 {
-                    return anyhow::Ok(());
-                }
-                if frames.send(frame(tag, &buffer[..read])).await.is_err() {
-                    return Ok(());
+            let mut scan = gate.as_ref().map(|_| StartScan::new());
+            let mut passed = Vec::new();
+            let result = async {
+                loop {
+                    let read = pipe.read(&mut buffer).await?;
+                    if read == 0 {
+                        return anyhow::Ok(());
+                    }
+                    let bytes = match (&mut scan, &gate) {
+                        (Some(scan), Some(gate)) => {
+                            passed.clear();
+                            if scan.push(&buffer[..read], &mut passed) {
+                                gate.mark_started();
+                            }
+                            if passed.is_empty() {
+                                continue;
+                            }
+                            &passed[..]
+                        }
+                        _ => &buffer[..read],
+                    };
+                    if frames.send(frame(tag, bytes)).await.is_err() {
+                        return Ok(());
+                    }
                 }
             }
+            .await;
+            if let (Some(scan), Some(gate)) = (&mut scan, &gate) {
+                passed.clear();
+                scan.finish(&mut passed);
+                if !passed.is_empty() {
+                    let _ = frames.send(frame(tag, &passed)).await;
+                }
+                gate.mark_ended();
+            }
+            result
         }
     };
     let out = pump(Box::new(stdout), FRAME_STDOUT);
     let err = pump(Box::new(stderr), FRAME_STDERR);
     // Forward output, and notice a reset even while the child prints nothing:
-    // a quiet child must still die when the daemon gives up on it.
+    // a quiet child must still die when the daemon gives up on it. Stderr
+    // frames wait here while the session has not started, because a refused
+    // attempt's stderr belongs to the retry, not to the daemon.
     let forward = async {
+        let mut held = Vec::<Bytes>::new();
         loop {
             let next = poll_fn(|cx| {
                 if let std::task::Poll::Ready(reset) = send.poll_reset(cx) {
@@ -747,21 +890,28 @@ async fn run_child(
             .await?;
             match next {
                 Some(framed) => {
-                    match framed.first() {
-                        Some(&FRAME_STDOUT) => {}
-                        Some(&FRAME_STDERR) => {
-                            let mut tail = stderr_tail
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            tail.extend_from_slice(&framed[5..]);
-                            let excess = tail.len().saturating_sub(4096);
-                            tail.drain(..excess);
-                        }
-                        _ => {}
+                    let is_stderr = framed.first() == Some(&FRAME_STDERR);
+                    if is_stderr {
+                        let mut tail = stderr_tail
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        tail.extend_from_slice(&framed[5..]);
+                        let excess = tail.len().saturating_sub(4096);
+                        tail.drain(..excess);
+                    }
+                    let waiting = gate
+                        .as_ref()
+                        .is_some_and(|gate| gate.phase() == crate::targets::StartPhase::Waiting);
+                    if is_stderr && waiting {
+                        held.push(framed);
+                        continue;
+                    }
+                    for earlier in held.drain(..) {
+                        send_all(send, earlier).await?;
                     }
                     send_all(send, framed).await?
                 }
-                None => return anyhow::Ok(()),
+                None => return anyhow::Ok(held),
             }
         }
     };
@@ -792,8 +942,8 @@ async fn run_child(
         async { err.await.context("read node child stderr") },
         forward,
     );
-    let status = match streamed {
-        Ok((status, (), (), ())) => status,
+    let (status, held) = match streamed {
+        Ok((status, (), (), held)) => (status, held),
         Err(error) => {
             // A reset or pipe failure must stop the whole process group.
             if let Some(group) = &group {
@@ -803,22 +953,44 @@ async fn run_child(
             return Err(error);
         }
     };
-    // A session the server turned away tells the ledger what it learned: a
-    // dead master is rechecked, and a full one is not leased again. The
-    // daemon sees the exit status and decides about a retry; the next lease
-    // here then lands on another master.
-    if let (Some(lease), Some(code)) = (&lease, status.code()) {
-        let tail = stderr_tail
+    let tail = std::mem::take(
+        &mut *stderr_tail
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(refusal) = crate::targets::ssh_refusal(code, &String::from_utf8_lossy(&tail)) {
-            lease.note_refusal(refusal);
-        }
-    }
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
     let exit = NodeExit {
         status: status.code(),
         error: None,
     };
+    // A session the server turned away tells the ledger what it learned: a
+    // dead master is rechecked, and a full one is not leased again. A session
+    // that printed the start marker is not refused, whatever its exit status.
+    if let (Some(lease), Some(code)) = (&lease, status.code()) {
+        let text = String::from_utf8_lossy(&tail);
+        let refusal = match &gate {
+            Some(gate) => gate.refusal(code, &text),
+            None => crate::targets::ssh_refusal(code, &text),
+        };
+        if let Some(refusal) = refusal {
+            let redirected = lease.note_refusal(refusal);
+            if gate.is_some() {
+                // Nothing reached the daemon: the caller retries the attempt.
+                // The lease is released first, then the process group's
+                // leftovers (none for a refused session) are gone with it.
+                drop(group);
+                return Ok(ChildEnd::Refused(Refused {
+                    refusal,
+                    redirected,
+                    stderr_tail: tail,
+                    held_stderr: held,
+                    exit,
+                }));
+            }
+        }
+    }
+    for held in held {
+        send_all(send, held).await?;
+    }
     send_all(send, frame(FRAME_EXIT, &serde_json::to_vec(&exit)?)).await?;
     send.send_data(Bytes::new(), true)?;
     // A non-detaching command owns its whole group: the guard kills what the
@@ -826,7 +998,7 @@ async fn run_child(
     // here, is held until this returns, after the group is gone. (Without
     // connection sharing, on Windows, the lease has no destructor at all.)
     drop(group);
-    Ok(())
+    Ok(ChildEnd::Exited)
 }
 
 // ---------------------------------------------------------------------------
@@ -1539,5 +1711,62 @@ mod tests {
             assert!(error.contains("/nonexistent/podman"), "{error}");
             assert!(!error.contains("stream error"), "{error}");
         }
+    }
+
+    /// A relay on the node is refused by the SSH server several times. The
+    /// node, where the lease lives, retries; it holds the daemon's input and
+    /// the refused attempts' stderr back, so the daemon sees one clean run.
+    // Hard-won: 5cb64e019: the daemon counted each refusal of a node-hosted relay as unproductive and gave up after three.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // The sharing override is process-wide.
+    async fn a_node_stream_refused_repeatedly_runs_once_without_the_daemon_seeing_it() {
+        use crate::targets::fake_ssh::{FakeSsh, FastRetries};
+        use crate::targets::{SshSharingForTest, set_ssh_connection_sharing_for_test};
+
+        let _guard = crate::targets::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let _fast_retries = FastRetries::new();
+        let fake = FakeSsh::new(&[
+            "refuse-session",
+            "refuse-session",
+            "refuse-auth",
+            "refuse-auth",
+            "refuse-auth",
+        ]);
+        let client = connected().await;
+        let exec = client
+            .exec(&fake.command(&["wc", "-c"]).to_node_run(true))
+            .await
+            .unwrap();
+        let (mut stdin, mut output) = exec.split();
+        // More than the pipes and the stream window buffer.
+        let payload = Bytes::from(vec![b'y'; 600 * 1024]);
+        let length = payload.len();
+        let feed = tokio::spawn(async move {
+            for chunk in payload.chunks(64 * 1024) {
+                stdin.write(Bytes::copy_from_slice(chunk)).await.unwrap();
+            }
+            stdin.close().unwrap();
+        });
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                match output.next().await.unwrap().expect("exit frame") {
+                    NodeFrame::Stdout(bytes) => stdout.extend_from_slice(&bytes),
+                    NodeFrame::Stderr(bytes) => stderr.extend_from_slice(&bytes),
+                    NodeFrame::Exit(exit) => break exit,
+                }
+            }
+        })
+        .await
+        .expect("the node retries until the session starts");
+        feed.await.unwrap();
+        set_ssh_connection_sharing_for_test(None);
+        assert_eq!(exit.status, Some(0), "{}", String::from_utf8_lossy(&stderr));
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), length.to_string());
+        assert_eq!(stderr, b"", "refused attempts print nothing to the daemon");
+        assert_eq!(fake.attempts(), 6);
     }
 }

@@ -162,7 +162,9 @@ fn copy_workspace(
     let local_path = format!("{}/", local.display());
     let mut args: Vec<String> = RSYNC_TRANSFER_OPTIONS.map(String::from).into();
     let base = targets::locator_command(backend, rsync_remote_arguments(remote));
-    let lease = base.open_ssh_session(executor)?;
+    // Rsync reads this ssh's stdout as its own protocol and appends its server
+    // arguments to the remote line, so the session carries no start marker.
+    let lease = base.open_ssh_session_without_marker(executor)?;
     let wrapper = if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
         let remote_path = format!("{}/", remote.display());
         args.extend(if upload {

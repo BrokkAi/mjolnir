@@ -124,8 +124,8 @@ pub(super) struct ConnectFailure {
 /// so the connect tries again. Either way the worker was never reached.
 pub(super) enum ConnectRetry {
     /// The SSH server turned the proxy away, and this is what `ssh` printed.
-    /// `learned` is whether the ledger took a new capacity from the refusal,
-    /// which sends the next attempt to another connection.
+    /// `learned` is whether the next attempt lands on another connection (see
+    /// `SshSessionLease::note_refusal`).
     Refused {
         refusal: mj_core::targets::SshRefusal,
         stderr: String,
