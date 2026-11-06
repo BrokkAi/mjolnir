@@ -10,7 +10,10 @@
 //! The named container, not the engine client, owns the check: killing
 //! `podman run` leaves its container running. [`QuotaContainer`] removes it on
 //! every exit path, and [`sweep_quota_containers`] removes any a stopped
-//! daemon left behind.
+//! daemon left behind. Each container names the process that started it, and
+//! the sweep never removes one whose process is still running: every process
+//! on a host that shares the data directory, such as a test run, has the same
+//! instance identity as the daemon.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -26,6 +29,10 @@ use mj_core::targets::{
 
 /// Marks a container as a quota check, so a later daemon can find leftovers.
 pub(crate) const QUOTA_LABEL: &str = "dev.mj.quota";
+/// Names the process that started a quota check: its process id and birth
+/// identity, as [`owner_token`] writes them. The sweep removes a container
+/// only when that process is gone.
+pub(crate) const OWNER_LABEL: &str = "dev.mj.quota-owner";
 /// Bounds the engine's own bookkeeping commands: image lookup and removal.
 const ENGINE_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// The container's home and working directory. A tmpfs, so a check runs the
@@ -204,6 +211,9 @@ impl ContainerRuntime {
             "--label".to_owned(),
             format!("{QUOTA_LABEL}=true"),
         ];
+        if let Some(owner) = owner_token() {
+            command.extend(["--label".to_owned(), format!("{OWNER_LABEL}={owner}")]);
+        }
         command.extend(self.user_args());
         command.extend([
             "--tmpfs".to_owned(),
@@ -330,7 +340,15 @@ impl Drop for QuotaContainer {
 }
 
 fn remove_container(command: &CommandSpec, name: &str) {
-    match BoundedProcessExecutor::new(ENGINE_COMMAND_TIMEOUT).execute(command) {
+    remove_container_with(
+        &BoundedProcessExecutor::new(ENGINE_COMMAND_TIMEOUT),
+        command,
+        name,
+    )
+}
+
+fn remove_container_with(executor: &impl CommandExecutor, command: &CommandSpec, name: &str) {
+    match executor.execute(command) {
         Ok(output) if output.status == 0 || !remove_reports_failure(&output.stderr) => {}
         Ok(output) => tracing::warn!(
             container = name,
@@ -350,9 +368,67 @@ fn remove_reports_failure(stderr: &[u8]) -> bool {
     !stderr.contains("no such container")
 }
 
+/// This process as a container owner: `<pid>:<birth identity>`. The birth
+/// identity keeps a reused process id from passing for this process. `None`
+/// when the host cannot report it; a container without an owner is never
+/// swept.
+fn owner_token() -> Option<&'static str> {
+    static OWNER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    OWNER
+        .get_or_init(|| {
+            let pid = std::process::id();
+            match mj_core::subprocess::process_birth_identity(pid) {
+                Ok(birth) => Some(format!("{pid}:{birth}")),
+                Err(error) => {
+                    tracing::warn!(%error, "quota containers will not name their owner");
+                    None
+                }
+            }
+        })
+        .as_deref()
+}
+
+/// Whether the process an owner label names is still running.
+fn owner_is_running(pid: u32, birth: &str) -> bool {
+    match mj_core::subprocess::process_birth_identity(pid) {
+        Ok(current) => current == birth,
+        // The identity could not be read. Only a process that does not exist
+        // is certainly gone.
+        Err(_) => mj_client::daemon::process_is_alive(pid),
+    }
+}
+
+/// Whether the sweep may remove a container with this owner label.
+///
+/// Only a label that names a process which is no longer running qualifies. A
+/// container with no label or an unreadable one is kept: it was started by a
+/// build that did not record its owner, so a live daemon may be using it, and
+/// a quota container can live as long as its daemon.
+fn owner_is_gone(label: &str, running: impl Fn(u32, &str) -> bool) -> bool {
+    let Some((pid, birth)) = label.trim().split_once(':') else {
+        return false;
+    };
+    let Ok(pid) = pid.parse::<u32>() else {
+        return false;
+    };
+    !running(pid, birth)
+}
+
 /// Remove every quota container this instance left behind, such as one whose
 /// daemon stopped mid-check. Runs on the engines installed on this host.
+///
+/// Containers whose owning process is still running stay. The instance
+/// identity comes from the data directory, so a second daemon, a CLI command
+/// or a test run on the same host sweeps with the live daemon's identity.
 pub(crate) fn sweep_quota_containers(executor: &impl CommandExecutor, path: Option<&OsStr>) {
+    sweep_quota_containers_with(executor, path, &owner_is_running)
+}
+
+fn sweep_quota_containers_with(
+    executor: &impl CommandExecutor,
+    path: Option<&OsStr>,
+    running: &dyn Fn(u32, &str) -> bool,
+) {
     let instance = mj_core::config::instance_identity();
     for engine in [Engine::Podman, Engine::Docker] {
         let Some(program) = mj_core::program_path::find_program_on_path(engine.program(), path)
@@ -392,9 +468,30 @@ pub(crate) fn sweep_quota_containers(executor: &impl CommandExecutor, path: Opti
             }
         };
         for id in ids {
+            let inspect = CommandSpec::new(
+                program.as_str(),
+                [
+                    "container",
+                    "inspect",
+                    "--format",
+                    &format!("{{{{index .Config.Labels \"{OWNER_LABEL}\"}}}}"),
+                    id.as_str(),
+                ],
+            )
+            .purpose("read a quota check container's owner");
+            let label = match executor.execute(&inspect) {
+                Ok(output) if output.status == 0 => {
+                    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+                }
+                // Gone since the listing, or not readable: leave it.
+                _ => continue,
+            };
+            if !owner_is_gone(&label, running) {
+                continue;
+            }
             let command = CommandSpec::new(program.as_str(), ["rm", "--force", id.as_str()])
                 .purpose("remove a leftover quota check container");
-            remove_container(&command, &id);
+            remove_container_with(executor, &command, &id);
         }
     }
 }
@@ -464,6 +561,138 @@ mod tests {
         }
         let path = directory.path().as_os_str().to_owned();
         (directory, path)
+    }
+
+    /// Answers the sweep's engine commands from `containers` (id, owner label)
+    /// and records every `rm`.
+    struct FakeEngine {
+        containers: Vec<(&'static str, &'static str)>,
+        removed: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FakeEngine {
+        fn new(containers: Vec<(&'static str, &'static str)>) -> Self {
+            Self {
+                containers,
+                removed: Default::default(),
+            }
+        }
+
+        fn removed(&self) -> Vec<String> {
+            self.removed.lock().unwrap().clone()
+        }
+    }
+
+    impl CommandExecutor for FakeEngine {
+        fn execute(&self, command: &CommandSpec) -> Result<mj_core::targets::CommandOutput> {
+            let args = &command.args;
+            let stdout = match args[0].as_str() {
+                "ps" => self
+                    .containers
+                    .iter()
+                    .map(|(id, _)| format!("{id}\n"))
+                    .collect::<String>(),
+                "container" => {
+                    let id = args.last().unwrap();
+                    self.containers
+                        .iter()
+                        .find(|(candidate, _)| candidate == id)
+                        .map(|(_, label)| format!("{label}\n"))
+                        .unwrap_or_default()
+                }
+                "rm" => {
+                    self.removed
+                        .lock()
+                        .unwrap()
+                        .push(args.last().unwrap().clone());
+                    String::new()
+                }
+                other => panic!("unexpected engine command {other}"),
+            };
+            Ok(mj_core::targets::CommandOutput {
+                status: 0,
+                stdout: stdout.into_bytes(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    fn sweep_removed(
+        containers: Vec<(&'static str, &'static str)>,
+        running: &dyn Fn(u32, &str) -> bool,
+    ) -> Vec<String> {
+        let (_directory, path) = path_with(&["podman"]);
+        let engine = FakeEngine::new(containers);
+        sweep_quota_containers_with(&engine, Some(&path), running);
+        engine.removed()
+    }
+
+    #[test]
+    fn sweep_keeps_containers_whose_owner_is_running() {
+        let removed = sweep_removed(vec![("live", "4242:boot-a:77")], &|pid, birth| {
+            pid == 4242 && birth == "boot-a:77"
+        });
+        assert!(removed.is_empty(), "{removed:?}");
+    }
+
+    #[test]
+    fn sweep_removes_containers_whose_owner_is_gone() {
+        // Dead: no such process. Reused: the pid runs, but it was born later.
+        let removed = sweep_removed(
+            vec![("dead", "4242:boot-a:77"), ("reused", "4243:boot-a:78")],
+            &|pid, birth| pid == 4243 && birth == "boot-a:99",
+        );
+        assert_eq!(removed, ["dead", "reused"]);
+    }
+
+    #[test]
+    fn sweep_removes_only_the_dead_owners_among_several() {
+        let removed = sweep_removed(
+            vec![
+                ("live", "10:b:1"),
+                ("dead", "11:b:2"),
+                ("also-live", "10:b:1"),
+            ],
+            &|pid, _| pid == 10,
+        );
+        assert_eq!(removed, ["dead"]);
+    }
+
+    /// A container started before owners were recorded may belong to a live
+    /// daemon, and a daemon's containers can outlive any age bound, so it
+    /// stays. An unreadable label is treated the same way.
+    #[test]
+    fn sweep_keeps_containers_without_a_readable_owner() {
+        let removed = sweep_removed(
+            vec![
+                ("legacy", ""),
+                ("no-pid", "not-a-pid:boot:1"),
+                ("no-birth", "4242"),
+            ],
+            &|_, _| false,
+        );
+        assert!(removed.is_empty(), "{removed:?}");
+    }
+
+    #[test]
+    fn owner_token_names_this_process_as_running() {
+        let Some(token) = owner_token() else {
+            return;
+        };
+        assert!(owner_is_gone(token, |_, _| false));
+        assert!(!owner_is_gone(token, owner_is_running));
+    }
+
+    #[test]
+    fn a_process_that_exited_is_not_running() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        let birth = mj_core::subprocess::process_birth_identity(pid).ok();
+        child.wait().unwrap();
+        assert!(!owner_is_running(
+            pid,
+            birth.as_deref().unwrap_or("unknown")
+        ));
     }
 
     /// Where `auto` runs a check for a config file with `targets` and these
