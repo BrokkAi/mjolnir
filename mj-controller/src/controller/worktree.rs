@@ -632,29 +632,58 @@ fn refresh_source_origin(
             }
         }
     };
+    const FETCH: [&str; 5] = [
+        "fetch",
+        "--no-write-fetch-head",
+        "--no-tags",
+        "--no-recurse-submodules",
+        "origin",
+    ];
     let purpose = "fetch origin";
-    command_stdout(
+    let fetched = command_stdout(
         executor.execute(&managed_network_git_command(
-            target,
-            repository,
-            [
-                "fetch",
-                "--no-write-fetch-head",
-                "--no-tags",
-                "--no-recurse-submodules",
-                "origin",
-            ],
-            purpose,
+            target, repository, FETCH, purpose,
         ))?,
         purpose,
-    )
-    .with_context(|| {
+    );
+    let fetched = match fetched {
+        Err(ssh_error) if is_github_ssh_url(String::from_utf8_lossy(&origin.stdout).trim()) => {
+            // A host can hold an HTTPS credential for GitHub, such as the GitHub
+            // CLI's helper, without an SSH key; sessions there push over HTTPS.
+            let purpose = "fetch origin over HTTPS";
+            let mut args = Vec::new();
+            for prefix in GITHUB_SSH_PREFIXES {
+                args.extend([
+                    "-c".to_owned(),
+                    format!("url.https://github.com/.insteadOf={prefix}"),
+                ]);
+            }
+            args.extend(FETCH.map(str::to_owned));
+            command_stdout(
+                executor.execute(&managed_network_git_command(
+                    target, repository, args, purpose,
+                ))?,
+                purpose,
+            )
+            .map_err(|https_error| anyhow::anyhow!("{ssh_error:#}; {https_error:#}"))
+        }
+        fetched => fetched,
+    };
+    fetched.with_context(|| {
         format!(
             "could not update origin in {} to find the latest starting commit",
             repository.display()
         )
     })?;
     Ok(())
+}
+
+const GITHUB_SSH_PREFIXES: [&str; 2] = ["git@github.com:", "ssh://git@github.com/"];
+
+fn is_github_ssh_url(url: &str) -> bool {
+    GITHUB_SSH_PREFIXES
+        .iter()
+        .any(|prefix| url.starts_with(prefix))
 }
 
 fn source_fetch_lock(

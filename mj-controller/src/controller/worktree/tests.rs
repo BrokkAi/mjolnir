@@ -633,6 +633,81 @@ fn concurrent_session_starts_fetch_one_repository_one_at_a_time() {
 }
 
 #[test]
+fn a_github_ssh_origin_without_a_key_is_fetched_over_https() {
+    struct Origin {
+        url: &'static str,
+        https_works: bool,
+        fetches: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+    impl CommandExecutor for Origin {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            if !command.args.iter().any(|arg| arg == "fetch") {
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: format!("{}\n", self.url).into_bytes(),
+                    stderr: Vec::new(),
+                });
+            }
+            self.fetches.lock().unwrap().push(command.args.clone());
+            let https = command.args.iter().any(|arg| arg.contains("insteadOf"));
+            Ok(if https && self.https_works {
+                CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }
+            } else {
+                CommandOutput {
+                    status: 128,
+                    stdout: Vec::new(),
+                    stderr: if https { "https refused" } else { "publickey" }.into(),
+                }
+            })
+        }
+    }
+    let fetch = |url, https_works| {
+        let executor = Origin {
+            url,
+            https_works,
+            fetches: Default::default(),
+        };
+        let result = refresh_source_origin(
+            &executor,
+            &ManagedWorktreeTarget::Local,
+            Path::new("/home/dev/ssh-origin-project"),
+        );
+        (result, executor.fetches.into_inner().unwrap())
+    };
+
+    for url in [
+        "git@github.com:owner/repo.git",
+        "ssh://git@github.com/owner/repo.git",
+    ] {
+        let (result, fetches) = fetch(url, true);
+        result.unwrap();
+        assert_eq!(fetches.len(), 2, "{url}");
+        for prefix in ["git@github.com:", "ssh://git@github.com/"] {
+            let rewrite = format!("url.https://github.com/.insteadOf={prefix}");
+            assert!(fetches[1].contains(&rewrite), "{url}: {:?}", fetches[1]);
+        }
+        assert_eq!(fetches[1].last().map(String::as_str), Some("origin"));
+    }
+
+    // Both failures reach the person, so neither credential problem hides.
+    let (result, _) = fetch("git@github.com:owner/repo.git", false);
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(
+        error.contains("publickey") && error.contains("https refused"),
+        "{error}"
+    );
+
+    // Another server's SSH failure is not retried against GitHub.
+    let (result, fetches) = fetch("git@gitlab.com:owner/repo.git", true);
+    assert!(format!("{:#}", result.unwrap_err()).contains("publickey"));
+    assert_eq!(fetches.len(), 1);
+}
+
+#[test]
 fn a_launch_base_on_a_plain_directory_fails_instead_of_being_ignored() {
     let directory = tempfile::tempdir().unwrap();
     let mut record = raw_session_on("localhost", directory.path().to_str().unwrap());
