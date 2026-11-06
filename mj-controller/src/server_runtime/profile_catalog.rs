@@ -999,9 +999,16 @@ impl ProfileCatalog {
         let identity = profile.capabilities_key(id);
         // Model-specific probes select that model to discover its efforts. Only
         // the default probe can grant the default-model exemption.
-        let default = self.fetch_unrestricted(config, id, None).await?.model;
+        let specific = model.is_some();
         let mut choices = self.fetch_unrestricted(config, id, model).await?;
         let selected = choices.model.clone();
+        // A default read already carries the default model; probing again
+        // would run Muse's fresh probe twice.
+        let default = if specific {
+            self.fetch_unrestricted(config, id, None).await?.model
+        } else {
+            selected.clone()
+        };
         choices.model = default;
         let allowed = self.lock().allowed_models(&identity);
         choices = choices.restricted_to(&allowed);

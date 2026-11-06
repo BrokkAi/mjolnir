@@ -139,12 +139,19 @@ where
         let model = model.clone();
         async move {
             let result = async {
-                let mut choices = probe(id.clone(), None).await?;
+                // Both probes apply the profile's `models` list, so a hidden
+                // model is never offered or accepted for delegation. The
+                // model-specific probe runs only for a model the list allows.
+                let mut choices = probe(id.clone(), None)
+                    .await?
+                    .restricted_to(&config.profiles[&id].models);
                 if let Some(model) = model
                     .as_ref()
                     .filter(|model| choices.models.iter().any(|choice| &choice.value == *model))
                 {
-                    choices = probe(id.clone(), Some(model.clone())).await?;
+                    choices = probe(id.clone(), Some(model.clone()))
+                        .await?
+                        .restricted_to(&config.profiles[&id].models);
                 }
                 Ok::<_, anyhow::Error>(choices)
             }
@@ -672,6 +679,54 @@ mod tests {
     use super::*;
     use mj_core::refusal::Refusal;
     use std::cell::{Cell, RefCell};
+
+    /// A profile's `models` list hides a model from delegation as well as
+    /// from pickers: session creation must not accept a sub-agent model that
+    /// later selection cannot find.
+    #[tokio::test]
+    async fn subagent_options_offer_only_models_the_profile_list_allows() {
+        let mut config = crate::server_runtime::profile_catalog::test_config(&[(
+            "gateway",
+            mj_core::config::HarnessKind::Codex,
+        )]);
+        config.profiles.get_mut("gateway").unwrap().models = vec!["allowed".into()];
+        let choice = |value: &str| mj_core::acp::SessionConfigChoice {
+            value: value.into(),
+            name: value.into(),
+            description: None,
+        };
+        let probe = |_id: String, model: Option<String>| {
+            let choices = ProfileConfig {
+                model: Some(model.unwrap_or_else(|| "default".into())),
+                models: vec![choice("default"), choice("allowed"), choice("hidden")],
+                efforts: vec![choice("high")],
+                observed_at: 0,
+            };
+            async move { Ok(choices) }
+        };
+        let values = |options: &mj_core::subagent::SubagentOptions| {
+            options
+                .models
+                .iter()
+                .map(|choice| choice.value.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let hidden = subagent_options_with(&config, "gateway", Some("hidden".into()), probe)
+            .await
+            .unwrap();
+        assert_eq!(values(&hidden), ["default", "allowed"]);
+        assert!(
+            hidden.efforts.is_empty(),
+            "a hidden model offers no efforts"
+        );
+
+        let allowed = subagent_options_with(&config, "gateway", Some("allowed".into()), probe)
+            .await
+            .unwrap();
+        assert_eq!(values(&allowed), ["allowed"]);
+        assert_eq!(allowed.efforts.len(), 1);
+    }
 
     // Hard-won: #1284: discovery staged Muse credentials outside its XDG home.
     #[test]
