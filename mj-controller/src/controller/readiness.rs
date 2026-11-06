@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::session_manager::StandaloneSession;
 use crate::targets::{self, CommandExecutor, CommandSpec, ProvisionStage, ProvisionStageGuard};
@@ -345,9 +345,9 @@ pub(super) async fn wait_for_native_session_in_stage(
 /// a look at the worker itself so the retry loop can tell a worker that is
 /// still starting from one that is never going to answer.
 trait StartingWorkerProbe {
-    type Relay;
+    type Relay: Send + 'static;
 
-    async fn connect(&self) -> Result<Self::Relay>;
+    fn connect(&self) -> impl std::future::Future<Output = Result<Self::Relay>> + Send + 'static;
 
     /// What the worker looks like on the target right now, or why the target
     /// could not tell.
@@ -365,8 +365,12 @@ struct StartingWorkerConnection<'a, E: CommandExecutor> {
 impl<E: CommandExecutor> StartingWorkerProbe for StartingWorkerConnection<'_, E> {
     type Relay = StandaloneSession;
 
-    async fn connect(&self) -> Result<StandaloneSession> {
-        StandaloneSession::connect_command(self.spec, self.session_id).await
+    fn connect(
+        &self,
+    ) -> impl std::future::Future<Output = Result<StandaloneSession>> + Send + 'static {
+        let spec = self.spec.clone();
+        let session_id = self.session_id.to_owned();
+        async move { StandaloneSession::connect_command(&spec, &session_id).await }
     }
 
     fn inspect(&self) -> Result<WorkerProbe> {
@@ -455,8 +459,9 @@ fn verdict(probe: &WorkerProbe) -> StartupVerdict {
     if let Some(exit) = &probe.exit {
         return StartupVerdict::Hopeless(probe.to_string(), exit.refusal.clone());
     }
-    // The launch clears the previous startup record, so a record is this
-    // launch's. With no record and no process, the worker may not have started
+    // The worker clears the previous startup record after claiming its root;
+    // a probe before then can still see the previous launch's records.
+    // With no record and no process, the worker may not have started
     // yet: a detached launch returns before its shell reaches the worker's own
     // command line, which a loaded machine can take seconds to do. That is not
     // evidence of death, so only the clock ends this wait.
@@ -473,7 +478,8 @@ fn verdict(probe: &WorkerProbe) -> StartupVerdict {
 /// keeps reaching new startup steps extends the initial window up to a ceiling.
 /// Before serving, a stalled step fails after the progress grace. Once serving
 /// is observed, only the ceiling ends the wait. A pending connection survives
-/// progress probes; failed connections retry after the connection interval.
+/// progress probes in its own task; failed connections retry after the connection
+/// interval. The first probe follows the first failure or the probe interval.
 async fn connect_to_starting_worker<P: StartingWorkerProbe>(
     probe: &mut P,
     executor: &impl CommandExecutor,
@@ -482,7 +488,7 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
     let started = tokio::time::Instant::now();
     let ceiling = started + std::cmp::max(timeout, WORKER_STARTUP_CONNECT_CEILING);
     let mut deadline = started + timeout;
-    let mut next_probe = started;
+    let mut next_probe = started + WORKER_STARTUP_PROBE_INTERVAL;
     let mut step: Option<String> = None;
     let mut last_error: Option<anyhow::Error> = None;
     let mut stalled_on: Option<String> = None;
@@ -490,7 +496,9 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
     let mut probe_error: Option<anyhow::Error> = None;
     let mut accepting = false;
     let mut reached_socket = false;
-    let mut attempt = Some(Box::pin(probe.connect()));
+    let mut attempt = Some(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+        probe.connect(),
+    )));
     let mut next_attempt = started;
     let mut first_attempt = true;
     loop {
@@ -500,7 +508,27 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
         let now = tokio::time::Instant::now();
         if now >= next_probe || now >= deadline {
             next_probe = now + WORKER_STARTUP_PROBE_INTERVAL;
-            match probe.inspect() {
+            let inspected = probe.inspect();
+            // The independently scheduled connection can finish while the
+            // synchronous target probe blocks. Use it before any failure or
+            // deadline decision based on that probe.
+            if attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.is_finished())
+            {
+                let result = attempt
+                    .take()
+                    .unwrap()
+                    .await
+                    .context("worker relay connection task failed")?;
+                match result {
+                    Ok(relay) => return Ok(relay),
+                    Err(error) => last_error = Some(error),
+                }
+                first_attempt = false;
+                next_attempt = tokio::time::Instant::now() + WORKER_STARTUP_CONNECT_INTERVAL;
+            }
+            match inspected {
                 Ok(found) => {
                     probe_error = None;
                     accepting |= found.accepting();
@@ -559,7 +587,9 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
         }
         let now = tokio::time::Instant::now();
         if attempt.is_none() && now >= next_attempt {
-            attempt = Some(Box::pin(probe.connect()));
+            attempt = Some(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+                probe.connect(),
+            )));
         }
         let mut wake = std::cmp::min(
             deadline,
@@ -569,7 +599,8 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
             wake = std::cmp::min(wake, next_attempt);
         }
         tokio::select! {
-            result = async { attempt.as_mut().unwrap().as_mut().await }, if attempt.is_some() => {
+            result = async { attempt.as_mut().unwrap().await }, if attempt.is_some() => {
+                let result = result.context("worker relay connection task failed")?;
                 match result {
                     Ok(relay) => return Ok(relay),
                     Err(error) => last_error = Some(error),
@@ -978,8 +1009,9 @@ mod tests {
     /// socket. It fails every connection until `accepts_after_attempts`,
     /// reports a recorded death once `death_after_attempts` attempts ran, and
     /// otherwise looks alive on the step `steps` names for that attempt.
+    #[derive(Clone)]
     struct FakeStartingWorker {
-        attempts: std::cell::Cell<usize>,
+        attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         accepts_after_attempts: Option<usize>,
         death_after_attempts: Option<usize>,
         vanishes_after_attempts: Option<usize>,
@@ -994,7 +1026,7 @@ mod tests {
         /// socket nobody accepts on.
         hangs: bool,
         connect_delay: Duration,
-        inspections: std::cell::Cell<usize>,
+        inspections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         /// Reports the step of the same number, counting from one, once that
         /// many attempts have run: a record that advances through its steps.
         steps: &'static [&'static str],
@@ -1005,7 +1037,7 @@ mod tests {
     impl FakeStartingWorker {
         fn never_accepts() -> Self {
             Self {
-                attempts: std::cell::Cell::new(0),
+                attempts: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 accepts_after_attempts: None,
                 death_after_attempts: None,
                 vanishes_after_attempts: None,
@@ -1015,7 +1047,7 @@ mod tests {
                 cancel_on_attempt: None,
                 hangs: false,
                 connect_delay: Duration::ZERO,
-                inspections: std::cell::Cell::new(0),
+                inspections: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 steps: &[],
                 not_started_until: None,
             }
@@ -1031,50 +1063,71 @@ mod tests {
     impl StartingWorkerProbe for FakeStartingWorker {
         type Relay = &'static str;
 
-        async fn connect(&self) -> Result<&'static str> {
-            tokio::time::sleep(self.connect_delay).await;
-            self.attempts.set(self.attempts.get() + 1);
-            if let Some(cancel) = &self.cancel_on_attempt {
-                cancel.store(true, std::sync::atomic::Ordering::Release);
-            }
-            match self.accepts_after_attempts {
-                Some(accepts) if self.attempts.get() >= accepts => Ok("relay"),
-                _ if self.hangs => std::future::pending().await,
-                _ => bail!("connect attempt {} refused", self.attempts.get()),
+        fn connect(
+            &self,
+        ) -> impl std::future::Future<Output = Result<&'static str>> + Send + 'static {
+            let worker = self.clone();
+            async move {
+                tokio::time::sleep(worker.connect_delay).await;
+                worker
+                    .attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some(cancel) = &worker.cancel_on_attempt {
+                    cancel.store(true, std::sync::atomic::Ordering::Release);
+                }
+                match worker.accepts_after_attempts {
+                    Some(accepts)
+                        if worker.attempts.load(std::sync::atomic::Ordering::SeqCst) >= accepts =>
+                    {
+                        Ok("relay")
+                    }
+                    _ if worker.hangs => std::future::pending().await,
+                    _ => bail!(
+                        "connect attempt {} refused",
+                        worker.attempts.load(std::sync::atomic::Ordering::SeqCst)
+                    ),
+                }
             }
         }
 
         fn inspect(&self) -> Result<WorkerProbe> {
-            self.inspections.set(self.inspections.get() + 1);
-            if self
-                .not_started_until
-                .is_some_and(|started| self.attempts.get() < started)
-            {
+            self.inspections
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.not_started_until.is_some_and(|started| {
+                self.attempts.load(std::sync::atomic::Ordering::SeqCst) < started
+            }) {
                 return Ok(WorkerProbe {
                     startup: None,
                     exit: None,
                     pids: vec![],
                 });
             }
-            let exited = self
-                .death_after_attempts
-                .is_some_and(|died_after| self.attempts.get() >= died_after);
-            let gone = self
-                .vanishes_after_attempts
-                .is_some_and(|gone_after| self.attempts.get() >= gone_after);
+            let exited = self.death_after_attempts.is_some_and(|died_after| {
+                self.attempts.load(std::sync::atomic::Ordering::SeqCst) >= died_after
+            });
+            let gone = self.vanishes_after_attempts.is_some_and(|gone_after| {
+                self.attempts.load(std::sync::atomic::Ordering::SeqCst) >= gone_after
+            });
             // The history holds only the steps reached so far; a stuck worker
             // has reached all of them.
             let reached = if self.stuck_step.is_some() {
                 self.steps
             } else {
-                &self.steps[..self.inspections.get().max(1).min(self.steps.len())]
+                &self.steps[..self
+                    .inspections
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    .max(1)
+                    .min(self.steps.len())]
             };
             let step = if let Some(step) = self.stuck_step {
                 Some(step.to_owned())
             } else if let Some(step) = reached.last() {
                 Some((*step).to_owned())
             } else if self.progressing {
-                Some(format!("step-{}", self.inspections.get()))
+                Some(format!(
+                    "step-{}",
+                    self.inspections.load(std::sync::atomic::Ordering::SeqCst)
+                ))
             } else {
                 None
             };
@@ -1110,7 +1163,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(relay, "relay");
-        assert_eq!(worker.attempts.get(), 4);
+        assert_eq!(worker.attempts.load(std::sync::atomic::Ordering::SeqCst), 4);
     }
     // Hard-won: b5e0edb9: startup waited through its timeout after the worker had recorded death
     #[tokio::test(start_paused = true)]
@@ -1128,7 +1181,7 @@ mod tests {
                 .await
                 .unwrap_err();
 
-        assert_eq!(worker.attempts.get(), 1);
+        assert_eq!(worker.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(started.elapsed() < WORKER_STARTUP_CONNECT_INTERVAL);
         let reported = format!("{error:#}");
         assert!(
@@ -1182,7 +1235,7 @@ mod tests {
                 .await
                 .unwrap_err();
 
-        assert_eq!(worker.attempts.get(), 1);
+        assert_eq!(worker.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(
             error
                 .to_string()
@@ -1237,7 +1290,7 @@ mod tests {
                 .await
                 .unwrap_err();
 
-        assert_eq!(worker.attempts.get(), 1);
+        assert_eq!(worker.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(started.elapsed() < WORKER_STARTUP_CONNECT_INTERVAL);
         let reported = format!("{error:#}");
         assert!(
@@ -1284,16 +1337,16 @@ mod tests {
                 .unwrap_err();
 
         assert!(
-            worker.attempts.get() > 1,
+            worker.attempts.load(std::sync::atomic::Ordering::SeqCst) > 1,
             "{} attempts",
-            worker.attempts.get()
+            worker.attempts.load(std::sync::atomic::Ordering::SeqCst)
         );
         assert!(started.elapsed() >= WORKER_STARTUP_CONNECT_TIMEOUT);
         let reported = format!("{error:#}");
         assert!(
             reported.contains(&format!(
                 "connect attempt {} refused",
-                worker.attempts.get()
+                worker.attempts.load(std::sync::atomic::Ordering::SeqCst)
             )),
             "{reported}"
         );
@@ -1328,6 +1381,69 @@ mod tests {
         );
     }
 
+    // Hard-won: ee2e05027: probing before connecting consumed the previous worker's death record
+    #[tokio::test(start_paused = true)]
+    async fn startup_connect_tries_connection_before_reading_old_death_record() {
+        let executor = CancellableProcessExecutor::new(std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        ));
+        let mut worker = FakeStartingWorker {
+            death_after_attempts: Some(0),
+            ..FakeStartingWorker::accepting_after(1)
+        };
+        assert_eq!(
+            connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
+                .await
+                .unwrap(),
+            "relay"
+        );
+        assert_eq!(
+            worker.inspections.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    // Hard-won: ee2e05027: a synchronous startup probe stopped polling an otherwise successful connection
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_connect_completes_during_a_blocking_probe_past_the_deadline() {
+        struct BlockingProbe;
+        impl StartingWorkerProbe for BlockingProbe {
+            type Relay = &'static str;
+
+            // An `async fn` would borrow `self`; the trait needs a 'static future.
+            #[allow(clippy::manual_async_fn)]
+            fn connect(
+                &self,
+            ) -> impl std::future::Future<Output = Result<Self::Relay>> + Send + 'static
+            {
+                async {
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    Ok("relay")
+                }
+            }
+
+            fn inspect(&self) -> Result<WorkerProbe> {
+                // The first probe starts after 3 s. The connection completes at
+                // 4 s while this probe blocks, and the deadline is 4.5 s.
+                tokio::task::block_in_place(|| std::thread::sleep(Duration::from_secs(2)));
+                Ok(WorkerProbe {
+                    startup: None,
+                    exit: None,
+                    pids: vec![41],
+                })
+            }
+        }
+        let executor = CancellableProcessExecutor::new(std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        ));
+        assert_eq!(
+            connect_to_starting_worker(&mut BlockingProbe, &executor, Duration::from_millis(4500))
+                .await
+                .unwrap(),
+            "relay"
+        );
+    }
+
     // Hard-won: da519db5: its per-attempt cut-off cancelled every connection slower than one probe interval
     #[tokio::test(start_paused = true)]
     async fn startup_connect_preserves_slow_attempt_after_serving() {
@@ -1346,7 +1462,7 @@ mod tests {
                 .unwrap(),
             "relay"
         );
-        assert_eq!(worker.attempts.get(), 1);
+        assert_eq!(worker.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// A hang after serving waits to the ceiling and names the last step,
