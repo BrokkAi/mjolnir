@@ -146,6 +146,9 @@ pub(crate) struct NewArgs {
     /// Omitted uses Native.
     #[arg(long)]
     subagents: Option<String>,
+    /// Oracle availability for this session.
+    #[arg(long, value_parser = ["enabled", "disabled"])]
+    oracle: Option<String>,
     /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
     subagent_straightforward: Option<String>,
@@ -158,6 +161,12 @@ pub(crate) struct NewArgs {
     /// Override subtle sub-agent effort (requires --subagent-subtle).
     #[arg(long)]
     subagent_subtle_effort: Option<String>,
+    /// Oracle model for this session, independent of delegation.
+    #[arg(long)]
+    subagent_oracle: Option<String>,
+    /// Oracle effort; requires --subagent-oracle.
+    #[arg(long, requires = "subagent_oracle")]
+    subagent_oracle_effort: Option<String>,
     /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_model: Option<String>,
@@ -1067,6 +1076,29 @@ fn new_subagent_policy(args: &NewArgs) -> Result<Option<mj_core::subagent::Subag
     )
 }
 
+pub(crate) fn oracle_override(
+    model: Option<&str>,
+    effort: Option<&str>,
+    enabled: Option<&str>,
+) -> Result<Option<mj_core::config::SubagentChoice>> {
+    if effort.is_some() && model.is_none() {
+        bail!("--subagent-oracle-effort requires --subagent-oracle");
+    }
+    if effort == Some("adaptive") {
+        bail!("adaptive oracle effort is not supported");
+    }
+    if model.is_some() && enabled == Some("disabled") {
+        bail!("--subagent-oracle cannot be used with --oracle disabled");
+    }
+    if model.is_some_and(|model| model.trim().is_empty()) {
+        bail!("--subagent-oracle requires a model name");
+    }
+    Ok(model.map(|model| mj_core::config::SubagentChoice {
+        model: model.to_owned(),
+        effort: effort.map(str::to_owned),
+    }))
+}
+
 pub(crate) fn subagent_policy(
     mode: Option<&str>,
     straightforward: Option<&str>,
@@ -1203,6 +1235,12 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let request = StartSessionRequest {
         remember_container_size: false,
         subagents: new_subagent_policy(&args)?,
+        oracle: args.oracle.as_deref().map(|choice| choice == "enabled"),
+        oracle_choice: oracle_override(
+            args.subagent_oracle.as_deref(),
+            args.subagent_oracle_effort.as_deref(),
+            args.oracle.as_deref(),
+        )?,
         review: new_session_review(&args)?,
         no_project_memory: args.no_project_memory,
         no_github_events: args.no_github_events,
@@ -3184,6 +3222,56 @@ mod tests {
         };
         for command in ["new", "move"] {
             let parse = |extra: &[&str]| parse_command(command, extra);
+            let oracle = |extra: &[&str]| {
+                let mut argv = vec!["mj", command, "--profile", "codex", "--target", "raw"];
+                if command == "new" {
+                    argv.extend(["--project-directory", "/srv/project"]);
+                } else {
+                    argv.extend(["--session", "session"]);
+                }
+                argv.extend_from_slice(extra);
+                let cli = Cli::try_parse_from(argv).map_err(anyhow::Error::from)?;
+                match cli.command {
+                    Some(Command::New(args)) => oracle_override(
+                        args.subagent_oracle.as_deref(),
+                        args.subagent_oracle_effort.as_deref(),
+                        args.oracle.as_deref(),
+                    ),
+                    Some(Command::Move(args)) => oracle_override(
+                        args.subagent_oracle.as_deref(),
+                        args.subagent_oracle_effort.as_deref(),
+                        args.oracle.as_deref(),
+                    ),
+                    _ => unreachable!(),
+                }
+            };
+            assert_eq!(
+                oracle(&[
+                    "--subagents",
+                    "native",
+                    "--subagent-oracle",
+                    "advisor",
+                    "--subagent-oracle-effort",
+                    "high"
+                ])
+                .unwrap(),
+                Some(mj_core::config::SubagentChoice {
+                    model: "advisor".into(),
+                    effort: Some("high".into())
+                })
+            );
+            assert!(oracle(&["--subagent-oracle-effort", "high"]).is_err());
+            assert!(
+                oracle(&[
+                    "--subagent-oracle",
+                    "advisor",
+                    "--subagent-oracle-effort",
+                    "adaptive"
+                ])
+                .is_err()
+            );
+            assert!(oracle(&["--oracle", "disabled", "--subagent-oracle", "advisor"]).is_err());
+            assert!(oracle(&["--oracle", "invalid"]).is_err());
             use mj_core::subagent::SubagentPolicy;
             assert_eq!(parse(&[]).unwrap(), None);
             assert_eq!(

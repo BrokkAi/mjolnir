@@ -398,7 +398,6 @@ impl DashboardState {
         .unwrap_or_default()
         .to_lowercase();
         [
-            session.display_title().to_lowercase(),
             session.listed_title().to_lowercase(),
             branch,
             session.id.to_lowercase(),

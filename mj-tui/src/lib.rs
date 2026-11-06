@@ -318,6 +318,8 @@ pub enum DashboardAction {
         remember_container_size: bool,
         create_managed_worktree: Option<bool>,
         subagents: Option<mj_core::subagent::SubagentPolicy>,
+        oracle: Option<bool>,
+        oracle_choice: Option<mj_core::config::SubagentChoice>,
         /// The session's automatic turn-review choice. `None` follows the
         /// global `[review]` settings.
         review: Option<mj_core::config::SessionReview>,
@@ -416,6 +418,8 @@ pub enum DashboardAction {
     MoveSession {
         /// Delegation policy for the destination; `None` keeps the session's.
         subagents: Option<mj_core::subagent::SubagentPolicy>,
+        oracle: Option<bool>,
+        oracle_choice: Option<mj_core::config::SubagentChoice>,
         workspace_selection: mj_core::move_workspace::WorkspaceSelection,
         session_id: String,
         profile_id: String,

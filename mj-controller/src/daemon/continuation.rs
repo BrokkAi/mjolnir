@@ -353,17 +353,45 @@ fn check_eligible(view: &ManagedSessionView) -> bool {
         })
 }
 
+/// Who may act on a session now. One call reads the continuation setting, the
+/// lifecycle entry and the Move owner together under one owner lock, so a
+/// caller that needs two answers derives both from the same instant. Reading
+/// them separately lets a failed Move release the session in between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Claim {
+    /// Continuation is on and nothing else owns the session.
+    Allowed,
+    /// A Move owns the session. A timed quota recovery outlasts one: a
+    /// completed Move changes the profile, which clears the recovery, and a
+    /// failed one leaves the quota stop real, so the retry stands.
+    Move,
+    /// Continuation is off, the session is gone, or another lifecycle
+    /// operation owns it.
+    Blocked,
+}
+
+fn claim(state: &RuntimeState, session: &str) -> Claim {
+    let owner = state.owner();
+    let lifecycle = owner.lifecycle.get(session);
+    if lifecycle.is_some_and(|active| active.kind == LifecycleKind::Move)
+        || crate::controller::move_session::move_owns_session(session)
+    {
+        return Claim::Move;
+    }
+    let controller = owner.controller();
+    if lifecycle.is_none()
+        && controller.config.automatic_continuation_enabled()
+        && controller.state.sessions.contains_key(session)
+        && !controller.state.subagents.contains_key(session)
+    {
+        Claim::Allowed
+    } else {
+        Claim::Blocked
+    }
+}
+
 fn allowed(state: &RuntimeState, session: &str) -> bool {
-    let enabled = {
-        let controller_owner = state.owner();
-        let controller = controller_owner.controller();
-        controller.config.automatic_continuation_enabled()
-            && controller.state.sessions.contains_key(session)
-            && !controller.state.subagents.contains_key(session)
-    };
-    enabled
-        && !crate::controller::move_session::move_owns_session(session)
-        && !state.owner().lifecycle.contains_key(session)
+    claim(state, session) == Claim::Allowed
 }
 
 #[derive(Clone)]
@@ -371,6 +399,8 @@ struct Environment {
     log: Option<mj_core::jev::DecisionLog>,
     control: SessionManagerControl,
     allowed: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    /// The same decision as `allowed`, with a Move told apart; see [`Claim`].
+    claim: Arc<dyn Fn(&str) -> Claim + Send + Sync>,
     live: Arc<dyn Fn() -> BTreeSet<String> + Send + Sync>,
     review: ReviewObserver,
     quota: quota::Resolver,
@@ -504,6 +534,10 @@ pub(super) fn spawn(
         allowed: {
             let state = state.clone();
             Arc::new(move |id| allowed(&state, id))
+        },
+        claim: {
+            let state = state.clone();
+            Arc::new(move |id| claim(&state, id))
         },
         live: {
             let state = state.clone();
@@ -1013,10 +1047,19 @@ fn spawn_with_gate(
                         if pending.contains_key(id) || retry_after.get(id).is_some_and(|t| *t > std::time::Instant::now()) { continue; }
                         let Some(snapshot) = &view.snapshot else { continue; };
                         let Some(recovery) = snapshot.operational.continuation.quota_recovery.as_ref().filter(|r| !r.submitted) else { continue; };
-                        let clear = (recovery.retry_at_ms.is_some() && !(environment.allowed)(id)) || (environment.profile)(id).as_deref() != Some(&recovery.profile_id);
+                        // A timed record survives a Move; any other owner of the session clears it.
+                        // One snapshot feeds both decisions: a Move that fails between two reads would clear a record whose session is free again.
+                        let claim = (environment.claim)(id);
+                        let clear = (recovery.retry_at_ms.is_some() && claim == Claim::Blocked) || (environment.profile)(id).as_deref() != Some(&recovery.profile_id);
                         if !clear && recovery.retry_at_ms.is_none_or(|t| t > mj_core::clock::epoch_millis()) { continue; }
                         // Due from here on: every refusal to submit is named, once a minute.
                         let mut refusal = if clear { Vec::new() } else { quota_resume_blockers(view) };
+                        match claim {
+                            Claim::Allowed => {}
+                            Claim::Move if !clear => refusal.push("a Move owns the session"),
+                            Claim::Blocked if !clear => refusal.push("continuation is off or another lifecycle operation owns the session"),
+                            _ => {}
+                        }
                         if clear && !view.connected { refusal.push("session is not connected"); }
                         if !refusal.is_empty() {
                             skips.note(environment.log.as_ref(), id, recovery, &refusal);

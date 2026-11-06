@@ -57,6 +57,10 @@ pub enum ControllerAction {
         /// Omitted uses the selected profile's subagent setting.
         #[serde(default)]
         subagents: Option<mj_core::subagent::SubagentPolicy>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        oracle: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        oracle_choice: Option<mj_core::config::SubagentChoice>,
         /// Turn review for this session. Omitted follows `[review]`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[serde(deserialize_with = "deserialize_session_review")]

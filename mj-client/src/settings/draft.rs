@@ -65,7 +65,7 @@ pub fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> 
         .as_object_mut()
         .unwrap()
         .remove("_review_action_reason");
-    for task in ["straightforward", "subtle"] {
+    for task in ["straightforward", "subtle", "oracle"] {
         if draft["subagents"][task]["model"]
             .as_str()
             .is_none_or(|m| m.trim().is_empty())

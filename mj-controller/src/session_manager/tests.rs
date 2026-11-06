@@ -2946,6 +2946,8 @@ async fn reconnect_retries_message_only_admission_after_lost_open_reply() {
 #[cfg(unix)]
 fn register_leased_relay_session() {
     crate::database::save_session(&mj_core::state::SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,

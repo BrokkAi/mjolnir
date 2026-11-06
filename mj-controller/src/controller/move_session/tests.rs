@@ -343,6 +343,8 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             state,
         };
         let selection = MoveSelection {
+            oracle: None,
+            oracle_choice: None,
             subagents: None,
             workspace: Default::default(),
             clear_resource_allocation: false,
@@ -425,6 +427,8 @@ fn move_configuration_fingerprint_changes_when_destination_changes() {
         },
     };
     let selection = mj_core::state::MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
@@ -488,6 +492,8 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "unknown target",
             mj_core::state::MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
                 clear_resource_allocation: false,
@@ -502,6 +508,8 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "unknown profile",
             mj_core::state::MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
                 clear_resource_allocation: false,
@@ -516,6 +524,8 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "invalid resource allocation",
             mj_core::state::MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
                 clear_resource_allocation: false,
@@ -533,6 +543,8 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "delegation policy the destination harness cannot run",
             mj_core::state::MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: Some(mj_core::subagent::SubagentPolicy::None),
                 workspace: Default::default(),
                 clear_resource_allocation: false,
@@ -547,6 +559,8 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "unconfigured Mjolnir delegation",
             mj_core::state::MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
                     straightforward: None,
                     subtle: None,
@@ -634,6 +648,8 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         .unwrap()
         .block_on(controller.prepare_move_session_controlled(
             mj_core::state::MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
                 clear_resource_allocation: false,
@@ -653,6 +669,78 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
             .unwrap()
             .is_none()
     );
+}
+
+/// Records what a Move tells the user about decisions it made for them.
+struct NoticeExecutor(std::sync::Mutex<Vec<String>>);
+
+impl CommandExecutor for NoticeExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        panic!("the Move unexpectedly ran {}", command.program);
+    }
+
+    fn notify_notice(&self, notice: &str) {
+        self.0.lock().unwrap().push(notice.to_owned());
+    }
+}
+
+#[test]
+fn only_an_explicit_oracle_request_without_a_model_is_turned_off_with_a_notice() {
+    let short = "only_an_explicit_oracle_request_without_a_model_is_turned_off_with_a_notice";
+    if !isolated_test_child(&test_name(short), PREPARE_PREFLIGHT_CHILD) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let home = tempfile::tempdir().unwrap();
+    let mut config = resume_compatibility_config();
+    add_codex_profile(&mut config, home.path());
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let mut running = checkpoint_test_session(session_id);
+    running.state = SessionState::Running;
+    running.oracle = false;
+    let state = State {
+        sessions: [(session_id.into(), running)].into_iter().collect(),
+        ..State::default()
+    };
+    crate::database::save_state(&state).unwrap();
+    let controller = Controller { config, state };
+    let selection = |oracle, oracle_choice| mj_core::state::MoveSelection {
+        oracle,
+        oracle_choice,
+        subagents: None,
+        workspace: Default::default(),
+        clear_resource_allocation: false,
+        session_id: session_id.into(),
+        profile_id: Some("codex".into()),
+        // The Move stops at its unknown target, after the oracle decision.
+        target_template_id: Some("missing".into()),
+        additional_mounts: None,
+        resource_allocation: None,
+    };
+    let notices = |selection| {
+        let executor = NoticeExecutor(Default::default());
+        let error = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(controller.prepare_move_session_controlled(selection, &executor))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("unknown destination target"));
+        executor.0.into_inner().unwrap()
+    };
+    // Leaving the choice alone, and turning Oracle off, are never reported.
+    assert!(notices(selection(None, None)).is_empty());
+    assert!(notices(selection(Some(false), None)).is_empty());
+    // Asking for it with no model anywhere is.
+    assert_eq!(
+        notices(selection(Some(true), None)),
+        [mj_core::state::ORACLE_UNAVAILABLE_NOTICE]
+    );
+    let override_choice = mj_core::config::SubagentChoice {
+        model: "advisor".into(),
+        effort: None,
+    };
+    assert!(notices(selection(None, Some(override_choice))).is_empty());
 }
 
 fn queued_prompt(command_id: &str) -> MaterializedQueuedPrompt {
@@ -793,6 +881,8 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
 
     let mut controller = Controller { config, state };
     let selection = MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
@@ -1032,6 +1122,8 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
         state: state.clone(),
     };
     let selection = mj_core::state::MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
@@ -1131,6 +1223,8 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
     source.additional_mounts = Vec::new();
     source.resource_allocation = None;
     let baseline = mj_core::state::MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
@@ -1178,6 +1272,8 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "another local bare target",
             mj_core::state::MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
                 target_template_id: Some("local-bare-two".into()),
@@ -1190,6 +1286,8 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "different target template",
             mj_core::state::MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
                 target_template_id: Some("ssh-bare".into()),
@@ -1202,6 +1300,8 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "different attached mounts",
             mj_core::state::MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
                 additional_mounts: another_mount,
@@ -1214,6 +1314,8 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "different resource allocation",
             mj_core::state::MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
                 resource_allocation: another_allocation,
@@ -1226,6 +1328,8 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "clearing absent resources is a no-op",
             mj_core::state::MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
                 clear_resource_allocation: true,
@@ -1281,6 +1385,8 @@ fn a_move_that_only_changes_delegation_still_restarts_the_session() {
     source.state = SessionState::Running;
     source.subagents = Some(SubagentPolicy::Native);
     let same = mj_core::state::MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
@@ -1301,6 +1407,8 @@ fn a_move_that_only_changes_delegation_still_restarts_the_session() {
     assert!(super::move_changes_nothing(&source, &explicit_same));
 
     let to_mjolnir = mj_core::state::MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: Some(SubagentPolicy::Mjolnir {
             straightforward: None,
             subtle: None,
@@ -1326,9 +1434,13 @@ fn in_place_move_retains_running_and_parked_children_and_roleless_refusal_names_
     let mut running = parent.clone();
     running.id = "child-running".into();
     running.state = SessionState::Running;
+    // The Move text names a child as the session list does, so a rename wins
+    // over the task name the relation holds.
+    running.session_title_override = Some("Renamed implementer".into());
     let mut parked = parent.clone();
     parked.id = "child-parked".into();
     parked.state = SessionState::Parked;
+    parked.session_title_override = Some("review the tests".into());
     let relation = |child_session_id: &str, task_name: &str| mj_core::subagent::SubagentRecord {
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
@@ -1378,9 +1490,19 @@ fn in_place_move_retains_running_and_parked_children_and_roleless_refusal_names_
     let refusal =
         super::roleless_move_children_error(&super::live_move_children(&state, &parent.id))
             .unwrap();
-    assert!(refusal.contains("implement the change"));
+    assert!(refusal.contains("Renamed implementer"));
     assert!(refusal.contains("child-running"));
+    assert!(!refusal.contains("implement the change"));
     assert!(!refusal.contains("review the tests"));
+
+    // A live oracle alone never refuses a Move to a harness without parent
+    // tools; the ordinary stop path stops it.
+    let mut oracle_only = state.clone();
+    oracle_only.subagents.get_mut(&running.id).unwrap().kind =
+        mj_core::subagent::SubagentKind::Oracle;
+    assert!(super::live_move_children(&oracle_only, &parent.id).is_empty());
+    // Nor is it ever named to the primary after an in-place swap.
+    assert_eq!(super::move_children(&oracle_only, &parent.id).len(), 1);
 
     let mut parked_only = state;
     parked_only.sessions.get_mut(&running.id).unwrap().state = SessionState::Parked;
@@ -1479,6 +1601,8 @@ pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord)
         source_checkpoint_only: false,
         operation_id: "move-source-recovery".into(),
         selection: MoveSelection {
+            oracle: None,
+            oracle_choice: None,
             subagents: None,
             workspace: Default::default(),
             clear_resource_allocation: false,
@@ -1843,6 +1967,8 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     crate::database::save_state(&state).unwrap();
     let controller = Controller { config, state };
     let selection = mj_core::state::MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
@@ -2334,6 +2460,8 @@ fn a_move_is_blocked_before_copying_when_an_rsync_rejects_partial_dir() {
     crate::database::save_state(&state).unwrap();
     let controller = Controller { config, state };
     let selection = mj_core::state::MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
@@ -2717,6 +2845,8 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
 #[cfg(unix)]
 fn in_place_operation(controller: &Controller, destination_profile: &str) -> MoveOperation {
     let selection = MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
@@ -2907,6 +3037,7 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
     let mut child = fixture.controller.state.sessions[parent_id].clone();
     child.id = "live-child".into();
     child.state = SessionState::Running;
+    child.session_title_override = Some("finish the migration".into());
     child.target = Some(TargetLocator::LocalBare {
         worker_root: fixture._directory.path().join("live-child"),
     });
@@ -2915,7 +3046,7 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         reviewer_launch: None,
         child_session_id: child.id.clone(),
         parent_session_id: parent_id.into(),
-        task_name: "finish the migration".into(),
+        task_name: "spawned as an audit".into(),
         profile_id: "codex".into(),
         model: None,
         effort: None,
@@ -3094,6 +3225,113 @@ fn recovery_from_in_place_closing_source_keeps_children_and_skips_stop_hook() {
     assert!(context.contains("wait that was in progress"), "{context}");
 }
 
+/// The oracle choice a Move was sealed with is what the destination session
+/// records, in memory and in the store, and a sealed retry must send it again.
+#[cfg(unix)]
+#[test]
+fn in_place_move_records_its_oracle_selection_on_the_session() {
+    let name = test_name("in_place_move_records_its_oracle_selection_on_the_session");
+    if std::env::var_os("MJ_MOVE_ORACLE_SELECTION_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_MOVE_ORACLE_SELECTION_CHILD", "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let InPlaceFixture {
+        _directory,
+        worker_root,
+        mut controller,
+        ..
+    } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let choice = mj_core::config::SubagentChoice {
+        model: "advisor".into(),
+        effort: Some("high".into()),
+    };
+    let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+    // Turning Oracle off while naming a model keeps the model for later.
+    operation.selection.oracle = Some(false);
+    operation.selection.oracle_choice = Some(choice.clone());
+    operation.configuration_fingerprint = controller
+        .move_configuration_fingerprint(&operation.selection)
+        .unwrap();
+    run_in_place_move(
+        &mut controller,
+        &mut operation,
+        &worker_root,
+        &RecordingProcessExecutor::default(),
+    )
+    .unwrap();
+
+    let moved = &controller.state.sessions[LATCH_RELAY_SESSION];
+    assert!(!moved.oracle);
+    assert_eq!(moved.oracle_choice, Some(choice.clone()));
+    let stored = crate::database::load_session_record(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert!(!stored.oracle);
+    assert_eq!(stored.oracle_choice, Some(choice));
+}
+
+/// A Move that stopped the oracle leaves the same entry a suspend does, and
+/// the primary's first prompt after the swap says so without naming the oracle.
+#[cfg(unix)]
+#[test]
+fn in_place_move_tells_the_primary_its_oracle_was_stopped() {
+    let name = test_name("in_place_move_tells_the_primary_its_oracle_was_stopped");
+    if std::env::var_os("MJ_MOVE_ORACLE_STOPPED_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_MOVE_ORACLE_STOPPED_CHILD", "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let InPlaceFixture {
+        _directory,
+        worker_root,
+        mut controller,
+        ..
+    } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    crate::database::record_stopped_subagents(
+        LATCH_RELAY_SESSION,
+        &[mj_core::subagent::StoppedSubagent::oracle()],
+    )
+    .unwrap();
+    let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+    run_in_place_move(
+        &mut controller,
+        &mut operation,
+        &worker_root,
+        &RecordingProcessExecutor::default(),
+    )
+    .unwrap();
+
+    let relay_snapshot: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+        &fs::read(worker_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
+    let context = relay_snapshot.pending_prompt_context.unwrap().text;
+    assert!(
+        context.contains(mj_core::subagent::STOPPED_ORACLE_LINE),
+        "{context}"
+    );
+    assert!(!context.contains("child_session_id"), "{context}");
+    assert!(
+        crate::database::load_stopped_subagents(LATCH_RELAY_SESSION)
+            .unwrap()
+            .is_empty(),
+        "the delivered entry is forgotten"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn in_place_move_reopens_message_only_queue_after_parent_policy_becomes_native() {
@@ -3229,6 +3467,128 @@ fn in_place_move_reopens_gate_after_lost_admission_close_reply() {
         SessionState::Running
     );
     assert_eq!(executor.move_stop_calls(), 0);
+    let queue: serde_json::Value =
+        serde_json::from_slice(&fs::read(worker_root.join("subagents.json")).unwrap()).unwrap();
+    assert_eq!(queue["mutating_admission_open"], true, "{queue}");
+}
+
+/// A Native source has no parent tools, but its worker still has a request
+/// queue (`ask_oracle`, `request_review`), so an in-place Move closes it first.
+#[cfg(unix)]
+#[test]
+fn in_place_move_drains_the_queue_of_a_native_source() {
+    let name = test_name("in_place_move_drains_the_queue_of_a_native_source");
+    if std::env::var_os("MJ_MOVE_NATIVE_DRAIN_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_MOVE_NATIVE_DRAIN_CHILD", "1")
+            .env(
+                crate::controller::checkpoint::tests::LATCH_RECORD_SUBAGENT_ADMISSION,
+                "1",
+            )
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let InPlaceFixture {
+        _directory,
+        worker_root,
+        mut controller,
+        ..
+    } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let source = controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap();
+    source.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+    crate::database::save_session(source).unwrap();
+    let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+    run_in_place_move(
+        &mut controller,
+        &mut operation,
+        &worker_root,
+        &RecordingProcessExecutor::default(),
+    )
+    .unwrap();
+
+    let queue: serde_json::Value =
+        serde_json::from_slice(&fs::read(worker_root.join("subagents.json")).unwrap()).unwrap();
+    assert_eq!(queue["admission_transitions"][0], false, "{queue}");
+    assert_eq!(queue["mutating_admission_open"], true, "{queue}");
+}
+
+/// The same source, failing after the close, gets its queue back.
+#[cfg(unix)]
+#[test]
+fn in_place_move_reopens_the_queue_of_a_native_source_after_a_failure() {
+    let name = test_name("in_place_move_reopens_the_queue_of_a_native_source_after_a_failure");
+    if std::env::var_os("MJ_MOVE_NATIVE_REOPEN_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_MOVE_NATIVE_REOPEN_CHILD", "1")
+            .env(
+                crate::controller::checkpoint::tests::LATCH_RECORD_SUBAGENT_ADMISSION,
+                "1",
+            )
+            .env(
+                crate::controller::checkpoint::tests::LATCH_DROP_ADMISSION_CLOSE_REPLY,
+                "1",
+            )
+            .env(
+                crate::controller::checkpoint::tests::LATCH_CHECKPOINT_ONLY,
+                "1",
+            )
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let InPlaceFixture {
+        _directory,
+        worker_root,
+        mut controller,
+        ..
+    } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let source = controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap();
+    source.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+    crate::database::save_session(source).unwrap();
+    let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+    let executor = RecordingProcessExecutor::default();
+    let source_relay = seed_source_relay(&worker_root);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(async {
+        let channels = start_source_relay_manager(&source_relay);
+        let result = controller
+            .execute_move(
+                &mut operation,
+                None,
+                &executor,
+                &channels.control,
+                MoveSourceRelay::default(),
+            )
+            .await;
+        channels.shutdown.shutdown().await.unwrap();
+        result
+    });
+    let error = result.unwrap_err();
+    assert!(
+        source_relay
+            .join("drop-admission-close-reply-once")
+            .exists(),
+        "the Native source's queue was closed before the failure; Move error: {error:#}"
+    );
     let queue: serde_json::Value =
         serde_json::from_slice(&fs::read(worker_root.join("subagents.json")).unwrap()).unwrap();
     assert_eq!(queue["mutating_admission_open"], true, "{queue}");
@@ -4686,6 +5046,8 @@ fn in_place_move_retry_that_finds_its_handoff_gone_leaves_the_session_destroyabl
 #[test]
 fn a_refused_sealed_move_retry_names_what_differs_and_what_to_pass() {
     let sealed = mj_core::state::MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: mj_core::move_workspace::WorkspaceSelection {
             exclusions: Vec::new(),
@@ -4703,6 +5065,16 @@ fn a_refused_sealed_move_retry_names_what_differs_and_what_to_pass() {
     let refusal = super::sealed_selection_difference(&sealed, &requested);
     assert!(refusal.contains("large-transfer"), "{refusal}");
     assert!(refusal.contains("--allow-large-transfer"), "{refusal}");
+    requested = sealed.clone();
+    requested.oracle = Some(false);
+    let refusal = super::sealed_selection_difference(&sealed, &requested);
+    assert!(refusal.contains("oracle choice"), "{refusal}");
+    requested = sealed.clone();
+    requested.oracle_choice = Some(mj_core::config::SubagentChoice {
+        model: "advisor".into(),
+        effort: None,
+    });
+    assert!(super::sealed_selection_difference(&sealed, &requested).contains("oracle choice"));
     requested = sealed.clone();
     requested.target_template_id = Some("podman".into());
     let refusal = super::sealed_selection_difference(&sealed, &requested);
@@ -4991,6 +5363,8 @@ fn ec2_move_preview_defers_destination_checks_and_resolves_inherited_container_s
     crate::database::save_state(&state).unwrap();
     let controller = Controller { config, state };
     let selection = mj_core::state::MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         session_id: id.into(),
         target_template_id: Some("ec2".into()),
         profile_id: Some("codex".into()),

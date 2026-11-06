@@ -117,7 +117,7 @@
                   "subagents"
                 ],
                 "label": "Sub-agents",
-                "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+                "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
                 "control": "page",
                 "summary": "Up to 6 at once"
               },
@@ -375,6 +375,22 @@
           ],
           "efforts": [],
           "unavailable": []
+        },
+        "oracle": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
         }
       }
     }
@@ -469,7 +485,7 @@
                   "subagents"
                 ],
                 "label": "Sub-agents",
-                "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+                "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
                 "control": "page",
                 "summary": "Up to 6 at once"
               },
@@ -596,6 +612,22 @@
           ],
           "efforts": [],
           "unavailable": []
+        },
+        "oracle": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
         }
       }
     }
@@ -653,6 +685,22 @@
           "unavailable": []
         },
         "subtle": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
+        },
+        "oracle": {
           "models": [
             {
               "value": "opus",
@@ -820,7 +868,7 @@
                   "subagents"
                 ],
                 "label": "Sub-agents",
-                "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+                "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
                 "control": "page",
                 "summary": "Up to 6 at once"
               },
@@ -947,6 +995,22 @@
           ],
           "efforts": [],
           "unavailable": []
+        },
+        "oracle": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
         }
       }
     }
@@ -968,7 +1032,7 @@
           "Settings",
           "Sub-agents"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
         "groups": [
           {
             "rows": [
@@ -1030,6 +1094,30 @@
                     "label": "sonnet"
                   }
                 ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "oracle",
+                  "model"
+                ],
+                "label": "Oracle model",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
               }
             ]
           }
@@ -1054,6 +1142,22 @@
           "unavailable": []
         },
         "subtle": {
+          "models": [
+            {
+              "value": "opus",
+              "name": "Opus",
+              "description": null
+            },
+            {
+              "value": "sonnet",
+              "name": "Sonnet",
+              "description": null
+            }
+          ],
+          "efforts": [],
+          "unavailable": []
+        },
+        "oracle": {
           "models": [
             {
               "value": "opus",
@@ -1112,7 +1216,7 @@
           "Settings",
           "Sub-agents"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
         "groups": [
           {
             "rows": [
@@ -1158,6 +1262,30 @@
                   "model"
                 ],
                 "label": "Subtle model",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "oracle",
+                  "model"
+                ],
+                "label": "Oracle model",
                 "control": "choice",
                 "value": null,
                 "choices": [
@@ -1224,7 +1352,7 @@
           "Settings",
           "Sub-agents"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
         "groups": [
           {
             "rows": [
@@ -1308,6 +1436,30 @@
                   {
                     "value": "max",
                     "label": "max"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "oracle",
+                  "model"
+                ],
+                "label": "Oracle model",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
                   }
                 ]
               }
@@ -1371,7 +1523,7 @@
           "Settings",
           "Sub-agents"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
         "groups": [
           {
             "rows": [
@@ -1481,6 +1633,30 @@
                     "label": "max"
                   }
                 ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "oracle",
+                  "model"
+                ],
+                "label": "Oracle model",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
               }
             ]
           }
@@ -1530,7 +1706,7 @@
           "Settings",
           "Sub-agents"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
         "groups": [
           {
             "rows": [
@@ -1638,6 +1814,30 @@
                   {
                     "value": "max",
                     "label": "max"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "oracle",
+                  "model"
+                ],
+                "label": "Oracle model",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
                   }
                 ]
               }
@@ -1695,7 +1895,7 @@
           "Settings",
           "Sub-agents"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
         "groups": [
           {
             "rows": [
@@ -1803,6 +2003,30 @@
                   {
                     "value": "max",
                     "label": "max"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "oracle",
+                  "model"
+                ],
+                "label": "Oracle model",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "None"
+                  },
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
                   }
                 ]
               }

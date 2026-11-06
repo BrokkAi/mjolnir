@@ -1413,7 +1413,7 @@ pub(crate) async fn run_server(
                     if publication.is_err()
                         && let Some(control) = action_cancellations.get(&started.action_id)
                     {
-                        control.request_cancel();
+                        control.request_cancel("phone action publication failed");
                     }
                     // The phone asked for a session, and now there is one to
                     // point at: that is what its request was waiting for.
@@ -1565,7 +1565,7 @@ pub(crate) async fn run_server(
         // Every exit stops in-flight work, whether it was asked for or forced.
         crate::controller::profile_config::cancel_all();
         for control in action_cancellations.values() {
-            control.request_cancel();
+            control.request_cancel("server shutdown");
         }
         match failure {
             Some(failure) => Err(failure),

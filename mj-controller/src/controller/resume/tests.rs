@@ -1145,6 +1145,8 @@ fn cross_harness_provision_cancellation_stops_the_next_command() {
 #[test]
 fn failed_resume_rolls_back_only_after_target_cleanup() {
     let previous = SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: Some((&TargetTemplate::LocalBare).into()),
         launch_base: None,

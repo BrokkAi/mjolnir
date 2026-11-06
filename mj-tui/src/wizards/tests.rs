@@ -1568,6 +1568,8 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateSession {
+            oracle: None,
+            oracle_choice: None,
             remember_container_size: false,
             subagents: Some(mj_core::subagent::SubagentPolicy::Native),
             review: None,
@@ -1899,6 +1901,8 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
     assert_eq!(
         dashboard.take_prerequisite_check().unwrap(),
         DashboardAction::CreateSession {
+            oracle: None,
+            oracle_choice: None,
             remember_container_size: false,
             subagents: Some(mj_core::subagent::SubagentPolicy::Native),
             review: None,
@@ -2325,6 +2329,8 @@ fn move_preparation() -> mj_core::state::MovePreparation {
         source_unavailable: false,
         conversion: None,
         selection: mj_core::state::MoveSelection {
+            oracle: None,
+            oracle_choice: None,
             subagents: None,
             workspace: Default::default(),
             session_id: "session-1".into(),
@@ -6056,6 +6062,39 @@ fn golden_single_choice_fast_paths() {
 }
 
 #[test]
+fn oracle_choice_stays_available_when_delegation_is_none() {
+    let mut config = config();
+    config.subagents.oracle = Some(mj_core::config::SubagentChoice {
+        model: "advisor".into(),
+        effort: None,
+    });
+    let mut draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::None);
+    let profile = config.profiles.keys().next().unwrap().clone();
+    draft.update_choices(&profile, &config, &Default::default());
+    assert!(draft.oracle_available());
+    assert_eq!(
+        draft.apply(&Interaction::ComboBoxCommit(WizardControl::Oracle, 1)),
+        Some(true)
+    );
+    assert!(!draft.oracle);
+    assert_eq!(draft.policy, mj_core::subagent::SubagentPolicy::None);
+    let override_choice = config.subagents.oracle.take();
+    let mut override_draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::None)
+        .with_oracle(true, override_choice);
+    override_draft.update_choices(&profile, &config, &Default::default());
+    assert!(override_draft.oracle_available());
+    config.subagents.oracle = override_draft.oracle_choice.clone();
+    let mut state = State::default();
+    state.last_oracle_choices.insert(profile, false);
+    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
+    dashboard.begin_new_wizard();
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("new wizard");
+    };
+    assert!(!wizard.subagents.oracle);
+}
+
+#[test]
 fn golden_create_delegation_availability_and_submission() {
     use mj_core::config::SubagentChoice;
     use mj_core::subagent::SubagentPolicy;
@@ -6069,6 +6108,10 @@ fn golden_create_delegation_availability_and_submission() {
             };
             dashboard.config.subagents.straightforward = Some(choice.clone());
             dashboard.config.subagents.subtle = Some(choice);
+            dashboard.config.subagents.oracle = Some(SubagentChoice {
+                model: "advisor".into(),
+                effort: Some("high".into()),
+            });
         }
         dashboard.state.last_subagent_policies.insert(
             String::new(),

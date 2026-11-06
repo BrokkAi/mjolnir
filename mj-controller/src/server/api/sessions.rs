@@ -218,6 +218,8 @@ pub(super) async fn start_session(
         base: request.base.clone(),
         no_later_history: request.no_later_history,
         subagents: request.subagents,
+        oracle: request.oracle,
+        oracle_choice: request.oracle_choice,
         review: request.review.clone(),
         no_project_memory: request.no_project_memory,
         no_github_events: request.no_github_events,

@@ -45,14 +45,7 @@ pub(super) fn ensure_subagent_child_can_receive_work(
     work: &str,
 ) -> Result<()> {
     ensure!(
-        matches!(
-            record.state,
-            SessionState::Provisioning
-                | SessionState::Running
-                | SessionState::Disconnected
-                | SessionState::Checkpointing
-                | SessionState::Parked
-        ),
+        record.state.can_receive_child_work(),
         "child session is {:?}; queued {work} was not delivered{}",
         record.state,
         record
@@ -93,6 +86,16 @@ impl ApiBackend {
                 None,
                 &requested_target_for_auth,
             )?;
+            // The oracle is asked with ask_oracle, never addressed directly.
+            if crate::database::load_subagent(&target_id)?.is_some_and(|relation| {
+                relation.kind == mj_core::subagent::SubagentKind::Oracle
+                    && relation.parent_session_id == sender_for_auth
+            }) {
+                anyhow::bail!(mj_core::refusal::Refusal::unusable(format!(
+                    "target session {} does not exist or was destroyed",
+                    requested_target_for_auth
+                )));
+            }
             let target = state.sessions.get(&target_id).cloned().ok_or_else(|| {
                 anyhow::Error::new(mj_core::refusal::Refusal::unusable(format!(
                     "target session {} does not exist or was destroyed",
@@ -135,33 +138,14 @@ impl ApiBackend {
                     )));
                 }
             }
-            Ok((target_id, own_child, managed_child, sender.title.clone()))
+            Ok((target_id, own_child, managed_child, sender.message_name()))
         })
         .await?;
 
         if own_child {
-            let request = SubagentToolRequest {
-                originating_command_id: None,
-                request_id: request_id.clone(),
-                created_at_ms,
-                action: SubagentToolAction::SendMessage {
-                    child_session_id: target_session_id.clone(),
-                    message: text.clone(),
-                },
-            };
-            let delivery = self
-                .deliver_subagent_input(&target_session_id, &text, &request)
-                .await?;
-            let (via, turn_id) = match delivery {
-                SubagentInputDelivery::Mailbox => ("mailbox", None),
-                SubagentInputDelivery::Turn { ordinal } => ("turn", Some(ordinal)),
-            };
-            return Ok(crate::server::api::SessionMessageResponse {
-                session_id: target_session_id,
-                via: via.into(),
-                turn_id,
-                managed_child: true,
-            });
+            return self
+                .deliver_to_own_child(target_session_id, text, request_id, created_at_ms)
+                .await;
         }
 
         if managed_child {
@@ -255,6 +239,39 @@ impl ApiBackend {
             via: "turn".into(),
             turn_id: Some(turn_id),
             managed_child: false,
+        })
+    }
+
+    /// A parent's message to one of its children: through the child's mailbox,
+    /// waking it when parked, or as a turn, keyed by the request for replay.
+    pub(super) async fn deliver_to_own_child(
+        &self,
+        child_session_id: String,
+        text: String,
+        request_id: String,
+        created_at_ms: i64,
+    ) -> Result<crate::server::api::SessionMessageResponse> {
+        let request = SubagentToolRequest {
+            originating_command_id: None,
+            request_id,
+            created_at_ms,
+            action: SubagentToolAction::SendMessage {
+                child_session_id: child_session_id.clone(),
+                message: text.clone(),
+            },
+        };
+        let delivery = self
+            .deliver_subagent_input(&child_session_id, &text, &request)
+            .await?;
+        let (via, turn_id) = match delivery {
+            SubagentInputDelivery::Mailbox => ("mailbox", None),
+            SubagentInputDelivery::Turn { ordinal } => ("turn", Some(ordinal)),
+        };
+        Ok(crate::server::api::SessionMessageResponse {
+            session_id: child_session_id,
+            via: via.into(),
+            turn_id,
+            managed_child: true,
         })
     }
 
@@ -617,7 +634,7 @@ pub(super) fn resolve_session_target(
         _ => {
             let candidates = permitted_matches
                 .iter()
-                .map(|(id, record)| format!("{id} ({:?})", record.title))
+                .map(|(id, record)| format!("{id} ({:?})", record.message_name()))
                 .collect::<Vec<_>>()
                 .join(", ");
             Err(mj_core::refusal::Refusal::unusable(format!(

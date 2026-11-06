@@ -39,7 +39,7 @@ pub(super) fn request_phone_action_cancellation(
                 .flatten()
         });
     if let Some(control) = control {
-        return control.request_cancel();
+        return control.request_cancel("person cancel from phone action");
     }
     false
 }
@@ -114,6 +114,24 @@ pub(super) struct PhoneActionServices<'a> {
     pub(super) daemon_runtime: &'a Arc<RuntimeState>,
 }
 
+/// The creation title and the rename a New action starts with. A phone that
+/// supplies no title gets the title the terminal would have derived, so a
+/// session started from either surface reads the same way in both. Only a
+/// title the person typed is a rename: the derived one must not hide the name
+/// the harness gives the session.
+fn new_session_titles(
+    title: Option<String>,
+    project_directory: Option<&std::path::Path>,
+    bundle_id: &str,
+    profile_id: &str,
+) -> (String, Option<String>) {
+    let typed = title.filter(|title| !title.trim().is_empty());
+    let title = typed.clone().unwrap_or_else(|| {
+        mj_core::state::default_session_title(project_directory, bundle_id, profile_id)
+    });
+    (title, typed)
+}
+
 pub(super) async fn apply_phone_action(
     controller: &mut Controller,
     services: PhoneActionServices<'_>,
@@ -148,6 +166,8 @@ pub(super) async fn apply_phone_action(
             base,
             no_later_history,
             subagents,
+            oracle,
+            oracle_choice,
             review,
             no_project_memory,
             no_github_events,
@@ -173,17 +193,8 @@ pub(super) async fn apply_phone_action(
             } else {
                 workspace_id
             };
-            // A phone that supplies no title gets the one the terminal would
-            // have derived, so a session started from either surface reads the
-            // same way in both.
-            let title = title.unwrap_or_else(|| {
-                mj_core::state::default_session_title(
-                    project_directory.as_deref(),
-                    &bundle_id,
-                    &profile_id,
-                )
-            });
-            let session_title_override = Some(title.clone());
+            let (title, session_title_override) =
+                new_session_titles(title, project_directory.as_deref(), &bundle_id, &profile_id);
             let (published, publication) = tokio::sync::oneshot::channel();
             let (registered, review_notice, capacity_warning) = services
                 .daemon_runtime
@@ -197,6 +208,8 @@ pub(super) async fn apply_phone_action(
                         base,
                         no_later_history,
                         subagents,
+                        oracle,
+                        oracle_choice,
                         review,
                         no_project_memory,
                         no_github_events,
@@ -608,5 +621,29 @@ pub(super) async fn apply_phone_action(
         ControllerAction::RefreshQuota { .. } | ControllerAction::RefreshCapacity { .. } => {
             bail!("refresh actions must be handled by the phone control loop")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::new_session_titles;
+    use std::path::Path;
+
+    #[test]
+    fn a_new_action_without_a_title_is_not_a_rename() {
+        for title in [None, Some(String::new()), Some("  \n".to_owned())] {
+            let (created_with, rename) =
+                new_session_titles(title, Some(Path::new("/work/project")), "bundle", "claude");
+            assert_eq!(created_with, "project via claude");
+            assert_eq!(rename, None);
+        }
+    }
+
+    #[test]
+    fn a_new_action_keeps_the_title_a_person_supplied_as_a_rename() {
+        let (created_with, rename) =
+            new_session_titles(Some("My name".into()), None, "bundle", "claude");
+        assert_eq!(created_with, "My name");
+        assert_eq!(rename.as_deref(), Some("My name"));
     }
 }

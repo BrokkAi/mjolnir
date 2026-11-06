@@ -97,8 +97,11 @@ impl DashboardContext {
             self.startup_prompts.observe_move(&session, id, terminal);
         }
         self.reconcile_composer_ownership();
-        self.startup_prompts
-            .flush_held(&self.dashboard_io_tx, &self.critical_operations);
+        self.startup_prompts.flush_held(
+            &self.controller.state,
+            &self.dashboard_io_tx,
+            &self.critical_operations,
+        );
         let composer_completed = self.collect_prepared_startup_prompts();
         self.startup_prompts.poll(&self.dashboard_io_tx);
         let pending_completed = self.drain_dashboard_io();
@@ -191,7 +194,10 @@ impl DashboardContext {
         for action in actions {
             if let DashboardAction::QueueStartupPrompt { session_id, prompt } = action {
                 self.startup_prompts.enqueue(
-                    session_id,
+                    io::NamedSession {
+                        name: io::session_notice_name(&self.controller.state, &session_id),
+                        id: session_id,
+                    },
                     prompt,
                     None,
                     self.dashboard_io_tx.clone(),
@@ -207,7 +213,10 @@ impl DashboardContext {
             changed |= !prepared.is_empty();
             for prompt in prepared {
                 self.startup_prompts.enqueue(
-                    session_id.clone(),
+                    io::NamedSession {
+                        name: io::session_notice_name(&self.controller.state, session_id),
+                        id: session_id.clone(),
+                    },
                     prompt,
                     None,
                     self.dashboard_io_tx.clone(),
@@ -825,9 +834,6 @@ pub(crate) fn refresh_open_chats(
         if dashboard.go_mode().is_some() {
             chat.set_display_title(dashboard.go_conversation_title(chat.session_id()));
         }
-        chat.set_subagents_enabled(record.is_some_and(|session| {
-            session_uses_subagents(session, controller.state.is_subagent_session(&session.id))
-        }));
     }
     refresh_subagent_counts(chats, dashboard);
 }
@@ -848,19 +854,6 @@ pub(crate) fn refresh_subagent_counts(
         chat.set_reviewer_counts(dashboard.reviewer_counts_for(&session_id));
         chat.set_subagent_working_count(dashboard.working_subagent_count_for(&session_id));
     }
-}
-
-/// Whether a session was created with Mjolnir sub-agents, matching the
-/// worker launch rule: the session's own choice, with `None` meaning native
-/// sub-agents; never for a child, and only for harnesses that can receive
-/// the tools.
-fn session_uses_subagents(session: &mj_core::state::SessionRecord, is_child: bool) -> bool {
-    session
-        .subagents
-        .clone()
-        .unwrap_or_default()
-        .for_launch(session.harness_kind, is_child)
-        .uses_mjolnir()
 }
 
 /// The tab to show after a feed frame: a workspace the user just created once

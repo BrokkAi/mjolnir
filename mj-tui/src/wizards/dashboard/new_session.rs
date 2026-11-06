@@ -325,6 +325,11 @@ impl DashboardState {
         DashboardAction::CreateSession {
             remember_container_size: wizard.remember_container_size,
             subagents: Some(wizard.subagents.selected()),
+            oracle: wizard
+                .subagents
+                .oracle_available()
+                .then_some(wizard.subagents.oracle),
+            oracle_choice: wizard.subagents.oracle_choice.clone(),
             review: None,
             create_managed_worktree: Some(
                 raw_project

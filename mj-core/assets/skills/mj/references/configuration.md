@@ -540,7 +540,15 @@ effort = "high"
 [subagents.subtle]
 model = "your-claude-model"
 effort = "high"
+
+[subagents.oracle]
+model = "your-strongest-model"
+effort = "high"
 ```
+
+`[subagents.oracle]` is optional and independent of the other two: it can be set
+without straightforward. It names the read-only advisor behind the `ask_oracle`
+tool, which every top-level session is offered whatever its delegation choice.
 
 Each choice requires a non-empty model. Effort is optional and must be offered
 by that model when specified; omitted effort uses the harness default. Adaptive
@@ -568,6 +576,15 @@ its matching model flag; `adaptive` and combining an override with `native` or
 `--subagent-model` and `--subagent-effort` flags fail with guidance to use the
 four per-type flags. `none` (CLI only) gives a Claude, Codex, or DSH session no
 delegation tools.
+
+`mj new` and `mj move` take `--oracle enabled|disabled` and `--subagent-oracle M`
+(with optional `--subagent-oracle-effort E`, which requires the model and rejects
+`adaptive`). The model flag implies `enabled` and is refused with
+`--oracle disabled`; none of them needs `--subagents mjolnir`. `mj new` without
+`--oracle` uses the choice last made for the profile, starting enabled; `mj move`
+without it retains the session's choice, and turning the oracle off keeps its
+model override. Asking for the oracle when no model is configured or given starts
+or moves the session with the oracle off and a notice.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |

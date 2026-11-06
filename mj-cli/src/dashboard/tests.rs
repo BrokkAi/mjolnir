@@ -124,6 +124,8 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
         state.sessions.insert(
             id.into(),
             mj_core::state::SessionRecord {
+                oracle_choice: None,
+                oracle: true,
                 project: None,
                 target_runtime: None,
                 launch_base: None,
@@ -824,6 +826,8 @@ fn missing_target_poll_preserves_the_daemon_notice() {
 
 fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
     mj_core::state::SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,

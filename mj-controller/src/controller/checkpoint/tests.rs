@@ -1411,6 +1411,12 @@ fn record_test_subagent_admission(relay_root: &Path, open: bool) {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_else(|| serde_json::json!({"requests": {}, "results": {}}));
+    let transitions = queue["admission_transitions"].as_array_mut().map(|items| {
+        items.push(serde_json::Value::Bool(open));
+    });
+    if transitions.is_none() {
+        queue["admission_transitions"] = serde_json::json!([open]);
+    }
     queue["mutating_admission_open"] = serde_json::Value::Bool(open);
     std::fs::write(queue_path, serde_json::to_vec(&queue).unwrap())
         .expect("persist fake worker sub-agent admission");
@@ -3269,6 +3275,8 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     };
 
     let selection = mj_core::state::MoveSelection {
+        oracle: None,
+        oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,

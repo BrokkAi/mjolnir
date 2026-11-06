@@ -325,6 +325,8 @@ pub(crate) fn config() -> Config {
 
 pub(crate) fn stopped_session() -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -377,6 +379,7 @@ pub(crate) fn stopped_session() -> SessionRecord {
 /// actually on the dashboard.
 pub(crate) fn running_session() -> SessionRecord {
     SessionRecord {
+        oracle: true,
         project: None,
         state: SessionState::Running,
         ..stopped_session()
@@ -483,6 +486,7 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_oracle_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),

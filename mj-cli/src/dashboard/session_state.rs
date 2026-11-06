@@ -491,8 +491,10 @@ impl DashboardContext {
             .collect::<Vec<_>>();
         for session_id in session_ids {
             self.project_sources_in_flight.insert(session_id.clone());
+            let session_name = self.session_notice_name(&session_id);
             spawn_project_source_resolution(
                 session_id,
+                &session_name,
                 self.dashboard_io_tx.clone(),
                 self.critical_operations.clone(),
             );

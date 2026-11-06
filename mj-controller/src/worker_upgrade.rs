@@ -345,6 +345,8 @@ mod tests {
 
     fn session_record(state: SessionState) -> SessionRecord {
         SessionRecord {
+            oracle_choice: None,
+            oracle: true,
             project: None,
             target_runtime: None,
             launch_base: None,

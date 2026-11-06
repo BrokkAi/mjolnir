@@ -20,6 +20,11 @@ set, parents choose a task type each time they delegate work. With only
 Straightforward, parents delegate straightforward work and do work that
 needs judgment themselves.
 
+**Oracle** is also optional, and independent of the other two. Set a strong
+model for read-only questions that the primary agent isn't sure about; sessions
+then get an `ask_oracle` tool whatever their delegation choice. **Create** and
+**Move…** show an Oracle row when a model is set.
+
 **Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
 requires a Claude, Codex, or DSH profile and a configured Straightforward task.
 DSH has no sub-agents of its own, so for a DSH profile they offer **Mjolnir** or
