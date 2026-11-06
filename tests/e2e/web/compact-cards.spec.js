@@ -72,6 +72,7 @@ function session(id, projectKey, projectLabel, options = {}) {
     turn_review: null,
     available_commands: [],
     subagent_session_ids: options.subagentSessionIds || [],
+    reviewer_session_ids: options.reviewerSessionIds || [],
     subagent_parent_id: options.subagentParentId,
     managed_checkout_kind: options.managedCheckoutKind ?? null,
     capabilities,
@@ -1219,10 +1220,113 @@ test('a running review leaves the conversation composer usable', async ({ page }
     capabilities: { prompt: true },
   });
   reviewing.turn_review = { status: 'Review running · 2 reviewers', roles: [], verdict: null };
-  await mount(page, [reviewing]);
+  const state = await mount(page, [reviewing]);
   await card(page, 'reviewing-primary').click();
   await expect(page.locator('#turn-review')).toContainText('Review running · 2 reviewers');
   await expect(page.locator('#send-button')).toBeEnabled();
   await page.locator('#prompt-text').fill('Continue while reviewers work');
   await expect(page.locator('#prompt-text')).toHaveText('Continue while reviewers work');
+
+  // Roles and a verdict stay out of the conversation: the review is one short
+  // passive line, and the reviewers' own conversations are in Reviewers.
+  const line = page.locator('#turn-review');
+  reviewing.turn_review = {
+    status: 'Findings sent to the agent',
+    roles: [
+      { label: 'Reviewer 1', state: 'findings', child_session_id: 'r1' },
+      { label: 'Reviewer 2', state: 'running', child_session_id: 'r2' },
+    ],
+    verdict: { kind: 'findings', text: Array.from({ length: 40 }, (_, i) => `[P1] finding ${i}`).join('\n') },
+  };
+  await refresh(page, state);
+  await expect(line).toHaveText('Review: Findings sent to the agent');
+  await expect(line.locator('*')).toHaveCount(1);
+  expect((await line.boundingBox()).height).toBeLessThan(40);
+  await expect(page.locator('#conversation-scroll')).toBeVisible();
+});
+
+test('reviewers open their own workspace and stay out of Subagents', async ({ page }) => {
+  const parent = session('parent', 'project', 'Project', {
+    title: 'Parent session',
+    subagentSessionIds: ['worker', 'review-open', 'review-done'],
+    reviewerSessionIds: ['review-open', 'review-done'],
+  });
+  const child = (id, options = {}) => session(id, 'project', 'Project', { subagentParentId: 'parent', ...options });
+  const worker = child('worker', { title: 'Worker', isIdle: false });
+  worker.chat_phase = 'running';
+  const reviewOpen = child('review-open', { title: 'Open reviewer', isIdle: false });
+  reviewOpen.chat_phase = 'running';
+  const reviewDone = child('review-done', { title: 'Done reviewer', lifecycle: 'suspended', capabilities: { open: false, resume: true } });
+  const state = await mount(page, [parent, worker, reviewOpen, reviewDone]);
+  await card(page, 'parent').click();
+  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 1');
+  await expect(page.locator('#reviewers-button')).toHaveText('Reviewers · 1');
+  await expect(page.locator('#reviewers-button')).toHaveAttribute('title', '2 reviewers');
+  await expect(page.locator('#subagents-button')).toHaveAttribute('title', '1 retained agents');
+
+  // Both controls fit beside each other without leaving the screen.
+  const [subagents, reviewers] = await Promise.all(['#subagents-button', '#reviewers-button']
+    .map(selector => page.locator(selector).boundingBox()));
+  expect(subagents.x + subagents.width).toBeLessThanOrEqual(reviewers.x);
+  expect(reviewers.x + reviewers.width).toBeLessThanOrEqual(390);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+
+  await page.locator('#reviewers-button').click();
+  await expect(page).toHaveURL(/#reviewers\/parent$/);
+  await expect(page.locator('#workspaces .virtual-workspace')).toContainText('Reviewers · Parent session');
+  await expect(card(page, 'review-open')).toBeVisible();
+  await expect(card(page, 'worker')).toHaveCount(0);
+  await expect(card(page, 'review-done')).toHaveCount(0);
+  await expect(page.locator('#sessions')).toContainText('1 idle reviewer hidden');
+  await page.getByRole('button', { name: 'Show idle' }).click();
+  await expect(card(page, 'review-done')).toBeVisible();
+  await expect(card(page, 'worker')).toHaveCount(0);
+
+  // A reviewer conversation returns to the reviewer list, and the close
+  // control returns to the parent conversation.
+  await card(page, 'review-open').click();
+  await expect(page).toHaveURL(/#reviewers\/parent\/review-open$/);
+  await page.locator('#back').click();
+  await expect(page).toHaveURL(/#reviewers\/parent$/);
+  await page.reload();
+  await expect(card(page, 'review-open')).toBeVisible();
+  await page.getByRole('button', { name: 'Close Parent session reviewers workspace' }).click();
+  await expect(page).toHaveURL(/#conversation\/parent$/);
+
+  await page.locator('#subagents-button').click();
+  await expect(page).toHaveURL(/#subagents\/parent$/);
+  await expect(page.locator('#workspaces .virtual-workspace')).not.toContainText('Reviewers');
+  await expect(card(page, 'worker')).toBeVisible();
+  await expect(card(page, 'review-open')).toHaveCount(0);
+  await expect(card(page, 'review-done')).toHaveCount(0);
+
+  // A link that names a child through the other kind's workspace is stale.
+  await page.evaluate(() => { location.hash = '#subagents/parent/review-open'; });
+  await expect(page).toHaveURL(/#subagents\/parent$/);
+  await page.evaluate(() => { location.hash = '#reviewers/parent/worker'; });
+  await expect(page).toHaveURL(/#reviewers\/parent$/);
+
+  // Desktop shows the same two controls on the prompt's lower border.
+  await page.getByRole('button', { name: 'Close Parent session reviewers workspace' }).click();
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(page.locator('#subagents-button-desktop')).toHaveText('Subagents · 1');
+  await expect(page.locator('#reviewers-button-desktop')).toHaveText('Reviewers · 1');
+  await expect(page.locator('#reviewers-button')).toBeHidden();
+  await page.locator('#reviewers-button-desktop').click();
+  await expect(page).toHaveURL(/#reviewers\/parent$/);
+  await page.getByRole('button', { name: 'Close Parent session reviewers workspace' }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  // Finished reviewers keep the control reachable with an open count of zero;
+  // with none at all the control is gone and Subagents keeps its own count.
+  reviewOpen.lifecycle = 'suspended';
+  reviewOpen.state = 'suspended';
+  await refresh(page, state);
+  await expect(page.locator('#reviewers-button')).toHaveText('Reviewers · 0');
+  parent.subagent_session_ids = ['worker'];
+  parent.reviewer_session_ids = [];
+  await refresh(page, state);
+  await expect(page.locator('#reviewers-button')).toBeHidden();
+  await expect(page.locator('#reviewers-button-desktop')).toBeHidden();
+  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 1');
 });
