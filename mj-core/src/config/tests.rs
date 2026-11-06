@@ -127,8 +127,6 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
     };
     let profile = |kind: HarnessKind, home: &Path| HarnessProfile {
         enabled: true,
-        kind,
-        home: home.to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
         models: Default::default(),
@@ -136,6 +134,7 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
         guardian_review_model: None,
         muse_auto_review: None,
         codex_profile: None,
+        ..HarnessProfile::new(kind, home.to_path_buf())
     };
     let every_name = CODEX_CREDENTIAL_ENVIRONMENT.map(str::to_owned).to_vec();
 
@@ -254,16 +253,8 @@ fn a_bedrock_codex_profile_uses_the_aws_chain_without_an_api_key_or_login_file()
     )
     .expect("write Codex configuration");
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
         environment: BTreeMap::new().into(),
-        context_window_bytes: None,
-        models: Default::default(),
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        muse_auto_review: None,
-        codex_profile: None,
+        ..HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
 
     profile
@@ -300,16 +291,8 @@ fn an_inline_token_codex_profile_is_authenticated_without_a_login_file() {
     )
     .expect("write Codex configuration");
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
         environment: BTreeMap::new().into(),
-        context_window_bytes: None,
-        models: Default::default(),
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        muse_auto_review: None,
-        codex_profile: None,
+        ..HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
 
     profile
@@ -853,16 +836,8 @@ fn sample_config() -> Config {
         profiles: BTreeMap::from([(
             "codex-1".into(),
             HarnessProfile {
-                enabled: true,
-                context_window_bytes: None,
-                kind: HarnessKind::Codex,
-                home: PathBuf::from("/home/test/.codex-one"),
                 environment: BTreeMap::from([("RUST_LOG".into(), "info".into())]).into(),
-                models: Default::default(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
+                ..HarnessProfile::new(HarnessKind::Codex, PathBuf::from("/home/test/.codex-one"))
             },
         )]),
         bundles: BTreeMap::from([(
@@ -3212,8 +3187,6 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
     .expect("write Codex configuration");
     let profile = |kind: HarnessKind, home: &Path, codex_profile: Option<&str>| HarnessProfile {
         enabled: true,
-        kind,
-        home: home.to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
         models: Default::default(),
@@ -3221,6 +3194,7 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
         guardian_review_model: None,
         muse_auto_review: None,
         codex_profile: codex_profile.map(str::to_owned),
+        ..HarnessProfile::new(kind, home.to_path_buf())
     };
     let mut config = Config::default();
     for (id, profile) in [
@@ -3325,8 +3299,6 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
     {
         let profile = |home: PathBuf| HarnessProfile {
             enabled: true,
-            kind: HarnessKind::Claude,
-            home,
             environment: Default::default(),
             context_window_bytes: None,
             models: Default::default(),
@@ -3334,6 +3306,7 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
             guardian_review_model: None,
             muse_auto_review: None,
             codex_profile: None,
+            ..HarnessProfile::new(HarnessKind::Claude, home)
         };
         let mut configured = Config::default();
         configured

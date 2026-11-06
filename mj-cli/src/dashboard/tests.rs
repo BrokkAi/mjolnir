@@ -85,9 +85,11 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 guardian_review_model: None,
                 muse_auto_review: None,
                 codex_profile: None,
-                kind,
-                home: std::path::PathBuf::from("/profiles").join(id),
                 environment: Default::default(),
+                ..mj_core::config::HarnessProfile::new(
+                    kind,
+                    std::path::PathBuf::from("/profiles").join(id),
+                )
             },
         );
     }

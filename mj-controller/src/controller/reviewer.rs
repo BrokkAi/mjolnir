@@ -174,8 +174,6 @@ mod tests {
                 id.to_owned(),
                 HarnessProfile {
                     enabled: true,
-                    kind,
-                    home,
                     environment: BTreeMap::from([("EXTRA".into(), "1".into())]).into(),
                     context_window_bytes: None,
                     models: Default::default(),
@@ -183,6 +181,7 @@ mod tests {
                     guardian_review_model: None,
                     codex_profile: None,
                     muse_auto_review: None,
+                    ..mj_core::config::HarnessProfile::new(kind, home)
                 },
             );
         }

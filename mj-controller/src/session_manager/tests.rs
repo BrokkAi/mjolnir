@@ -4307,16 +4307,12 @@ async fn model_policy_refilters_the_same_actor_and_preserves_raw_observations() 
         config.profiles.insert(
             "gateway".into(),
             mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: directory.path().into(),
-                environment: Default::default(),
-                context_window_bytes: None,
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
                 models: vec!["allowed".into()],
                 legacy_subagents: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    directory.path().to_path_buf(),
+                )
             },
         );
         Ok(())

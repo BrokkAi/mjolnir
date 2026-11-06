@@ -4698,8 +4698,6 @@ mod tests {
                 format!("profile-{index}"),
                 HarnessProfile {
                     enabled: true,
-                    kind,
-                    home,
                     environment: Default::default(),
                     context_window_bytes: None,
                     models: Default::default(),
@@ -4707,6 +4705,7 @@ mod tests {
                     guardian_review_model: None,
                     codex_profile: None,
                     muse_auto_review: None,
+                    ..mj_core::config::HarnessProfile::new(kind, home)
                 },
             );
         }

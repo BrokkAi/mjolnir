@@ -249,46 +249,28 @@ pub(crate) fn config() -> Config {
             (
                 "claude-1".into(),
                 HarnessProfile {
-                    enabled: true,
-                    context_window_bytes: None,
-                    models: Default::default(),
-                    legacy_subagents: Default::default(),
-                    guardian_review_model: None,
-                    muse_auto_review: None,
-                    codex_profile: None,
-                    kind: HarnessKind::Claude,
-                    home: PathBuf::from("/profiles/claude"),
-                    environment: Default::default(),
+                    ..mj_core::config::HarnessProfile::new(
+                        HarnessKind::Claude,
+                        PathBuf::from("/profiles/claude"),
+                    )
                 },
             ),
             (
                 "codex-1".into(),
                 HarnessProfile {
-                    enabled: true,
-                    context_window_bytes: None,
-                    models: Default::default(),
-                    legacy_subagents: Default::default(),
-                    guardian_review_model: None,
-                    muse_auto_review: None,
-                    codex_profile: None,
-                    kind: HarnessKind::Codex,
-                    home: PathBuf::from("/profiles/codex"),
-                    environment: Default::default(),
+                    ..mj_core::config::HarnessProfile::new(
+                        HarnessKind::Codex,
+                        PathBuf::from("/profiles/codex"),
+                    )
                 },
             ),
             (
                 "codex-2".into(),
                 HarnessProfile {
-                    enabled: true,
-                    context_window_bytes: None,
-                    models: Default::default(),
-                    legacy_subagents: Default::default(),
-                    guardian_review_model: None,
-                    muse_auto_review: None,
-                    codex_profile: None,
-                    kind: HarnessKind::Codex,
-                    home: PathBuf::from("/profiles/codex-two"),
-                    environment: Default::default(),
+                    ..mj_core::config::HarnessProfile::new(
+                        HarnessKind::Codex,
+                        PathBuf::from("/profiles/codex-two"),
+                    )
                 },
             ),
         ]),

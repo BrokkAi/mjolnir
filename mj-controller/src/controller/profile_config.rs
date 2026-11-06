@@ -753,16 +753,8 @@ mod tests {
         // never change the person's own credentials or session data.
         let credentials = std::fs::read(home.join("auth.json")).unwrap();
         let profile = HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Muse,
-            home: home.clone(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
-            models: Default::default(),
             legacy_subagents: None,
+            ..mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Muse, home.clone())
         };
         let choices = probe_profile(
             "muse-discovery-1284-test",
@@ -820,16 +812,11 @@ mod tests {
         .unwrap();
         for home in [stored, legacy] {
             let profile = HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::OpenCode,
-                home: home.clone(),
-                environment: Default::default(),
-                context_window_bytes: None,
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
-                models: Default::default(),
                 legacy_subagents: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::OpenCode,
+                    home.clone(),
+                )
             };
             let choices = probe_profile(
                 "opencode-database-login-test",
@@ -872,16 +859,11 @@ mod tests {
         Config::default().save().unwrap();
         let home = tempfile::tempdir().unwrap();
         let profile = HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: home.path().into(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
-            models: Default::default(),
             legacy_subagents: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                home.path().to_path_buf(),
+            )
         };
         let key = fingerprint(&profile);
         let choice = |value: &str| mj_core::acp::SessionConfigChoice {
@@ -988,16 +970,10 @@ mod tests {
     fn harness_home_files_do_not_invalidate_configured_capabilities() {
         let home = tempfile::tempdir().unwrap();
         let profile = HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: home.path().into(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            models: Default::default(),
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                home.path().to_path_buf(),
+            )
         };
         let key = || fingerprint(&profile);
 
@@ -1034,16 +1010,10 @@ mod tests {
     fn discovery_fingerprint_ignores_creation_defaults_and_unrelated_profile_preferences() {
         let home = tempfile::tempdir().unwrap();
         let mut profile = HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: home.path().into(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            models: Default::default(),
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                home.path().to_path_buf(),
+            )
         };
         let original = fingerprint(&profile);
         for _ in 0..2 {
@@ -1063,16 +1033,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let token = root.path().join("token");
         let profile = HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Claude,
-            home: root.path().into(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            models: Default::default(),
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Claude,
+                root.path().to_path_buf(),
+            )
         };
         let resolve = |environment: BTreeMap<String, String>| {
             let mut environment = environment;
@@ -1383,12 +1347,6 @@ mod tests {
         .unwrap();
         let profile = |kind: mj_core::config::HarnessKind| HarnessProfile {
             enabled: true,
-            kind,
-            home: if kind == mj_core::config::HarnessKind::Muse {
-                home.clone()
-            } else {
-                root.path().into()
-            },
             environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
@@ -1396,6 +1354,14 @@ mod tests {
             muse_auto_review: None,
             models: Default::default(),
             legacy_subagents: None,
+            ..mj_core::config::HarnessProfile::new(
+                kind,
+                if kind == mj_core::config::HarnessKind::Muse {
+                    home.clone()
+                } else {
+                    root.path().into()
+                },
+            )
         };
         let mut config = Config::default();
         config
@@ -1542,8 +1508,6 @@ mod tests {
                 "parent".into(),
                 HarnessProfile {
                     enabled: true,
-                    kind,
-                    home: "/fixture".into(),
                     environment: Default::default(),
                     context_window_bytes: None,
                     guardian_review_model: None,
@@ -1551,6 +1515,7 @@ mod tests {
                     muse_auto_review: None,
                     models: Default::default(),
                     legacy_subagents: None,
+                    ..mj_core::config::HarnessProfile::new(kind, "/fixture")
                 },
             );
             let error = validate_session_subagent_policy(

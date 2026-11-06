@@ -622,16 +622,11 @@ mod delegation_replay_tests {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: mj_core::config::data_dir().join("unused-profile-home"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
-                models: Default::default(),
                 legacy_subagents: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    mj_core::config::data_dir().join("unused-profile-home"),
+                )
             },
         );
         config.targets.insert(
@@ -763,16 +758,11 @@ mod delegation_replay_tests {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: mj_core::config::data_dir().join("missing-profile-home"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
-                models: Default::default(),
                 legacy_subagents: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    mj_core::config::data_dir().join("missing-profile-home"),
+                )
             },
         );
         config.save().unwrap();

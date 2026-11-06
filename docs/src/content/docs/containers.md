@@ -119,9 +119,12 @@ each release publishes an immutable tag for its own version, such as
 
 The daemon also uses this image for quota checks that start a harness: the
 Codex app-server, Grok's agent, and Claude Code's login refresh. With
-`[quota] runtime = "auto"`, the default, those checks run in the image of your
-enabled local Podman runtime, else your enabled local Docker runtime, when its
-engine is installed. With no such runtime they run on this machine. A machine
+`[quota] runtime = "auto"`, the default, a check runs on this machine when the
+machine already has that harness: Mjolnir's managed Codex installation, or a
+`grok` or `claude` on `PATH` (Grok also finds the copy in the profile's home).
+Otherwise the check runs in the image of your enabled local Podman runtime,
+else your enabled local Docker runtime, when its engine is installed; with no
+such runtime it runs on this machine and reports the missing harness. A machine
 that runs every session in containers therefore needs no harness installed to
 show its quota, and the check uses the image the daemon already keeps
 downloaded for that runtime. The profile's account directory is mounted at its

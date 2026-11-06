@@ -157,16 +157,7 @@ mod tests {
 
     fn fixture() -> (Config, ProfileCapabilitiesSnapshot) {
         let profile = HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: "/profiles/parent".into(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
-            models: Default::default(),
-            legacy_subagents: Default::default(),
+            ..HarnessProfile::new(HarnessKind::Codex, "/profiles/parent")
         };
         let choice = |value: &str| SessionConfigChoice {
             value: value.into(),

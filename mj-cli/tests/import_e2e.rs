@@ -97,16 +97,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         profiles: BTreeMap::from([(
             "claude-e2e".into(),
             HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Claude,
-                home: claude_home,
-                environment: Default::default(),
-                context_window_bytes: None,
-                models: Default::default(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, claude_home)
             },
         )]),
         bundles: BTreeMap::new(),
@@ -231,16 +222,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         profiles: BTreeMap::from([(
             "kimi-e2e".into(),
             HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Kimi,
-                home: kimi_home.clone(),
-                environment: Default::default(),
-                context_window_bytes: None,
-                models: Default::default(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Kimi, kimi_home.clone())
             },
         )]),
         bundles: BTreeMap::from([(
@@ -372,16 +354,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         profiles: BTreeMap::from([(
             "grok-e2e".into(),
             HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Grok,
-                home: grok_home.clone(),
-                environment: Default::default(),
-                context_window_bytes: None,
-                models: Default::default(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Grok, grok_home.clone())
             },
         )]),
         bundles: BTreeMap::from([(
@@ -620,16 +593,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         profiles: BTreeMap::from([(
             "codex-e2e".into(),
             HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Codex,
-                home: codex_home.clone(),
-                environment: Default::default(),
-                context_window_bytes: None,
-                models: Default::default(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, codex_home.clone())
             },
         )]),
         bundles: BTreeMap::from([(

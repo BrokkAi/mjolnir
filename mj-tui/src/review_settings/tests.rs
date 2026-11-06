@@ -246,14 +246,12 @@ fn quota_updates_refresh_the_open_dialogs_suggestion() {
 #[test]
 fn an_opencode_profile_without_a_report_is_usage_priced() {
     let mut config = config();
-    config.profiles.insert(
-        "openrouter".into(),
-        mj_core::config::HarnessProfile {
-            kind: mj_core::config::HarnessKind::OpenCode,
-            home: "/profiles/openrouter/opencode".into(),
-            ..config.profiles["codex-1"].clone()
-        },
-    );
+    config.profiles.insert("openrouter".into(), {
+        let mut profile = config.profiles["codex-1"].clone();
+        profile.kind = mj_core::config::HarnessKind::OpenCode;
+        profile.home = "/profiles/openrouter/opencode".into();
+        profile
+    });
     let mut dashboard = DashboardState::new(config, Default::default(), Default::default());
     assert_eq!(
         dashboard.usage_priced_profiles(&dashboard.config),

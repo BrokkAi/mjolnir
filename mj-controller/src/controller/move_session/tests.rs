@@ -52,16 +52,7 @@ fn add_codex_profile(config: &mut Config, home: &Path) {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: home.to_path_buf(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            models: Default::default(),
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, home.to_path_buf())
         },
     );
 }
@@ -2788,8 +2779,6 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
                 id.into(),
                 HarnessProfile {
                     enabled: true,
-                    kind,
-                    home: home.clone(),
                     environment: Default::default(),
                     context_window_bytes: None,
                     models: Default::default(),
@@ -2797,6 +2786,7 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
                     guardian_review_model: None,
                     codex_profile: None,
                     muse_auto_review: None,
+                    ..mj_core::config::HarnessProfile::new(kind, home.clone())
                 },
             );
         }
