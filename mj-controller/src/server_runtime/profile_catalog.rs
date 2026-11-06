@@ -2333,7 +2333,7 @@ mod tests {
             ],
         );
         // Two profiles install the same home; editing it must re-probe both.
-        config.profiles.get_mut("two").unwrap().home = root.join("one").into();
+        config.profiles.get_mut("two").unwrap().home = root.join("one");
         homes.insert("two".to_owned(), root.join("one"));
         let catalog = ProfileCatalog::with_probe(home_model_probe(homes, calls.clone()));
         catalog.sync_now(&config).await;
