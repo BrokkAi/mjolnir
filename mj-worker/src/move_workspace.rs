@@ -480,7 +480,12 @@ pub fn restore(source: &Path, repositories: &[WorkspaceRepository]) -> Result<()
             wanted_refs.iter().map(|(name, _)| name.as_str()).collect();
         let mut deletions = Vec::new();
         for line in git_text(root, &["for-each-ref", "--format=%(refname)"])?.lines() {
-            if !saved_refs.contains(line) {
+            // A managed linked worktree shares the user's refs. Old review
+            // pins and legacy `refs/hel` refs there are the user's to remove
+            // (`mj doctor` lists them), so a Move leaves them alone.
+            let residue =
+                mj_core::archive::is_review_baseline_pin(line) || line.starts_with("refs/hel/");
+            if !saved_refs.contains(line) && !residue {
                 write!(deletions, "delete {line}\0\0")?;
             }
         }
@@ -909,6 +914,20 @@ fi
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
         }
+        // Pins already in the destination belong to the user's repository.
+        let blob = String::from_utf8(
+            git_with_input(&target, &["hash-object", "-w", "--stdin"], b"pin").unwrap(),
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let existing = [
+            "refs/mj/worktrees/other/review-baseline",
+            "refs/hel/review-baseline",
+        ];
+        for pin in existing {
+            git(&target, &["update-ref", pin, &blob]).unwrap();
+        }
         restore(
             &stage,
             &[WorkspaceRepository {
@@ -917,6 +936,13 @@ fi
             }],
         )
         .unwrap();
+        for pin in existing {
+            assert_eq!(
+                git_text(&target, &["rev-parse", pin]).unwrap().trim(),
+                blob,
+                "{pin}"
+            );
+        }
         assert!(
             fs::metadata(target.join(".git/move-ref-batches"))
                 .unwrap()
