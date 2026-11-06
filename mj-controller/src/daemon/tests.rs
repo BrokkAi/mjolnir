@@ -1059,25 +1059,44 @@ pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
 }
 
 /// The wait notice names what the daemon is waiting for, so `UpgradeBlockers`
-/// must report a live gate label and stop reporting it once released. The gate
-/// is process-wide and other tests hold their own labels beside this one, so
-/// the test asserts only on a label nothing else uses.
+/// must report a live gate label and stop reporting it once released. A
+/// lifecycle hold also names its session, kind and current stage, read from the
+/// lifecycle registry when the notice renders. The gate is process-wide, so
+/// the test runs in a child process where no other test holds a label.
 #[tokio::test]
 async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
+    const CHILD: &str = "MJ_UPGRADE_BLOCKERS_TEST_CHILD";
     const LABEL: &str = "test-only upgrade blocker";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let name = format!(
+            "{}::upgrade_blockers_names_the_daemon_owned_work_then_releases_it",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        crate::controller::test_support::IsolatedTest::new(name)
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "upgrade-blockers-test")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
     let state = test_runtime_state();
     let metadata = test_metadata("127.0.0.1:1".parse().unwrap());
     let shutdown = CancellationToken::new();
-    let labels = |reply: DaemonReply| match reply {
-        DaemonReply::UpgradeBlockers(labels) => labels,
-        other => panic!("expected named blockers, got {other:?}"),
+    let blockers = || async {
+        match handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
+            .await
+            .unwrap()
+        {
+            DaemonReply::UpgradeBlockers(labels) => labels,
+            other => panic!("expected named blockers, got {other:?}"),
+        }
     };
     let held = crate::upgrade::activity(LABEL).unwrap();
-    let named = labels(
-        handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
-            .await
-            .unwrap(),
-    );
+    let named = blockers().await;
     assert!(
         named.iter().any(|blocker| blocker
             .strip_prefix(&format!("{LABEL} ("))
@@ -1085,14 +1104,70 @@ async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
         "the blocker is named with its age: {named:?}"
     );
     drop(held);
-    let released = labels(
-        handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
-            .await
-            .unwrap(),
-    );
+    let released = blockers().await;
     assert!(
         !released.iter().any(|blocker| blocker.starts_with(LABEL)),
         "released work is still named: {released:?}"
+    );
+
+    // Four lifecycles hold the handoff; the notice names the oldest three.
+    let sessions = ["e5dfbd99-a", "e5dfbd99-b", "e5dfbd99-c", "e5dfbd99-d"];
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let operations = sessions
+        .map(|session| {
+            let release = release.clone();
+            state
+                .start_or_join_lifecycle(session.into(), LifecycleKind::Create, {
+                    move |_, _, _| async move {
+                        drop(release.acquire().await.unwrap());
+                        Ok(DaemonLifecycleResult::Done)
+                    }
+                })
+                .unwrap()
+        })
+        .to_vec();
+    let lifecycle_blocker = || async {
+        let named = blockers().await;
+        let [blocker] = named.as_slice() else {
+            panic!("only the lifecycles block: {named:?}")
+        };
+        blocker.clone()
+    };
+    let blocker = lifecycle_blocker().await;
+    assert!(
+        blocker.starts_with("session lifecycle x4: create e5dfbd99 (")
+            && blocker.matches("create e5dfbd99 (").count() == 3
+            && blocker.ends_with("; and 1 more"),
+        "{blocker}"
+    );
+    assert!(
+        !blocker.contains(','),
+        "no stage has been reported: {blocker}"
+    );
+    // A stage the lifecycle registry records appears in the next notice.
+    let executor = DaemonStageReportingExecutor::new(
+        RefusingExecutor("a stage notification"),
+        state.clone(),
+        sessions[0].into(),
+    );
+    executor.stage_started(ProvisionStage::Cloning);
+    executor.stage_started(ProvisionStage::Syncing);
+    let blocker = lifecycle_blocker().await;
+    assert!(
+        blocker.starts_with("session lifecycle x4: create e5dfbd99 (Clone + Sync, "),
+        "{blocker}"
+    );
+    executor.stage_finished(ProvisionStage::Cloning);
+    executor.stage_finished(ProvisionStage::Syncing);
+    release.add_permits(sessions.len());
+    for operation in operations {
+        RuntimeState::wait_lifecycle_result(operation)
+            .await
+            .unwrap();
+    }
+    assert!(
+        blockers().await.is_empty(),
+        "finished lifecycles are no longer named"
     );
 }
 
