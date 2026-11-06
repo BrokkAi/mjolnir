@@ -301,7 +301,12 @@ impl ProfileCatalog {
                 }
             }
         }).collect::<Vec<_>>();
-        if !omitted.is_empty() {
+        if !omitted.is_empty()
+            && !legacy
+                .profile
+                .as_ref()
+                .is_some_and(|profile| available.iter().any(|(id, _)| id == profile))
+        {
             anyhow::bail!(
                 "legacy review upgrade waiting for profiles: {}",
                 omitted.join(", ")
@@ -319,6 +324,9 @@ impl ProfileCatalog {
         .await?;
         if !known {
             anyhow::bail!("reviewer efforts remain unknown");
+        }
+        if reviewers.is_empty() {
+            anyhow::bail!("legacy review upgrade found no reviewers; waiting for matching models");
         }
         let count = reviewers.len();
         let path = self
@@ -344,6 +352,9 @@ impl ProfileCatalog {
         definitions: &[(String, String)],
         legacy: &mj_core::config::LegacyReview,
     ) -> Result<bool> {
+        if reviewers.is_empty() {
+            anyhow::bail!("cannot persist an empty reviewer upgrade");
+        }
         let (_, wrote) = Config::update_to(path, |config| {
             if !config.review.is_legacy() {
                 return Ok(false);
@@ -1855,13 +1866,13 @@ mod tests {
         assert!(!loaded.review.is_legacy());
         assert_eq!(loaded.review.reviewers, vec![choice]);
         assert!(
-            !ProfileCatalog::persist_legacy_review_to(
+            ProfileCatalog::persist_legacy_review_to(
                 &path,
                 Vec::new(),
                 &[],
                 &mj_core::config::LegacyReview::default()
             )
-            .unwrap()
+            .is_err()
         );
         assert_eq!(Config::load_from(&path).unwrap().review.reviewers.len(), 1);
     }
@@ -1923,11 +1934,11 @@ mod tests {
                 &[],
                 &mj_core::config::LegacyReview::default()
             )
-            .unwrap()
+            .is_err()
         );
-        assert!(!Config::load_from(&path).unwrap().review.is_legacy());
+        assert!(Config::load_from(&path).unwrap().review.is_legacy());
         assert!(
-            std::fs::read_to_string(&path)
+            !std::fs::read_to_string(&path)
                 .unwrap()
                 .contains("reviewers = []")
         );

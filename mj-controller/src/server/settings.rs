@@ -11,6 +11,7 @@ use super::*;
 use mj_client::settings::{discovery, draft, hidden, save, view};
 use mj_core::profile_capabilities::CapabilityState;
 use mj_core::profile_capabilities::ProfileCapabilitiesSnapshot;
+use mj_core::review::autoconfigure::autoconfigure;
 use mj_core::worker_launch::ProfileConfig;
 use serde_json::Value;
 
@@ -142,8 +143,10 @@ fn discover(
             backend.warm_profile_capabilities(&config);
         }
         let config = draft::config_from_draft(real.clone()).ok()?;
+        let current = warm.and_then(|backend| backend.profile_capabilities_snapshot());
+        let capabilities = current.as_ref().unwrap_or(capabilities);
         let action_reason = match capabilities.options(&config, None) {
-            Some(options) if !options.models.is_empty() => Value::Null,
+            Some(options) if autoconfigure(&options.models, |_| None).is_some() => Value::Null,
             Some(options) if !options.unavailable.is_empty() => {
                 Value::String(options.unavailable.join("; "))
             }
@@ -283,7 +286,9 @@ async fn autoconfigure_settings(
         .subagent
         .clone()
         .ok_or_else(|| ApiError::bad_request("Reviewer discovery is unavailable."))?;
-    let snapshot = capabilities(&state);
+    let snapshot = backend
+        .profile_capabilities_snapshot()
+        .unwrap_or_else(|| capabilities(&state));
     let (mut draft, config) = tokio::task::spawn_blocking(move || {
         let mut draft = request.draft;
         let stored =
@@ -313,7 +318,7 @@ async fn autoconfigure_settings(
             ))
         })
         .collect::<Vec<_>>();
-    let (reviewers, _) = crate::review_selection::autoconfigure_with_efforts(
+    let (mut reviewers, known) = crate::review_selection::autoconfigure_with_efforts(
         &available,
         |profile, model| {
             let backend = backend.clone();
@@ -328,6 +333,19 @@ async fn autoconfigure_settings(
             "Autoconfigure unavailable: no supported models",
         ));
     }
+    let unknown = known
+        .iter()
+        .filter_map(|(model, known)| (!known).then_some(model.clone()))
+        .collect::<Vec<_>>();
+    for reviewer in &mut reviewers {
+        if unknown.contains(&reviewer.model) {
+            reviewer.effort = None;
+        }
+    }
+    let notice = (!unknown.is_empty()).then(|| format!(
+        "Could not confirm reviewer efforts for {} (discovery failed or timed out); using defaults.",
+        unknown.join(", ")
+    ));
     draft["review"]["reviewers"] = serde_json::to_value(reviewers).map_err(unreadable)?;
     for key in ["count", "profile", "effort"] {
         draft["review"].as_object_mut().unwrap().remove(key);
@@ -341,7 +359,7 @@ async fn autoconfigure_settings(
         Ok(SettingsEditResponse {
             draft,
             page,
-            notice: None,
+            notice,
             error: None,
         })
     })

@@ -2802,6 +2802,12 @@ impl SubagentBackend for ApiBackend {
         self.profile_catalog.ensure(config);
     }
 
+    fn profile_capabilities_snapshot(
+        &self,
+    ) -> Option<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot> {
+        Some(self.profile_catalog.snapshot().into_inner())
+    }
+
     fn subagent_candidates(
         &self,
         _parent_profile: String,

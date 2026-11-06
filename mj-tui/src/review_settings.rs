@@ -58,7 +58,9 @@ pub(crate) struct ReviewSettingsDialog {
     models: Vec<SessionConfigChoice>,
     efforts: Vec<Vec<SessionConfigChoice>>,
     models_known: bool,
+    models_partial: bool,
     efforts_known: Vec<bool>,
+    efforts_partial: Vec<bool>,
     suggested: Option<Vec<SubagentChoice>>,
     pending_autoconfigure: Option<(Vec<SubagentChoice>, Instant)>,
     effort_notice: Option<String>,
@@ -76,7 +78,9 @@ impl ReviewSettingsDialog {
             models: Vec::new(),
             efforts: Vec::new(),
             models_known: false,
+            models_partial: false,
             efforts_known: Vec::new(),
+            efforts_partial: Vec::new(),
             suggested: None,
             pending_autoconfigure: None,
             effort_notice: None,
@@ -110,14 +114,20 @@ impl ReviewSettingsDialog {
         let models = snapshot.options(config, None);
         self.models_known = models.is_some();
         if let Some(options) = models {
+            self.models_partial = !options.unavailable.is_empty();
             self.models = options.models;
             self.suggested = mj_core::review::autoconfigure::autoconfigure(&self.models, |model| {
-                snapshot
-                    .options(config, Some(model))
-                    .map(|options| options.efforts)
+                snapshot.options(config, Some(model)).and_then(|options| {
+                    if options.unavailable.is_empty() {
+                        Some(options.efforts)
+                    } else {
+                        None
+                    }
+                })
             });
         } else {
             self.models.clear();
+            self.models_partial = false;
             self.suggested = None;
         }
         if let Some((draft, started)) = &self.pending_autoconfigure {
@@ -125,7 +135,10 @@ impl ReviewSettingsDialog {
                 snapshot
                     .options(config, Some(&choice.model))
                     .is_some_and(|options| {
-                        options.unavailable.is_empty() || !options.efforts.is_empty()
+                        options.unavailable.is_empty()
+                            || choice.effort.as_deref().is_some_and(|effort| {
+                                options.efforts.iter().any(|item| item.value == effort)
+                            })
                     })
             });
             if ready || started.elapsed() >= Duration::from_secs(20) {
@@ -167,14 +180,17 @@ impl ReviewSettingsDialog {
         }
         self.efforts.clear();
         self.efforts_known.clear();
+        self.efforts_partial.clear();
         for reviewer in &self.review.reviewers {
             match snapshot.options(config, Some(&reviewer.model)) {
                 Some(options) => {
+                    self.efforts_partial.push(!options.unavailable.is_empty());
                     self.efforts.push(options.efforts);
                     self.efforts_known.push(true);
                 }
                 None => {
                     self.efforts.push(Vec::new());
+                    self.efforts_partial.push(false);
                     self.efforts_known.push(false);
                 }
             }
@@ -195,6 +211,7 @@ impl ReviewSettingsDialog {
             return false;
         };
         self.efforts_known.get(i) == Some(&true)
+            && self.efforts_partial.get(i) != Some(&true)
             && !self.efforts[i].iter().any(|choice| choice.value == effort)
     }
 
@@ -218,6 +235,7 @@ impl ReviewSettingsDialog {
             .all(|(i, reviewer)| {
                 !reviewer.model.trim().is_empty()
                     && (!self.models_known
+                        || self.models_partial
                         || self
                             .models
                             .iter()
@@ -231,9 +249,14 @@ impl ReviewSettingsDialog {
             reviewers: self.review.reviewers.clone(),
             legacy: self.review.is_legacy(),
             models: self.models.clone(),
-            models_known: self.models_known,
+            models_known: self.models_known && !self.models_partial,
             efforts: self.efforts.clone(),
-            efforts_known: self.efforts_known.clone(),
+            efforts_known: self
+                .efforts_known
+                .iter()
+                .zip(&self.efforts_partial)
+                .map(|(known, partial)| *known && !*partial)
+                .collect(),
         }
     }
 
@@ -446,7 +469,10 @@ impl ReviewSettingsDialog {
                             .profile_capabilities
                             .options(&config, Some(&choice.model))
                             .is_none_or(|options| {
-                                !options.unavailable.is_empty() && options.efforts.is_empty()
+                                !options.unavailable.is_empty()
+                                    && choice.effort.as_deref().is_some_and(|effort| {
+                                        !options.efforts.iter().any(|item| item.value == effort)
+                                    })
                             })
                     });
                     if unknown {

@@ -502,3 +502,23 @@ fn failed_effort_discovery_is_reported_when_autoconfigure_times_out() {
             .contains("probe failed")
     );
 }
+
+#[test]
+fn partial_discovery_does_not_reject_configured_reviewer_on_save() {
+    let mut config = config();
+    config.review.reviewers = vec![SubagentChoice {
+        model: "custom-model".into(),
+        effort: Some("high".into()),
+    }];
+    let mut snapshot = catalog(&config, &[]);
+    for profile in snapshot.profiles.values_mut() {
+        profile.choices = CapabilityState::Failed("probe failed".into());
+    }
+    let mut dialog = ReviewSettingsDialog::new(&config);
+    dialog.update_choices(&config, &snapshot);
+    assert!(dialog.can_save());
+    assert!(
+        ReviewSettingsDialog::validation_error(&dialog.validation_snapshot(), &dialog.review)
+            .is_none()
+    );
+}

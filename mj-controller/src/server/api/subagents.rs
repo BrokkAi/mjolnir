@@ -198,27 +198,35 @@ pub(crate) async fn resolve_reviewer_model_profile_selection(
     let requirement = effort
         .map(EffortRequirement::Exact)
         .unwrap_or(EffortRequirement::Default);
-    if let Ok(selected) = resolve_model_profile_selection_matching(
-        backend,
-        None,
-        model,
-        requirement,
-        None,
-        ModelProfileCandidateSource::ReviewersReady,
-    )
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        if let Ok(selected) = resolve_model_profile_selection_matching(
+            backend,
+            None,
+            model,
+            requirement,
+            None,
+            ModelProfileCandidateSource::ReviewersReady,
+        )
+        .await
+        {
+            return Ok(selected);
+        }
+        resolve_model_profile_selection_matching(
+            backend,
+            None,
+            model,
+            requirement,
+            None,
+            ModelProfileCandidateSource::Reviewers,
+        )
+        .await
+    })
     .await
-    {
-        return Ok(selected);
-    }
-    resolve_model_profile_selection_matching(
-        backend,
-        None,
-        model,
-        requirement,
-        None,
-        ModelProfileCandidateSource::Reviewers,
-    )
-    .await
+    .map_err(|_| {
+        ApiFailure::unavailable(format!(
+            "reviewer effort discovery timed out for model {model:?}"
+        ))
+    })?
 }
 
 pub(crate) async fn resolve_pinned_reviewer_model_profile_selection(
@@ -349,13 +357,17 @@ async fn resolve_model_profile_selection_matching(
             });
         }
     }
+    if reviewer_source {
+        tokio::task::yield_now().await;
+    }
+    let mut ready_results = std::collections::HashMap::new();
     let all_offered = offered.clone();
     let mut matching_model = false;
     let mut offered_any_effort = false;
     let mut selection_errors = Vec::new();
     let mut unhealthy = Vec::new();
-    for candidate in offered {
-        if !offers_model(&candidate, model) {
+    for (index, candidate) in offered.iter().enumerate() {
+        if !offers_model(candidate, model) {
             continue;
         }
         matching_model = true;
@@ -363,20 +375,50 @@ async fn resolve_model_profile_selection_matching(
             let receiver = receivers
                 .remove(&candidate.profile_id)
                 .expect("reviewer probe");
-            tokio::time::timeout_at(deadline, receiver)
-                .await
-                .map_err(|_| {
-                    ApiFailure::unavailable(format!(
-                        "reviewer effort probe timed out for {:?}",
-                        candidate.profile_id
-                    ))
-                })
-                .and_then(|result| {
-                    result.map_err(|error| ApiFailure::unavailable(error.to_string()))
-                })
-                .and_then(|result| result)
+            let ready_later = offered.iter().skip(index + 1).any(|later| {
+                if !offers_model(later, model) || unhealthy_note(later, model).is_some() {
+                    return false;
+                }
+                let Some(later_receiver) = receivers.get_mut(&later.profile_id) else {
+                    return false;
+                };
+                let result = match later_receiver.try_recv() {
+                    Ok(result) => result,
+                    Err(_) => return false,
+                };
+                let qualifies = result.as_ref().is_ok_and(|efforts| match requirement {
+                    EffortRequirement::Exact(requested) => {
+                        efforts.iter().any(|effort| effort.value == requested)
+                    }
+                    EffortRequirement::Default => true,
+                    EffortRequirement::Any => false,
+                });
+                ready_results.insert(later.profile_id.clone(), result);
+                qualifies
+            });
+            let candidate_deadline = if ready_later {
+                deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(2))
+            } else {
+                deadline
+            };
+            if let Some(result) = ready_results.remove(&candidate.profile_id) {
+                result
+            } else {
+                tokio::time::timeout_at(candidate_deadline, receiver)
+                    .await
+                    .map_err(|_| {
+                        ApiFailure::unavailable(format!(
+                            "reviewer effort probe timed out for {:?}",
+                            candidate.profile_id
+                        ))
+                    })
+                    .and_then(|result| {
+                        result.map_err(|error| ApiFailure::unavailable(error.to_string()))
+                    })
+                    .and_then(|result| result)
+            }
         } else {
-            model_efforts(backend, &candidate, model).await
+            model_efforts(backend, candidate, model).await
         };
         let efforts = match result {
             Ok(efforts) => efforts,
@@ -405,13 +447,13 @@ async fn resolve_model_profile_selection_matching(
         };
         // A pinned profile runs even while marked: someone chose it.
         if profile_id.is_none()
-            && let Some(note) = unhealthy_note(&candidate, model)
+            && let Some(note) = unhealthy_note(candidate, model)
         {
             unhealthy.push(note);
             continue;
         }
         probes.abort_all();
-        return Ok(selection(candidate.profile_id, model, effort));
+        return Ok(selection(candidate.profile_id.clone(), model, effort));
     }
     probes.abort_all();
     if !unhealthy.is_empty() {
@@ -1526,6 +1568,42 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(selected.profile_id, "subscription");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reviewer_ready_later_candidate_bounds_earlier_probe_grace() {
+        let mut ready = candidate("ready", Some(0), &["fixed"]);
+        ready.choices.model = Some("fixed".into());
+        ready.choices.efforts = vec![mj_core::acp::SessionConfigChoice {
+            value: "high".into(),
+            name: "High".into(),
+            description: None,
+        }];
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
+            discovery_fails: false,
+            config: Default::default(),
+            candidates: SubagentCandidates {
+                offered: vec![candidate("stalled-first", Some(80), &["fixed"]), ready],
+                unavailable: Vec::new(),
+            },
+        });
+        let start = tokio::time::Instant::now();
+        let selected = resolve_model_profile_selection_matching(
+            &backend,
+            None,
+            "fixed",
+            EffortRequirement::Exact("high"),
+            None,
+            ModelProfileCandidateSource::ReviewersReady,
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.profile_id, "ready");
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(start),
+            std::time::Duration::from_secs(2)
+        );
     }
 
     #[tokio::test(start_paused = true)]
