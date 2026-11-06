@@ -697,7 +697,8 @@ pub fn linked_worktree_start(
 
 /// Where a review's coverage starts. A recorded session start wins. Without
 /// one, the merge base with the default branch bounds the session's work when
-/// HEAD has moved past it. Otherwise nothing tells the session's commits from
+/// HEAD has moved past it, and then the newest reviewed commit in HEAD's
+/// history does. Otherwise nothing tells the session's commits from
 /// older history: the current HEAD is recorded as the start so later commits
 /// can be reviewed, and this review is refused instead of reporting the
 /// session's earlier commits as reviewed.
@@ -717,6 +718,11 @@ pub fn review_start_head(
         && base != head
     {
         return Ok(Some(base));
+    }
+    // An earlier review of HEAD's history bounds the work that follows it.
+    let reviewed = reviewed_refs(runner, root, &[format!("--merged={head}")])?;
+    if let Some(reviewed) = furthest_reviewed_ancestor(runner, root, &reviewed)? {
+        return Ok(Some(reviewed));
     }
     ensure_session_start_head(runner, root, session)?;
     anyhow::bail!(
@@ -1481,6 +1487,21 @@ pub(super) mod push_tests {
             session_start_head(&SystemGit, &root, "unpinned").unwrap(),
             Some(head),
             "later reviews start at the commit recorded now"
+        );
+
+        let reviewed = git(&root, &["rev-parse", "HEAD"]);
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &tree, &reviewed).unwrap();
+        commit(&root, "after a review");
+        git(&root, &["push", "-q", "origin", "main"]);
+        assert_eq!(
+            review_start_head(&SystemGit, &root, "reviewed").unwrap(),
+            Some(reviewed),
+            "an earlier reviewed commit bounds the work after it"
+        );
+        assert_eq!(
+            session_start_head(&SystemGit, &root, "reviewed").unwrap(),
+            None
         );
 
         git(&root, &["checkout", "-qb", "feature", &main]);
