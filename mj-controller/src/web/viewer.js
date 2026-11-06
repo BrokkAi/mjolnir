@@ -7347,7 +7347,9 @@ async function searchHistory(query) {
     }
     paletteSelected = 0;
     if (!paletteMatches.length) {
-      commandPalette.replaceChildren(el('p', 'dim palette-row', 'No earlier prompts match.'));
+      // The daemon's trigram index matches substrings of three characters or more.
+      const hint = [...query].length < 3 ? 'Type at least 3 characters.' : 'No earlier prompts match.';
+      commandPalette.replaceChildren(el('p', 'dim palette-row', hint));
       commandPalette.classList.remove('hidden');
       return;
     }

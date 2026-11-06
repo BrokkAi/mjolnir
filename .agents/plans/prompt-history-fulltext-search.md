@@ -16,9 +16,11 @@ To see it working, open a session in the terminal and press Ctrl-R. Type three o
 
 - [x] (2026-11-06) Research and prototype: confirmed trigram FTS5 behaviour on SQLite 3.46 and the bundled 3.53.2, measured index build time and size on a copy of the live store.
 - [x] (2026-11-06) Milestone 1: schema revision 111 adds the `prompt_history_text` index and its triggers; `prompt_text_index_covers_existing_rows_and_follows_previous_writers` passes.
-- [ ] Milestone 2: one paged, tiered search in `mj-controller/src/database/prompts.rs` serves the terminal and the web route.
-- [ ] Milestone 3: the terminal composer keeps an eight-match queue with a cursor; Up and Ctrl-P read a session-only list.
-- [ ] Milestone 4: documentation, full validation, commit, review, push.
+- [x] (2026-11-06) Milestone 2: `search_prompt_page_from` serves the terminal (`client_backend.rs`) and the web route (`run.rs`); the session tier's filter is written `+p.session_id` so the full-text index drives it; store tests cover ordering, paging with `limit = 2`, short queries and quotes.
+- [x] (2026-11-06) Milestone 3: `HistorySearch` keeps eight matches queued and refills from `next`; `history_search_keeps_eight_matches_queued_and_refills_from_the_cursor` passes; the web palette explains queries shorter than 3 characters.
+- [x] (2026-11-06) Revision 111 also limits `prompt_history` to top-level sessions that still exist (see the Decision Log); `prompt_history_keeps_top_level_prompts_and_its_index_follows_previous_writers` and the `database::`, prompt and history filters (326 tests) pass.
+- [x] (2026-11-06) Milestone 4: docs, workspace clippy, and the Ctrl-R step in `tests/e2e/tui_components_chat.py` passed against a real daemon and TUI (seed 61113, captures `008-history-search` and `009-history-search-scope`). The rest of that scenario is stale on master: it waited for a composer titled "Prompt" (fixed to the `╭  mic` border) and for a "Choose a model" dialog that is now a "model" menu (not fixed). `Lab.environment()` no longer passes the host session's `CLAUDE*`, `CODEX_*` and `MJ_*` variables to lab daemons. The full suites ran once with 11 worker-startup timeouts in resume, move and proxy tests, which the user chose not to rerun.
+- [ ] Commit, review, push.
 
 
 ## Surprises & Discoveries
@@ -34,6 +36,12 @@ To see it working, open a session in the terminal and press Ctrl-R. Type three o
 
 - Observation: a page for a session that has no matches, under a query that matches 160,000 rows elsewhere, reads every match and takes about 85 ms. The live store is far smaller, so this is not a practical concern.
   Evidence: the live store held 13,891 prompts in 8,719 sessions, at most 291 in one session.
+
+- Observation: on the real schema, SQLite planned the session tier from the `prompt_history_session_recent` index and probed the full-text index once per row. That took 75 ms for a 291-prompt session. Writing the filter as `+p.session_id = ?` hides it from index selection, so the full-text index drives the query, and the same page took 6 ms. The project and other-project tiers already let the full-text index drive, because their filters are correlated `EXISTS` subqueries.
+  Evidence: `EXPLAIN QUERY PLAN` showed `SEARCH p USING INDEX prompt_history_session_recent ... SCAN f VIRTUAL TABLE INDEX 192:=M1 ... USE TEMP B-TREE FOR ORDER BY` before the change and `SCAN f VIRTUAL TABLE INDEX 192:M1< ; SEARCH p USING INTEGER PRIMARY KEY` after it, on a copy of the live store.
+
+- Observation: SQLite refuses `ALTER TABLE ... RENAME` while a trigger on another table names a table that has just been dropped. Revision 77 recreates `prompt_history` this way, so test fixtures that rewind a current store below revision 111 and rerun older migrations failed with "error in trigger prompt_history_child_registered: no such table: main.prompt_history". Real stores below revision 111 have no such triggers. The fix is the fixture helper `restore_pre111_prompt_history` in `mj-controller/src/database/schema.rs`, called from `restore_review_state_schema`. A future migration that recreates `prompt_history`, `sessions` or `subagent_sessions` must drop and recreate these triggers itself.
+  Evidence: 13 schema and store tests failed with that message before the helper and passed after it.
 
 - Observation: building the index on a copy of the live store's prompt text (61 MB) took 10.9 s and grew the file from 64 MB to 206 MB. Queries on that copy took under 5 ms.
   Evidence: prototype output `rebuild s 10.9 base MB 64 with index MB 206`; `"the"` matched 11,330 rows in 2.8 ms.
@@ -65,6 +73,10 @@ To see it working, open a session in the terminal and press Ctrl-R. Type three o
   Rationale: older readers ignore the new table. Older writers insert into `prompt_history`, and the triggers live in the database, so they keep the index current. Every shipped build links SQLite through `rusqlite` with the `bundled` feature, and the bundled `libsqlite3-sys` builds 0.26, 0.30 and 0.38 all compile with `SQLITE_ENABLE_FTS5`, so older builds can run the triggers.
   Date/Author: 2026-11-06, agent.
 
+- Decision: `prompt_history` holds only prompts of top-level sessions that still exist. Revision 111 deletes the rows of sub-agent children and of destroyed sessions, and triggers keep the rule for every writer: `prompt_history_top_level_only` ignores inserts for sessions in `subagent_sessions`, `prompt_history_child_registered` deletes a child's rows when it is registered, and `prompt_history_session_destroyed` deletes a session's rows when its `sessions` row is deleted. The index then covers the whole table.
+  Rationale: on the live store, 5,333 child sessions held one row each (their spawn instructions, 45.5 MB of 62.3 MB), and destroyed sessions held 3,908 rows (12.9 MB). Neither is text a person typed into a conversation they can still open. Only Ctrl-R, Up/Ctrl-P and the web palette read the table, so nothing else loses data. This reverses the earlier rule in `delete_session` that kept a destroyed session's prompts. With about 4 MB of text left, building the index inside the migration takes about a second, so the build stays synchronous. The user confirmed the deletion.
+  Date/Author: 2026-11-06, user.
+
 - Decision: remove the in-memory substring fallback `ChatState::local_history_search_results`.
   Rationale: it ran only when a chat had no project ID, which an open chat always has (`ActiveChat` calls `set_history_context` on open), so it was a second matching mode reachable only from tests.
   Date/Author: 2026-11-06, agent.
@@ -72,7 +84,7 @@ To see it working, open a session in the terminal and press Ctrl-R. Type three o
 
 ## Outcomes & Retrospective
 
-Not started.
+Ctrl-R and the web palette now search a trigram index over prompts of top-level sessions that still exist, smallest scope first, eight matches ahead at a time. Work per keystroke follows the matches shown. The live store will keep about 4,750 of its 13,984 rows. Two gaps remain. Prompts sent through the HTTP API's `prompt` action, which the web viewer uses, are not recorded in `prompt_history` at all (`submit_prompt_with_id` in `mj-controller/src/server_runtime/api.rs` submits without `record_prompt`), so they never appear in history; this predates the plan. The tmux component scenario is stale after the history step. Lesson: measure what a table holds before indexing it; 73% of its text was sub-agent instructions.
 
 
 ## Context and Orientation
@@ -189,3 +201,6 @@ In `mj-client/src/session.rs`, on `SessionHandleBackend` and `SessionHandle`:
     fn search_prompts(&self, bundle_id: String, scope: HistoryScope, query: String,
         after: Option<HistoryCursor>, limit: usize) -> BoxFuture<'_, Result<PromptHistoryPage>>;
     fn session_prompts(&self) -> BoxFuture<'_, Result<Vec<PromptHistoryEntry>>>;
+
+
+Revision note (2026-11-06): the user decided that prompt history keeps only top-level sessions that still exist, so revision 111 now deletes child and destroyed-session rows and adds three triggers that keep that rule. The build stays synchronous because the remaining text is small. Progress, Decision Log and Surprises were updated.

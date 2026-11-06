@@ -463,7 +463,7 @@ changing the prompt draft.
 | `Ctrl+C` | Save the current draft to history and clear Prompt |
 | `Ctrl+P` / `Ctrl+N` | Move to the previous or next line, then through this session's earlier prompts |
 
-History search starts across all projects. Matches from this session come first, then the rest of this project, then other projects, and each group runs newest first. Inside history search, `Ctrl+R` or `↑` selects an older match, `Ctrl+S` or `↓` selects a newer match, `Enter` accepts it, and `Esc` or `Ctrl+C` cancels the search.
+History search starts across all projects and matches what you type anywhere in an earlier prompt, ignoring case, once you have typed at least 3 characters. Matches from this session come first, then the rest of this project, then other projects, and each group runs newest first. History keeps the prompts you send to top-level sessions; sub-agents' instructions and the prompts of destroyed sessions are not kept. Inside history search, `Ctrl+R` or `↑` selects an older match, `Ctrl+S` or `↓` selects a newer match, `Enter` accepts it, and `Esc` or `Ctrl+C` cancels the search.
 
 Toggling the transcript between rendered and raw text (`prefix+t`) and starting or stopping dictation (`prefix+m`) are prefix commands rather than composer-only keys; see [Prefix key](#prefix-key). They act on whichever session's conversation is visible, including from a pane other than Prompt.
 

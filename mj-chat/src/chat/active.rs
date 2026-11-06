@@ -22,7 +22,7 @@ use crate::components::{EventResult, render_scrollbar, scrollbar_geometry};
 use crate::selection::{SurfaceFrame, SurfaceId};
 use mj_core::config::Config;
 use mj_core::state::{MaterializedSession, SessionRecord, TranscriptItem, config_command_text};
-use mj_core::storage::{HistoryScope, PromptHistoryEntry};
+use mj_core::storage::PromptHistoryEntry;
 
 use mj_client::session::{
     ManagedSessionView, SessionControl as SessionManagerControl,
@@ -647,10 +647,9 @@ impl ActiveChat {
         {
             let updates = chat_io_tx.clone();
             let history_session = session.clone();
-            let bundle_id = bundle_id.to_owned();
             tokio::spawn(async move {
                 let result = history_session
-                    .search_prompts(bundle_id, HistoryScope::Session, String::new())
+                    .session_prompts()
                     .await
                     .map_err(|error| format!("{error:#}"));
                 if let Err(error) = updates.send(ChatIoUpdate::SessionHistoryPrefetched(result)) {

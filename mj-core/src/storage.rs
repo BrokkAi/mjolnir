@@ -295,15 +295,26 @@ pub struct PushFindingsRecord {
     pub synthesis: String,
 }
 
-/// What a bounded prompt search found, and whether it stopped early.
+/// Prompt-history queries shorter than this many characters match nothing:
+/// the trigram index behind the search cannot answer them.
+pub const MIN_HISTORY_QUERY_CHARS: usize = 3;
+
+/// Where a prompt search resumes: the tier it reached, counted from the
+/// asking session outward, and the newest history row it has not yet read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryCursor {
+    pub tier: u8,
+    pub before: i64,
+}
+
+/// One page of a prompt search. `next` is `None` once nothing more matches.
 ///
-/// The flag is not decoration. Without it a caller cannot tell twenty matches
-/// from the first twenty of many, and will present a partial answer as a whole
-/// one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BoundedPromptHistory {
+/// Without `next` a caller cannot tell eight matches from the first eight of
+/// many, and would present a partial answer as a whole one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PromptHistoryPage {
     pub entries: Vec<PromptHistoryEntry>,
-    pub truncated: bool,
+    pub next: Option<HistoryCursor>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

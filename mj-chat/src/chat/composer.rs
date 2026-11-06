@@ -28,7 +28,7 @@ pub(super) enum ComposerIoUpdate {
     },
     HistorySearchResults {
         generation: u64,
-        result: Result<Vec<mj_core::storage::PromptHistoryEntry>, String>,
+        result: Result<mj_core::storage::PromptHistoryPage, String>,
     },
     AttachmentFinished(AttachmentResult),
     Remote(remote::ChatRemoteResult),

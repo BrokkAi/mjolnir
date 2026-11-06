@@ -882,6 +882,14 @@ impl SessionHandleBackend for FakeSession {
         _bundle_id: String,
         _scope: mj_core::storage::HistoryScope,
         _query: String,
+        _after: Option<mj_core::storage::HistoryCursor>,
+        _limit: usize,
+    ) -> BoxFuture<'_, AnyResult<mj_core::storage::PromptHistoryPage>> {
+        Box::pin(async { Ok(Default::default()) })
+    }
+
+    fn session_prompts(
+        &self,
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::storage::PromptHistoryEntry>>> {
         Box::pin(async { Ok(Vec::new()) })
     }

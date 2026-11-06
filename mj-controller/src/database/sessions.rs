@@ -1289,7 +1289,7 @@ pub(super) fn validate_session_record(session: &SessionRecord) -> Result<()> {
 }
 
 /// Remove one operational session while retaining its relational history
-/// context and prompt history.
+/// context. A database trigger removes its prompt history with it.
 pub fn delete_session(session_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     submit_database_write("delete_session", move |_| {

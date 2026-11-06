@@ -163,12 +163,17 @@ pub trait SessionHandleBackend: Send + Sync {
     ) -> BoxFuture<'_, Result<mj_core::storage::TranscriptHistoryPage>> {
         Box::pin(async { anyhow::bail!("earlier conversation history is unavailable") })
     }
+    /// One page of prompts matching `query`, resuming from `after`.
     fn search_prompts(
         &self,
         bundle_id: String,
         scope: mj_core::storage::HistoryScope,
         query: String,
-    ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>>;
+        after: Option<mj_core::storage::HistoryCursor>,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<mj_core::storage::PromptHistoryPage>>;
+    /// This session's stored prompts, newest first, each text once.
+    fn session_prompts(&self) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>>;
     fn config_result(&self, command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>>;
 
     fn clone_box(&self) -> Box<dyn SessionHandleBackend>;
@@ -218,8 +223,16 @@ impl SessionHandle {
         bundle_id: String,
         scope: mj_core::storage::HistoryScope,
         query: String,
-    ) -> Result<Vec<mj_core::storage::PromptHistoryEntry>> {
-        self.backend.search_prompts(bundle_id, scope, query).await
+        after: Option<mj_core::storage::HistoryCursor>,
+        limit: usize,
+    ) -> Result<mj_core::storage::PromptHistoryPage> {
+        self.backend
+            .search_prompts(bundle_id, scope, query, after, limit)
+            .await
+    }
+
+    pub async fn session_prompts(&self) -> Result<Vec<mj_core::storage::PromptHistoryEntry>> {
+        self.backend.session_prompts().await
     }
 
     pub fn new(backend: impl SessionHandleBackend + 'static) -> Self {
@@ -512,7 +525,9 @@ impl SessionHandleBackend for ReplacementTestSession {
         _bundle_id: String,
         _scope: mj_core::storage::HistoryScope,
         _query: String,
-    ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
+        _after: Option<mj_core::storage::HistoryCursor>,
+        _limit: usize,
+    ) -> BoxFuture<'_, Result<mj_core::storage::PromptHistoryPage>> {
         #[cfg(test)]
         if let Some(history) = &self.history {
             let (response, result) = tokio::sync::oneshot::channel();
@@ -529,6 +544,10 @@ impl SessionHandleBackend for ReplacementTestSession {
                     .map_err(|_| anyhow::anyhow!("history response dropped"))?
             });
         }
+        Box::pin(async { Ok(Default::default()) })
+    }
+
+    fn session_prompts(&self) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
@@ -680,13 +699,13 @@ struct HistoryTestRequest {
     bundle_id: String,
     scope: mj_core::storage::HistoryScope,
     query: String,
-    response: tokio::sync::oneshot::Sender<Result<Vec<mj_core::storage::PromptHistoryEntry>>>,
+    response: tokio::sync::oneshot::Sender<Result<mj_core::storage::PromptHistoryPage>>,
 }
 
 #[cfg(test)]
 mod storage_tests {
     use super::*;
-    use mj_core::storage::{HistoryScope, PromptHistoryEntry};
+    use mj_core::storage::{HistoryScope, PromptHistoryEntry, PromptHistoryPage};
 
     #[tokio::test]
     async fn history_search_yields_until_backend_responds_and_propagates_failures() {
@@ -701,8 +720,13 @@ mod storage_tests {
             view,
             _view_guard: Some(Arc::new(view_guard)),
         });
-        let search =
-            session.search_prompts("bundle".into(), HistoryScope::Project, "needle".into());
+        let search = session.search_prompts(
+            "bundle".into(),
+            HistoryScope::Project,
+            "needle".into(),
+            None,
+            8,
+        );
         tokio::pin!(search);
         let request = tokio::select! {
             biased;
@@ -724,7 +748,13 @@ mod storage_tests {
                 .contains("storage unavailable")
         );
 
-        let search = session.search_prompts("bundle".into(), HistoryScope::Project, "retry".into());
+        let search = session.search_prompts(
+            "bundle".into(),
+            HistoryScope::Project,
+            "retry".into(),
+            None,
+            8,
+        );
         tokio::pin!(search);
         let request = tokio::select! {
             biased;
@@ -733,12 +763,15 @@ mod storage_tests {
         };
         request
             .response
-            .send(Ok(vec![PromptHistoryEntry {
-                id: 1,
-                session_id: "session".into(),
-                text: "retry works".into(),
-            }]))
+            .send(Ok(PromptHistoryPage {
+                entries: vec![PromptHistoryEntry {
+                    id: 1,
+                    session_id: "session".into(),
+                    text: "retry works".into(),
+                }],
+                next: None,
+            }))
             .unwrap();
-        assert_eq!(search.await.unwrap()[0].text, "retry works");
+        assert_eq!(search.await.unwrap().entries[0].text, "retry works");
     }
 }

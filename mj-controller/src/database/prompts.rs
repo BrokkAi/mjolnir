@@ -125,76 +125,64 @@ pub(super) fn record_prompt_to(
     Ok(())
 }
 
-pub fn search_prompts(
-    session_id: &str,
-    bundle_id: &str,
-    scope: HistoryScope,
-    query: &str,
-) -> Result<Vec<PromptHistoryEntry>> {
-    search_prompts_from(&database_path(), session_id, bundle_id, scope, query)
-}
-
-/// Search prompt history, stopping at `limit` matches.
+/// One page of prompt history matching `query`, smallest scope first.
 ///
-/// `search_prompts` pages through the whole table and stops only when a page
-/// comes back short, which is fine for a terminal running it against a local
-/// database and is not something an HTTP route may reach.
-pub fn search_prompts_bounded(
+/// `after` is the `next` cursor of the previous page, or `None` to start.
+pub fn search_prompt_page(
     session_id: &str,
     bundle_id: &str,
     scope: HistoryScope,
     query: &str,
+    after: Option<HistoryCursor>,
     limit: usize,
-) -> Result<BoundedPromptHistory> {
-    search_prompts_bounded_from(&database_path(), session_id, bundle_id, scope, query, limit)
-}
-
-pub(super) fn search_prompts_bounded_from(
-    path: &Path,
-    session_id: &str,
-    bundle_id: &str,
-    scope: HistoryScope,
-    query: &str,
-    limit: usize,
-) -> Result<BoundedPromptHistory> {
-    search_prompt_tiers(
-        path,
+) -> Result<PromptHistoryPage> {
+    search_prompt_page_from(
+        &database_path(),
         session_id,
         bundle_id,
         scope,
         query,
-        Some(SearchBounds {
-            limit,
-            // A query that matches nothing must not walk an unbounded history.
-            max_rows_scanned: 4_096,
-        }),
+        after,
+        limit,
     )
 }
 
-pub(super) fn search_prompts_from(
-    path: &Path,
-    session_id: &str,
-    bundle_id: &str,
-    scope: HistoryScope,
-    query: &str,
-) -> Result<Vec<PromptHistoryEntry>> {
-    Ok(search_prompt_tiers(path, session_id, bundle_id, scope, query, None)?.entries)
+/// This session's stored prompts, newest first, each text once.
+pub fn session_prompts(session_id: &str) -> Result<Vec<PromptHistoryEntry>> {
+    session_prompts_from(&database_path(), session_id)
 }
 
-/// Where prompts come from, smallest scope first.
-#[derive(Clone, Copy)]
+pub(super) fn session_prompts_from(
+    path: &Path,
+    session_id: &str,
+) -> Result<Vec<PromptHistoryEntry>> {
+    let connection = open_reader(path)?;
+    let mut seen = std::collections::HashSet::new();
+    Ok(query_history_page(
+        &connection,
+        "SELECT history_id, session_id, text FROM prompt_history
+         WHERE session_id = ?1 ORDER BY history_id DESC",
+        [session_id],
+    )?
+    .into_iter()
+    .filter(|entry| seen.insert(entry.text.clone()))
+    .collect())
+}
+
+/// Where prompts come from, smallest scope first. The discriminant is the
+/// tier's position in [`HistoryCursor::tier`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum HistoryTier {
     /// The asking session's own prompts.
-    Session,
+    Session = 0,
     /// Other sessions in the asking session's project.
-    Project,
+    Project = 1,
     /// Sessions in every other project.
-    Elsewhere,
+    Elsewhere = 2,
 }
 
 impl HistoryTier {
-    /// The tiers a scope reads, in the order their matches are listed. Within
-    /// a tier, matches run newest first.
+    /// The tiers a scope reads, in the order their matches are listed.
     fn of_scope(scope: HistoryScope) -> &'static [HistoryTier] {
         match scope {
             HistoryScope::Session => &[HistoryTier::Session],
@@ -207,118 +195,147 @@ impl HistoryTier {
         }
     }
 
-    /// One newest-first page of the tier's rows older than `before`.
+    /// Up to `count` of the tier's matches older than `before`, newest first.
+    /// The full-text index drives each query, so it reads matches only.
     fn page(
         self,
         connection: &Connection,
+        phrase: &str,
         session_id: &str,
         bundle_id: &str,
         before: i64,
-        page_size: usize,
+        count: usize,
     ) -> Result<Vec<PromptHistoryEntry>> {
-        let page_size = page_size as i64;
+        let count = i64::try_from(count).unwrap_or(i64::MAX);
         match self {
+            // The unary `+` keeps SQLite from driving this query from the
+            // session's history index and probing the full-text index once per
+            // row, which took 75 ms for a 291-prompt session instead of 6 ms.
             HistoryTier::Session => query_history_page(
                 connection,
-                "SELECT history_id, session_id, text FROM prompt_history
-                 WHERE session_id = ?1 AND history_id < ?2
-                 ORDER BY history_id DESC LIMIT ?3",
-                params![session_id, before, page_size],
+                "SELECT p.history_id, p.session_id, p.text
+                 FROM prompt_history_text f JOIN prompt_history p ON p.history_id = f.rowid
+                 WHERE prompt_history_text MATCH ?1 AND f.rowid < ?2 AND +p.session_id = ?3
+                 ORDER BY f.rowid DESC LIMIT ?4",
+                params![phrase, before, session_id, count],
             ),
             HistoryTier::Project => query_history_page(
                 connection,
-                "SELECT h.history_id, h.session_id, h.text
-                 FROM prompt_history h JOIN session_contexts c USING(session_id)
-                 WHERE c.bundle_id = ?1 AND h.session_id <> ?2 AND h.history_id < ?3
-                 ORDER BY h.history_id DESC LIMIT ?4",
-                params![bundle_id, session_id, before, page_size],
+                "SELECT p.history_id, p.session_id, p.text
+                 FROM prompt_history_text f JOIN prompt_history p ON p.history_id = f.rowid
+                 WHERE prompt_history_text MATCH ?1 AND f.rowid < ?2 AND p.session_id <> ?3
+                   AND EXISTS (SELECT 1 FROM session_contexts c
+                               WHERE c.session_id = p.session_id AND c.bundle_id = ?4)
+                 ORDER BY f.rowid DESC LIMIT ?5",
+                params![phrase, before, session_id, bundle_id, count],
             ),
             HistoryTier::Elsewhere => query_history_page(
                 connection,
-                "SELECT h.history_id, h.session_id, h.text FROM prompt_history h
-                 WHERE h.history_id < ?1 AND NOT EXISTS (
-                     SELECT 1 FROM session_contexts c
-                     WHERE c.session_id = h.session_id AND c.bundle_id = ?2)
-                 ORDER BY h.history_id DESC LIMIT ?3",
-                params![before, bundle_id, page_size],
+                "SELECT p.history_id, p.session_id, p.text
+                 FROM prompt_history_text f JOIN prompt_history p ON p.history_id = f.rowid
+                 WHERE prompt_history_text MATCH ?1 AND f.rowid < ?2
+                   AND NOT EXISTS (SELECT 1 FROM session_contexts c
+                                   WHERE c.session_id = p.session_id AND c.bundle_id = ?3)
+                 ORDER BY f.rowid DESC LIMIT ?4",
+                params![phrase, before, bundle_id, count],
             ),
         }
     }
 }
 
-struct SearchBounds {
-    /// Matches to return before reporting the result as truncated.
-    limit: usize,
-    /// Rows the search may read, across all tiers, before it gives up.
-    max_rows_scanned: usize,
+/// `query` as one full-text phrase, which the trigram index matches as a
+/// substring ignoring case. `None` when it is too short for the index.
+fn fulltext_phrase(query: &str) -> Option<String> {
+    (query.chars().count() >= MIN_HISTORY_QUERY_CHARS)
+        .then(|| format!("\"{}\"", query.replace('"', "\"\"")))
 }
 
 /// The one prompt search behind the terminal composer and the web viewer.
 ///
-/// Tiers are read one after another, each as indexed newest-first pages, so a
-/// scan cap spends its rows on the smaller scopes first. A prompt that
-/// appears in several tiers is listed once, at its smallest scope.
-fn search_prompt_tiers(
+/// Tiers are read in order from the cursor, and the search stops as soon as
+/// it holds `limit` matches, so its work follows the matches returned rather
+/// than the size of the history. Repeated text appears once within a page;
+/// a caller that keeps several pages drops repeats across them.
+pub(super) fn search_prompt_page_from(
     path: &Path,
     session_id: &str,
     bundle_id: &str,
     scope: HistoryScope,
     query: &str,
-    bounds: Option<SearchBounds>,
-) -> Result<BoundedPromptHistory> {
-    const PAGE_SIZE: usize = 256;
-
+    after: Option<HistoryCursor>,
+    limit: usize,
+) -> Result<PromptHistoryPage> {
+    let Some(phrase) = fulltext_phrase(query) else {
+        return Ok(PromptHistoryPage::default());
+    };
     let connection = open_reader(path)?;
     let canonical_bundle = super::projects::session_project_id(&connection, session_id, bundle_id)?;
-    let query = query.to_lowercase();
+    let start = after.unwrap_or(HistoryCursor {
+        tier: HistoryTier::Session as u8,
+        before: i64::MAX,
+    });
     let mut seen = std::collections::HashSet::new();
-    let mut matches = Vec::new();
-    let mut scanned = 0;
-    for tier in HistoryTier::of_scope(scope) {
-        let mut before = i64::MAX;
+    let mut entries = Vec::new();
+    for &tier in HistoryTier::of_scope(scope)
+        .iter()
+        .filter(|tier| **tier as u8 >= start.tier)
+    {
+        let mut before = if tier as u8 == start.tier {
+            start.before
+        } else {
+            i64::MAX
+        };
         loop {
-            let page = tier.page(
+            let wanted = limit.saturating_sub(entries.len());
+            // One row past what is still needed shows whether more exist.
+            let rows = tier.page(
                 &connection,
+                &phrase,
                 session_id,
                 &canonical_bundle,
                 before,
-                PAGE_SIZE,
+                wanted.saturating_add(1),
             )?;
-            let page_len = page.len();
-            for entry in page {
+            let exhausted = rows.len() <= wanted;
+            for entry in rows {
+                if entries.len() == limit {
+                    return Ok(PromptHistoryPage {
+                        entries,
+                        next: Some(HistoryCursor {
+                            tier: tier as u8,
+                            before,
+                        }),
+                    });
+                }
                 before = entry.id;
-                scanned += 1;
-                if entry.text.to_lowercase().contains(&query) && seen.insert(entry.text.clone()) {
-                    if bounds
-                        .as_ref()
-                        .is_some_and(|bounds| matches.len() == bounds.limit)
-                    {
-                        return Ok(BoundedPromptHistory {
-                            entries: matches,
-                            truncated: true,
-                        });
-                    }
-                    matches.push(entry);
+                if seen.insert(entry.text.clone()) {
+                    entries.push(entry);
                 }
             }
-            if page_len < PAGE_SIZE {
+            if exhausted {
                 break;
-            }
-            if bounds
-                .as_ref()
-                .is_some_and(|bounds| scanned >= bounds.max_rows_scanned)
-            {
-                return Ok(BoundedPromptHistory {
-                    entries: matches,
-                    truncated: true,
-                });
             }
         }
     }
-    Ok(BoundedPromptHistory {
-        entries: matches,
-        truncated: false,
+    Ok(PromptHistoryPage {
+        entries,
+        next: None,
     })
+}
+
+/// Every match in one page, for tests that check what a search finds rather
+/// than how it pages.
+#[cfg(test)]
+pub(super) fn search_prompts_from(
+    path: &Path,
+    session_id: &str,
+    bundle_id: &str,
+    scope: HistoryScope,
+    query: &str,
+) -> Result<Vec<PromptHistoryEntry>> {
+    let page = search_prompt_page_from(path, session_id, bundle_id, scope, query, None, 10_000)?;
+    assert!(page.next.is_none(), "the test history fits in one page");
+    Ok(page.entries)
 }
 
 pub(super) fn query_history_page(

@@ -51,32 +51,37 @@ fn a_bounded_prompt_search_reports_that_it_stopped_early() {
         .unwrap();
     }
 
-    let found = search_prompts_bounded_from(
+    let found = search_prompt_page_from(
         &database,
         "session-1",
         "bundle-1",
         HistoryScope::Session,
         "ship",
+        None,
         10,
     )
     .unwrap();
     assert_eq!(found.entries.len(), 10);
     assert!(
-        found.truncated,
+        found.next.is_some(),
         "a search that stopped early reported a complete answer"
     );
 
-    let all = search_prompts_bounded_from(
+    let all = search_prompt_page_from(
         &database,
         "session-1",
         "bundle-1",
         HistoryScope::Session,
         "ship",
+        None,
         100,
     )
     .unwrap();
     assert_eq!(all.entries.len(), 50);
-    assert!(!all.truncated, "a complete answer reported itself partial");
+    assert!(
+        all.next.is_none(),
+        "a complete answer reported itself partial"
+    );
 }
 
 /// The eviction the daemon performs depends on the typed cause reaching the
@@ -3280,7 +3285,7 @@ fn projection_page_apply_outruns_per_event_apply() {
 }
 
 #[test]
-fn deleting_operational_session_retains_relational_history_context() {
+fn deleting_an_operational_session_removes_its_prompts_and_keeps_its_context() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut state = State::default();
@@ -3299,14 +3304,16 @@ fn deleting_operational_session_retains_relational_history_context() {
     state.sessions.clear();
     save_state_to(&database, &state).unwrap();
 
-    let retained: String = connection
-        .query_row(
-            "SELECT text FROM prompt_history WHERE session_id = 'session-1'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(retained, "remember this");
+    let count = |sql: &str| -> i64 { connection.query_row(sql, [], |row| row.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT count(*) FROM prompt_history WHERE session_id = 'session-1'"),
+        0,
+        "a destroyed session's prompts leave the history"
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM session_contexts WHERE session_id = 'session-1'"),
+        1
+    );
 }
 
 #[test]
@@ -3410,13 +3417,15 @@ fn wider_history_scopes_list_smaller_scopes_first_and_dedupe_at_the_smallest() {
         )
         .unwrap();
     }
-    let texts = |scope| {
-        search_prompts_from(&database, "session-1", "project-1", scope, "alpha")
+    let search = |scope, query: &str| {
+        search_prompts_from(&database, "session-1", "project-1", scope, query)
             .unwrap()
             .into_iter()
             .map(|entry| entry.text)
             .collect::<Vec<_>>()
     };
+    let texts = |scope| search(scope, "alpha");
+    let texts_for = |query: &str| search(HistoryScope::All, query);
 
     assert_eq!(
         texts(HistoryScope::All),
@@ -3436,81 +3445,39 @@ fn wider_history_scopes_list_smaller_scopes_first_and_dedupe_at_the_smallest() {
         ["alpha session new", "alpha session old"]
     );
 
-    let bounded = |limit| {
-        search_prompts_bounded_from(
+    // Paging two at a time from each `next` cursor yields the same sequence,
+    // with no gaps and no repeats, including across tier boundaries.
+    let mut paged = Vec::new();
+    let mut after = None;
+    loop {
+        let page = search_prompt_page_from(
             &database,
             "session-1",
             "project-1",
             HistoryScope::All,
             "alpha",
-            limit,
-        )
-        .unwrap()
-    };
-    let three = bounded(3);
-    assert_eq!(three.entries.len(), 3);
-    assert!(three.truncated, "a fourth match exists");
-    assert!(!bounded(4).truncated);
-}
-
-#[test]
-fn bounded_history_search_spends_its_row_budget_on_smaller_scopes_first() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    record_prompt_to(
-        &database,
-        "session-1",
-        "project-1",
-        1,
-        Some("2026-08-12T00:00:00Z"),
-        "needle in this session",
-    )
-    .unwrap();
-    record_prompt_to(
-        &database,
-        "session-2",
-        "project-2",
-        1,
-        Some("2026-08-12T00:00:00Z"),
-        "unrelated",
-    )
-    .unwrap();
-    // More newer rows in another project than the search may scan.
-    let mut connection = open(&database).unwrap();
-    let tx = connection.transaction().unwrap();
-    for ordinal in 2..5_000 {
-        tx.execute(
-            "INSERT INTO prompt_history(session_id, event_ordinal, submitted_at, text)
-             VALUES ('session-2', ?1, '2026-08-12T00:00:00Z', 'unrelated')",
-            [ordinal],
+            after,
+            2,
         )
         .unwrap();
+        assert!(page.entries.len() <= 2);
+        paged.extend(page.entries.into_iter().map(|entry| entry.text));
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
     }
-    tx.commit().unwrap();
-    drop(connection);
+    // The session's "alpha session old" reappears from the project tier on a
+    // later page; a caller holding earlier pages drops it, as the composer does.
+    let mut seen = std::collections::HashSet::new();
+    paged.retain(|text| seen.insert(text.clone()));
+    assert_eq!(paged, texts(HistoryScope::All));
 
-    let found = search_prompts_bounded_from(
-        &database,
-        "session-1",
-        "project-1",
-        HistoryScope::All,
-        "needle",
-        10,
-    )
-    .unwrap();
-
-    assert_eq!(
-        found
-            .entries
-            .iter()
-            .map(|entry| entry.text.as_str())
-            .collect::<Vec<_>>(),
-        ["needle in this session"]
-    );
     assert!(
-        found.truncated,
-        "the other project exhausted the row budget"
+        texts_for("al").is_empty(),
+        "too short for the trigram index"
     );
+    assert!(texts_for("say \"alpha\"").is_empty());
 }
 
 #[test]
@@ -3625,15 +3592,9 @@ fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe
 
     record_abandoned_prompt_to(&database, "session-2", "project-1", " \n\t ").unwrap();
     assert!(
-        search_prompts_from(
-            &database,
-            "session-2",
-            "project-1",
-            HistoryScope::Session,
-            "",
-        )
-        .unwrap()
-        .is_empty()
+        session_prompts_from(&database, "session-2")
+            .unwrap()
+            .is_empty()
     );
 }
 

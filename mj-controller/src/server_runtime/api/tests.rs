@@ -576,6 +576,14 @@ impl SessionHandleBackend for FakeSession {
         _bundle_id: String,
         _scope: mj_core::storage::HistoryScope,
         _query: String,
+        _after: Option<mj_core::storage::HistoryCursor>,
+        _limit: usize,
+    ) -> mj_client::session::BoxFuture<'_, Result<mj_core::storage::PromptHistoryPage>> {
+        Box::pin(async { Ok(Default::default()) })
+    }
+
+    fn session_prompts(
+        &self,
     ) -> mj_client::session::BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -991,8 +999,15 @@ impl SessionHandleBackend for ConfigSession {
         bundle: String,
         scope: mj_core::storage::HistoryScope,
         query: String,
-    ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
-        self.inner.search_prompts(bundle, scope, query)
+        after: Option<mj_core::storage::HistoryCursor>,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<mj_core::storage::PromptHistoryPage>> {
+        self.inner
+            .search_prompts(bundle, scope, query, after, limit)
+    }
+
+    fn session_prompts(&self) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
+        self.inner.session_prompts()
     }
 
     fn config_result(&self, id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {
@@ -2192,8 +2207,15 @@ impl SessionHandleBackend for ScriptedSession {
         bundle_id: String,
         scope: mj_core::storage::HistoryScope,
         query: String,
-    ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
-        self.inner.search_prompts(bundle_id, scope, query)
+        after: Option<mj_core::storage::HistoryCursor>,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<mj_core::storage::PromptHistoryPage>> {
+        self.inner
+            .search_prompts(bundle_id, scope, query, after, limit)
+    }
+
+    fn session_prompts(&self) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
+        self.inner.session_prompts()
     }
 
     fn config_result(&self, command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {

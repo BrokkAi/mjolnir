@@ -3430,9 +3430,20 @@ impl mj_client::session::SessionHandleBackend for DelayedNativeSession {
         bundle: String,
         scope: mj_core::storage::HistoryScope,
         query: String,
+        after: Option<mj_core::storage::HistoryCursor>,
+        limit: usize,
+    ) -> mj_client::session::BoxFuture<'_, anyhow::Result<mj_core::storage::PromptHistoryPage>>
+    {
+        Box::pin(
+            self.delegate
+                .search_prompts(bundle, scope, query, after, limit),
+        )
+    }
+    fn session_prompts(
+        &self,
     ) -> mj_client::session::BoxFuture<'_, anyhow::Result<Vec<mj_core::storage::PromptHistoryEntry>>>
     {
-        Box::pin(self.delegate.search_prompts(bundle, scope, query))
+        Box::pin(self.delegate.session_prompts())
     }
     fn config_result(
         &self,
