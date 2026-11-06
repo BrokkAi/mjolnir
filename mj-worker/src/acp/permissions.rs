@@ -535,23 +535,23 @@ fn gh_script(script: &str) -> bool {
 }
 
 /// Calls to Mjolnir's own MCP servers, for a harness that cannot be told to
-/// trust them. Under configured approvals DSH and OpenCode ask before every
-/// MCP tool call (OpenCode when its configuration says `ask`) and have no
-/// per-server rule, so the worker allows the tools the servers this launch
-/// registered itself list, as Claude's allowed tools and Codex's server
+/// trust them. Under configured approvals DSH asks before every MCP tool call
+/// and has no per-server rule, so the worker allows the tools the servers this
+/// launch registered itself list, as Claude's allowed tools and Codex's server
 /// approval mode do for those harnesses. Every other request still reaches a
 /// person. A title is matched against each owned tool's full name, never a
-/// server prefix: server names may contain the separator, so a separately
-/// configured `mj-agents_extra` server could otherwise borrow `mj-agents_`.
+/// server prefix, and DSH's double separator keeps server and tool apart.
+///
+/// OpenCode gets no such answers. It titles a call `<server>_<tool>`, and
+/// server names may contain `_`, so another server (for example one a
+/// project's own configuration adds, named `mj-agents_send` with a `message`
+/// tool) can produce exactly an owned title. Nothing in the request says which
+/// server a call belongs to, so its person decides, and can allow always.
 #[derive(Debug, Clone, Default)]
 pub(super) struct OwnedMcpApprovals {
     /// The permission title of each owned server's tool calls, without any
     /// argument the harness appends.
     titles: Vec<String>,
-    /// Whether the harness marks an MCP call's kind `other`. OpenCode titles a
-    /// shell command or file edit with its text, so only the kind tells such
-    /// a request from an MCP call.
-    requires_other_kind: bool,
     /// Whether the harness follows the title with a space and an argument.
     appends_argument: bool,
 }
@@ -561,30 +561,23 @@ impl OwnedMcpApprovals {
         if spec.execution_policy != ExecutionPolicy::ConfiguredApprovals {
             return Self::default();
         }
-        let (title, requires_other_kind, appends_argument): (fn(&str, &str) -> String, _, _) =
-            match spec.harness {
-                // dsh-acp names an MCP tool `mcp__<server>__<tool>` and titles
-                // its call with that name, underscores shown as spaces, then
-                // any `path` argument.
-                HarnessKind::Dsh => (
-                    |server, tool| format!("mcp__{server}__{tool}").replace('_', " "),
-                    false,
-                    true,
-                ),
-                // OpenCode 2.2.1, with its `execute` code tool denied, offers
-                // an MCP tool as `<server>_<tool>` and titles its call with
-                // exactly that name.
-                HarnessKind::OpenCode => (|server, tool| format!("{server}_{tool}"), true, false),
-                _ => return Self::default(),
-            };
+        // dsh-acp names an MCP tool `mcp__<server>__<tool>` and titles its
+        // call with that name, underscores shown as spaces, then any `path`
+        // argument.
+        if spec.harness != HarnessKind::Dsh {
+            return Self::default();
+        }
         let titles = owned_acp_mcp_tools(spec)
             .iter()
-            .flat_map(|(server, tools)| tools.iter().map(|tool| title(server, tool)))
+            .flat_map(|(server, tools)| {
+                tools
+                    .iter()
+                    .map(move |tool| format!("mcp__{server}__{tool}").replace('_', " "))
+            })
             .collect();
         Self {
             titles,
-            requires_other_kind,
-            appends_argument,
+            appends_argument: true,
         }
     }
 
@@ -594,12 +587,6 @@ impl OwnedMcpApprovals {
         request: &RequestPermissionRequest,
     ) -> Option<RequestPermissionResponse> {
         let title = request.tool_call.fields.title.as_deref()?;
-        if self.requires_other_kind
-            && request.tool_call.fields.kind
-                != Some(agent_client_protocol::v1::schema::ToolKind::Other)
-        {
-            return None;
-        }
         let owned = self.titles.iter().any(|owned| {
             title == owned
                 || (self.appends_argument

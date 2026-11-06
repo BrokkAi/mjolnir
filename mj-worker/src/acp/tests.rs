@@ -317,66 +317,38 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
     spec.subagent_mcp_socket.as_mut().unwrap().review_gate = false;
 }
 
-/// OpenCode 2.2.1 titles an MCP call `<server>_<tool>` with kind `other`, but
-/// titles a shell command or file edit with its own text, so the kind has to
-/// agree before the worker answers on a person's behalf.
+/// OpenCode 2.2.1 titles an MCP call `<server>_<tool>`, and server names may
+/// contain `_`, so another server can produce an owned tool's exact title.
+// Hard-won: 01332d2da: a server named `mj-agents_send` could borrow `send_message`'s approval
 #[test]
-fn opencode_owned_mcp_calls_are_preapproved_only_as_mcp_calls() {
+fn opencode_mcp_calls_always_reach_the_person() {
     use agent_client_protocol::v1::schema::{PermissionOption, ToolCallUpdateFields, ToolKind};
-    let answer = |approvals: &OwnedMcpApprovals, title: &str, kind: ToolKind| {
+    let mut spec = reload_fallback_spec(HarnessKind::OpenCode);
+    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+    let mut socket = worker_socket(SubagentMcpRole::Parent);
+    socket.review_gate = true;
+    spec.subagent_mcp_socket = Some(socket);
+    let approvals = OwnedMcpApprovals::for_launch(&spec);
+    // `mj-agents` + `send_message` and `mj-agents_send` + `message` look alike.
+    for title in [
+        "mj-agents_spawn",
+        "mj-agents_send_message",
+        "mj-review_request_review",
+    ] {
         let request = RequestPermissionRequest::new(
             "native",
-            ToolCallUpdate::new("call", ToolCallUpdateFields::new().title(title).kind(kind)),
+            ToolCallUpdate::new(
+                "call",
+                ToolCallUpdateFields::new()
+                    .title(title)
+                    .kind(ToolKind::Other),
+            ),
             vec![
                 PermissionOption::new("once", "Allow once", PermissionOptionKind::AllowOnce),
-                PermissionOption::new("always", "Always allow", PermissionOptionKind::AllowAlways),
                 PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
             ],
         );
-        approvals
-            .response(&request)
-            .map(|response| serde_json::to_value(response).unwrap()["outcome"]["optionId"].clone())
-    };
-    for policy in [
-        ExecutionPolicy::ConfiguredApprovals,
-        ExecutionPolicy::Unconstrained,
-    ] {
-        let mut spec = reload_fallback_spec(HarnessKind::OpenCode);
-        spec.execution_policy = policy;
-        let mut socket = worker_socket(SubagentMcpRole::Parent);
-        socket.review_gate = true;
-        spec.subagent_mcp_socket = Some(socket);
-        let approvals = OwnedMcpApprovals::for_launch(&spec);
-        let guardian = policy == ExecutionPolicy::ConfiguredApprovals;
-        for (title, kind, owned) in [
-            ("mj-agents_spawn", ToolKind::Other, true),
-            ("mj-agents_list_agents", ToolKind::Other, true),
-            ("mj-review_request_review", ToolKind::Other, true),
-            // A command or a file named like an owned tool is not an MCP call.
-            ("mj-agents_spawn", ToolKind::Execute, false),
-            ("mj-agents_spawn", ToolKind::Edit, false),
-            ("mj-agents_", ToolKind::Other, false),
-            ("mj-tools_run", ToolKind::Other, false),
-            // A server whose name merely begins with an owned one, and a tool
-            // the owned server does not list, are not approved.
-            ("mj-agents_extra_delete", ToolKind::Other, false),
-            ("mj-review_extra_request_review", ToolKind::Other, false),
-            ("mj-agents_delete", ToolKind::Other, false),
-            ("mj-agents_spawn_extra", ToolKind::Other, false),
-            // The `execute` code tool is denied, so a call through it is not ours.
-            ("execute", ToolKind::Other, false),
-            ("opencode_session_move", ToolKind::Other, false),
-        ] {
-            assert_eq!(
-                answer(&approvals, title, kind),
-                (guardian && owned).then(|| serde_json::json!("once")),
-                "{policy:?}: {title} {kind:?}"
-            );
-        }
-        // Without the socket this launch registers no delegation server.
-        spec.subagent_mcp_socket = None;
-        let approvals = OwnedMcpApprovals::for_launch(&spec);
-        assert_eq!(answer(&approvals, "mj-agents_spawn", ToolKind::Other), None);
+        assert!(approvals.response(&request).is_none(), "{title}");
     }
 }
 

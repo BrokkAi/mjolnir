@@ -33,9 +33,12 @@ Mjolnir and Straightforward is configured, and on None otherwise. Its choice
 becomes the remembered one on interactive creation only when it is Mjolnir, so choosing None for DSH
 does not change what the next Claude or Codex session starts with.
 OpenCode has no steering, so a child's report reaches an OpenCode parent when
-its current turn ends, not between its tool calls. The first turn of a new
-OpenCode session can start before OpenCode has listed the `mj-agents` tools to the model;
-from the next turn on they are there.
+its current turn ends, not between its tool calls. OpenCode loads MCP tools
+shortly after it connects to their servers and does not say when it is done, so
+the worker holds an OpenCode session's first prompt until 250 ms after the
+session opens, which gives the `mj-agents` tools time to reach the model.
+Under configured approvals OpenCode asks the person before each `mj-agents`
+call; choose "always allow" to stop it asking for the rest of the session.
 Existing sessions keep their recorded policy; leaving Move's choice unchanged
 retains it.
 
@@ -844,9 +847,10 @@ Mjolnir then adds its own files to the staged home:
   that turn off OpenCode's `execute` tool, so the `mj-agents` tools are
   ordinary tools named `mj-agents_spawn` and so on instead of reachable only
   through scripts, and, unless the session uses OpenCode's own delegation
-  (Native), its own `subagent` tool. Under configured approvals the worker
-  answers OpenCode's permission request for a call to a Mjolnir MCP server
-  itself;
+  (Native), its own `subagent` tool. OpenCode names a tool
+  `<server>_<tool>`, so another server can carry the same name as a Mjolnir
+  tool; the worker therefore never answers OpenCode's permission requests,
+  and under configured approvals the person approves Mjolnir's tools too;
 - for DSH, the staged `AGENTS.md` in the session's `DSH_ACP_DATA_DIR` (with
   `DSH_ACP_SYSTEM_PROMPT` cleared), and dsh-acp's `permission_mode` on every
   session open: `ask` under configured approvals, `allow` under an
