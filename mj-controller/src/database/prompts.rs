@@ -254,6 +254,11 @@ fn fulltext_phrase(query: &str) -> Option<String> {
 /// page takes a few queries rather than one per row.
 const MIN_PAGE_ROWS: usize = 16;
 
+/// Rows a full page reads past its last match looking for one that repeats
+/// no listed text. Past this budget the page reports that more may follow,
+/// so a long run of repeats costs the next request, not this one.
+const PEEK_ROWS: usize = 16;
+
 /// The one prompt search behind the terminal composer and the web viewer.
 ///
 /// Tiers are read in order from the cursor, and the search stops as soon as
@@ -280,6 +285,7 @@ pub(super) fn search_prompt_page_from(
     });
     let mut seen = std::collections::HashSet::new();
     let mut entries = Vec::new();
+    let mut peeked = 0;
     for &tier in HistoryTier::of_scope(scope)
         .iter()
         .filter(|tier| **tier as u8 >= start.tier)
@@ -306,11 +312,8 @@ pub(super) fn search_prompt_page_from(
             )?;
             let exhausted = rows.len() < count;
             for entry in rows {
-                if seen.contains(&entry.text) {
-                    before = entry.id;
-                    continue;
-                }
-                if entries.len() == limit {
+                let repeat = seen.contains(&entry.text);
+                if entries.len() == limit && (!repeat || peeked == PEEK_ROWS) {
                     return Ok(PromptHistoryPage {
                         entries,
                         next: Some(HistoryCursor {
@@ -320,8 +323,12 @@ pub(super) fn search_prompt_page_from(
                     });
                 }
                 before = entry.id;
-                seen.insert(entry.text.clone());
-                entries.push(entry);
+                if entries.len() == limit {
+                    peeked += 1;
+                } else if !repeat {
+                    seen.insert(entry.text.clone());
+                    entries.push(entry);
+                }
             }
             if exhausted {
                 break;

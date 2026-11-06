@@ -77,6 +77,10 @@ To see it working, open a session in the terminal and press Ctrl-R. Type three o
   Rationale: on the live store, 5,333 child sessions held one row each (their spawn instructions, 45.5 MB of 62.3 MB), and destroyed sessions held 3,908 rows (12.9 MB). Neither is text a person typed into a conversation they can still open. Only Ctrl-R, Up/Ctrl-P and the web palette read the table, so nothing else loses data. This reverses the earlier rule in `delete_session` that kept a destroyed session's prompts. With about 4 MB of text left, building the index inside the migration takes about a second, so the build stays synchronous. The user confirmed the deletion.
   Date/Author: 2026-11-06, user.
 
+- Decision: a full page reads at most 16 further rows (`PEEK_ROWS`) for a match that repeats no listed text; past that it returns a cursor meaning "may continue", and the web palette says "Stopped after N matches" instead of "More matches than N".
+  Rationale: reading past every repeat made a page's cost follow the number of repeats, which review found could be thousands of rows per keystroke. A bounded peek keeps the answer exact in the common case and the cost bounded in all cases.
+  Date/Author: 2026-11-06, agent, after review.
+
 - Decision: remove the in-memory substring fallback `ChatState::local_history_search_results`.
   Rationale: it ran only when a chat had no project ID, which an open chat always has (`ActiveChat` calls `set_history_context` on open), so it was a second matching mode reachable only from tests.
   Date/Author: 2026-11-06, agent.

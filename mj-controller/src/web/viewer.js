@@ -7437,7 +7437,7 @@ async function searchHistory(query) {
       // Saying the answer is partial is the whole reason the bound reports it.
       paletteMatches.push({
         insert: composerText(),
-        label: `More matches than ${paletteMatches.length} — narrow the search`,
+        label: `Stopped after ${paletteMatches.length} matches — narrow the search`,
         hint: '',
       });
     }

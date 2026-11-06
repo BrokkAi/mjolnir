@@ -111,6 +111,44 @@ fn a_bounded_prompt_search_reports_that_it_stopped_early() {
     .unwrap();
     assert_eq!(repeats.entries.len(), 10);
     assert!(repeats.next.is_none(), "repeated text is not another match");
+
+    // A long run of repeats after a full page is left to the next request,
+    // which skips it and finds nothing new.
+    for round in 2..5 {
+        for index in 0..10 {
+            record_prompt_to(
+                &database,
+                "session-1",
+                "bundle-1",
+                100 + round * 10 + index,
+                Some("2026-01-01T00:00:00Z"),
+                &format!("repeat {index}"),
+            )
+            .unwrap();
+        }
+    }
+    let page = |after| {
+        search_prompt_page_from(
+            &database,
+            "session-1",
+            "bundle-1",
+            HistoryScope::Session,
+            "repeat",
+            after,
+            10,
+        )
+        .unwrap()
+    };
+    let full = page(None);
+    assert_eq!(full.entries.len(), 10);
+    let rest = page(Some(full.next.expect("the repeats outlast the peek")));
+    assert!(
+        rest.entries
+            .iter()
+            .all(|entry| full.entries.iter().any(|seen| seen.text == entry.text)),
+        "every later match repeats a listed prompt"
+    );
+    assert!(rest.next.is_none());
 }
 
 /// The eviction the daemon performs depends on the typed cause reaching the
