@@ -161,7 +161,9 @@ impl DashboardState {
             if episode.reported {
                 continue;
             }
-            if visible.as_deref() == Some(id.as_str()) {
+            // An open conversation shows only its first form, so being on
+            // screen sees an episode only when it covers one form.
+            if visible.as_deref() == Some(id.as_str()) && episode.forms.len() <= 1 {
                 episode.reported = true;
                 continue;
             }
@@ -172,7 +174,15 @@ impl DashboardState {
             if !enabled {
                 continue;
             }
-            let row = parent.unwrap_or(id);
+            // A child's reviewer has no row either; name the top-level one.
+            let mut row = id.as_str();
+            let mut steps = 0;
+            while let Some(relation) = self.state.subagents.get(row)
+                && steps < self.state.sessions.len()
+            {
+                row = relation.parent_session_id.as_str();
+                steps += 1;
+            }
             let Some(session) = self.state.sessions.get(row) else {
                 continue;
             };

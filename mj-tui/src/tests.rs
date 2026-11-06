@@ -3579,7 +3579,7 @@ fn resize_mode_respects_custom_commands_and_workspace_changes() {
 /// the way the parent's own question would: the row's symbol, the attention
 /// queue and a notification, and the row says whose question it is.
 // Hard-won: 91244ea: a child permission question left its parent without an attention mark.
-// Hard-won: #1451: the restored mark hid the parent's running turn from turn controls, and one episode per parent or per session swallowed a child's later form.
+// Hard-won: #1451: the restored mark hid the parent's running turn from turn controls, one episode per parent or per session swallowed a child's later form, and a form behind the displayed one counted as seen.
 #[test]
 fn a_subagent_question_marks_its_parent_for_attention() {
     let (mut dashboard, parent) = dashboard_with_one_subagent();
@@ -3708,6 +3708,26 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         due[0].body,
         "Sub-agent \"Answer project codename\": Allow the command?"
     );
+
+    // The open conversation shows only its first form, so a form that
+    // arrives behind it while the child is on screen still rings.
+    dashboard.set_current_session(Some("child-session"));
+    let mut third = question("child-session");
+    third.id = "child-session-third-question".into();
+    third.message = "Approve the plan?".into();
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .pending_elicitations
+        .push(third);
+    assert!(dashboard.notification_events(9_000).is_empty());
+    let due = dashboard.notification_events(11_000);
+    assert_eq!(due.len(), 1, "{due:?}");
+    assert_eq!(
+        due[0].body,
+        "Sub-agent \"Answer project codename\": Approve the plan?"
+    );
 }
 
 /// Reviewers are listed in their own workspace, not among the Sub-agents,
@@ -3737,6 +3757,48 @@ fn a_reviewer_question_names_the_reviewer_and_leads_to_its_workspace() {
     dashboard.step_attention(1);
     assert!(dashboard.reviewers_workspace_open());
     assert_eq!(dashboard.selected_session_id(), Some("child-session"));
+}
+
+/// A child may run its own review. Its reviewer's open form marks the
+/// top-level row, names the reviewer, and leads to it.
+// Hard-won: #1451: a child's reviewer holding an approval marked only the hidden child, so nothing led the person to it.
+#[test]
+fn a_childs_reviewer_question_reaches_the_top_level_row() {
+    let (mut dashboard, parent) = dashboard_with_one_subagent();
+    let mut state = dashboard.state.clone();
+    let mut reviewer = state.sessions["child-session"].clone();
+    reviewer.id = "reviewer-session".into();
+    let mut relation = state.subagents["child-session"].clone();
+    relation.kind = mj_core::subagent::SubagentKind::Reviewer;
+    relation.child_session_id = reviewer.id.clone();
+    relation.parent_session_id = "child-session".into();
+    relation.request_key = "review-1".into();
+    state.sessions.insert(reviewer.id.clone(), reviewer);
+    state.subagents.insert("reviewer-session".into(), relation);
+    dashboard.set_state(state);
+    for id in [parent.as_str(), "child-session", "reviewer-session"] {
+        set_working(&mut dashboard, id);
+    }
+    dashboard.set_current_session(None);
+    dashboard
+        .session_details
+        .get_mut("reviewer-session")
+        .unwrap()
+        .pending_elicitations = vec![question("reviewer-session")];
+
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Waiting);
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("Reviewer question")),
+        "{lines:#?}"
+    );
+    assert!(dashboard.notification_events(0).is_empty());
+    let due = dashboard.notification_events(2_000);
+    assert_eq!(due.len(), 1, "{due:?}");
+    assert_eq!(due[0].session_id, parent);
+    dashboard.step_attention(1);
+    assert!(dashboard.reviewers_workspace_open());
+    assert_eq!(dashboard.selected_session_id(), Some("reviewer-session"));
 }
 
 /// A suspend stops the parent's sub-agents without a checkpoint of their own.

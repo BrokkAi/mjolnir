@@ -128,19 +128,36 @@ impl SessionFacts {
             .iter()
             .map(|(id, session)| (id.clone(), own_attention_level(dashboard, id, session)))
             .collect::<HashMap<_, _>>();
+        let holds_form = |child: &str| {
+            own.get(child) == Some(&AttentionLevel::Waiting)
+                && dashboard.state.sessions.contains_key(child)
+                && dashboard
+                    .session_details
+                    .get(child)
+                    .is_some_and(|detail| !detail.pending_elicitations.is_empty())
+        };
+        // A descendant holding a form, at any depth, so a child's reviewer
+        // reaches the top-level row too. Validation rejects
+        // ownership cycles; `visited` keeps a malformed state finite anyway.
         let waiting_child = index
             .active_children
-            .iter()
-            .filter_map(|(parent, children)| {
-                let child = children.iter().find(|child| {
-                    own.get(*child) == Some(&AttentionLevel::Waiting)
-                        && dashboard.state.sessions.contains_key(*child)
-                        && dashboard
-                            .session_details
-                            .get(*child)
-                            .is_some_and(|detail| !detail.pending_elicitations.is_empty())
-                })?;
-                Some((parent.clone(), child.clone()))
+            .keys()
+            .filter_map(|parent| {
+                let mut visited = std::collections::HashSet::new();
+                let mut stack = vec![parent.as_str()];
+                while let Some(session) = stack.pop() {
+                    if !visited.insert(session) {
+                        continue;
+                    }
+                    let Some(children) = index.active_children.get(session) else {
+                        continue;
+                    };
+                    if let Some(child) = children.iter().find(|child| holds_form(child)) {
+                        return Some((parent.clone(), child.clone()));
+                    }
+                    stack.extend(children.iter().rev().map(String::as_str));
+                }
+                None
             })
             .collect();
         let mut listed = index.live.clone();

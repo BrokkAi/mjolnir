@@ -5425,11 +5425,15 @@ function workingChildCount(session) {
     .length;
 }
 
-/// Children with an open form, which only a person can answer.
-function waitingChildCount(session) {
-  return (session?.subagent_session_ids || [])
+/// Children with an open form, which only a person can answer, counting a
+/// child whose own reviewer holds one. Validation rejects ownership cycles;
+/// `seen` keeps a malformed snapshot finite anyway.
+function waitingChildCount(session, seen = new Set()) {
+  if (!session || seen.has(session.id)) return 0;
+  seen.add(session.id);
+  return (session.subagent_session_ids || [])
     .map(id => sessionById(id))
-    .filter(child => child && pendingFormCount(child))
+    .filter(child => child && (pendingFormCount(child) || waitingChildCount(child, seen)))
     .length;
 }
 
