@@ -2063,7 +2063,7 @@ pub use git::{
     collect_git_snapshot, collect_git_snapshot_with_progress, collect_plain_directory_snapshot,
     diff_between_trees, empty_tree_id, has_origin_refs, merge_trees, migrate_review_ref,
     numstat_between_trees, pin_review_tree, push_branch, read_head_reflog, read_review_point,
-    record_review_point, record_reviewed_tree, remote_workspace_base,
+    record_overridden_tree, record_review_point, record_reviewed_tree, remote_workspace_base,
     remove_departed_worktree_pins, restore_git_snapshot, review_baseline_ref, session_diff,
     session_diff_details, tree_without_paths, validate_symlink_target,
 };

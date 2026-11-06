@@ -8,7 +8,7 @@ Fix the parser race.
 
 Reviewer 2 (session reviewer-two)
 Preserve requests during retries.
-Fix these, commit, and call request_review again before pushing. If you judge these findings incorrect or unreasonable, call override_review with your reason instead.
+For each finding you will not fix, call override_review now, before committing any change, with the finding and your reason. Fix the rest, commit, and call request_review again before pushing. If you override every finding, you can push these commits as they are.
 
 Review incomplete for commits aaaaaaa..bbbbbbb in /workspace/app:
 Reviewer 1 (session reviewer-one)

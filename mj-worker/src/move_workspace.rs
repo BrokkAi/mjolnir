@@ -821,6 +821,7 @@ mod tests {
         .unwrap();
         for (name, object) in [
             (format!("refs/mj/reviewed/{tree}"), head.clone()),
+            (format!("refs/mj/overridden/{tree}"), head.clone()),
             ("refs/mj/session-start/session/baseline".into(), head),
             ("refs/mj/review-baseline".into(), point),
             ("refs/mj/worktrees/linked/review-baseline".into(), tree),

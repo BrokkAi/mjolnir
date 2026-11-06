@@ -53,15 +53,18 @@ pub enum ReviewerAction {
     CaptureDelta {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repositories: Option<Vec<std::path::PathBuf>>,
-        #[serde(default)]
-        scope: mj_core::relay::CaptureScope,
-        baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
     RecordReviewed {
         trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
     },
-    AdvanceBaseline {
-        trees: std::collections::BTreeMap<std::path::PathBuf, String>,
+    /// Record trees as overridden: pushable, but not the next review base.
+    RecordOverridden {
+        trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
+    },
+    /// Make a reviewed or overridden commit the next push review base.
+    SetReviewBase {
+        path: Option<std::path::PathBuf>,
+        commit: String,
     },
 }
 
@@ -69,8 +72,9 @@ impl ReviewerAction {
     pub const fn operation_name(&self) -> &'static str {
         match self {
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
-            Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
             Self::RecordReviewed { .. } => "reviewer_record_reviewed",
+            Self::RecordOverridden { .. } => "reviewer_record_overridden",
+            Self::SetReviewBase { .. } => "reviewer_set_review_base",
         }
     }
 }
@@ -78,8 +82,16 @@ impl ReviewerAction {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewerOutcome {
-    Delta { repositories: Vec<RepoDelta> },
+    Delta {
+        repositories: Vec<RepoDelta>,
+    },
     BaselineAdvanced,
+    ReviewBaseSet {
+        root: std::path::PathBuf,
+        commit: String,
+        tree: String,
+        changed: bool,
+    },
 }
 
 /// Preserve whether a submit failed before delivery or lost its acknowledgement.

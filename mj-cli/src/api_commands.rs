@@ -176,8 +176,9 @@ pub(crate) struct NewArgs {
     /// Reviewer model and optional effort; final colon suffix is effort only when a known effort (minimal, low, medium, high, xhigh, max); trailing colon escapes it. Repeat up to three times.
     #[arg(long = "reviewer", value_name = "MODEL[:EFFORT]")]
     reviewers: Vec<String>,
-    /// Review trigger for this session, overriding `[review]`.
-    #[arg(long, value_parser = ["off", "turn", "push"])]
+    /// Whether this session is reviewed before push (`push`) or not (`off`).
+    /// Omitted follows `[review]`: review runs when reviewers are configured.
+    #[arg(long, value_name = "off|push")]
     review: Option<String>,
     /// Start this session with no project memory: nothing from the
     /// workspace's project memory is loaded into the harness, and the harness
@@ -1160,6 +1161,9 @@ pub(crate) fn subagent_policy(
     })
 }
 
+/// Said when a session asks for the review mode that was removed.
+const TURN_REVIEW_REMOVED: &str = "Per-turn review was removed. Use `--review push`, or omit `--review` to review before push when reviewers are configured.";
+
 /// The session's review overrides, or `None` to follow all of `[review]`.
 fn new_session_review(args: &NewArgs) -> Result<Option<mj_core::config::SessionReview>> {
     session_review(args.review.as_deref(), &args.reviewers)
@@ -1209,8 +1213,8 @@ pub(crate) fn session_review(
     Ok(Some(match trigger {
         "off" => SessionReview::Off,
         "push" => SessionReview::Push { reviewers },
-        "turn" => SessionReview::Turn { reviewers },
-        _ => unreachable!("clap validates the review trigger"),
+        "turn" => bail!("{TURN_REVIEW_REMOVED}"),
+        other => bail!("unknown --review value {other:?}; use off or push"),
     }))
 }
 
@@ -3122,18 +3126,32 @@ mod tests {
                 reviewers: Some(choices.clone())
             }
         );
-        for trigger in [ReviewTrigger::Off, ReviewTrigger::Turn, ReviewTrigger::Push] {
+        // Session reviewer flags enable review even without global reviewers.
+        for (global_reviewers, trigger) in [
+            (Vec::new(), ReviewTrigger::Push),
+            (vec![choices[1].clone()], ReviewTrigger::Push),
+        ] {
             let global = ReviewConfig {
-                trigger,
+                reviewers: global_reviewers,
                 ..Default::default()
             };
-            assert_eq!(global.for_session(Some(&inherited)).trigger, trigger);
+            assert_eq!(global.for_session(Some(&inherited)).trigger(), trigger);
             assert_eq!(global.for_session(Some(&inherited)).reviewers, choices);
         }
         assert_eq!(
             parse(&["--review", "off"]).unwrap().unwrap(),
             Some(SessionReview::Off)
         );
+        assert_eq!(
+            parse(&["--review", "push"]).unwrap().unwrap(),
+            Some(SessionReview::Push { reviewers: None })
+        );
+        // Per-turn review was removed; the refusal says what to use instead.
+        let refused = parse(&["--review", "turn"])
+            .unwrap()
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("--review push"), "{refused}");
         assert!(
             parse(&[
                 "--reviewer",

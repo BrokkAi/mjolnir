@@ -1,13 +1,17 @@
 use super::*;
 
 impl HostState {
-    /// Applies a driver resolution. Ordinary findings forwarding calls this
-    /// internally; only legacy before-push Cancel remains externally callable.
+    /// Cancel an open review or its preparation.
     pub(super) fn resolve(
         &mut self,
         session_id: &str,
         resolution: Resolution,
     ) -> Result<(), String> {
+        if resolution != Resolution::Cancelled {
+            return Err(
+                "reviews deliver their verdict automatically; only Cancel is available".into(),
+            );
+        }
         if resolution == Resolution::Cancelled
             && let Some(PreparingOperation::Review { cancelled, .. }) =
                 self.preparing.get(session_id)
@@ -15,124 +19,17 @@ impl HostState {
             cancelled.store(true, std::sync::atomic::Ordering::Release);
             return Ok(());
         }
-        let (requests, pending_state) = {
-            let Some(slot) = self.reviews.get_mut(session_id) else {
-                return Err("no review is open for that session".to_owned());
-            };
-            if slot.push.as_ref().is_some_and(|push| push.finishing) {
-                return Err("the review verdict is being delivered".into());
-            }
-            if slot.push.is_some() && resolution != Resolution::Cancelled {
-                return Err("before-push reviews only support Cancel".into());
-            }
-            let requests = match resolution {
-                Resolution::Forwarded => {
-                    if !slot.driver.can_forward() {
-                        return Err("there are no findings to forward".to_owned());
-                    }
-                    slot.driver.forward(
-                        new_command_id("review-forward").map_err(|error| format!("{error:#}"))?,
-                    )
-                }
-                Resolution::Dismissed => {
-                    if slot.driver.verdict().is_none() {
-                        return Err("the review has not reached a verdict yet".to_owned());
-                    }
-                    slot.driver.dismiss()
-                }
-                Resolution::Cancelled => slot.driver.cancel(),
-                Resolution::NothingToReview | Resolution::CoverageStarted => {
-                    return Err("that is not a resolution a surface can ask for".to_owned());
-                }
-            };
-            if requests.is_empty() {
-                return Err("the review could not be resolved that way".to_owned());
-            }
-            slot.sync_group();
-            let pending_state = if resolution == Resolution::Forwarded {
-                let Some(pending) = slot.driver.pending_forward() else {
-                    return Err("the review handoff has no durable findings".to_owned());
-                };
-                slot.state.pending_forward = Some(pending);
-                Some(slot.state.clone())
-            } else {
-                None
-            };
-            (requests, pending_state)
-        };
-        if let Some(state) = pending_state {
-            self.awaiting_forward_persistence
-                .insert(session_id.to_owned(), requests);
-            if let Err(error) = self.persist(
-                session_id.to_owned(),
-                state,
-                Some(PersistenceCompletion::Forward),
-            ) {
-                self.awaiting_forward_persistence.remove(session_id);
-                self.forward_failed(
-                    session_id,
-                    format!("the handoff could not be recorded durably: {error}"),
-                );
-                return Err(error);
-            }
-            self.publish(session_id);
-            return Ok(());
+        let slot = self
+            .reviews
+            .get_mut(session_id)
+            .ok_or("no review is open for that session")?;
+        if slot.finishing {
+            return Err("the review verdict is being delivered".into());
         }
-        self.run(session_id, requests);
-        Ok(())
-    }
-
-    pub(super) fn forward_failed(&mut self, session_id: &str, error: impl Into<String>) {
-        const MAX_ATTEMPTS: u8 = 3;
-        let Some(slot) = self.reviews.get_mut(session_id) else {
-            return;
-        };
-        let reason = error.into();
-        slot.driver.forward_failed(reason.clone());
-        slot.state.forward_attempts = slot.state.forward_attempts.saturating_add(1);
-        slot.sync_group();
-        if slot.state.forward_attempts >= MAX_ATTEMPTS {
-            self.stop_failed_forward(session_id, reason);
-            return;
-        }
-        let state = slot.state.clone();
-        if let Err(error) = self.persist(
-            session_id.to_owned(),
-            state,
-            Some(PersistenceCompletion::ForwardRetry),
-        ) {
-            self.stop_failed_forward(
-                session_id,
-                format!("could not record delivery retry: {error}"),
-            );
-        } else {
-            self.publish(session_id);
-        }
-    }
-
-    pub(super) fn schedule_forward_retry(&self, session_id: &str) {
-        let Some(slot) = self.reviews.get(session_id) else {
-            return;
-        };
-        let attempts = slot.state.forward_attempts;
-        let epoch = slot.epoch;
-        let events = self.events.clone();
-        let session_id = session_id.to_owned();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(1 << attempts.min(3))).await;
-            let _ = events.send(HostEvent::RetryForward { session_id, epoch });
-        });
-    }
-
-    pub(super) fn stop_failed_forward(&mut self, session_id: &str, reason: impl std::fmt::Display) {
-        let Some(slot) = self.reviews.get_mut(session_id) else {
-            return;
-        };
-        let attempts = slot.state.forward_attempts;
         let requests = slot.driver.cancel();
         slot.sync_group();
-        self.record_notice(session_id, format!("Review findings could not be delivered after {attempts} attempts: {reason}. The changes remain unreviewed."));
         self.run(session_id, requests);
+        Ok(())
     }
 
     /// Ends a review that cannot continue without advancing its baseline.
@@ -169,64 +66,26 @@ impl HostState {
                 self.run_one(session_id, request);
             }
         }
-        self.forward_fresh_findings(session_id);
         self.publish(session_id);
-    }
-
-    /// A review someone asked for, automatic or manual, delivers its findings:
-    /// there is no case where the agent should not see them, so a findings
-    /// verdict is forwarded as soon as it is reached. A clean or failed
-    /// verdict already closes itself. Forwarding leaves the verdict
-    /// phase, so this runs once per verdict.
-    fn forward_fresh_findings(&mut self, session_id: &str) {
-        let fresh = self.reviews.get(session_id).is_some_and(|slot| {
-            slot.push.is_none()
-                && matches!(slot.driver.verdict(), Some(ReviewVerdict::Findings { .. }))
-                && slot.driver.can_forward()
-        });
-        if fresh && let Err(error) = self.resolve(session_id, Resolution::Forwarded) {
-            tracing::warn!(session_id, %error, "could not forward the review's findings");
-        }
     }
 }
 
 impl HostState {
     /// The host owns verdict delivery; the driver still owns review classification.
-    fn finish_push(&mut self, session_id: &str, requests: &[ReviewRequest]) -> bool {
+    fn finish_push(&mut self, session_id: &str, _requests: &[ReviewRequest]) -> bool {
         let Some(slot) = self.reviews.get_mut(session_id) else {
             return false;
         };
-        let Some(push) = slot.push.as_mut() else {
-            return false;
-        };
-        if push.finishing {
+        if slot.finishing {
             return true;
         }
         let Some(verdict) = slot.driver.last_verdict().cloned() else {
             return false;
         };
-        push.finishing = true;
-        let deltas = push.deltas.clone();
+        slot.finishing = true;
+        let deltas = slot.driver.deltas().to_vec();
         let epoch = slot.epoch;
         let review_id = slot.driver.snapshot().review_id;
-        if verdict.is_complete()
-            && let ReviewVerdict::Findings {
-                synthesis,
-                evidence,
-            } = &verdict
-        {
-            slot.state.prior_review = Some(mj_core::review::lanes::PriorReviewContext {
-                synthesis: synthesis.clone(),
-                evidence: evidence.clone(),
-            });
-        }
-        let reviewed_through_ordinal = requests.iter().find_map(|request| match request {
-            ReviewRequest::AdvanceBaseline {
-                reviewed_through_ordinal,
-                ..
-            } => Some(*reviewed_through_ordinal),
-            _ => None,
-        });
         let completion =
             crate::upgrade::activity_unless_draining("push review verdict").map(|admission| {
                 PushCompletion {
@@ -238,7 +97,6 @@ impl HostState {
                     deltas,
                     verdict,
                     _admission: admission,
-                    reviewed_through_ordinal,
                 }
             });
         let queued = completion.and_then(|completion| {
@@ -259,12 +117,9 @@ impl HostState {
             let Some(slot) = self.reviews.get_mut(session_id) else {
                 return;
             };
-            let Some(push) = slot.push.as_mut() else {
-                return;
-            };
-            push.finishing = false;
-            let delay = push.retry_delay;
-            push.retry_delay = (delay * 2).min(std::time::Duration::from_secs(30));
+            slot.finishing = false;
+            let delay = slot.retry_delay;
+            slot.retry_delay = (delay * 2).min(std::time::Duration::from_secs(30));
             (delay, slot.epoch)
         };
         tracing::warn!(%session_id, %error, retry_in_seconds = delay.as_secs(), "push review delivery will retry");
@@ -292,7 +147,6 @@ pub(super) async fn finish_push_delivery(
         deltas,
         mut verdict,
         _admission,
-        reviewed_through_ordinal,
         ..
     } = completion;
     state.push_findings = None;
@@ -334,30 +188,12 @@ pub(super) async fn finish_push_delivery(
         if let Err(reason) = recorded {
             verdict = ReviewVerdict::Failed { reason };
         } else {
-            let trees: BTreeMap<_, _> = deltas
-                .iter()
-                .map(|delta| (delta.root.clone(), delta.current_tree.clone()))
-                .collect();
-            // A baseline pin failure cannot undo a clean verdict. Report it, keeping
-            // the reviewed tree and the controller's authoritative baseline.
-            if let Err(error) = push_action(
-                &control,
-                &owner,
-                ReviewerAction::AdvanceBaseline {
-                    trees: trees.clone(),
-                },
-            )
-            .await
-            {
-                tracing::warn!(session_id = %owner, %error, "could not pin the clean push review baseline");
-            }
-            if let Some(ordinal) = reviewed_through_ordinal {
-                state.reviewed_through_ordinal = ordinal;
-            }
-            // A review scoped to one worktree leaves the other repositories'
-            // baselines where they were.
-            state.baselines.extend(trees);
-            state.prior_review = None;
+            state.advance_review_bases(
+                &deltas
+                    .iter()
+                    .map(|delta| delta.root.clone())
+                    .collect::<Vec<_>>(),
+            );
             state.push_findings = None;
         }
     }

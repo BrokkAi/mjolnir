@@ -868,7 +868,7 @@ pub(super) async fn handle_action(
         DaemonAction::StartTurnReview { session_id } => {
             state
                 .review_host()
-                .start(&session_id, true)
+                .start(&session_id)
                 .await
                 .map_err(|refusal| anyhow!("{refusal}"))?;
             state.publish_revision();

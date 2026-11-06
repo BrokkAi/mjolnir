@@ -278,7 +278,7 @@ pub(super) async fn run_daemon_runtime(
             );
             record_daemon_cleanup(
                 &mut outcome,
-                "shut down turn review host after bootstrap failure",
+                "shut down code review host after bootstrap failure",
                 state
                     .review_host()
                     .shutdown()
@@ -925,7 +925,7 @@ pub(super) async fn run_daemon_runtime(
     );
     epilogue.record(
         &mut outcome,
-        "shut down turn review host",
+        "shut down code review host",
         state
             .review_host()
             .shutdown()

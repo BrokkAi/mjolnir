@@ -599,10 +599,8 @@ pub(super) async fn interrupt_turn(
     send_action(&state, ControllerAction::InterruptTurn { session_id }).await
 }
 
-/// Start a one-off review of the turn the session just finished. The
-/// controller answers once the review has opened; a review that cannot start
-/// (the session is still working, prompts are queued, a sub-agent's turn, no
-/// usable reviewer) is refused with the reason, as 409.
+/// Review committed work through the push gate. Refusals, including tracked
+/// uncommitted changes or an unsupported harness, reach the caller as 409.
 pub(super) async fn start_review(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,

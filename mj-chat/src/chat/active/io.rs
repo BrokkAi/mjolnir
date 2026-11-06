@@ -100,7 +100,7 @@ impl ActiveChat {
         self.surface_reviewer_elicitations();
     }
 
-    /// Asks the daemon to review the turn that just finished.
+    /// Asks the daemon to review committed work.
     pub(crate) fn request_turn_review(&mut self) {
         let session_id = self.session.session_id().to_owned();
         self.state.set_notice("Starting a review…");
