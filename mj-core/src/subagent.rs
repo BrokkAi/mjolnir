@@ -1009,7 +1009,7 @@ impl SubagentMcpRole {
                 "ask_oracle",
             ],
             Self::MessageOnly => &["send_message", "fetch", "ask_oracle"],
-            Self::FetchOnly => &["fetch", "send_message"],
+            Self::FetchOnly => &["fetch", "send_message", "ask_oracle"],
             Self::Child => &["handback", "fetch", "send_message"],
         }
     }
