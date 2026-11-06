@@ -1576,13 +1576,22 @@ impl RuntimeState {
         inherited_draft: Option<&str>,
         command_id: &str,
     ) -> Result<u64> {
-        let bundle_id = self
-            .owner()
-            .controller()
-            .state
-            .sessions
-            .get(session_id)
-            .map(|record| record.bundle_id.clone());
+        // History is written before the session sees the prompt; see
+        // `record_user_prompt`.
+        let history_id = session_id.to_owned();
+        let history_command = command_id.to_owned();
+        let history_text = text.to_owned();
+        if let Err(error) = blocking(move || {
+            crate::database::record_user_prompt(&history_id, &history_command, &history_text)
+        })
+        .await
+        {
+            tracing::warn!(
+                session_id,
+                error = format!("{error:#}"),
+                "the queued prompt's history could not be stored"
+            );
+        }
         let ordinal = handle
             .submit(
                 command_id.to_owned(),
@@ -1612,27 +1621,6 @@ impl RuntimeState {
                 );
             }
             self.publish_revision();
-        }
-        if let Some(bundle_id) = bundle_id {
-            let history_id = session_id.to_owned();
-            let history_text = text.to_owned();
-            if let Err(error) = blocking(move || {
-                crate::database::record_prompt(
-                    &history_id,
-                    &bundle_id,
-                    ordinal,
-                    None,
-                    &history_text,
-                )
-            })
-            .await
-            {
-                tracing::warn!(
-                    session_id,
-                    error = format!("{error:#}"),
-                    "the queued prompt was accepted but its history could not be stored"
-                );
-            }
         }
         Ok(ordinal)
     }

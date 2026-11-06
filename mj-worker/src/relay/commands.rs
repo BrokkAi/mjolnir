@@ -1725,17 +1725,6 @@ impl DurableRelay {
         if let Some(message) = notice {
             self.append_relay_event(Some(command_id), RelayObservation::Notice { message })?;
         }
-        let stop_applied = matches!(outcome, RelayCommandOutcome::Cancelled)
-            && self
-                .snapshot
-                .dispatches
-                .get(command_id)
-                .is_some_and(|dispatch| {
-                    matches!(
-                        dispatch.command,
-                        RelayCommand::Cancel | RelayCommand::CancelTurn
-                    )
-                });
         let ordinal = self.append_relay_event(
             Some(command_id),
             RelayObservation::CommandCompleted {
@@ -1751,9 +1740,6 @@ impl DurableRelay {
                 outcome,
             },
         )?;
-        if stop_applied {
-            self.note_harness_turn_stop();
-        }
         if finishes_turn && !self.snapshot.goal.running() {
             self.finish_turn_activity()?;
         }

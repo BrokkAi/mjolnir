@@ -8,53 +8,19 @@ impl ReviewSlot {
     }
 
     pub(super) fn view(&self, session_id: &str) -> RuntimeReviewView {
-        let mut verdict = match self.driver.phase() {
-            TurnReviewPhase::Forwarding { synthesis, .. } => Some(VerdictView {
-                kind: VerdictKind::Findings,
-                text: synthesis.clone(),
-                allowed: if matches!(
-                    self.driver.phase(),
-                    TurnReviewPhase::Forwarding { error: Some(_), .. }
-                ) {
-                    vec![Resolution::Forwarded, Resolution::Cancelled]
-                } else {
-                    Vec::new()
-                },
-            }),
-            _ => self.driver.verdict().map(|verdict| match verdict {
-                ReviewVerdict::Clean => VerdictView {
-                    kind: VerdictKind::Clean,
-                    text: String::new(),
-                    allowed: Vec::new(),
-                },
-                ReviewVerdict::Findings { synthesis, .. } => VerdictView {
-                    kind: VerdictKind::Findings,
-                    text: synthesis.clone(),
-                    allowed: vec![
-                        Resolution::Forwarded,
-                        Resolution::Dismissed,
-                        Resolution::Cancelled,
-                    ],
-                },
-                ReviewVerdict::Failed { reason } => VerdictView {
-                    kind: VerdictKind::Failed,
-                    text: reason.clone(),
-                    // A failed review has nothing to forward, and dismissing
-                    // it does not advance the baseline: the change stays
-                    // unreviewed either way.
-                    allowed: vec![Resolution::Dismissed, Resolution::Cancelled],
-                },
-            }),
-        };
-        if self.push.is_some()
-            && let Some(verdict) = verdict.as_mut()
-        {
-            verdict.allowed = if self.push.as_ref().is_some_and(|push| push.finishing) {
-                Vec::new()
-            } else {
-                vec![Resolution::Cancelled]
-            };
-        }
+        let verdict = self.driver.last_verdict().map(|v| VerdictView {
+            kind: match v {
+                ReviewVerdict::Clean => VerdictKind::Clean,
+                ReviewVerdict::Findings { .. } => VerdictKind::Findings,
+                ReviewVerdict::Failed { .. } => VerdictKind::Failed,
+            },
+            text: match v {
+                ReviewVerdict::Clean => String::new(),
+                ReviewVerdict::Findings { synthesis, .. } => synthesis.clone(),
+                ReviewVerdict::Failed { reason } => reason.clone(),
+            },
+            allowed: Vec::new(),
+        });
         let mut roles = self.driver.roles();
         if let Some(group) = &self.state.active_group {
             for role in &mut roles {
@@ -71,8 +37,7 @@ impl ReviewSlot {
             child_session_id: None,
             phase: self.driver.phase().clone(),
             roles,
-            // A review that needed no reviewer (nothing changed, or only a
-            // handoff to finish) has no reviewer to describe.
+            // Matching trees need no reviewer identity to describe.
             status: if self
                 .reviewers
                 .iter()

@@ -1266,7 +1266,7 @@ fn subagent_policy_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
 fn subagent_policy_check(config: &Config) -> DoctorCheck {
     let subagents = &config.subagents;
     let detail = format!(
-        "Claude, Codex, and DSH sessions may opt in, up to {} sub-agents at once per session. Sub-agents may use any enabled profile that offers the configured model and effort.",
+        "Claude, Codex, DSH, and OpenCode sessions may opt in, up to {} sub-agents at once per session. Sub-agents may use any enabled profile that offers the configured model and effort.",
         subagents.max_concurrent
     );
     DoctorCheck::ready("subagents.policy", "Sub-agent policy", detail)

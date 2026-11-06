@@ -311,7 +311,6 @@ mod tests {
                 )
             },
         );
-        config.review.trigger = mj_core::config::ReviewTrigger::Turn;
         config.review.reviewers = vec![mj_core::config::SubagentChoice {
             model: "gpt-6-astra".into(),
             effort: None,

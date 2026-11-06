@@ -6297,7 +6297,7 @@ fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
         draft
             .unavailable_reason()
             .unwrap()
-            .contains("Claude, Codex, or DSH")
+            .contains("Claude, Codex, DSH, or OpenCode")
     );
     // DSH lists Mjolnir and None only; unconfigured Mjolnir stays disabled.
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Dsh;

@@ -1697,7 +1697,9 @@ pub fn apply_runtime_event_to_entries(
 /// tool call reads as the command it ran rather than as JSON.
 pub fn transcript_item_text(item: &TranscriptItem) -> String {
     match &item.body {
-        TranscriptBody::User { content } => materialized_content_text(content),
+        TranscriptBody::User { content } => {
+            sanitize_terminal_text(&materialized_content_text(content))
+        }
         TranscriptBody::Message { event } => format!(
             "{}\n\n{}",
             event.message_label(),
@@ -1749,8 +1751,8 @@ pub fn transcript_item_text(item: &TranscriptItem) -> String {
                 .collect::<Vec<_>>()
                 .join("\n")
         }
-        TranscriptBody::PlanProposal { plan, .. } => plan.clone(),
-        TranscriptBody::System { text } => text.clone(),
+        TranscriptBody::PlanProposal { plan, .. } => sanitize_terminal_text(plan),
+        TranscriptBody::System { text } => sanitize_terminal_text(text),
     }
 }
 
@@ -2315,6 +2317,40 @@ mod tests {
         use std::fmt::Write as _;
 
         let mut output = String::new();
+        // Hard-won: #1416: untrusted User, PlanProposal, and System text could emit terminal controls.
+        let hostile = "safe\x1b]52;c;Y2xpcGJvYXJk\x07\x1b[31mred\x1b[0m";
+        for (label, body) in [
+            (
+                "user message",
+                TranscriptBody::User {
+                    content: vec![json!({"type":"text","text":hostile})],
+                },
+            ),
+            (
+                "plan proposal",
+                TranscriptBody::PlanProposal {
+                    proposal_id: "golden".into(),
+                    plan: hostile.into(),
+                },
+            ),
+            (
+                "system message",
+                TranscriptBody::System {
+                    text: hostile.into(),
+                },
+            ),
+        ] {
+            let item = TranscriptItem {
+                stable_id: format!("{label}:golden"),
+                position: 1,
+                latest_content_event_ordinal: None,
+                created_at_ms: 1,
+                last_changed_at_ms: 1,
+                body,
+            };
+            writeln!(output, "=== {label} (transcript row) ===").unwrap();
+            writeln!(output, "{}", transcript_item_text(&item)).unwrap();
+        }
         let diff = agent_client_protocol::v1::schema::Diff::new("/workspace/new.txt", "one\ntwo\n");
         writeln!(output, "=== new file diff detail (transcript row) ===").unwrap();
         writeln!(output, "{}", format_diffstat(&diff)).unwrap();

@@ -735,17 +735,7 @@ pub(super) async fn handle_action(
                 let values = values
                     .as_array()
                     .context("serialized prompt content is not an array")?;
-                let text = mj_core::transcript::materialized_content_text(values);
-                let bundle_id = state
-                    .owner()
-                    .controller()
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .with_context(|| format!("unknown session {session_id}"))?
-                    .bundle_id
-                    .clone();
-                Some((bundle_id, text))
+                Some(mj_core::transcript::materialized_content_text(values))
             } else {
                 None
             };
@@ -758,6 +748,19 @@ pub(super) async fn handle_action(
                 .wait_for_session(&session_id, Duration::from_secs(5))
                 .await?;
             let session_id = session.session_id().to_owned();
+            // History is written before the session sees the prompt; see
+            // `record_user_prompt`.
+            if let Some(text) = history {
+                let history_id = session_id.clone();
+                let history_command = command_id.clone();
+                if let Err(error) = blocking(move || {
+                    crate::database::record_user_prompt(&history_id, &history_command, &text)
+                })
+                .await
+                {
+                    tracing::warn!(%error, "prompt history could not be stored");
+                }
+            }
             let ordinal = session.submit(command_id, command).await?;
             if let Some(expected) = inherited_draft {
                 let persisted_id = session_id.clone();
@@ -777,14 +780,6 @@ pub(super) async fn handle_action(
                     }
                 });
                 state.publish_revision();
-            }
-            if let Some((bundle_id, text)) = history
-                && let Err(error) = blocking(move || {
-                    crate::database::record_prompt(&session_id, &bundle_id, ordinal, None, &text)
-                })
-                .await
-            {
-                tracing::warn!(%error, "prompt was accepted but its history could not be stored");
             }
             Ok(DaemonReply::Ordinal(ordinal))
         }
@@ -875,7 +870,7 @@ pub(super) async fn handle_action(
         DaemonAction::StartTurnReview { session_id } => {
             state
                 .review_host()
-                .start(&session_id, true)
+                .start(&session_id)
                 .await
                 .map_err(|refusal| anyhow!("{refusal}"))?;
             state.publish_revision();

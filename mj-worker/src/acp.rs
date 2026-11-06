@@ -35,6 +35,7 @@ mod grok_usage;
 mod grok_usage_tests;
 mod kimi_tasks;
 mod muse_usage;
+mod opencode_usage;
 pub use kimi_tasks::resolve_session_dir as resolve_kimi_session_dir;
 pub use kimi_tasks::*;
 #[cfg(test)]

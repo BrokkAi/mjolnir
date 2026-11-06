@@ -795,11 +795,12 @@ pub(crate) async fn run_server(
                                         "all" => crate::database::HistoryScope::All,
                                         _ => crate::database::HistoryScope::Project,
                                     };
-                                    let found = crate::database::search_prompts_bounded(
+                                    let found = crate::database::search_prompt_page(
                                         &session_id,
                                         &bundle,
                                         scope,
                                         &query,
+                                        None,
                                         crate::server::MAX_HISTORY_MATCHES,
                                     )?;
                                     anyhow::Ok(crate::server::ViewerPromptHistory {
@@ -808,7 +809,7 @@ pub(crate) async fn run_server(
                                             .into_iter()
                                             .map(|entry| entry.text)
                                             .collect(),
-                                        truncated: found.truncated,
+                                        truncated: found.next.is_some(),
                                     })
                                 })
                                 .await;

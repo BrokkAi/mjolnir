@@ -59,7 +59,16 @@ pub trait ExportRuntime: Send + Sync {
     fn override_review(
         &self,
         _session_id: String,
-        _reason: String,
+        _overrides: Vec<mj_core::subagent::ReviewOverride>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        Box::pin(async { bail!("push review is unavailable") })
+    }
+
+    fn set_review_baseline(
+        &self,
+        _session_id: String,
+        _commit: String,
+        _path: Option<String>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async { bail!("push review is unavailable") })
     }
@@ -243,13 +252,27 @@ impl ExportRuntime for RuntimeState {
     fn override_review(
         &self,
         session_id: String,
-        reason: String,
+        overrides: Vec<mj_core::subagent::ReviewOverride>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async move {
             self.review_host()
-                .override_push(&session_id, reason)
+                .override_push(&session_id, overrides)
                 .await
                 .map_err(|error| anyhow!("override_review refused: {}", error.0))
+        })
+    }
+
+    fn set_review_baseline(
+        &self,
+        session_id: String,
+        commit: String,
+        path: Option<String>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        Box::pin(async move {
+            self.review_host()
+                .set_push_base(&session_id, commit, path)
+                .await
+                .map_err(|error| anyhow!("set_review_baseline refused: {}", error.0))
         })
     }
 
@@ -929,9 +952,14 @@ impl ApiBackend {
                 self.ask_oracle(parent_session_id, request, prepared, message)
                     .await
             }
-            SubagentToolAction::OverrideReview { reason } => {
+            SubagentToolAction::OverrideReview { overrides } => {
                 self.exports
-                    .override_review(parent_session_id.to_owned(), reason.to_owned())
+                    .override_review(parent_session_id.to_owned(), overrides.clone())
+                    .await
+            }
+            SubagentToolAction::SetReviewBaseline { commit, path } => {
+                self.exports
+                    .set_review_baseline(parent_session_id.to_owned(), commit.clone(), path.clone())
                     .await
             }
             SubagentToolAction::ListProfiles => {
@@ -3190,6 +3218,17 @@ impl SubagentBackend for ApiBackend {
                 .await?;
             Ok(turn)
         })
+    }
+
+    fn record_user_prompt(
+        &self,
+        session_id: String,
+        command_id: String,
+        text: String,
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(super::actions::record_user_prompt(
+            session_id, command_id, text,
+        ))
     }
 
     fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, Result<String>> {

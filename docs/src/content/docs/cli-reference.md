@@ -26,7 +26,7 @@ of a coding harness, and is documented in [ACP agent](/acp-agent/).
 | `mj workspaces list [--json]` | List workspaces without a terminal. |
 | `mj workspaces create <name> [--json]` | Create a workspace, or select the one that already has the name. |
 | `mj go [--setup] [--global-default] [<folder>]` | Open the dashboard on a folder (default: the current directory) with its remembered account and target. `--setup` changes that folder's setup; `--global-default` also makes it the default for new projects. |
-| `mj simple [<folder>]` | Open the folder's last running Simple session or start one immediately with the default enabled agent, the local `localhost` target, and an isolated checkout. Automatic turn review is off for the session. Commands are direct Ctrl-key chords with no prefix, so Ctrl+B remains available to tmux. |
+| `mj simple [<folder>]` | Open the folder's last running Simple session or start one immediately with the default enabled agent, the local `localhost` target, and an isolated checkout. Commands are direct Ctrl-key chords with no prefix, so Ctrl+B remains available to tmux. |
 | `mj app` | Open the authenticated web viewer in the separate `mj-desktop` application. |
 
 Use `prefix+q` to detach from the dashboard without stopping the daemon or any session. The [terminal surface](/terminal-surface/) documents its keys; the [web viewer](/web-viewer/) covers `mj app` and browser access.
@@ -149,7 +149,7 @@ are not importable yet either.
 | `--allow-dirty` | Proceed when the source Git checkouts have uncommitted changes. |
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
-| `--review <off\|turn\|push>` | Set the imported session's review trigger, overriding `[review]`. |
+| `--review <off\|push>` | Set the imported session's review mode, overriding global reviewers. |
 | `--reviewer MODEL[:EFFORT]` | Add a reviewer choice; repeat up to three times. The final colon is an effort separator only for `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (for example, `x:0:high` uses model `x:0` and effort `high`). A trailing colon means no effort and removes that colon, so `foo:high:` selects model `foo:high`. Other suffixes, such as `:free` or `:latest`, remain part of the model ID. |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
@@ -205,7 +205,7 @@ the matching task choice for this session; each unspecified type uses its global
 choice. Either override implies Mjolnir. The matching
 `--subagent-*-effort` flag requires its model flag. Omitted policy retains
 the session's override. `--subagents none` removes delegation tools entirely;
-it needs a Claude, Codex, or DSH session. A retry of a sealed
+it needs a Claude, Codex, DSH, or OpenCode session. A retry of a sealed
 Move retains its recorded policy; an explicit different policy is refused.
 
 `--oracle enabled|disabled` turns the session's oracle on or off, and
@@ -302,7 +302,7 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
        [--oracle enabled|disabled]
        [--subagent-oracle <model>] [--subagent-oracle-effort <effort>]
-       [--review <off|turn|push>] [--reviewer MODEL[:EFFORT]]...
+       [--review <off|push>] [--reviewer MODEL[:EFFORT]]...
        [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>]
@@ -324,7 +324,6 @@ mj resume (--session <id> | --wiki <sessionwiki-id>)
 mj interrupt-turn --session <id> [--json]
 mj review start --session <id> [--json]
 mj review status --session <id> [--json]
-mj review (forward | dismiss | cancel) --session <id> [--json]
 mj stop-task --session <id> (<task-id> | --all) [--json]
 mj api-info [--json]
 mj events [--session <id>] [--workspace-id <id>] [--workspace <name>] [--after-seq <seq>]
@@ -380,7 +379,7 @@ mj new --workspace eval --bundle product --target builder \
 - `mj new --subagents native|mjolnir|none` selects delegation. Omitted defaults to
   Native, or to None for a DSH profile. DSH has no sub-agents of its own, so it
   refuses `native` and accepts `mjolnir` or `none`. `none` gives the session no delegation tools, native or Mjolnir; it
-  needs a Claude, Codex, or DSH profile. Mjolnir requires a Claude, Codex, or DSH parent and a straightforward
+  needs a Claude, Codex, DSH, or OpenCode profile. Mjolnir requires a Claude, Codex, DSH, or OpenCode parent and a straightforward
   choice in `[subagents.straightforward]` or a session override. The subtle
   choice in `[subagents.subtle]` is optional. Configure global defaults in
   config.toml or TUI Settings → Sub-agents.
@@ -405,7 +404,7 @@ mj new --workspace eval --bundle product --target builder \
   requires it, and `adaptive` is invalid. Combining `--subagent-oracle` with
   `--oracle disabled` is refused. When you ask for the oracle without a model,
   the session starts with the oracle off and says so.
-- `mj new --review off|turn|push` sets the session's trigger, overriding
+- `mj new --review off|push` sets the session's review mode, overriding
   `[review]`. `mj import <harness>` takes the same option for the session it
   adopts. Repeat `--reviewer MODEL[:EFFORT]` up to three times to choose reviewers. See
   [per-session settings](/turn-review/#per-session-settings). An empty global reviewer list means no reviewers; choose rows or press **Autoconfigure** in Settings → Code Review.
@@ -625,7 +624,7 @@ which can take a few minutes while a reviewer is chosen and started, and fails
 with the reason when the session is still working, has queued prompts, is a
 sub-agent, or has no usable reviewer. `mj review status` prints the open
 review's status, reviewer role, and verdict, or `no review is open`.
-The conversation prompt stays available while the review runs. See [turn review](/turn-review/).
+The conversation prompt stays available while the review runs. See [Code review](/turn-review/).
 
 `mj destroy` permanently removes the live session record, environment, and
 recovery archive. Its conversation is indexed in SessionWiki first:
