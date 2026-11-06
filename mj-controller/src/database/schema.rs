@@ -3669,6 +3669,7 @@ mod reader_tests {
                 "ALTER TABLE sessions DROP COLUMN oracle_choice;
              ALTER TABLE sessions DROP COLUMN oracle;
              DROP TABLE oracle_preference;
+             ALTER TABLE turn_review_state DROP COLUMN declined_findings;
              DELETE FROM schema_migrations WHERE version >= 111;
              UPDATE schema_compatibility SET minimum_compatible_version = 110 WHERE singleton = 1;
              PRAGMA user_version = 110;",
