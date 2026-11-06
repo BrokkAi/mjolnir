@@ -1245,6 +1245,34 @@ pull_policy = "never"
         # review needs no reviewer and closes again on its own. The answer can
         # wait up to two minutes behind the recovery copy the finished turn
         # started, as `mj review start` allows for.
+        #
+        # The fixture clone sits at the default branch with no reviewed commit
+        # and no recorded start, so nothing tells the session's work from
+        # earlier history. The first start refuses with 409 and records the
+        # current commit as the start. The review needs a commit after that
+        # start; an empty commit keeps the trees equal, so no reviewer is
+        # needed.
+        status, value = self.request(
+            "POST",
+            "/api/actions",
+            {"action": "start-review", "session_id": session_id},
+            timeout=150,
+        )
+        if status != 409 or "No starting point was recorded" not in repr(value):
+            raise ScenarioFailure(
+                f"first start-review action did not record a start: {status} {value!r}"
+            )
+        clones = sorted((self.project / ".mj" / "clones").iterdir())
+        if len(clones) != 1:
+            raise ScenarioFailure(f"expected one session clone: {clones!r}")
+        self.git_output(
+            [
+                "-c", "user.name=Hel Reliability",
+                "-c", "user.email=reliability@invalid",
+                "commit", "--allow-empty", "-m", "session work",
+            ],
+            clones[0],
+        )
         started = time.monotonic()
         status, value = self.request(
             "POST",
@@ -1258,8 +1286,12 @@ pull_policy = "never"
             "review-started", session_id=session_id, seconds=round(time.monotonic() - started, 3)
         )
 
+        # The review's empty commit is unpublished work, which the viewer
+        # confirms the same way when it suspends.
         status, _ = self.request(
-            "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
+            "POST",
+            "/api/actions",
+            {"action": "suspend", "session_id": session_id, "acknowledge_unpublished_work": True},
         )
         if status != 202:
             raise ScenarioFailure(f"close action returned {status}")

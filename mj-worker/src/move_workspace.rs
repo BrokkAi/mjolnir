@@ -250,7 +250,11 @@ pub fn capture(
             let (name, hash) = line.split_once(' ').context("invalid Git ref")?;
             Ok((name.to_owned(), hash.to_owned()))
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        // Old review baseline pins are not carried: nothing reads them.
+        .filter(|(name, _)| !mj_core::archive::is_review_baseline_pin(name))
+        .collect::<Vec<_>>();
         let symbolic_refs = git_text(&root, &["for-each-ref", "--format=%(refname) %(symref)"])?
             .lines()
             .filter_map(|line| {
@@ -466,14 +470,22 @@ pub fn restore(source: &Path, repositories: &[WorkspaceRepository]) -> Result<()
             ],
         )?;
         git(root, &["checkout", "--detach", "--force", &repository.head])?;
-        let saved_refs: std::collections::BTreeSet<_> = repository
+        // A manifest written before baseline pins were dropped may carry some.
+        let wanted_refs: Vec<_> = repository
             .refs
             .iter()
-            .map(|(name, _)| name.as_str())
+            .filter(|(name, _)| !mj_core::archive::is_review_baseline_pin(name))
             .collect();
+        let saved_refs: std::collections::BTreeSet<_> =
+            wanted_refs.iter().map(|(name, _)| name.as_str()).collect();
         let mut deletions = Vec::new();
         for line in git_text(root, &["for-each-ref", "--format=%(refname)"])?.lines() {
-            if !saved_refs.contains(line) {
+            // A managed linked worktree shares the user's refs. Old review
+            // pins and legacy `refs/hel` refs there are the user's to remove
+            // (`mj doctor` lists them), so a Move leaves them alone.
+            let residue =
+                mj_core::archive::is_review_baseline_pin(line) || line.starts_with("refs/hel/");
+            if !saved_refs.contains(line) && !residue {
                 write!(deletions, "delete {line}\0\0")?;
             }
         }
@@ -486,7 +498,7 @@ pub fn restore(source: &Path, repositories: &[WorkspaceRepository]) -> Result<()
             )?;
         }
         let mut updates = Vec::new();
-        for (name, hash) in &repository.refs {
+        for (name, hash) in wanted_refs {
             write!(updates, "update {name}\0{hash}\0\0")?;
         }
         if !updates.is_empty() {
@@ -902,6 +914,20 @@ fi
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
         }
+        // Pins already in the destination belong to the user's repository.
+        let blob = String::from_utf8(
+            git_with_input(&target, &["hash-object", "-w", "--stdin"], b"pin").unwrap(),
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let existing = [
+            "refs/mj/worktrees/other/review-baseline",
+            "refs/hel/review-baseline",
+        ];
+        for pin in existing {
+            git(&target, &["update-ref", pin, &blob]).unwrap();
+        }
         restore(
             &stage,
             &[WorkspaceRepository {
@@ -910,6 +936,13 @@ fi
             }],
         )
         .unwrap();
+        for pin in existing {
+            assert_eq!(
+                git_text(&target, &["rev-parse", pin]).unwrap().trim(),
+                blob,
+                "{pin}"
+            );
+        }
         assert!(
             fs::metadata(target.join(".git/move-ref-batches"))
                 .unwrap()
@@ -925,10 +958,6 @@ fi
             vec!["status", "--porcelain=v1", "--untracked-files=no"],
             vec!["ls-files", "--stage"],
             vec!["stash", "list"],
-            vec![
-                "for-each-ref",
-                "--format=%(refname) %(objectname) %(symref)",
-            ],
             vec!["show", "stash@{1}:tracked"],
             vec!["diff", "--binary"],
             vec!["diff", "--cached", "--binary"],
@@ -938,6 +967,29 @@ fi
                 git(&target, &args).unwrap(),
                 "{args:?}"
             );
+        }
+        // Every ref moves except the old review baseline pins, which nothing reads.
+        let refs_without_pins = |root: &Path| {
+            git_text(
+                root,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname) %(objectname) %(symref)",
+                ],
+            )
+            .unwrap()
+            .lines()
+            .filter(|line| !line.contains("review-baseline"))
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        assert_eq!(refs_without_pins(&source), refs_without_pins(&target));
+        for pin in [
+            "refs/mj/review-baseline",
+            "refs/mj/worktrees/linked/review-baseline",
+        ] {
+            assert!(!git(&source, &["for-each-ref", pin]).unwrap().is_empty());
+            assert!(git(&target, &["for-each-ref", pin]).unwrap().is_empty());
         }
         assert_eq!(fs::read(target.join("large")).unwrap(), body);
         assert_eq!(

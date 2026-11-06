@@ -1496,6 +1496,13 @@ impl CommandExecutor for SshHostExecutor {
             self.host_files
                 .borrow_mut()
                 .insert(format!("{directory}/hel"));
+        } else if command.purpose == "link shared Mjolnir worker into session" {
+            // Arguments end with: source temporary destination digest mode.
+            let words = remote.split_whitespace().collect::<Vec<_>>();
+            let source = words[words.len() - 5].trim_matches('\'');
+            if !self.host_files.borrow().contains(source) {
+                status = 75;
+            }
         } else if command.purpose == "verify shared Mjolnir worker" {
             let path = remote.split_whitespace().last().unwrap().trim_matches('\'');
             if self.host_files.borrow().contains(path) {
@@ -4673,9 +4680,18 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
     };
 
+    // A host of its own, so no other test has claimed this store's collection.
+    let locator = targets::TargetLocator::SshBare {
+        worker_id: None,
+        ssh: SshTarget {
+            destination: "managed-harness-upgrade@host.test".into(),
+            ssh_args: Vec::new(),
+        },
+        workspace: format!("/srv/mj/{session}"),
+    };
     prepare_managed_harness_for_upgrade(
         &executor,
-        &ssh_bare_locator(session),
+        &locator,
         session,
         &WorkerInstall::Host(source),
         &launch,
@@ -4693,16 +4709,8 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
             "clear managed harness preparation staging",
             "create managed harness preparation staging",
             "remove stale private worker staging",
-            "collect unused Mjolnir worker binaries",
-            "verify shared Mjolnir worker",
-            "create private worker store upload",
-            "stage replacement Mjolnir worker",
-            "replace installed Mjolnir worker",
-            "make replaced Mjolnir worker executable",
-            "verify uploaded Mjolnir worker",
-            "publish shared Mjolnir worker",
-            "discard private worker store upload",
             "link shared Mjolnir worker into session",
+            "collect unused Mjolnir worker binaries",
             "stage managed harness launch configuration",
             "prepare exact managed harness",
             "remove managed harness preparation staging",
