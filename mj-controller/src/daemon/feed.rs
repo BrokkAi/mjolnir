@@ -66,6 +66,10 @@ impl RuntimeHistory {
             self.snapshots.back_mut().expect("current projection").2 = 0;
             self.bytes = 0;
         }
+        // A view of an evicted publication can no longer be served, and would
+        // keep that publication's rows and tails alive.
+        let oldest = self.snapshots.front().expect("current projection").0;
+        self.scoped.retain(|(sequence, _)| *sequence >= oldest);
         Ok(())
     }
 
@@ -784,6 +788,32 @@ mod tests {
             ["other"]
         );
         assert_eq!(replica.projection.subagents.len(), 1199);
+    }
+
+    /// Evicting a publication from history also drops the scoped views of it,
+    /// so the view cache never holds more than the history budget allows.
+    #[test]
+    fn evicted_publications_take_their_scoped_views_with_them() {
+        let mut history = RuntimeHistory::default();
+        let mut next = RuntimeProjection::default();
+        history.publish(next.clone()).unwrap();
+        let served = history.cursor();
+        history.frame(None);
+        assert!(
+            history
+                .scoped
+                .iter()
+                .any(|(sequence, _)| *sequence == served.sequence)
+        );
+        for revision in 1..=4096 {
+            next.revision = revision;
+            history.publish(next.clone()).unwrap();
+        }
+        assert!(history.snapshot(served.sequence).is_none());
+        assert!(
+            history.scoped.is_empty(),
+            "no view outlives its publication"
+        );
     }
 
     /// A terminal following its family scope through deltas holds exactly
