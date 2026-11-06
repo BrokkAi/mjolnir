@@ -8620,9 +8620,12 @@ function renderConversationHeader(session) {
     button.setAttribute('aria-label', waiting
       ? `Open sub-agent workspace; ${waiting} waiting for your answer`
       : 'Open sub-agent workspace');
+    // Inside a sub-agent context the button opens this child's own children
+    // only when one of them waits for the person, such as a reviewer of the
+    // child's work; otherwise it stays hidden there.
     button.classList.toggle(
       'hidden',
-      total === 0 || Boolean(route.subagentParentId),
+      total === 0 || (Boolean(route.subagentParentId) && waiting === 0),
     );
   }
   syncConversationStatus();
