@@ -10,6 +10,10 @@ pub(super) fn forward_subagent_question_with(
     recorded_at_ms: i64,
     request: &ElicitationRequest,
 ) -> Result<bool> {
+    // Approvals stay with the person; the child's worker leaves them open.
+    if !request.goes_to_parent() {
+        return Ok(false);
+    }
     let relation: Option<(String, Option<String>, String)> = tx
         .query_row(
             "SELECT a.parent_session_id, p.state, c.title FROM subagent_sessions a

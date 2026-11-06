@@ -1,13 +1,15 @@
-//! A managed child's permission request must reach its parent, not wait for a person.
+//! A managed child's questions go to its parent; its approvals stay with a person.
 #![cfg(unix)]
 
 use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
+use mj_core::elicitation::{ElicitationResponse, ElicitationValue};
 use mj_core::relay::{
     RELAY_PROTOCOL_VERSION, RelayCommand, RelayRequest, RelayRequestEnvelope, RelayResponseBody,
-    RelayResponsePayload,
+    RelayResponseEnvelope, RelayResponsePayload,
 };
 use mj_core::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
 use mj_worker::relay::DurableRelay;
+use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
 
 #[path = "../src/test_support/timeouts.rs"]
@@ -16,23 +18,66 @@ use timeouts::IO_TIMEOUT;
 
 const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 
+/// Answer a form through the worker's control socket, as the daemon does
+/// for a person. False until the worker holds a form with this id.
+fn answer_form(root: &std::path::Path, elicitation_id: &str, choice: &str) -> bool {
+    let Ok(mut stream) = std::os::unix::net::UnixStream::connect(root.join("control.sock")) else {
+        return false;
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let request = RelayRequestEnvelope {
+        request_id: format!("answer-{elicitation_id}"),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::RespondElicitation {
+            elicitation_id: elicitation_id.into(),
+            response: ElicitationResponse::Accept {
+                content: [("choice".into(), ElicitationValue::String(choice.into()))].into(),
+            },
+        },
+    };
+    serde_json::to_writer(&mut stream, &request).unwrap();
+    stream.write_all(b"\n").unwrap();
+    let mut line = String::new();
+    if std::io::BufReader::new(stream)
+        .read_line(&mut line)
+        .is_err()
+    {
+        return false;
+    }
+    serde_json::from_str::<RelayResponseEnvelope>(&line)
+        .is_ok_and(|response| matches!(response.body, RelayResponseBody::Ok { .. }))
+}
+
 /// A real worker process reads the launch file as a daemon writes it. The
-/// scripted bridge asks permission during its prompt and records the answer
-/// it receives; a form left open for a person would leave it waiting.
-// Hard-won: #1451: the worker dropped the managed-child marker before building the ACP launch, so a child's permission form stayed open.
+/// scripted bridge asks a question and then a tool permission during one
+/// prompt, and records the answer to each. The question comes back
+/// cancelled at once, which only a worker that knows it is a managed child
+/// does. The permission waits, and only a person's answer selects "allow".
+// Hard-won: #1451: the worker dropped the managed-child marker before building the ACP launch, and the parent could not grant a child's permission.
 #[test]
-fn a_managed_child_permission_request_is_cancelled_by_its_worker() {
+fn a_managed_child_sends_questions_to_its_parent_and_keeps_approvals_for_a_person() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("worker");
-    let answer_log = temp.path().join("permission-answer.json");
+    let answers = temp.path().join("answers.jsonl");
     let script = temp.path().join("bridge.py");
     std::fs::write(
         &script,
         format!(
             r#"import json, sys
-answer_log = {answer_log}
+answers = {answers}
 def send(message):
     print(json.dumps(message), flush=True)
+def ask(ident, method, params):
+    send({{"jsonrpc": "2.0", "id": ident, "method": method, "params": params}})
+    # The answer arrives on stdin before the prompt can finish.
+    for line in sys.stdin:
+        answer = json.loads(line)
+        if answer.get("id") == ident:
+            with open(answers, "a") as output:
+                output.write(json.dumps(answer) + "\n")
+            return
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
@@ -43,23 +88,23 @@ for line in sys.stdin:
         result = {{"sessionId": "child-session", "modes": {{"currentModeId": "agent",
                   "availableModes": [{{"id": "agent", "name": "Guardian"}}]}}}}
     elif method == "session/prompt":
-        send({{"jsonrpc": "2.0", "id": "permission-1", "method": "session/request_permission",
-              "params": {{"sessionId": "child-session",
-                         "toolCall": {{"toolCallId": "call-1", "title": "Bash", "kind": "execute"}},
-                         "options": [
-                             {{"optionId": "allow", "name": "Allow", "kind": "allow_once"}},
-                             {{"optionId": "reject", "name": "Reject", "kind": "reject_once"}}]}}}})
-        # The answer arrives on stdin before the prompt can finish.
-        answer = json.loads(sys.stdin.readline())
-        with open(answer_log, "w") as output:
-            json.dump(answer, output)
+        ask("question-1", "elicitation/create", {{
+            "sessionId": "child-session", "mode": "form", "message": "Which file?",
+            "requestedSchema": {{"type": "object", "properties": {{
+                "file": {{"type": "string", "title": "File"}}}}}}}})
+        ask("permission-1", "session/request_permission", {{
+            "sessionId": "child-session",
+            "toolCall": {{"toolCallId": "call-1", "title": "Bash", "kind": "execute"}},
+            "options": [
+                {{"optionId": "allow", "name": "Allow", "kind": "allow_once"}},
+                {{"optionId": "reject", "name": "Reject", "kind": "reject_once"}}]}})
         result = {{"stopReason": "end_turn"}}
     else:
         result = {{}}
     if ident is not None:
         send({{"jsonrpc": "2.0", "id": ident, "result": result}})
 "#,
-            answer_log = serde_json::to_string(&answer_log).unwrap(),
+            answers = serde_json::to_string(&answers).unwrap(),
         ),
     )
     .unwrap();
@@ -116,21 +161,34 @@ for line in sys.stdin:
     let worker =
         std::thread::spawn(move || BoundedProcessExecutor::new(IO_TIMEOUT * 2).execute(&command));
 
-    let observation = (|| -> anyhow::Result<serde_json::Value> {
+    let recorded = || -> Vec<serde_json::Value> {
+        std::fs::read_to_string(&answers)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    let observation = (|| -> anyhow::Result<Vec<serde_json::Value>> {
         let deadline = Instant::now() + IO_TIMEOUT;
+        let mut answered = false;
         loop {
-            if let Ok(bytes) = std::fs::read(&answer_log)
-                && let Ok(answer) = serde_json::from_slice(&bytes)
-            {
-                return Ok(answer);
+            let seen = recorded();
+            if seen.len() == 2 {
+                return Ok(seen);
+            }
+            // Answer only after the question's cancellation reached the
+            // bridge, so the permission cannot have been answered by anyone
+            // but this simulated person.
+            if seen.len() == 1 && !answered {
+                answered = answer_form(&root, "tool-permission-1", "allow");
             }
             anyhow::ensure!(
                 !worker.is_finished(),
-                "worker exited before the bridge received an answer"
+                "worker exited before the bridge received both answers: {seen:?}"
             );
             anyhow::ensure!(
                 Instant::now() < deadline,
-                "the permission request stayed open: the worker is not treating this session as a managed child"
+                "the bridge did not receive both answers: {seen:?}"
             );
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -140,7 +198,7 @@ for line in sys.stdin:
         BoundedProcessExecutor::new(IO_TIMEOUT).execute(&CommandSpec::new("sh", ["-c", &stop]));
     let owner = worker.join().expect("worker owner panicked");
     let worker_log = std::fs::read_to_string(root.join("worker.log")).unwrap_or_default();
-    let answer = observation.unwrap_or_else(|error| {
+    let seen = observation.unwrap_or_else(|error| {
         panic!(
             "{error:#}; worker: {}; worker log: {worker_log}; stop: {stopped:?}",
             owner
@@ -149,9 +207,14 @@ for line in sys.stdin:
                 .unwrap_or_else(|error| error.to_string())
         )
     });
-    assert_eq!(answer["id"], "permission-1", "{answer}");
+    assert_eq!(seen[0]["id"], "question-1", "{seen:?}");
     assert_eq!(
-        answer["result"]["outcome"]["outcome"], "cancelled",
-        "{answer}"
+        seen[0]["result"]["action"], "cancel",
+        "a managed child's question goes to its parent: {seen:?}"
+    );
+    assert_eq!(seen[1]["id"], "permission-1", "{seen:?}");
+    assert_eq!(
+        seen[1]["result"]["outcome"]["optionId"], "allow",
+        "a person answers a managed child's permission: {seen:?}"
     );
 }

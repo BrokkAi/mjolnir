@@ -64,6 +64,15 @@ impl ElicitationRequest {
         lines.join("\n")
     }
 
+    /// Whether a managed child sends this form to its parent agent instead of
+    /// a person. A parent answers questions with a message, but it has no
+    /// way to grant a tool permission or approve a plan, so those stay open
+    /// for a person, as harnesses do for their native sub-agents.
+    #[must_use]
+    pub fn goes_to_parent(&self) -> bool {
+        self.tool_permission.is_none() && !crate::acp::is_plan_review_id(&self.id)
+    }
+
     /// Whether the form offers Skip (the `decline` action). Every surface
     /// asks this, and [`Self::harness_response`] refuses a Skip it denies.
     #[must_use]

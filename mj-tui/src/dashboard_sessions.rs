@@ -149,7 +149,7 @@ pub(crate) fn attention_level(
 /// The attention level of `session` from its own facts alone. Only
 /// [`crate::session_view::SessionFacts`] calls this; everything else reads
 /// the level it keeps.
-pub(crate) fn session_attention_level(
+pub(crate) fn own_attention_level(
     dashboard: &DashboardState,
     session_id: &str,
     session: &SessionRecord,
@@ -788,6 +788,11 @@ impl DashboardState {
     }
 
     /// The attention level of one session, wherever it lives.
+    ///
+    /// A parent whose Mjolnir sub-agent is waiting on a question reads as
+    /// waiting too. The child has no row outside the Sub-agents view, so
+    /// without this nothing a person normally looks at would show that the
+    /// child needs them (R11-1).
     pub fn attention_level(&self, session_id: &str) -> AttentionLevel {
         self.session_facts().attention_level(session_id)
     }
@@ -817,7 +822,7 @@ impl DashboardState {
     /// question the agent asked in that turn.
     fn has_unfinished_turn(&self, session_id: &str) -> bool {
         matches!(
-            self.attention_level(session_id),
+            self.own_attention_level(session_id),
             AttentionLevel::Working | AttentionLevel::Waiting
         )
     }
@@ -887,6 +892,27 @@ impl DashboardState {
             failures.len(),
             crate::widgets::counted(targets.len(), "turn", "turns"),
         ));
+    }
+
+    /// The first of this parent's Mjolnir sub-agents that is waiting on a
+    /// question, with that question.
+    pub(crate) fn subagent_question(
+        &self,
+        parent_id: &str,
+    ) -> Option<(&SessionRecord, &mj_core::elicitation::ElicitationRequest)> {
+        let child = self.session_facts().waiting_child(parent_id)?.to_owned();
+        let child = self.state.sessions.get(&child)?;
+        let question = self
+            .session_details
+            .get(&child.id)?
+            .pending_elicitations
+            .first()?;
+        Some((child, question))
+    }
+
+    /// The attention level from the session's own facts alone.
+    fn own_attention_level(&self, session_id: &str) -> AttentionLevel {
+        self.session_facts().own_attention_level(session_id)
     }
 
     /// Whether a live, reachable session is computing right now: the fact the
