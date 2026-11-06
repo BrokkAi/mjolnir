@@ -1941,9 +1941,12 @@ fn local_bare_github_checks(
     let Ok(config) = config else {
         return Vec::new();
     };
+    // `localhost` is usually a default target rather than a saved one.
     config
+        .clone()
+        .with_local_targets()
         .targets
-        .iter()
+        .into_iter()
         .filter(|(_, target)| matches!(target, TargetTemplate::LocalBare))
         .map(|(id, _)| {
             github::github_access_check(

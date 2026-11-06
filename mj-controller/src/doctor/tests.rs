@@ -1990,3 +1990,19 @@ fn ssh_bare_github_check_runs_only_on_a_reachable_host() {
         commands[3].args
     );
 }
+
+// Hard-won: e32a6aeef: the default localhost target, not saved in config.toml, got no GitHub check.
+#[test]
+fn the_default_local_target_gets_a_github_check() {
+    if !crate::targets::HOST_RUNS_WORKERS {
+        return;
+    }
+    let checks = local_bare_github_checks(Ok(&Config::default()), &AlwaysFailingExecutor);
+    assert_eq!(
+        checks
+            .iter()
+            .map(|check| check.id.as_str())
+            .collect::<Vec<_>>(),
+        ["github.local-bare.localhost"]
+    );
+}
