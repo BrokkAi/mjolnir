@@ -1160,6 +1160,7 @@ async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
         .unwrap();
     let (updates, mut receiver) = crate::session_manager::coalesced_update_channel();
     updates.send(crate::session_manager::SessionManagerUpdate {
+        raw_observation: None,
         session_id: "completed-turn".into(),
         view: ManagedSessionView::default(),
     });

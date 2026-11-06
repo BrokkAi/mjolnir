@@ -71,6 +71,7 @@ async fn recovery_allows_preparation_longer_than_the_previous_thirty_second_dead
 async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
     let (commands, mut requests) = mpsc::channel(1);
     let control = SessionManagerControl {
+        model_policies: watch::channel(BTreeMap::new()).0,
         commands,
         session_cpu: watch::channel(SessionCpuTable::new()).1,
     };
@@ -1568,9 +1569,23 @@ fn leased_relay_child_serves_stdio() {
                     // relay reports no work in flight.
                     relay
                         .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
-                            config_options: vec![],
+                            config_options: if std::env::var_os("MJ_TEST_MODEL_POLICY").is_some() {
+                                policy_test_options()
+                            } else {
+                                vec![]
+                            },
                         })
                         .expect("record the configured harness session");
+                    if std::env::var_os("MJ_TEST_MODEL_POLICY").is_some() {
+                        relay
+                            .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+                                native_session_id: "policy-native".into(),
+                                resumed: false,
+                                native_continuity_lost: false,
+                                replaced_unused_native_session_id: None,
+                            })
+                            .unwrap();
+                    }
                 }
                 relay
             });
@@ -3414,6 +3429,9 @@ fn dashboard_updates_keep_only_the_latest_view_per_session() {
     let (sender, mut receiver) = coalesced_update_channel();
     for revision in 0..1_000 {
         sender.send(SessionManagerUpdate {
+            raw_observation: (revision == 0).then(|| {
+                mj_core::relay::RelaySnapshot::new("session-1".into()).operational_state()
+            }),
             session_id: "session-1".into(),
             view: ManagedSessionView {
                 error: Some(ViewError::Unreachable(format!("revision-{revision}"))),
@@ -3422,6 +3440,7 @@ fn dashboard_updates_keep_only_the_latest_view_per_session() {
         });
     }
     sender.send(SessionManagerUpdate {
+        raw_observation: None,
         session_id: "session-2".into(),
         view: ManagedSessionView {
             error: Some(ViewError::Unreachable("other".into())),
@@ -3440,7 +3459,14 @@ fn dashboard_updates_keep_only_the_latest_view_per_session() {
     );
     let updates = [receiver.try_recv().unwrap(), receiver.try_recv().unwrap()]
         .into_iter()
-        .map(|update| (update.session_id, update.view.error.unwrap()))
+        .map(|update| {
+            assert_eq!(
+                update.raw_observation.is_some(),
+                update.session_id == "session-1",
+                "coalescing must retain a pending raw observation"
+            );
+            (update.session_id, update.view.error.unwrap())
+        })
         .collect::<BTreeMap<_, _>>();
     assert_eq!(updates["session-1"].detail(), "revision-999");
     assert_eq!(updates["session-2"].detail(), "other");
@@ -3458,6 +3484,7 @@ async fn dashboard_updates_deliver_sessions_in_first_pending_order_with_the_late
         ("m-third", 4),
     ] {
         sender.send(SessionManagerUpdate {
+            raw_observation: None,
             session_id: session_id.into(),
             view: view_at_ordinal(ordinal),
         });
@@ -3479,6 +3506,7 @@ fn dashboard_updates_deliver_waiting_sessions_before_a_republishing_hot_session(
     let (sender, mut receiver) = coalesced_update_channel();
     for session_id in ["a-hot", "z-waiting", "m-waiting"] {
         sender.send(SessionManagerUpdate {
+            raw_observation: None,
             session_id: session_id.into(),
             view: view_at_ordinal(1),
         });
@@ -3487,6 +3515,7 @@ fn dashboard_updates_deliver_waiting_sessions_before_a_republishing_hot_session(
     for expected in ["z-waiting", "m-waiting"] {
         for ordinal in 2..200 {
             sender.send(SessionManagerUpdate {
+                raw_observation: None,
                 session_id: "a-hot".into(),
                 view: view_at_ordinal(ordinal),
             });
@@ -3513,21 +3542,25 @@ fn dashboard_updates_put_a_replacement_actor_after_sessions_already_waiting() {
     let (sender, mut receiver) = coalesced_update_channel();
     let old = sender.for_actor("a-replaced");
     old.send(SessionManagerUpdate {
+        raw_observation: None,
         session_id: "a-replaced".into(),
         view: view_at_ordinal(1),
     });
     for session_id in ["z-waiting", "m-waiting"] {
         sender.send(SessionManagerUpdate {
+            raw_observation: None,
             session_id: session_id.into(),
             view: view_at_ordinal(2),
         });
     }
     let current = sender.for_actor("a-replaced");
     current.send(SessionManagerUpdate {
+        raw_observation: None,
         session_id: "a-replaced".into(),
         view: view_at_ordinal(3),
     });
     old.send(SessionManagerUpdate {
+        raw_observation: None,
         session_id: "a-replaced".into(),
         view: view_at_ordinal(4),
     });
@@ -3848,6 +3881,7 @@ fn replaced_actors_cannot_publish_or_leave_a_queued_observation() {
     let (sender, mut receiver) = coalesced_update_channel();
     let old = sender.for_actor("session-1");
     let update = |detail: &str| SessionManagerUpdate {
+        raw_observation: None,
         session_id: "session-1".into(),
         view: ManagedSessionView {
             error: Some(ViewError::Unreachable(detail.into())),
@@ -4182,4 +4216,202 @@ fn retired_cpu_producers_cannot_erase_or_overwrite_their_replacement() {
     assert_eq!(updates.cpu.borrow().get("session"), Some(&expected));
     drop(current);
     assert!(updates.cpu.borrow().is_empty());
+}
+
+#[cfg(unix)]
+fn policy_test_options() -> Vec<agent_client_protocol::v1::schema::SessionConfigOption> {
+    use agent_client_protocol::v1::schema::*;
+    vec![
+        SessionConfigOption::select(
+            "provider-model",
+            "Model",
+            "current",
+            SessionConfigSelectOptions::Ungrouped(
+                ["current", "allowed", "hidden"]
+                    .map(|value| SessionConfigSelectOption::new(value, value))
+                    .to_vec(),
+            ),
+        )
+        .category(SessionConfigOptionCategory::Model),
+    ]
+}
+
+// Hard-won: a2afafcb3: live model selectors bypassed the profile allowlist.
+#[cfg(unix)]
+#[tokio::test]
+async fn model_policy_refilters_the_same_actor_and_preserves_raw_observations() {
+    const CHILD: &str = "MJ_TEST_MODEL_POLICY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "model_policy_refilters_the_same_actor_and_preserves_raw_observations",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let directory = tempfile::tempdir().unwrap();
+    let mut target = leased_relay_target(directory.path());
+    target
+        .spec
+        .env
+        .insert(RELAY_SESSION_CONFIGURED.into(), "1".into());
+    target
+        .spec
+        .env
+        .insert("MJ_TEST_MODEL_POLICY".into(), "1".into());
+    let mut manager = spawn_session_manager().unwrap();
+    let policy = |models: &[&str]| {
+        BTreeMap::from([(
+            LEASED_RELAY_SESSION.into(),
+            SessionModelPolicy {
+                profile: "gateway".into(),
+                models: models.iter().map(|model| (*model).into()).collect(),
+            },
+        )])
+    };
+    manager
+        .control
+        .model_policies
+        .send_replace(policy(&["allowed"]));
+    manager.targets.send_replace(vec![target]);
+    let handle = manager
+        .control
+        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let update = next_policy_update(&mut manager.updates).await;
+    let values = |state: &RelayOperationalState| {
+        mj_core::acp::session_config_choices(&state.config_options, "model")
+            .into_iter()
+            .map(|choice| choice.value)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        values(&update.view.snapshot.unwrap().operational),
+        ["current", "allowed"]
+    );
+    let raw = update.raw_observation.unwrap();
+    assert_eq!(values(&raw), ["current", "allowed", "hidden"]);
+    mj_core::config::Config::update(|config| {
+        config.profiles.insert(
+            "gateway".into(),
+            mj_core::config::HarnessProfile {
+                enabled: true,
+                kind: mj_core::config::HarnessKind::Codex,
+                home: directory.path().into(),
+                environment: Default::default(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+                codex_profile: None,
+                muse_auto_review: None,
+                models: vec!["allowed".into()],
+                legacy_subagents: None,
+            },
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        crate::controller::profile_config::observe(
+            "gateway".into(),
+            String::new(),
+            raw,
+            crate::controller::profile_config::ObservationCheck::NoProbe
+        )
+        .await
+        .unwrap()
+    );
+    let cached = crate::controller::profile_config::discover("gateway".into(), None, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        cached
+            .models
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect::<Vec<_>>(),
+        ["current", "allowed", "hidden"]
+    );
+    let error = handle
+        .enqueue_submit(
+            "hidden-model".into(),
+            RelayCommand::SetConfig {
+                key: "model".into(),
+                value: "hidden".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .wait()
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("gateway") && error.to_string().contains("models setting"),
+        "{error:?}"
+    );
+    let error = handle
+        .enqueue_submit(
+            "hidden-model-alias".into(),
+            RelayCommand::SetConfig {
+                key: "provider-model".into(),
+                value: "hidden".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .wait()
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("models setting"));
+    let mut controller = crate::controller::Controller {
+        config: mj_core::config::Config::load().unwrap(),
+        state: crate::database::load_state().unwrap(),
+    };
+    controller
+        .state
+        .sessions
+        .get_mut(LEASED_RELAY_SESSION)
+        .unwrap()
+        .last_profile = "gateway".into();
+    let profile = controller.config.profiles.get_mut("gateway").unwrap();
+    profile.models = vec!["hidden".into()];
+    // Disabling a profile for new sessions must not remove its live-session policy.
+    profile.enabled = false;
+    manager.control.update_model_policies(&controller);
+    let update = next_policy_update(&mut manager.updates).await;
+    assert_eq!(
+        values(&update.view.snapshot.unwrap().operational),
+        ["current", "hidden"]
+    );
+    let same = manager.control.session(LEASED_RELAY_SESSION).await.unwrap();
+    assert!(
+        handle.commands.same_channel(&same.commands),
+        "policy edits must retain the actor"
+    );
+    assert!(!handle.is_stopped());
+    assert_eq!(
+        values(&handle.view().snapshot.unwrap().operational),
+        ["current", "hidden"]
+    );
+    manager.shutdown.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+async fn next_policy_update(updates: &mut SessionManagerUpdates) -> SessionManagerUpdate {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let update = updates.recv().await.unwrap();
+            if update
+                .view
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.operational.native_session_is_ready())
+            {
+                break update;
+            }
+        }
+    })
+    .await
+    .unwrap()
 }

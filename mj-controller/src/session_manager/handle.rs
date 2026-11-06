@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Clone)]
 pub struct SessionManagerControl {
+    pub(super) model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,
     pub(crate) session_cpu: watch::Receiver<SessionCpuTable>,
     pub(super) commands: mpsc::Sender<ManagerCommand>,
 }

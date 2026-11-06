@@ -2797,12 +2797,23 @@ impl SubagentBackend for ApiBackend {
                     // A forced refresh bypasses the catalogue's cache, not its
                     // allow-list: an explicit request cannot select a model the
                     // picker hides.
-                    let allowed = self.profile_catalog.allowed_models(&profile);
-                    Ok(
-                        crate::controller::profile_config::discover(profile, model, refresh)
-                            .await?
-                            .restricted_to(&allowed),
+                    let default = self
+                        .profile_catalog
+                        .unrestricted_capabilities(&profile)
+                        .await?
+                        .model;
+                    let mut choices = crate::controller::profile_config::discover(
+                        profile.clone(),
+                        model,
+                        refresh,
                     )
+                    .await?;
+                    let selected = choices.model.clone();
+                    choices.model = default;
+                    let allowed = self.profile_catalog.allowed_models(&profile);
+                    choices = choices.restricted_to(&allowed);
+                    choices.model = selected;
+                    Ok(choices)
                 }
             }
         })

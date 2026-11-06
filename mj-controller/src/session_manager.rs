@@ -75,3 +75,6 @@ pub use standalone::*;
 
 #[cfg(test)]
 mod tests;
+
+mod model_policy;
+use model_policy::SessionModelPolicy;

@@ -995,15 +995,18 @@ impl ProfileCatalog {
         id: &str,
         model: Option<String>,
     ) -> Result<ProfileConfig> {
-        let allowed = config
-            .enabled_profile(id)
-            .context("profile unavailable")?
-            .models
-            .clone();
-        Ok(self
-            .fetch_unrestricted(config, id, model)
-            .await?
-            .restricted_to(&allowed))
+        let profile = config.enabled_profile(id).context("profile unavailable")?;
+        let identity = profile.capabilities_key(id);
+        // Model-specific probes select that model to discover its efforts. Only
+        // the default probe can grant the default-model exemption.
+        let default = self.fetch_unrestricted(config, id, None).await?.model;
+        let mut choices = self.fetch_unrestricted(config, id, model).await?;
+        let selected = choices.model.clone();
+        choices.model = default;
+        let allowed = self.lock().allowed_models(&identity);
+        choices = choices.restricted_to(&allowed);
+        choices.model = selected;
+        Ok(choices)
     }
 
     /// What `id`'s harness advertises, before the allow-list. Only `mj doctor`
@@ -2489,5 +2492,95 @@ mod tests {
         config.profiles.get_mut("p").unwrap().models.clear();
         catalog.sync_now(&config).await;
         assert_eq!(snapshot_models(&catalog), ["p-model", "m1", "m2", "m3"]);
+    }
+    // Hard-won: a2afafcb3: a model probe exempted its requested hidden model.
+    #[tokio::test]
+    async fn a_model_probe_cannot_exempt_a_hidden_requested_model() {
+        let probe: Arc<Probe> = Arc::new(|id| {
+            Box::pin(async move {
+                let mut choices = test_choices(&id);
+                choices.models.push(mj_core::acp::SessionConfigChoice {
+                    value: "hidden".into(),
+                    name: "hidden".into(),
+                    description: None,
+                });
+                Ok(choices)
+            })
+        });
+        let default_probe = probe.clone();
+        let catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            default_probe,
+            Arc::new(move |id, model| {
+                let probe = probe.clone();
+                Box::pin(async move {
+                    let mut choices = probe(id).await?;
+                    choices.model = Some(model);
+                    Ok(choices)
+                })
+            }),
+        );
+        let mut config = test_config(&[("p", HarnessKind::Codex)]);
+        config.profiles.get_mut("p").unwrap().models = vec!["allowed".into()];
+        catalog.sync_now(&config).await;
+        let choices = catalog
+            .model_capabilities("p".into(), "hidden".into())
+            .await
+            .unwrap();
+        assert!(crate::server::api::validate_selectors(&choices, Some("hidden"), None).is_err());
+        assert!(
+            choices
+                .models
+                .iter()
+                .any(|choice| choice.value == "p-model")
+        );
+    }
+
+    // Hard-won: a2afafcb3: a pending read applied its starting allowlist.
+    #[tokio::test]
+    async fn a_pending_discovery_uses_the_current_models_setting() {
+        let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+        let (release, gate) = tokio::sync::watch::channel(false);
+        let catalog = ProfileCatalog::with_probe(Arc::new(move |id| {
+            let mut gate = gate.clone();
+            let started = started_tx.clone();
+            Box::pin(async move {
+                started.send(()).unwrap();
+                if !*gate.borrow() {
+                    gate.changed().await.unwrap();
+                }
+                let mut choices = test_choices(&id);
+                choices.models.extend(["old", "new"].map(|value| {
+                    mj_core::acp::SessionConfigChoice {
+                        value: value.into(),
+                        name: value.into(),
+                        description: None,
+                    }
+                }));
+                Ok(choices)
+            })
+        }));
+        let mut config = test_config(&[("p", HarnessKind::Codex)]);
+        config.profiles.get_mut("p").unwrap().models = vec!["old".into()];
+        catalog.sync(&config);
+        started.recv().await.unwrap();
+        let reader = {
+            let catalog = catalog.clone();
+            let config = config.clone();
+            tokio::spawn(async move { catalog.fetch(&config, "p", None).await })
+        };
+        tokio::task::yield_now().await;
+        config.profiles.get_mut("p").unwrap().models = vec!["new".into()];
+        catalog.sync(&config);
+        release.send(true).unwrap();
+        let choices = reader.await.unwrap().unwrap();
+        assert_eq!(
+            choices
+                .models
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            ["p-model", "new"]
+        );
     }
 }
