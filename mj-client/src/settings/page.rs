@@ -80,6 +80,8 @@ pub fn hidden_root_key(key: &str) -> bool {
             | "theme"
             | "keys"
             | "_subagent_options"
+            | "_reviewer_options"
+            | "_review_action_reason"
     )
 }
 
@@ -182,7 +184,7 @@ pub fn row_page(path: &[String]) -> &[String] {
 /// Settings that exist in the stored shape but have no meaning on this entry,
 /// so showing them would invite a value that does nothing.
 pub fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
-    if key == "_subagent_options" {
+    if matches!(key, "_subagent_options" | "_reviewer_options") {
         return true;
     }
     let parts = path.iter().map(String::as_str).collect::<Vec<_>>();

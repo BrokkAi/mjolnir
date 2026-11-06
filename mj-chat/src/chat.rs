@@ -127,30 +127,20 @@ pub use attachments::{CHAT_DRAFT_PREFIX, PromptImage, PromptPayload};
 /// and is one being reviewed right now.
 #[must_use]
 pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) -> String {
-    let armed = match (review.trigger, review.reviewer_profile()) {
-        (mj_core::config::ReviewTrigger::Push, _) => "Review trigger is before push".to_owned(),
-        (mj_core::config::ReviewTrigger::Turn, Some(profile)) => {
-            format!("Reviewing every completed turn with [review] profile {profile:?}")
-        }
-        (mj_core::config::ReviewTrigger::Turn, None) => {
-            "Reviewing every completed turn with Auto".to_owned()
-        }
-        (mj_core::config::ReviewTrigger::Off, Some(profile)) => {
-            format!("Automatic review is off; /review reviews one turn with {profile:?}")
-        }
-        (mj_core::config::ReviewTrigger::Off, None) => {
-            "Automatic review is off; /review uses Auto".to_owned()
-        }
+    let armed = match review.trigger {
+        mj_core::config::ReviewTrigger::Push => "Review trigger is before push",
+        mj_core::config::ReviewTrigger::Turn => "Reviewing every completed turn",
+        mj_core::config::ReviewTrigger::Off => "Automatic review is off; /review reviews one turn",
     };
-    let armed = match &review.model {
-        Some(model) => format!("{armed}, model {model:?}"),
-        None => armed,
+    let count = review.reviewers.len();
+    let armed = if count == 0 {
+        format!("{armed}; no reviewers")
+    } else {
+        format!(
+            "{armed}; {count} reviewer{}",
+            if count == 1 { "" } else { "s" }
+        )
     };
-    let count = review.count.get();
-    let armed = format!(
-        "{armed}; {count} reviewer{}",
-        if count == 1 { "" } else { "s" }
-    );
     if open {
         format!("{armed}. A review is open now.")
     } else {

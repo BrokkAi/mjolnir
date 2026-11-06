@@ -908,12 +908,15 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
     let fixture = mj_client::session::replacement_session_test_fixture("session-review", 88);
     let mut context = chat_context("session-review", &[]);
     context.config.review = mj_core::config::ReviewConfig {
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Turn,
-        count: mj_core::config::default_review_count(),
-        tier: Some("extended".into()),
-        profile: Some("reviewer-a".into()),
-        model: None,
-        effort: None,
+        reviewers: vec![
+            mj_core::config::SubagentChoice {
+                model: "gpt-6-terra".into(),
+                effort: None
+            };
+            2
+        ],
     };
     let mut chat = ActiveChat::open(
         fixture.stopped,
@@ -928,12 +931,15 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
     assert_eq!(
         chat.state.review_config(),
         mj_core::config::ReviewConfig {
+            legacy: None,
             trigger: mj_core::config::ReviewTrigger::Turn,
-            count: mj_core::config::default_review_count(),
-            tier: Some("extended".into()),
-            profile: Some("reviewer-a".into()),
-            model: None,
-            effort: None,
+            reviewers: vec![
+                mj_core::config::SubagentChoice {
+                    model: "gpt-6-terra".into(),
+                    effort: None
+                };
+                2
+            ],
         }
     );
     let title = prompt_title_parts(&chat.state);
@@ -946,7 +952,10 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
     );
 
     let mut reloaded = Config::default();
-    reloaded.review.profile = Some("reviewer-b".into());
+    reloaded.review.reviewers = vec![mj_core::config::SubagentChoice {
+        model: "gpt-6-sol".into(),
+        effort: None,
+    }];
     chat.refresh_context(&reloaded, None, None);
 
     assert_eq!(chat.state.review_config(), reloaded.review);

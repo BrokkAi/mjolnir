@@ -247,7 +247,7 @@ impl RuntimeState {
         request: CreateSessionRequest,
         control: LifecycleControl,
         publication: tokio::sync::oneshot::Receiver<std::result::Result<(), String>>,
-    ) -> Result<(RegisteredSession, bool, Option<String>)> {
+    ) -> Result<(RegisteredSession, Option<&'static str>, Option<String>)> {
         self.start_create_session_inner(request, control, Some(publication))
             .await
     }
@@ -257,7 +257,7 @@ impl RuntimeState {
         request: CreateSessionRequest,
         control: LifecycleControl,
         publication: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
-    ) -> Result<(RegisteredSession, bool, Option<String>)> {
+    ) -> Result<(RegisteredSession, Option<&'static str>, Option<String>)> {
         let mut request = request;
         let parent = request.profile_id.clone();
         let supplied = request.subagents.clone();
@@ -302,7 +302,7 @@ impl RuntimeState {
         let path_cancelled = control.cancelled.clone();
         let remember_launch_choices = request.remember_launch_choices;
         let preferences_owner = self.clone();
-        let (registered, review_turned_off, oracle_notice) = blocking(move || {
+        let (registered, review_notice, oracle_notice) = blocking(move || {
             let mut controller = Controller::load()?;
             let path_executor = crate::targets::CancellableProcessExecutor::new(path_cancelled)
                 .with_deadline(Duration::from_secs(30));
@@ -402,7 +402,7 @@ impl RuntimeState {
                     session,
                     remembered_container_size,
                 },
-                registration.review_turned_off,
+                registration.review_notice,
                 registration.oracle_notice,
             ))
         })
@@ -474,7 +474,7 @@ impl RuntimeState {
             },
         )?;
         self.reload_controller().await?;
-        Ok((registered, review_turned_off, capacity_warning))
+        Ok((registered, review_notice, capacity_warning))
     }
 
     pub async fn wait_create_session(&self, session_id: &str) -> Result<()> {

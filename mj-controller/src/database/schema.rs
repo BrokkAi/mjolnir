@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 110;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 111;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1992,9 +1992,22 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older readers require ActiveReviewGroup `reviewer` and reject
+    // SessionReview `reviewers` and retained legacy override fields.
+    if version < 110 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 110 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (110, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 110;
+             COMMIT;",
+        )?;
+    }
+
     // Breaking: older writers would drop a session's Oracle choice on update,
     // and older daemons cannot decode AskOracle actions or Oracle-kind children.
-    if version < 110 {
+    if version < 111 {
         connection.execute_batch("BEGIN IMMEDIATE;")?;
         if !legacy_schema::table_has_column(connection, "sessions", "oracle")? {
             connection.execute_batch("ALTER TABLE sessions ADD COLUMN oracle INTEGER NOT NULL DEFAULT 1 CHECK(oracle IN (0, 1));")?;
@@ -2007,10 +2020,10 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
                  profile_id TEXT PRIMARY KEY,
                  enabled INTEGER NOT NULL CHECK(enabled IN (0, 1))
              );
-             UPDATE schema_compatibility SET minimum_compatible_version = 110 WHERE singleton = 1;
+             UPDATE schema_compatibility SET minimum_compatible_version = 111 WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
-                 VALUES (110, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
-             PRAGMA user_version = 110;
+                 VALUES (111, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 111;
              COMMIT;",
         )?;
     }
@@ -3320,7 +3333,7 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
-        if version < 110 {
+        if version < 111 {
             connection
                 .execute_batch(
                     "ALTER TABLE sessions DROP COLUMN oracle_choice;
@@ -3476,9 +3489,9 @@ mod reader_tests {
                 "ALTER TABLE sessions DROP COLUMN oracle_choice;
              ALTER TABLE sessions DROP COLUMN oracle;
              DROP TABLE oracle_preference;
-             DELETE FROM schema_migrations WHERE version >= 110;
-             UPDATE schema_compatibility SET minimum_compatible_version = 109 WHERE singleton = 1;
-             PRAGMA user_version = 109;",
+             DELETE FROM schema_migrations WHERE version >= 111;
+             UPDATE schema_compatibility SET minimum_compatible_version = 110 WHERE singleton = 1;
+             PRAGMA user_version = 110;",
             )
             .unwrap();
         drop(connection);
@@ -3487,7 +3500,7 @@ mod reader_tests {
         assert!(
             read_schema_state(&connection)
                 .unwrap()
-                .ensure_supported_by(109)
+                .ensure_supported_by(110)
                 .is_err()
         );
         drop(connection);

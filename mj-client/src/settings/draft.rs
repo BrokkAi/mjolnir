@@ -60,6 +60,11 @@ pub fn open(config: &Config) -> (Value, Value) {
 
 pub fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> {
     draft.as_object_mut().unwrap().remove("_subagent_options");
+    draft.as_object_mut().unwrap().remove("_reviewer_options");
+    draft
+        .as_object_mut()
+        .unwrap()
+        .remove("_review_action_reason");
     for task in ["straightforward", "subtle", "oracle"] {
         if draft["subagents"][task]["model"]
             .as_str()

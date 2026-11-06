@@ -150,8 +150,7 @@ are not importable yet either.
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
 | `--review <off\|turn\|push>` | Set the imported session's review trigger, overriding `[review]`. |
-| `--review-count <count>` | Independent reviewer sessions, overriding the configured count (default 2). 1–3 is reasonable; more has diminishing returns. Used alone selects turn review. |
-| `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Set the reviewer model or a named profile's effort. Auto always uses High. Without `--review`, these options select `turn`. The deprecated tier option still accepts either value but ignores it. |
+| `--reviewer MODEL[:EFFORT]` | Add a reviewer choice; repeat up to three times. The final colon is an effort separator only for `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (for example, `x:0:high` uses model `x:0` and effort `high`). A trailing colon means no effort and removes that colon, so `foo:high:` selects model `foo:high`. Other suffixes, such as `:free` or `:latest`, remain part of the model ID. |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
 Import leaves the source checkout and the harness's source transcript unchanged. The imported session starts suspended and is available through `prefix+g`.
@@ -303,8 +302,8 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
        [--oracle enabled|disabled]
        [--subagent-oracle <model>] [--subagent-oracle-effort <effort>]
-       [--review <off|turn|push>] [--review-count <count>] [--review-model <name>] [--review-effort <name>]
-       [--review-tier quick|extended] [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
+       [--review <off|turn|push>] [--reviewer MODEL[:EFFORT]]...
+       [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>]
           [--timeout <seconds>] [--return-on-input] [--json]
@@ -396,6 +395,7 @@ mj new --workspace eval --bundle product --target builder \
   `subtle`. With only straightforward, the spawn tool has no task type,
   every child uses the straightforward choice, and the parent is told to
   delegate straightforward work.
+  Mjolnir chooses an enabled profile offering its model and effort by quota.
 - `mj new --oracle enabled|disabled` chooses whether the session may consult
   the oracle, a read-only advisor behind the `ask_oracle` tool. It works with
   any delegation policy and any harness. Omitted uses the choice last made for
@@ -405,16 +405,10 @@ mj new --workspace eval --bundle product --target builder \
   requires it, and `adaptive` is invalid. Combining `--subagent-oracle` with
   `--oracle disabled` is refused. When you ask for the oracle without a model,
   the session starts with the oracle off and says so.
-  Mjolnir chooses an enabled profile offering its model and effort by quota.
 - `mj new --review off|turn|push` sets the session's trigger, overriding
   `[review]`. `mj import <harness>` takes the same option for the session it
-  adopts. `--review-model <name>` and `--review-effort <name>` set reviewer
-  choices; Auto always uses High effort. `--review-count <count>` selects the
-  number of independent reviewers (default 2). 1–3 is reasonable; more has
-  diminishing returns. Without `--review`, any of these options selects `turn`. The deprecated
-  `--review-tier quick|extended` also selects `turn` when used alone, but its
-  value is ignored. See
-  [per-session settings](/turn-review/#per-session-settings).
+  adopts. Repeat `--reviewer MODEL[:EFFORT]` up to three times to choose reviewers. See
+  [per-session settings](/turn-review/#per-session-settings). An empty global reviewer list means no reviewers; choose rows or press **Autoconfigure** in Settings → Code Review.
 - `mj new --no-project-memory` starts the session with no project memory:
   nothing from the workspace's project memory is put in the agent's startup
   context, and the harness is offered no memory directory to write to. Its

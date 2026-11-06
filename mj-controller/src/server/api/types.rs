@@ -282,7 +282,7 @@ pub struct StartSessionRequest {
     pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     /// Turn review for this session. Omitted follows `[review]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(deserialize_with = "super::super::actions::deserialize_session_review")]
+    #[serde(deserialize_with = "super::super::actions::deserialize_api_session_review")]
     pub review: Option<mj_core::config::SessionReview>,
     /// Start the session with no project memory: nothing from the workspace's
     /// project memory is injected and the harness is offered no memory

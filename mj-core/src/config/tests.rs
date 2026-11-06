@@ -1483,17 +1483,20 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
     .unwrap();
 
     let review = ReviewConfig {
+        legacy: None,
         trigger: ReviewTrigger::Turn,
-        count: std::num::NonZeroUsize::new(3).unwrap(),
-        tier: None,
-        profile: Some("codex-1".into()),
-        model: Some("review-model".into()),
-        effort: Some("high".into()),
+        reviewers: vec![
+            SubagentChoice {
+                model: "review-model".into(),
+                effort: Some("high".into())
+            };
+            3
+        ],
     };
     let saved = Config::save_review_to(&path, review.clone()).unwrap();
     assert_eq!(saved.version, CONFIG_VERSION);
     assert_eq!(saved.review, review);
-    assert_eq!(saved.review.count.get(), 3);
+    assert_eq!(saved.review.reviewers.len(), 3);
     assert_eq!(saved.daemon, latest.daemon);
     assert!(!saved.phone.enabled);
     assert_eq!(
@@ -2281,142 +2284,84 @@ fn a_disabled_profile_loads_instead_of_failing() {
 }
 
 #[test]
-fn a_session_review_choice_is_stored_in_a_stable_shape() {
-    // Stored in `sessions.review_json`; older and newer releases read it.
-    let inherit = SessionReview::Inherit {
-        count: std::num::NonZeroUsize::new(2),
-        model: Some("gpt-6-astra".into()),
-        effort: Some("high".into()),
-        tier: None,
-    };
-    assert_eq!(
-        serde_json::to_string(&inherit).unwrap(),
-        r#"{"mode":"inherit","count":2,"model":"gpt-6-astra","effort":"high"}"#
-    );
-    assert_eq!(
-        serde_json::from_str::<SessionReview>(
-            r#"{"mode":"inherit","count":2,"model":"gpt-6-astra","effort":"high"}"#
-        )
-        .unwrap(),
-        inherit
-    );
-    let inherited_tier = SessionReview::Inherit {
-        count: None,
-        model: None,
-        effort: None,
-        tier: Some("extended".into()),
-    };
-    assert_eq!(
-        serde_json::to_string(&inherited_tier).unwrap(),
-        r#"{"mode":"inherit"}"#
-    );
-    let on = SessionReview::Turn {
-        count: None,
-        model: Some("gpt-6-astra".into()),
-        effort: None,
-        tier: None,
-    };
-    assert_eq!(
-        serde_json::to_string(&on).unwrap(),
-        r#"{"mode":"turn","model":"gpt-6-astra"}"#
-    );
-    assert_eq!(
-        serde_json::to_string(&SessionReview::Off).unwrap(),
-        r#"{"mode":"off"}"#
-    );
-    assert_eq!(
-        serde_json::from_str::<SessionReview>(r#"{"mode":"on"}"#).unwrap(),
-        SessionReview::Turn {
-            count: None,
-            model: None,
-            effort: None,
-            tier: None,
-        }
-    );
-    // Existing records may include a deprecated tier and remain readable.
-    assert_eq!(
-        serde_json::from_str::<SessionReview>(
-            r#"{"mode":"on","model":"gpt-6-luna","effort":"max"}"#
-        )
-        .unwrap(),
-        SessionReview::Turn {
-            count: None,
-            model: Some("gpt-6-luna".into()),
-            effort: Some("max".into()),
-            tier: None,
-        }
-    );
-    let extended = SessionReview::Turn {
-        count: None,
-        model: None,
-        effort: None,
-        tier: Some("extended".into()),
-    };
-    assert_eq!(
-        serde_json::to_string(&extended).unwrap(),
-        r#"{"mode":"turn"}"#
-    );
-    assert_eq!(
-        serde_json::from_str::<SessionReview>(r#"{"mode":"on","tier":"extended"}"#).unwrap(),
-        extended
-    );
-    for trigger in ["turn", "push"] {
-        let value = format!(r#"{{"mode":"{trigger}","model":"astra","effort":"high"}}"#);
-        let choice: SessionReview = serde_json::from_str(&value).unwrap();
-        assert_eq!(serde_json::to_string(&choice).unwrap(), value);
-        assert_eq!(
-            ReviewConfig::default().for_session(Some(&choice)).trigger,
-            choice.trigger().unwrap()
-        );
-        let global = ReviewConfig {
-            count: std::num::NonZeroUsize::new(4).unwrap(),
-            ..Default::default()
-        };
-        assert_eq!(global.for_session(Some(&choice)).count, global.count);
-        let explicit =
-            format!(r#"{{"mode":"{trigger}","count":3,"model":"astra","effort":"high"}}"#);
-        let counted: SessionReview = serde_json::from_str(&explicit).unwrap();
-        assert_eq!(serde_json::to_string(&counted).unwrap(), explicit);
-        assert_eq!(global.for_session(Some(&counted)).count.get(), 3);
-    }
-    assert_eq!(
-        serde_json::from_str::<SessionReview>(r#"{"mode":"off"}"#).unwrap(),
-        SessionReview::Off
-    );
-
-    // Session-only model/count overrides must preserve each live global trigger.
-    for trigger in [ReviewTrigger::Off, ReviewTrigger::Turn, ReviewTrigger::Push] {
-        let global = ReviewConfig {
-            trigger,
-            count: std::num::NonZeroUsize::new(4).unwrap(),
-            ..Default::default()
-        };
-        let effective = global.for_session(Some(&inherit));
-        assert_eq!(effective.trigger, trigger);
-        assert_eq!(effective.model.as_deref(), Some("gpt-6-astra"));
-        assert_eq!(effective.count.get(), 2);
-        assert_eq!(effective.effort.as_deref(), Some("high"));
-        assert_eq!(inherit.trigger(), None);
-    }
-}
-
-#[test]
-fn deprecated_review_tier_is_accepted_but_omitted_from_serialization() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(
-        &path,
-        format!(
-            "version = {CONFIG_VERSION}\n\n[profiles.reviewer]\nkind = \"claude\"\nhome = \"/profiles/reviewer\"\n\n[review]\nenabled = true\ntier = \"extended\"\nprofile = \"reviewer\"\n"
-        ),
+fn legacy_review_keys_and_session_records_preserve_partial_overrides() {
+    let legacy: ReviewConfig = toml::from_str(
+        "trigger = 'turn'\ncount = 4\nprofile = 'old'\nmodel = 'gpt-6-terra'\neffort = 'high'\n",
     )
     .unwrap();
-
-    let config = Config::load_from(&path).unwrap();
-    assert_eq!(config.review.tier.as_deref(), Some("extended"));
-
-    let serialized = toml::to_string_pretty(&config).unwrap();
-    assert!(!serialized.contains("tier"), "{serialized}");
+    assert_eq!(legacy.reviewers.len(), MAX_REVIEWERS);
+    assert!(!toml::to_string(&legacy).unwrap().contains("profile"));
+    let session: SessionReview = serde_json::from_str(
+        r#"{"mode":"turn","count":3,"model":"gpt-6-terra","effort":"high","tier":"old"}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.for_session(Some(&session)).reviewers.len(), 3);
+    let saved = serde_json::to_string(&session).unwrap();
+    assert!(!saved.contains("reviewers"));
+    assert!(saved.contains("count"));
+    assert!(!saved.contains("tier"));
+    let count_only: SessionReview = serde_json::from_str(r#"{"mode":"turn","count":1}"#).unwrap();
+    assert_eq!(legacy.for_session(Some(&count_only)).reviewers.len(), 1);
+    let effort_only: SessionReview =
+        serde_json::from_str(r#"{"mode":"turn","effort":"low"}"#).unwrap();
+    assert!(
+        legacy
+            .for_session(Some(&effort_only))
+            .reviewers
+            .iter()
+            .all(|reviewer| reviewer.effort.as_deref() == Some("low"))
+    );
+    let model_only: SessionReview =
+        serde_json::from_str(r#"{"mode":"turn","model":"other"}"#).unwrap();
+    assert!(
+        legacy
+            .for_session(Some(&model_only))
+            .reviewers
+            .iter()
+            .all(|reviewer| reviewer.model == "other")
+    );
+    assert!(
+        legacy
+            .for_session(Some(&model_only))
+            .reviewers
+            .iter()
+            .all(|reviewer| reviewer.effort.as_deref() == Some("high"))
+    );
+    let mut auto_config = ReviewConfig::legacy_default();
+    auto_config.trigger = ReviewTrigger::Turn;
+    let effective = auto_config.for_session(Some(&model_only));
+    assert!(!effective.is_legacy());
+    assert_eq!(effective.reviewers.len(), 2);
+    let pending = vec![
+        SubagentChoice {
+            model: "default".into(),
+            effort: None
+        };
+        2
+    ];
+    assert_eq!(
+        apply_legacy_override(
+            &pending,
+            Some(std::num::NonZeroUsize::new(1).unwrap()),
+            None,
+            None,
+            &auto_config
+        )
+        .len(),
+        1
+    );
+    assert!(
+        apply_legacy_override(&pending, None, None, Some(&"high".into()), &auto_config)
+            .iter()
+            .all(|choice| choice.effort.as_deref() == Some("high"))
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&count_only).unwrap())
+            .unwrap(),
+        serde_json::json!({"mode":"turn","count":1})
+    );
+    let auto: ReviewConfig = toml::from_str("enabled = true\ncount = 2\n").unwrap();
+    assert!(auto.reviewers.is_empty());
 }
 
 #[test]
@@ -2453,7 +2398,65 @@ fn empty_config_uses_clean_v1_defaults() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     fs::write(&path, "\n\t").unwrap();
-    assert_eq!(Config::load_from(&path).unwrap(), Config::default());
+    let loaded = Config::load_from(&path).unwrap();
+    assert!(loaded.review.is_legacy());
+    assert!(!Config::default().review.is_legacy());
+}
+
+#[test]
+fn legacy_auto_survives_unrelated_saves_and_json_drafts() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!("version = {}\n[review]\ntrigger = 'turn'\n", CONFIG_VERSION),
+    )
+    .unwrap();
+    let mut config = Config::load_from(&path).unwrap();
+    assert!(config.review.is_legacy());
+    config.phone.enabled = false;
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("reviewers"), "{saved}");
+    let json = serde_json::to_string(&config).unwrap();
+    assert!(!json.contains("reviewers"), "{json}");
+    assert!(
+        serde_json::from_str::<Config>(&json)
+            .unwrap()
+            .review
+            .is_legacy()
+    );
+    config.review.clear_legacy();
+    config.save_to(&path).unwrap();
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("reviewers = []")
+    );
+    assert!(!Config::load_from(&path).unwrap().review.is_legacy());
+}
+
+#[test]
+fn legacy_profile_count_and_effort_survive_unrelated_save() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n[review]\ncount = 3\nprofile = 'claude'\neffort = 'high'\n"
+        ),
+    )
+    .unwrap();
+    let mut config = Config::load_from(&path).unwrap();
+    assert!(config.review.is_legacy());
+    config.phone.enabled = false;
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("count = 3"));
+    assert!(saved.contains("profile = "));
+    assert!(saved.contains("effort = "));
+    assert!(!saved.contains("reviewers"));
+    assert_eq!(Config::load_from(&path).unwrap().review, config.review);
 }
 
 #[test]
@@ -2543,7 +2546,7 @@ fn removed_profile_overrides_have_an_actionable_error() {
 
 /// A config an earlier release wrote can hold a MiMo Code profile, possibly
 /// chosen as the reviewer. The file must still load with every other
-/// profile, review falls back to Auto, and the next save drops the profile.
+/// profile; the reviewer model remains usable through another enabled profile.
 #[test]
 fn a_profile_for_a_removed_harness_is_dropped_without_failing_the_config() {
     let directory = tempfile::tempdir().unwrap();
@@ -2562,11 +2565,12 @@ fn a_profile_for_a_removed_harness_is_dropped_without_failing_the_config() {
     let loaded = Config::load_from(&path).expect("the config must still load");
     assert_eq!(loaded.profiles.keys().collect::<Vec<_>>(), ["codex"]);
     assert_eq!(loaded.review.trigger, ReviewTrigger::Turn);
-    assert_eq!(loaded.review.profile, None);
-    assert_eq!(loaded.review.model, None);
+    assert_eq!(loaded.review.reviewers[0].model, "mimo-v2");
 
     loaded.save_to(&path).unwrap();
-    assert!(!fs::read_to_string(&path).unwrap().contains("mimo"));
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("mimo-v2"));
+    assert!(!saved.contains("profile = \"mimo\""));
 }
 
 #[test]
@@ -3265,11 +3269,19 @@ fn review_trigger_loads_legacy_settings_and_saves_only_the_trigger() {
         assert_eq!(config.review.trigger, expected, "{settings}");
         config.save_to(&path).unwrap();
         let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(saved["review"].get("enabled").is_none());
-        assert_eq!(
-            saved["review"]["trigger"].as_str(),
-            serde_json::to_value(expected).unwrap().as_str()
+        assert!(
+            saved
+                .get("review")
+                .is_none_or(|review| review.get("enabled").is_none())
         );
+        if expected == ReviewTrigger::Off {
+            assert_eq!(saved["review"]["trigger"].as_str(), Some("off"));
+        } else {
+            assert_eq!(
+                saved["review"]["trigger"].as_str(),
+                serde_json::to_value(expected).unwrap().as_str()
+            );
+        }
     }
 }
 

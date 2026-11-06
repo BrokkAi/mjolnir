@@ -20,9 +20,9 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
         "notify" => {
             json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
         }
-        "review" => {
-            json!({"trigger":"off","profile":null,"model":null,"effort":null})
-        }
+        // Only the section itself: its reviewer entries are SubagentChoice
+        // tables, which reject unknown keys.
+        "review" if path.len() == 1 => json!({"trigger":"off"}),
         "continuation" => json!({"enabled":true}),
         "github" if path.len() == 1 => json!({"watch":{}}),
         "github" if key == "watch" => {
@@ -429,13 +429,6 @@ pub fn null_label(path: &[String], draft: &Value) -> String {
             mj_core::config::GUARDIAN_REVIEW_NEWEST_FLASH.to_owned()
         }
         ["profiles", _, "codex_profile"] => "None — config.toml only".to_owned(),
-        // Review needs a named reviewer profile; there is no fallback to a
-        // first enabled profile (`ReviewConfig::reviewer_profile`).
-        ["review", "profile"] => "Auto — choose by provider and quota".to_owned(),
-        ["review", "model" | "effort"] => match draft["review"]["profile"].as_str() {
-            Some(profile) => format!("{profile}'s default"),
-            None => "Not set".to_owned(),
-        },
         _ => "Not set".to_owned(),
     }
 }
@@ -509,16 +502,19 @@ pub fn section_summary(
             }
         }
         "review" => {
-            if section["trigger"].as_str() == Some("push") {
-                return Some("Before push".to_owned());
-            }
-            if section["trigger"].as_str().unwrap_or("off") == "off" {
-                "Off".to_owned()
+            let trigger = match section["trigger"].as_str().unwrap_or("off") {
+                "turn" => "Every turn",
+                "push" => "Before push",
+                _ => return Some("Off".to_owned()),
+            };
+            let reviewers = section["reviewers"].as_array().map_or(0, Vec::len);
+            if reviewers == 0 {
+                format!("{trigger} · no reviewers")
             } else {
-                match section["profile"].as_str() {
-                    Some(profile) => profile.to_owned(),
-                    None => "Auto · picks by quota".to_owned(),
-                }
+                format!(
+                    "{trigger} · {reviewers} reviewer{}",
+                    if reviewers == 1 { "" } else { "s" }
+                )
             }
         }
         "continuation" => {
@@ -714,10 +710,24 @@ pub fn build_cache_gigabytes_label(size: &str) -> String {
 
 pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
     let key = path.last().map(String::as_str).unwrap_or("");
-    if path.len() == 3 && path[0] == "subagents" && matches!(key, "model" | "effort") {
-        let mut choices = vec![Value::Null];
-        if let Some(values) = draft["_subagent_options"][&path[1]]
-            [if key == "model" { "models" } else { "efforts" }]
+    if ((path.len() == 3 && path[0] == "subagents")
+        || (path.len() == 4 && path[0] == "review" && path[1] == "reviewers"))
+        && matches!(key, "model" | "effort")
+    {
+        let mut choices = if path[0] == "review" && key == "model" {
+            Vec::new()
+        } else {
+            vec![Value::Null]
+        };
+        if let Some(values) = draft[if path[0] == "review" {
+            "_reviewer_options"
+        } else {
+            "_subagent_options"
+        }][if path[0] == "review" {
+            &path[2]
+        } else {
+            &path[1]
+        }][if key == "model" { "models" } else { "efforts" }]
         .as_array()
         {
             choices.extend(
@@ -952,7 +962,9 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         "repositories" => {
             "Set either a local repository directory or a GitHub source for each repository."
         }
-        "review" => "Used by turn review. Auto picks another provider with quota.",
+        "review" => {
+            "Review triggers and reviewers. An empty reviewer list means no reviewers are configured."
+        }
         "continuation" => {
             "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
         }
@@ -1058,5 +1070,50 @@ pub fn path_kind(path: &[String]) -> Option<PathKind> {
         | ["targets", _, "workspace_storage", "root"] => Some(Target),
         ["bundles", _, "repositories", _, "destination"] => Some(RelativeDestination),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    /// Reviewer entries are SubagentChoice tables, which reject unknown
+    /// keys, so expanding a draft must leave them exactly as stored.
+    #[test]
+    fn expanding_a_draft_leaves_reviewer_entries_unchanged() {
+        let reviewer = json!({"model": "gpt-6-terra", "effort": "xhigh"});
+        let mut draft = json!({"review": {"trigger": "push", "reviewers": [reviewer]}});
+        expand(&mut draft, &mut Vec::new());
+        assert_eq!(draft["review"]["reviewers"], json!([reviewer]));
+    }
+
+    #[test]
+    fn legacy_review_defaults_do_not_insert_reviewers() {
+        let path = ["review".to_owned()];
+        assert_eq!(defaults(&path, &json!({})), json!({"trigger": "off"}));
+    }
+
+    #[test]
+    fn review_summary_names_the_trigger_and_reviewer_count() {
+        let theme = |_: &Value, _: &Value| String::new();
+        let summary =
+            |review: Value| section_summary("review", &json!({ "review": review }), &theme);
+        let reviewer = json!({"model": "gpt-6-terra", "effort": "xhigh"});
+        assert_eq!(
+            summary(json!({"trigger": "off", "reviewers": [reviewer]})).as_deref(),
+            Some("Off")
+        );
+        assert_eq!(
+            summary(json!({"trigger": "turn", "reviewers": []})).as_deref(),
+            Some("Every turn · no reviewers")
+        );
+        assert_eq!(
+            summary(json!({"trigger": "push", "reviewers": [reviewer]})).as_deref(),
+            Some("Before push · 1 reviewer")
+        );
+        assert_eq!(
+            summary(json!({"trigger": "push", "reviewers": [reviewer, reviewer]})).as_deref(),
+            Some("Before push · 2 reviewers")
+        );
     }
 }

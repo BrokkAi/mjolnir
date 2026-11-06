@@ -68,7 +68,7 @@
 {
   "oracle": true,
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -170,7 +170,7 @@
   "row": {
     "oracle": true,
     "review_trigger": "off",
-    "review_count": 2,
+    "review_count": 0,
     "subagents": {
       "mode": "native"
     },
@@ -276,7 +276,7 @@
 {
   "oracle": true,
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -365,7 +365,7 @@
     "row": {
       "oracle": true,
       "review_trigger": "off",
-      "review_count": 2,
+      "review_count": 0,
       "subagents": {
         "mode": "native"
       },
@@ -463,7 +463,7 @@
     "row": {
       "oracle": true,
       "review_trigger": "off",
-      "review_count": 2,
+      "review_count": 0,
       "subagents": {
         "mode": "native"
       },
@@ -558,7 +558,7 @@
   "parent": {
     "oracle": true,
     "review_trigger": "off",
-    "review_count": 2,
+    "review_count": 0,
     "subagents": {
       "mode": "native"
     },
@@ -642,7 +642,7 @@
   "child": {
     "oracle": true,
     "review_trigger": "off",
-    "review_count": 2,
+    "review_count": 0,
     "subagents": {
       "mode": "native"
     },
@@ -730,7 +730,7 @@
 {
   "oracle": true,
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -815,7 +815,7 @@
 {
   "oracle": true,
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -964,7 +964,7 @@
 {
   "oracle": true,
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -1043,7 +1043,7 @@
 {
   "oracle": true,
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -1120,7 +1120,7 @@
 {
   "oracle": true,
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -1194,7 +1194,7 @@
   "session": {
     "oracle": true,
     "review_trigger": "off",
-    "review_count": 2,
+    "review_count": 0,
     "subagents": {
       "mode": "native"
     },

@@ -333,7 +333,10 @@ fn golden_phone_new_session_preflight() {
         },
     );
     config.review.trigger = mj_core::config::ReviewTrigger::Turn;
-    config.review.profile = Some("codex".into());
+    config.review.reviewers = vec![mj_core::config::SubagentChoice {
+        model: "gpt-6-astra".into(),
+        effort: None,
+    }];
     let mut plain = run_new_preflight(
         config,
         "hel".into(),

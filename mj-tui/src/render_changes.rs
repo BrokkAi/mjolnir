@@ -106,10 +106,6 @@ impl DashboardState {
                         dialog.opened_at.elapsed().as_millis(),
                     ))
                 }
-                Mode::Setup(setup) => setup
-                    .review_editor
-                    .as_ref()
-                    .and_then(|dialog| dialog.animation_frame()),
                 _ => None,
             },
         }

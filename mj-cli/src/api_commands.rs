@@ -173,19 +173,9 @@ pub(crate) struct NewArgs {
     /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_effort: Option<String>,
-    /// Override the reviewer model while keeping the configured review trigger.
-    /// Without a `[review]` profile, Auto picks a profile that offers the model.
-    #[arg(long)]
-    review_model: Option<String>,
-    /// Override reviewer effort while keeping the configured review trigger.
-    #[arg(long)]
-    review_effort: Option<String>,
-    /// Independent reviewers per review. 1–3 is reasonable; more has diminishing returns.
-    #[arg(long)]
-    review_count: Option<std::num::NonZeroUsize>,
-    /// Deprecated compatibility option; the value is ignored.
-    #[arg(long, hide = true, value_parser = ["quick", "extended"])]
-    review_tier: Option<String>,
+    /// Reviewer model and optional effort; final colon suffix is effort only when a known effort (minimal, low, medium, high, xhigh, max); trailing colon escapes it. Repeat up to three times.
+    #[arg(long = "reviewer", value_name = "MODEL[:EFFORT]")]
+    reviewers: Vec<String>,
     /// Review trigger for this session, overriding `[review]`.
     #[arg(long, value_parser = ["off", "turn", "push"])]
     review: Option<String>,
@@ -1171,54 +1161,57 @@ pub(crate) fn subagent_policy(
 }
 
 /// The session's review overrides, or `None` to follow all of `[review]`.
-fn new_session_review(args: &NewArgs) -> Option<mj_core::config::SessionReview> {
-    session_review(
-        args.review.as_deref(),
-        args.review_model.as_deref(),
-        args.review_effort.as_deref(),
-        args.review_tier.as_deref(),
-        args.review_count,
-    )
+fn new_session_review(args: &NewArgs) -> Result<Option<mj_core::config::SessionReview>> {
+    session_review(args.review.as_deref(), &args.reviewers)
 }
 
 /// The review flags shared by `mj new` and `mj import`.
 pub(crate) fn session_review(
     trigger: Option<&str>,
-    model: Option<&str>,
-    effort: Option<&str>,
-    tier: Option<&str>,
-    count: Option<std::num::NonZeroUsize>,
-) -> Option<mj_core::config::SessionReview> {
+    choices: &[String],
+) -> Result<Option<mj_core::config::SessionReview>> {
     use mj_core::config::SessionReview;
-    let model = model.map(str::to_owned);
-    let effort = effort.map(str::to_owned);
+    ensure!(
+        choices.len() <= mj_core::config::MAX_REVIEWERS,
+        "at most three --reviewer values are allowed"
+    );
+    let reviewers = choices
+        .iter()
+        .map(|value| {
+            let (model, effort) =
+                value
+                    .rsplit_once(':')
+                    .map_or((value.as_str(), None), |(model, suffix)| {
+                        if matches!(
+                            suffix,
+                            "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+                        ) {
+                            (model, Some(suffix))
+                        } else if suffix.is_empty() {
+                            (model, None)
+                        } else {
+                            (value.as_str(), None)
+                        }
+                    });
+            ensure!(!model.trim().is_empty(), "reviewer model must not be empty");
+            Ok(mj_core::config::SubagentChoice {
+                model: model.to_owned(),
+                effort: effort.map(str::to_owned),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let reviewers = (!reviewers.is_empty()).then_some(reviewers);
     let Some(trigger) = trigger else {
-        // Reviewer overrides preserve the configured trigger. The deprecated
-        // tier is accepted but does not change it.
-        return (model.is_some() || effort.is_some() || count.is_some() || tier.is_some())
-            .then_some(SessionReview::Inherit {
-                count,
-                model,
-                effort,
-                tier: None,
-            });
+        return Ok(reviewers.map(|reviewers| SessionReview::Inherit {
+            reviewers: Some(reviewers),
+        }));
     };
-    Some(match trigger {
+    Ok(Some(match trigger {
         "off" => SessionReview::Off,
-        "push" => SessionReview::Push {
-            count,
-            model,
-            effort,
-            tier: None,
-        },
-        "turn" => SessionReview::Turn {
-            count,
-            model,
-            effort,
-            tier: None,
-        },
+        "push" => SessionReview::Push { reviewers },
+        "turn" => SessionReview::Turn { reviewers },
         _ => unreachable!("clap validates the review trigger"),
-    })
+    }))
 }
 
 /// Create a session and deliver its optional first prompt.
@@ -1248,7 +1241,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
             args.subagent_oracle_effort.as_deref(),
             args.oracle.as_deref(),
         )?,
-        review: new_session_review(&args),
+        review: new_session_review(&args)?,
         no_project_memory: args.no_project_memory,
         no_github_events: args.no_github_events,
         create_managed_worktree: None,
@@ -1277,7 +1270,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let client = ApiClient::connect().await?;
     let response = client.start(&request).await.map_err(name_launch_flags)?;
     if let Some(notice) = &response.notice {
-        eprintln!("{}", sanitize_terminal_text(notice));
+        write_start_notice(std::io::stderr().lock(), notice)?;
     }
     if args.json {
         return print_json(&response);
@@ -1287,6 +1280,13 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         println!("turn {turn_id}");
     }
     Ok(())
+}
+
+pub(crate) fn write_start_notice(
+    mut output: impl std::io::Write,
+    notice: &str,
+) -> std::io::Result<()> {
+    writeln!(output, "{}", sanitize_terminal_text(notice))
 }
 
 /// Name the command-line flags where a refused start names the API's fields.
@@ -3076,112 +3076,119 @@ mod tests {
         assert_eq!(refused.to_string(), "--no-later-history requires --at");
     }
 
-    // Hard-won: 06cfc1cfe: reviewer-only flags replaced before-push review with end-of-turn.
+    // Hard-won: 06cfc1cfe: reviewer-only flags preserve the global trigger.
     #[test]
     fn new_review_flags_choose_the_sessions_own_review() {
-        use mj_core::config::{ReviewConfig, ReviewTrigger, SessionReview};
+        use mj_core::config::{ReviewConfig, ReviewTrigger, SessionReview, SubagentChoice};
         let parse = |extra: &[&str]| {
             let mut argv = vec!["mj", "new", "--bundle", "product"];
             argv.extend_from_slice(extra);
             Cli::try_parse_from(argv).map(|cli| match cli.command {
                 Some(Command::New(args)) => new_session_review(&args),
-                _ => panic!("expected the new command"),
+                _ => panic!("expected new command"),
             })
         };
-        assert_eq!(parse(&[]).unwrap(), None);
+        assert_eq!(parse(&[]).unwrap().unwrap(), None);
+        let inherited = parse(&[
+            "--reviewer",
+            "gpt-6-terra:xhigh",
+            "--reviewer",
+            "gpt-6-sol:medium",
+        ])
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let choices = vec![
+            SubagentChoice {
+                model: "gpt-6-terra".into(),
+                effort: Some("xhigh".into()),
+            },
+            SubagentChoice {
+                model: "gpt-6-sol".into(),
+                effort: Some("medium".into()),
+            },
+        ];
         assert_eq!(
-            parse(&["--review", "off", "--review-count", "3"]).unwrap(),
-            Some(SessionReview::Off)
-        );
-        assert_eq!(
-            parse(&["--review", "push"]).unwrap().unwrap().trigger(),
-            Some(ReviewTrigger::Push)
-        );
-        assert_eq!(
-            parse(&["--review", "turn"]).unwrap().unwrap().trigger(),
-            Some(ReviewTrigger::Turn)
-        );
-        assert!(parse(&["--review", "on"]).is_err());
-        assert_eq!(
-            parse(&["--review-model", "gpt-6-astra", "--review-count", "3"]).unwrap(),
-            Some(SessionReview::Inherit {
-                count: std::num::NonZeroUsize::new(3),
-                model: Some("gpt-6-astra".into()),
-                effort: None,
-                tier: None,
-            })
-        );
-        assert_eq!(
-            parse(&["--review-effort", "high"]).unwrap(),
-            Some(SessionReview::Inherit {
-                count: None,
-                model: None,
-                effort: Some("high".into()),
-                tier: None,
-            })
-        );
-        assert_eq!(
-            parse(&["--review-tier", "extended", "--review-model", "gpt-6-luna"]).unwrap(),
-            Some(SessionReview::Inherit {
-                count: None,
-                model: Some("gpt-6-luna".into()),
-                effort: None,
-                tier: None,
-            })
-        );
-        assert_eq!(
-            parse(&["--review-tier", "quick"]).unwrap(),
-            Some(SessionReview::Inherit {
-                count: None,
-                model: None,
-                effort: None,
-                tier: None,
-            })
+            inherited,
+            SessionReview::Inherit {
+                reviewers: Some(choices.clone())
+            }
         );
         for trigger in [ReviewTrigger::Off, ReviewTrigger::Turn, ReviewTrigger::Push] {
             let global = ReviewConfig {
                 trigger,
                 ..Default::default()
             };
-            for flags in [
-                ["--review-model", "gpt-6-astra"],
-                ["--review-effort", "high"],
-                ["--review-count", "3"],
-                ["--review-tier", "extended"],
-            ] {
-                let inherited = parse(&flags).unwrap().unwrap();
-                assert_eq!(
-                    global.for_session(Some(&inherited)).trigger,
-                    trigger,
-                    "{flags:?} with global {trigger}"
-                );
-            }
-            for (flag, expected) in [
-                ("off", ReviewTrigger::Off),
-                ("turn", ReviewTrigger::Turn),
-                ("push", ReviewTrigger::Push),
-            ] {
-                let explicit = parse(&["--review", flag]).unwrap().unwrap();
-                assert_eq!(global.for_session(Some(&explicit)).trigger, expected);
-            }
+            assert_eq!(global.for_session(Some(&inherited)).trigger, trigger);
+            assert_eq!(global.for_session(Some(&inherited)).reviewers, choices);
         }
-        let help = Cli::try_parse_from(["mj", "new", "--help"])
-            .expect_err("help exits parsing")
-            .to_string();
-        assert!(
-            !help.contains("--review-tier"),
-            "deprecated option is hidden"
-        );
-        assert!(
-            parse(&["--review-tier", "thorough"]).is_err(),
-            "the deprecated flag still accepts only quick and extended"
-        );
-        assert!(parse(&["--no-review"]).is_err());
-        let counted = parse(&["--review-count", "4"]).unwrap().unwrap();
         assert_eq!(
-            serde_json::to_value(counted).unwrap(),
-            serde_json::json!({"mode":"inherit","count":4})
+            parse(&["--review", "off"]).unwrap().unwrap(),
+            Some(SessionReview::Off)
         );
+        assert!(
+            parse(&[
+                "--reviewer",
+                "a",
+                "--reviewer",
+                "b",
+                "--reviewer",
+                "c",
+                "--reviewer",
+                "d"
+            ])
+            .unwrap()
+            .is_err()
+        );
+        assert!(parse(&["--reviewer", ":high"]).unwrap().is_err());
+        for (input, model, effort) in [
+            ("openai/gpt-oss-120b:free", "openai/gpt-oss-120b:free", None),
+            ("qwen:latest", "qwen:latest", None),
+            ("x:0:high", "x:0", Some("high")),
+            ("foo:high:", "foo:high", None),
+        ] {
+            let parsed = parse(&["--reviewer", input]).unwrap().unwrap().unwrap();
+            let SessionReview::Inherit {
+                reviewers: Some(reviewers),
+            } = parsed
+            else {
+                panic!("review override expected")
+            };
+            assert_eq!(reviewers[0].model, model);
+            assert_eq!(reviewers[0].effort.as_deref(), effort);
+        }
+
+        let parsed = parse(&[
+            "--reviewer",
+            "anthropic.claude-haiku:0",
+            "--reviewer",
+            "x:0:high",
+            "--reviewer",
+            "m:high",
+        ])
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            parsed,
+            SessionReview::Inherit {
+                reviewers: Some(vec![
+                    SubagentChoice {
+                        model: "anthropic.claude-haiku:0".into(),
+                        effort: None
+                    },
+                    SubagentChoice {
+                        model: "x:0".into(),
+                        effort: Some("high".into())
+                    },
+                    SubagentChoice {
+                        model: "m".into(),
+                        effort: Some("high".into())
+                    },
+                ])
+            }
+        );
+        assert!(parse(&["--review-count", "2"]).is_err());
     }
 
     #[test]

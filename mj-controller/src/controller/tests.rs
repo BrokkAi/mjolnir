@@ -943,7 +943,10 @@ fn registration_records_a_plain_local_directory_as_its_project() {
         .targets
         .insert("local".into(), TargetTemplate::LocalBare);
     config.review.trigger = mj_core::config::ReviewTrigger::Turn;
-    config.review.profile = Some("codex".into());
+    config.review.reviewers = vec![mj_core::config::SubagentChoice {
+        model: "gpt-6-astra".into(),
+        effort: None,
+    }];
     let mut controller = Controller {
         config,
         state: State::default(),
@@ -956,14 +959,17 @@ fn registration_records_a_plain_local_directory_as_its_project() {
     let explicit = controller
         .register_session_reporting_review("codex", "project", "local", "plain", options)
         .unwrap();
-    assert!(!explicit.review_turned_off);
+    assert!(explicit.review_notice.is_none());
 
     let mut options = launch_options(Vec::new());
     options.project_directory = Some(workspace.path().to_owned());
     let registration = controller
         .register_session_reporting_review("codex", "project", "local", "plain", options)
         .unwrap();
-    assert!(registration.review_turned_off);
+    assert_eq!(
+        registration.review_notice,
+        Some(mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF)
+    );
     let id = registration.id;
 
     let stored = &controller.state.sessions[&id];
@@ -977,6 +983,43 @@ fn registration_records_a_plain_local_directory_as_its_project() {
         Some(expected.as_path())
     );
     project.key().unwrap();
+    controller.config.review.reviewers.clear();
+    let mut options = launch_options(Vec::new());
+    options.project_directory = Some(workspace.path().to_owned());
+    options.review = Some(mj_core::config::SessionReview::Turn { reviewers: None });
+    let no_reviewers = controller
+        .register_session_reporting_review("codex", "project", "local", "plain", options)
+        .unwrap();
+    assert_eq!(
+        no_reviewers.review_notice,
+        Some(mj_core::review::settings::NO_REVIEWERS_REVIEW_OFF)
+    );
+    assert_eq!(
+        controller.state.sessions[&no_reviewers.id].review,
+        Some(mj_core::config::SessionReview::Off)
+    );
+
+    // The API shape `{"mode":"turn","reviewers":[]}` is an explicitly empty
+    // list; it gets the same treatment even with a global list present.
+    controller.config.review.reviewers = vec![mj_core::config::SubagentChoice {
+        model: "gpt-6-astra".into(),
+        effort: None,
+    }];
+    let mut options = launch_options(Vec::new());
+    options.project_directory = Some(workspace.path().to_owned());
+    options.review =
+        Some(serde_json::from_str(r#"{"mode":"turn","reviewers":[]}"#).expect("API review shape"));
+    let empty_list = controller
+        .register_session_reporting_review("codex", "project", "local", "plain", options)
+        .unwrap();
+    assert_eq!(
+        empty_list.review_notice,
+        Some(mj_core::review::settings::NO_REVIEWERS_REVIEW_OFF)
+    );
+    assert_eq!(
+        controller.state.sessions[&empty_list.id].review,
+        Some(mj_core::config::SessionReview::Off)
+    );
 }
 
 #[test]
@@ -2120,7 +2163,10 @@ fn a_launch_config_arms_the_review_capture_only_when_a_reviewer_is_configured() 
         "Auto can review with the primary profile even with automation off"
     );
 
-    controller.config.review.profile = Some("codex".into());
+    controller.config.review.reviewers = vec![mj_core::config::SubagentChoice {
+        model: "gpt-6-astra".into(),
+        effort: None,
+    }];
 
     assert!(
         controller
@@ -2166,10 +2212,10 @@ fn a_session_named_review_model_takes_a_baseline_for_the_reviewer_auto_will_choo
             .unwrap()
     };
     let named = register(Some(mj_core::config::SessionReview::Turn {
-        count: None,
-        model: Some("deepseek-flash".into()),
-        effort: None,
-        tier: None,
+        reviewers: Some(vec![mj_core::config::SubagentChoice {
+            model: "deepseek-flash".into(),
+            effort: None,
+        }]),
     }));
     let unnamed = register(None);
 
