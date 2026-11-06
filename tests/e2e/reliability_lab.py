@@ -483,6 +483,13 @@ class Lab:
 
     def environment(self) -> dict[str, str]:
         env = os.environ.copy()
+        # A shell inside a Mjolnir or Claude Code session carries that
+        # session's profile home and instance. A lab daemon that inherits them
+        # detects the real profile, offers it for new sessions and reads its
+        # quota. Keep only the worker binary, which callers pass on purpose.
+        for key in list(env):
+            if key.startswith(("CLAUDE", "CODEX_", "MJ_")) and key != "MJ_WORKER_BINARY":
+                del env[key]
         # The viewer asks for a commit author when the daemon's Git has none.
         # The lab gives its daemon one, apart from the host's own config.
         git_config = self.runtime_root / "gitconfig"
