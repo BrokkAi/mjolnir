@@ -2906,11 +2906,51 @@ fn sessions_wheel_scrolls_past_the_selection_until_it_changes() {
     let _ = crate::test_support::drawn(&mut dashboard, 120, 40);
     assert_eq!(dashboard.sessions_scroll.get(), scrolled);
 
+    // Choosing the row that is already selected, as Home does, brings it back.
+    dashboard.set_selection_for(Focus::Sessions, 0);
+    let lines = crate::test_support::drawn(&mut dashboard, 120, 40);
+    assert!(row_of_title(&lines, "child-00").is_some(), "{lines:#?}");
+
     // Moving the selection brings it back into view.
+    for _ in 0..8 {
+        dashboard.scroll_sessions_view(1);
+    }
+    let _ = crate::test_support::drawn(&mut dashboard, 120, 40);
     dashboard.move_selection(1);
     let lines = crate::test_support::drawn(&mut dashboard, 120, 40);
     assert_eq!(dashboard.selected_session_id(), Some("child-01"));
     assert!(row_of_title(&lines, "child-01").is_some(), "{lines:#?}");
+}
+
+// Hard-won: review of the wheel change: the table scrolled a partly visible
+// selected row into view, so click areas pointed at other sessions.
+#[test]
+fn sessions_wheel_scroll_keeps_click_areas_on_the_rows_drawn() {
+    let names = (0..30).map(|n| format!("child-{n:02}")).collect::<Vec<_>>();
+    let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+    let (mut dashboard, parent) = dashboard_with_subagents(&refs);
+    dashboard.open_subagent_workspace(parent);
+    dashboard.clear_sessions_filter();
+    dashboard.select_active_session("child-29");
+    dashboard.focus = Focus::Sessions;
+    // Heights that leave the selected row cut off at the bottom for some offsets.
+    for height in [33, 34, 35, 36, 37] {
+        dashboard.sessions_wheel_scrolled_from.take();
+        dashboard.select_active_session("child-29");
+        let _ = crate::test_support::drawn(&mut dashboard, 120, height);
+        for _ in 0..28 {
+            dashboard.scroll_sessions_view(-1);
+            let lines = crate::test_support::drawn(&mut dashboard, 120, height);
+            for (index, area) in dashboard.session_row_areas.iter() {
+                let title = dashboard.ordered_sessions()[*index].title.clone();
+                assert!(
+                    lines[usize::from(area.y)].contains(&title),
+                    "height {height}: area for {title} shows {:?}",
+                    lines[usize::from(area.y)]
+                );
+            }
+        }
+    }
 }
 
 #[test]

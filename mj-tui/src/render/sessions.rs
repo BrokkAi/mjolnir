@@ -1623,23 +1623,30 @@ pub(crate) fn render_sessions(
         row_heights,
         viewport,
     );
-    if let Some(selected) = selected {
-        let wheel_scrolled = dashboard.sessions_wheel_scrolled_from.borrow().as_deref()
-            == dashboard.selected_session_id();
-        let recenter = take_selection_recenter(dashboard, Focus::Sessions);
-        if recenter || !wheel_scrolled {
-            // A moved selection ends the wheel's hold on the offset.
-            dashboard.sessions_wheel_scrolled_from.take();
+    // A moved selection, or none at all, ends the wheel's hold on the offset.
+    let wheel_scrolled = {
+        let mut held = dashboard.sessions_wheel_scrolled_from.borrow_mut();
+        if selected.is_none() || held.as_deref() != dashboard.selected_session_id() {
+            *held = None;
         }
-        if recenter {
+        held.is_some()
+    };
+    let mut reveal_selected = true;
+    if let Some(selected) = selected {
+        let content = usize::from(layout.presentation(selected, minimized).height());
+        if take_selection_recenter(dashboard, Focus::Sessions) {
             offset = mj_chat::components::centered_offset(selected, row_heights, viewport);
         } else if wheel_scrolled {
-            // The wheel moved the list, not the selection; the selected row
-            // may be off screen until the selection changes.
+            // The wheel moved the list, not the selection, so the selected row
+            // may be off screen. The table below must not scroll to it either:
+            // that would put its rows out of step with the hit areas, so it
+            // only marks a selection that already fits where it is.
+            reveal_selected = selected >= offset
+                && offset_showing_selected(offset, selected, content, row_heights, viewport)
+                    == offset;
         } else if selected < offset {
             offset = selected;
         } else {
-            let content = usize::from(layout.presentation(selected, minimized).height());
             offset = offset_showing_selected(offset, selected, content, row_heights, viewport);
         }
     }
@@ -1665,7 +1672,7 @@ pub(crate) fn render_sessions(
     );
     let mut state = TableState::default().with_selected(
         selected
-            .filter(|selected| *selected < end)
+            .filter(|selected| reveal_selected && *selected < end)
             .and_then(|selected| selected.checked_sub(offset)),
     );
     frame.render_stateful_widget(table, rows_area, &mut state);

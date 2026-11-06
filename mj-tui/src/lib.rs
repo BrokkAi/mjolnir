@@ -1194,6 +1194,7 @@ pub struct DashboardState {
 #[derive(Debug, Clone)]
 struct WorkspaceViewState {
     sessions_scroll: usize,
+    sessions_wheel_scrolled_from: Option<String>,
     targets_scroll: usize,
     quota_scroll: usize,
     capacity_index: usize,
@@ -1208,6 +1209,7 @@ impl WorkspaceViewState {
     fn from_dashboard(dashboard: &DashboardState) -> Self {
         Self {
             sessions_scroll: dashboard.sessions_scroll.get(),
+            sessions_wheel_scrolled_from: dashboard.sessions_wheel_scrolled_from.borrow().clone(),
             targets_scroll: dashboard.targets_scroll.get(),
             quota_scroll: dashboard.quota_scroll.get(),
             capacity_index: dashboard.capacity_index,

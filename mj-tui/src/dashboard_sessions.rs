@@ -1048,6 +1048,7 @@ impl DashboardState {
                 .entry(workspace_id.to_owned())
                 .or_insert_with(|| WorkspaceViewState {
                     sessions_scroll: 0,
+                    sessions_wheel_scrolled_from: None,
                     targets_scroll: 0,
                     quota_scroll: 0,
                     capacity_index: 0,
@@ -1351,6 +1352,8 @@ impl DashboardState {
         self.recenter_on_selection.set(None);
         if focus == Focus::Sessions {
             self.set_session_action_focus(None);
+            // Choosing a row, even the current one, shows it again.
+            self.sessions_wheel_scrolled_from.take();
         }
         match focus {
             Focus::Sessions => {
