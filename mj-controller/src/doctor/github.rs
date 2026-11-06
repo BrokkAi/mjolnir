@@ -6,6 +6,7 @@
 //! `~/.gitconfig`. So the host needs a GitHub SSH key, or HTTPS through a
 //! credential helper together with `insteadOf` rules that send SSH GitHub
 //! URLs over HTTPS. Doctor reports which one the host has; it changes nothing.
+//! Its findings are warnings: a host that never uses GitHub needs neither.
 
 use super::*;
 
@@ -197,8 +198,10 @@ fn rewrites_to_https(host: BareHost<'_>, remote: &str, executor: &impl CommandEx
 
 /// The one check for a bare target's GitHub access.
 ///
-/// Every outcome but ready is fixable rather than failed: a target that never
-/// touches GitHub works without any of this.
+/// Git picks the transport per URL spelling: a spelling an `insteadOf` rule
+/// rewrites goes over HTTPS whatever SSH could do, so the rewrite decides
+/// which credentials have to work. Every outcome but ready is a warning: a
+/// target that never touches GitHub works without any of this.
 pub(super) fn github_access_check(
     check_id: String,
     title: String,
@@ -206,58 +209,86 @@ pub(super) fn github_access_check(
     executor: &impl CommandExecutor,
 ) -> DoctorCheck {
     let location = host.location();
-    let refusal = match probe_github_ssh(host, executor) {
-        GithubSsh::Authenticated => {
-            return DoctorCheck::ready(
-                check_id,
-                title,
-                format!(
+    let (over_https, over_ssh): (Vec<usize>, Vec<usize>) = (0..SSH_REMOTES.len())
+        .partition(|&index| rewrites_to_https(host, SSH_REMOTES[index], executor));
+    let refusal = if over_ssh.is_empty() {
+        None
+    } else {
+        match probe_github_ssh(host, executor) {
+            GithubSsh::Authenticated => None,
+            GithubSsh::Refused(refusal) => Some(refusal),
+        }
+    };
+    // HTTPS matters for rewritten spellings, and for a host whose SSH fails
+    // it tells whether adding the rewrite would be enough.
+    let https = (!over_https.is_empty() || refusal.is_some())
+        .then(|| probe_https_credentials(host, executor));
+    let https_gap = match &https {
+        Some(HttpsCredentials::Unavailable(gap)) => Some(gap.as_str()),
+        _ => None,
+    };
+    let remotes = |indexes: &[usize]| {
+        indexes
+            .iter()
+            .map(|&index| SSH_REMOTES[index])
+            .collect::<Vec<_>>()
+            .join(" and ")
+    };
+    match (&refusal, https_gap) {
+        (None, None) => {
+            let route = match (over_ssh.is_empty(), over_https.is_empty()) {
+                (true, _) => format!(
+                    "GitHub over HTTPS: Git on {location} rewrites SSH GitHub URLs to HTTPS, and a Git credential helper there supplies github.com credentials."
+                ),
+                (_, true) => format!(
                     "GitHub over SSH: `ssh -T git@github.com` authenticates noninteractively on {location}."
                 ),
-            );
-        }
-        GithubSsh::Refused(refusal) => refusal,
-    };
-    let https_gap = match probe_https_credentials(host, executor) {
-        HttpsCredentials::Supplied => {
-            let unrewritten: Vec<&str> = SSH_REMOTES
-                .iter()
-                .copied()
-                .filter(|remote| !rewrites_to_https(host, remote, executor))
-                .collect();
-            if unrewritten.is_empty() {
-                return DoctorCheck::ready(
-                    check_id,
-                    title,
-                    format!(
-                        "GitHub over HTTPS: a Git credential helper on {location} supplies github.com credentials, and Git there rewrites SSH GitHub URLs to HTTPS."
-                    ),
-                );
-            }
-            return DoctorCheck::fixable(
-                check_id,
-                title,
-                format!(
-                    "A Git credential helper on {location} supplies github.com credentials, but Git there does not rewrite {} to HTTPS. Sessions can start, but agents' pushes to SSH GitHub remotes will fail.",
-                    unrewritten.join(" or ")
+                _ => format!(
+                    "GitHub over SSH for {} and over HTTPS for {}: on {location}, `ssh -T git@github.com` authenticates and a Git credential helper supplies github.com credentials.",
+                    remotes(&over_ssh),
+                    remotes(&over_https)
                 ),
-                format!(
-                    "On {location}, run `{}` and `{}`, then rerun `mj doctor`.",
-                    REWRITE_COMMANDS[0], REWRITE_COMMANDS[1]
-                ),
-            );
+            };
+            DoctorCheck::ready(check_id, title, route)
         }
-        HttpsCredentials::Unavailable(gap) => gap,
-    };
-    DoctorCheck::fixable(
-        check_id,
-        title,
-        format!(
-            "{location} cannot reach GitHub noninteractively. SSH: {}. HTTPS: {https_gap}.",
-            ssh_gap(&refusal)
+        (None, Some(gap)) => DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "Git on {location} rewrites {} to HTTPS, but {gap}. Fetches and pushes to those GitHub remotes will fail.",
+                remotes(&over_https)
+            ),
+            format!(
+                "On {location}, run `gh auth login` then `gh auth setup-git` (it records gh's absolute path, which non-interactive SSH needs when gh is not on PATH). Or, if that host uses a GitHub SSH key, remove the rewrite with `git config --global --unset-all url.https://github.com/.insteadOf`. Rerun `mj doctor` afterwards."
+            ),
         ),
-        no_access_remediation(location, refusal.kind),
-    )
+        (Some(refusal), None) => DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "A Git credential helper on {location} supplies github.com credentials, but Git there does not rewrite {} to HTTPS, and SSH fails: {}. Agents' pushes to SSH GitHub remotes will fail.",
+                remotes(&over_ssh),
+                ssh_gap(refusal)
+            ),
+            format!(
+                "On {location}, run {}, then rerun `mj doctor`.",
+                over_ssh
+                    .iter()
+                    .map(|&index| format!("`{}`", REWRITE_COMMANDS[index]))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
+        ),
+        (Some(refusal), Some(gap)) => DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "{location} cannot reach GitHub noninteractively. SSH: {}. HTTPS: {gap}.",
+                ssh_gap(refusal)
+            ),
+            no_access_remediation(location, refusal.kind),
+        ),
+    }
 }
 
 fn ssh_gap(refusal: &SshRefusal) -> String {
@@ -378,44 +409,70 @@ mod tests {
     /// recorded command line.
     #[test]
     fn github_access_outcomes_name_the_working_route_and_never_carry_the_token() {
+        let no_password = || {
+            exit(
+                128,
+                "",
+                "fatal: could not read Username for 'https://github.com'\n",
+            )
+        };
         let cases = [
-            // SSH works; nothing else is asked.
-            (vec![greeting()], CheckStatus::Ready, "GitHub over SSH"),
-            // SSH refused, HTTPS answers, both spellings rewritten.
+            // Neither spelling rewritten and SSH works; HTTPS is not asked.
             (
-                vec![denied(), credential(), rewritten(), rewritten()],
+                vec![unrewritten(), unrewritten(), greeting()],
+                CheckStatus::Ready,
+                "GitHub over SSH",
+            ),
+            // Both spellings rewritten and HTTPS answers; SSH is not asked.
+            (
+                vec![rewritten(), rewritten(), credential()],
                 CheckStatus::Ready,
                 "GitHub over HTTPS",
             ),
-            // HTTPS answers but one spelling is not rewritten.
+            // One spelling each way, and both routes work.
             (
-                vec![denied(), credential(), rewritten(), unrewritten()],
-                CheckStatus::Fixable,
-                "ssh://git@github.com/octocat/hello-world.git",
+                vec![rewritten(), unrewritten(), greeting(), credential()],
+                CheckStatus::Ready,
+                "over SSH for ssh://git@github.com/octocat/hello-world.git",
+            ),
+            // HTTPS answers, SSH fails, and one spelling is not rewritten.
+            (
+                vec![rewritten(), unrewritten(), denied(), credential()],
+                CheckStatus::Warning,
+                "url.https://github.com/.insteadOf ssh://git@github.com/",
             ),
             // Unknown GitHub host key and no credentials.
             (
                 vec![
+                    unrewritten(),
+                    unrewritten(),
                     exit(
                         255,
                         "",
                         "No ED25519 host key is known for github.com\nHost key verification failed.\n",
                     ),
-                    exit(
-                        128,
-                        "",
-                        "fatal: could not read Username for 'https://github.com'\n",
-                    ),
+                    no_password(),
                 ],
-                CheckStatus::Fixable,
+                CheckStatus::Warning,
                 "host key is unknown or has changed",
             ),
             // A key GitHub does not know and a credential helper that answers
             // without a password.
             (
-                vec![denied(), exit(0, "username=octocat\npassword=\n", "")],
-                CheckStatus::Fixable,
+                vec![
+                    unrewritten(),
+                    unrewritten(),
+                    denied(),
+                    exit(0, "username=octocat\npassword=\n", ""),
+                ],
+                CheckStatus::Warning,
                 "GitHub accepted no SSH key",
+            ),
+            // Hard-won: e32a6aeef: a working SSH key reported ready although insteadOf sent GitHub over HTTPS without credentials.
+            (
+                vec![rewritten(), rewritten(), no_password()],
+                CheckStatus::Warning,
+                "rewrites git@github.com:octocat/hello-world.git and ssh://git@github.com/octocat/hello-world.git to HTTPS",
             ),
         ];
         for (responses, status, expected) in cases {
@@ -436,7 +493,12 @@ mod tests {
             }
         }
 
-        let (check, _) = run([denied(), exit(255, "", "could not run")]);
+        let (check, _) = run([
+            unrewritten(),
+            unrewritten(),
+            denied(),
+            exit(255, "", "could not run"),
+        ]);
         let fix = check.remediation.unwrap();
         for needed in [
             "gh auth login",

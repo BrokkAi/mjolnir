@@ -1968,6 +1968,9 @@ fn ssh_bare_github_check_runs_only_on_a_reachable_host() {
 
     let reachable = FakeExecutor::new([
         Ok(output(b"")),
+        // Git on the host rewrites neither SSH spelling, so SSH decides.
+        Ok(output(b"git@github.com:octocat/hello-world.git")),
+        Ok(output(b"ssh://git@github.com/octocat/hello-world.git")),
         Ok(failed(
             b"Hi octocat! You've successfully authenticated, but GitHub does not provide shell access.",
         )),
@@ -1976,14 +1979,14 @@ fn ssh_bare_github_check_runs_only_on_a_reachable_host() {
     assert_eq!(checks[1].id, "github.ssh-bare.builder");
     assert_eq!(checks[1].status, CheckStatus::Ready);
     let commands = reachable.commands.borrow();
-    assert_eq!(&commands[1].args[..2], ["-o", "StrictHostKeyChecking=yes"]);
+    assert_eq!(&commands[3].args[..2], ["-o", "StrictHostKeyChecking=yes"]);
     assert!(
-        commands[1]
+        commands[3]
             .args
             .last()
             .unwrap()
             .contains("'StrictHostKeyChecking=yes' '-o' 'ConnectTimeout=5' 'git@github.com'"),
         "{:?}",
-        commands[1].args
+        commands[3].args
     );
 }
