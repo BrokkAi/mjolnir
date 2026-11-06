@@ -1624,8 +1624,18 @@ pub(crate) fn render_sessions(
         viewport,
     );
     if let Some(selected) = selected {
-        if take_selection_recenter(dashboard, Focus::Sessions) {
+        let wheel_scrolled = dashboard.sessions_wheel_scrolled_from.borrow().as_deref()
+            == dashboard.selected_session_id();
+        let recenter = take_selection_recenter(dashboard, Focus::Sessions);
+        if recenter || !wheel_scrolled {
+            // A moved selection ends the wheel's hold on the offset.
+            dashboard.sessions_wheel_scrolled_from.take();
+        }
+        if recenter {
             offset = mj_chat::components::centered_offset(selected, row_heights, viewport);
+        } else if wheel_scrolled {
+            // The wheel moved the list, not the selection; the selected row
+            // may be off screen until the selection changes.
         } else if selected < offset {
             offset = selected;
         } else {

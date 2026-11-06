@@ -1495,11 +1495,13 @@ fn mouse_wheel_scrolls_the_hovered_pane_without_changing_focus() {
         .expect("draw pane hitboxes");
     let pane_areas = dashboard.pane_areas.expect("dashboard pane hitboxes");
 
-    // The sessions pane moves one row per wheel notch, like a single arrow.
+    // The sessions pane scrolls its list under the wheel and keeps the selection.
     dashboard.handle_mouse(mouse_in(MouseEventKind::ScrollDown, pane_areas[0]));
-    assert_eq!(dashboard.selected_visible_index().unwrap_or(0), 1);
+    assert_eq!(dashboard.selected_visible_index().unwrap_or(0), 0);
+    assert_eq!(dashboard.sessions_scroll.get(), 1);
     dashboard.handle_mouse(mouse_in(MouseEventKind::ScrollUp, pane_areas[0]));
     assert_eq!(dashboard.selected_visible_index().unwrap_or(0), 0);
+    assert_eq!(dashboard.sessions_scroll.get(), 0);
 
     // The quota pane is also a list: one notch moves its selection by one.
     assert_eq!(dashboard.focus, Focus::Sessions);

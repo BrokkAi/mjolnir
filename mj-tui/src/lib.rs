@@ -1004,6 +1004,10 @@ pub struct DashboardState {
     /// direction of the latest keyboard or wheel navigation, when it fits.
     /// This is consumed by that pane's renderer after the movement.
     pub(crate) recenter_on_selection: Cell<Option<Focus>>,
+    /// The selected session the user scrolled the Sessions list away from with
+    /// the wheel. While that session stays selected, the renderer keeps the
+    /// wheel's offset instead of scrolling the selection back into view.
+    pub(crate) sessions_wheel_scrolled_from: RefCell<Option<String>>,
     pub(crate) capacity_index: usize,
     /// Last rendered Disks button bounds, indexed like `capacity_details`.
     /// Keyboard commands use this geometry to anchor the details dropdown.
@@ -1311,6 +1315,7 @@ impl DashboardState {
             targets_scroll: Cell::new(0),
             quota_scroll: Cell::new(0),
             recenter_on_selection: Cell::new(None),
+            sessions_wheel_scrolled_from: RefCell::new(None),
             capacity_index: 0,
             quota_index: 0,
             focus: Focus::Sessions,

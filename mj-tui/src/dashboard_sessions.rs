@@ -1402,6 +1402,17 @@ impl DashboardState {
         self.scroll_selection_for(self.focus, delta);
     }
 
+    /// Scrolls the Sessions list by `delta` rows without moving the selection.
+    /// The renderer clamps the offset to the list and leaves it alone until
+    /// the selection changes.
+    pub(crate) fn scroll_sessions_view(&mut self, delta: isize) {
+        self.recenter_on_selection.set(None);
+        *self.sessions_wheel_scrolled_from.borrow_mut() =
+            self.selected_session_id().map(str::to_owned);
+        self.sessions_scroll
+            .set(self.sessions_scroll.get().saturating_add_signed(delta));
+    }
+
     pub(crate) fn scroll_selection_for(&mut self, focus: Focus, delta: isize) {
         let len = self.focus_len_for(focus);
         if len == 0 {

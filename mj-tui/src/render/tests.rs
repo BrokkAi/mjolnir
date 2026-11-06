@@ -2880,6 +2880,39 @@ fn sessions_pane_keeps_the_keyboard_selection_centred_and_pins_the_ends() {
     assert_eq!(dashboard.sessions_scroll.get(), 0);
 }
 
+// The wheel scrolls the Sessions list and leaves the selection where it was,
+// even when that scrolls the selected row out of view.
+#[test]
+fn sessions_wheel_scrolls_past_the_selection_until_it_changes() {
+    let names = (0..30).map(|n| format!("child-{n:02}")).collect::<Vec<_>>();
+    let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+    let (mut dashboard, parent) = dashboard_with_subagents(&refs);
+    dashboard.open_subagent_workspace(parent);
+    dashboard.clear_sessions_filter();
+    dashboard.select_active_session("child-00");
+    dashboard.focus = Focus::Sessions;
+    let _ = crate::test_support::drawn(&mut dashboard, 120, 40);
+
+    for _ in 0..8 {
+        dashboard.scroll_sessions_view(1);
+    }
+    let lines = crate::test_support::drawn(&mut dashboard, 120, 40);
+    assert_eq!(dashboard.selected_session_id(), Some("child-00"));
+    assert!(row_of_title(&lines, "child-00").is_none(), "{lines:#?}");
+    let scrolled = dashboard.sessions_scroll.get();
+    assert!(scrolled > 0);
+
+    // Later frames keep the wheel's offset.
+    let _ = crate::test_support::drawn(&mut dashboard, 120, 40);
+    assert_eq!(dashboard.sessions_scroll.get(), scrolled);
+
+    // Moving the selection brings it back into view.
+    dashboard.move_selection(1);
+    let lines = crate::test_support::drawn(&mut dashboard, 120, 40);
+    assert_eq!(dashboard.selected_session_id(), Some("child-01"));
+    assert!(row_of_title(&lines, "child-01").is_some(), "{lines:#?}");
+}
+
 #[test]
 fn golden_dashboard_session_render() {
     let mut output = String::new();
