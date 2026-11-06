@@ -1987,7 +1987,7 @@ fn session_starts_follow_the_session_between_worktree_names() {
     );
 }
 
-// Hard-won: PENDING-COMMIT: a metadata-only capture whose only refs/mj ref was a dropped pin restored as a full snapshot.
+// Hard-won: 38f041c03: a metadata-only capture whose only refs/mj ref was a dropped pin restored as a full snapshot.
 #[test]
 fn a_metadata_only_capture_without_review_refs_never_restores_contents() {
     let directory = tempfile::tempdir().unwrap();
