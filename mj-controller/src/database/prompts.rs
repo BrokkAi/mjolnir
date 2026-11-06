@@ -157,68 +157,18 @@ pub(super) fn search_prompts_bounded_from(
     query: &str,
     limit: usize,
 ) -> Result<BoundedPromptHistory> {
-    const PAGE_SIZE: usize = 256;
-    /// How many rows the search may read before giving up on finding more.
-    /// A query that matches nothing must not walk an unbounded history.
-    const MAX_ROWS_SCANNED: usize = 4_096;
-
-    let connection = open_reader(path)?;
-    let canonical_bundle = super::projects::session_project_id(&connection, session_id, bundle_id)?;
-    let bundle_id = canonical_bundle.as_str();
-    let query = query.to_lowercase();
-    let mut seen = std::collections::HashSet::new();
-    let mut matches = Vec::new();
-    let mut before = i64::MAX;
-    let mut scanned = 0;
-    let mut truncated = false;
-    loop {
-        let page = match scope {
-            HistoryScope::Project => query_history_page(
-                &connection,
-                "SELECT h.history_id, h.session_id, h.text
-                 FROM prompt_history h JOIN session_contexts c USING(session_id)
-                 WHERE c.bundle_id = ?1 AND h.history_id < ?2
-                 ORDER BY h.history_id DESC LIMIT ?3",
-                params![bundle_id, before, PAGE_SIZE as i64],
-            )?,
-            HistoryScope::Session => query_history_page(
-                &connection,
-                "SELECT history_id, session_id, text FROM prompt_history
-                 WHERE session_id = ?1 AND history_id < ?2
-                 ORDER BY history_id DESC LIMIT ?3",
-                params![session_id, before, PAGE_SIZE as i64],
-            )?,
-            HistoryScope::All => query_history_page(
-                &connection,
-                "SELECT history_id, session_id, text FROM prompt_history
-                 WHERE history_id < ?1 ORDER BY history_id DESC LIMIT ?2",
-                params![before, PAGE_SIZE as i64],
-            )?,
-        };
-        let page_len = page.len();
-        for entry in page {
-            before = entry.id;
-            scanned += 1;
-            if entry.text.to_lowercase().contains(&query) && seen.insert(entry.text.clone()) {
-                if matches.len() == limit {
-                    truncated = true;
-                    break;
-                }
-                matches.push(entry);
-            }
-        }
-        if truncated || page_len < PAGE_SIZE {
-            break;
-        }
-        if scanned >= MAX_ROWS_SCANNED {
-            truncated = true;
-            break;
-        }
-    }
-    Ok(BoundedPromptHistory {
-        entries: matches,
-        truncated,
-    })
+    search_prompt_tiers(
+        path,
+        session_id,
+        bundle_id,
+        scope,
+        query,
+        Some(SearchBounds {
+            limit,
+            // A query that matches nothing must not walk an unbounded history.
+            max_rows_scanned: 4_096,
+        }),
+    )
 }
 
 pub(super) fn search_prompts_from(
@@ -228,50 +178,147 @@ pub(super) fn search_prompts_from(
     scope: HistoryScope,
     query: &str,
 ) -> Result<Vec<PromptHistoryEntry>> {
-    const PAGE_SIZE: usize = 256;
-    let connection = open_reader(path)?;
-    let canonical_bundle = super::projects::session_project_id(&connection, session_id, bundle_id)?;
-    let bundle_id = canonical_bundle.as_str();
-    let query = query.to_lowercase();
-    let mut seen = std::collections::HashSet::new();
-    let mut matches = Vec::new();
-    let mut before = i64::MAX;
-    loop {
-        let page = match scope {
-            HistoryScope::Project => query_history_page(
-                &connection,
-                "SELECT h.history_id, h.session_id, h.text
-                 FROM prompt_history h JOIN session_contexts c USING(session_id)
-                 WHERE c.bundle_id = ?1 AND h.history_id < ?2
-                 ORDER BY h.history_id DESC LIMIT ?3",
-                params![bundle_id, before, PAGE_SIZE as i64],
-            )?,
-            HistoryScope::Session => query_history_page(
-                &connection,
+    Ok(search_prompt_tiers(path, session_id, bundle_id, scope, query, None)?.entries)
+}
+
+/// Where prompts come from, smallest scope first.
+#[derive(Clone, Copy)]
+enum HistoryTier {
+    /// The asking session's own prompts.
+    Session,
+    /// Other sessions in the asking session's project.
+    Project,
+    /// Sessions in every other project.
+    Elsewhere,
+}
+
+impl HistoryTier {
+    /// The tiers a scope reads, in the order their matches are listed. Within
+    /// a tier, matches run newest first.
+    fn of_scope(scope: HistoryScope) -> &'static [HistoryTier] {
+        match scope {
+            HistoryScope::Session => &[HistoryTier::Session],
+            HistoryScope::Project => &[HistoryTier::Session, HistoryTier::Project],
+            HistoryScope::All => &[
+                HistoryTier::Session,
+                HistoryTier::Project,
+                HistoryTier::Elsewhere,
+            ],
+        }
+    }
+
+    /// One newest-first page of the tier's rows older than `before`.
+    fn page(
+        self,
+        connection: &Connection,
+        session_id: &str,
+        bundle_id: &str,
+        before: i64,
+        page_size: usize,
+    ) -> Result<Vec<PromptHistoryEntry>> {
+        let page_size = page_size as i64;
+        match self {
+            HistoryTier::Session => query_history_page(
+                connection,
                 "SELECT history_id, session_id, text FROM prompt_history
                  WHERE session_id = ?1 AND history_id < ?2
                  ORDER BY history_id DESC LIMIT ?3",
-                params![session_id, before, PAGE_SIZE as i64],
-            )?,
-            HistoryScope::All => query_history_page(
-                &connection,
-                "SELECT history_id, session_id, text FROM prompt_history
-                 WHERE history_id < ?1 ORDER BY history_id DESC LIMIT ?2",
-                params![before, PAGE_SIZE as i64],
-            )?,
-        };
-        let page_len = page.len();
-        for entry in page {
-            before = entry.id;
-            if entry.text.to_lowercase().contains(&query) && seen.insert(entry.text.clone()) {
-                matches.push(entry);
-            }
-        }
-        if page_len < PAGE_SIZE {
-            break;
+                params![session_id, before, page_size],
+            ),
+            HistoryTier::Project => query_history_page(
+                connection,
+                "SELECT h.history_id, h.session_id, h.text
+                 FROM prompt_history h JOIN session_contexts c USING(session_id)
+                 WHERE c.bundle_id = ?1 AND h.session_id <> ?2 AND h.history_id < ?3
+                 ORDER BY h.history_id DESC LIMIT ?4",
+                params![bundle_id, session_id, before, page_size],
+            ),
+            HistoryTier::Elsewhere => query_history_page(
+                connection,
+                "SELECT h.history_id, h.session_id, h.text FROM prompt_history h
+                 WHERE h.history_id < ?1 AND NOT EXISTS (
+                     SELECT 1 FROM session_contexts c
+                     WHERE c.session_id = h.session_id AND c.bundle_id = ?2)
+                 ORDER BY h.history_id DESC LIMIT ?3",
+                params![before, bundle_id, page_size],
+            ),
         }
     }
-    Ok(matches)
+}
+
+struct SearchBounds {
+    /// Matches to return before reporting the result as truncated.
+    limit: usize,
+    /// Rows the search may read, across all tiers, before it gives up.
+    max_rows_scanned: usize,
+}
+
+/// The one prompt search behind the terminal composer and the web viewer.
+///
+/// Tiers are read one after another, each as indexed newest-first pages, so a
+/// scan cap spends its rows on the smaller scopes first. A prompt that
+/// appears in several tiers is listed once, at its smallest scope.
+fn search_prompt_tiers(
+    path: &Path,
+    session_id: &str,
+    bundle_id: &str,
+    scope: HistoryScope,
+    query: &str,
+    bounds: Option<SearchBounds>,
+) -> Result<BoundedPromptHistory> {
+    const PAGE_SIZE: usize = 256;
+
+    let connection = open_reader(path)?;
+    let canonical_bundle = super::projects::session_project_id(&connection, session_id, bundle_id)?;
+    let query = query.to_lowercase();
+    let mut seen = std::collections::HashSet::new();
+    let mut matches = Vec::new();
+    let mut scanned = 0;
+    for tier in HistoryTier::of_scope(scope) {
+        let mut before = i64::MAX;
+        loop {
+            let page = tier.page(
+                &connection,
+                session_id,
+                &canonical_bundle,
+                before,
+                PAGE_SIZE,
+            )?;
+            let page_len = page.len();
+            for entry in page {
+                before = entry.id;
+                scanned += 1;
+                if entry.text.to_lowercase().contains(&query) && seen.insert(entry.text.clone()) {
+                    if bounds
+                        .as_ref()
+                        .is_some_and(|bounds| matches.len() == bounds.limit)
+                    {
+                        return Ok(BoundedPromptHistory {
+                            entries: matches,
+                            truncated: true,
+                        });
+                    }
+                    matches.push(entry);
+                }
+            }
+            if page_len < PAGE_SIZE {
+                break;
+            }
+            if bounds
+                .as_ref()
+                .is_some_and(|bounds| scanned >= bounds.max_rows_scanned)
+            {
+                return Ok(BoundedPromptHistory {
+                    entries: matches,
+                    truncated: true,
+                });
+            }
+        }
+    }
+    Ok(BoundedPromptHistory {
+        entries: matches,
+        truncated: false,
+    })
 }
 
 pub(super) fn query_history_page(

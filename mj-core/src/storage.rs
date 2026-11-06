@@ -68,10 +68,16 @@ impl std::fmt::Display for StoreSchemaMismatch {
 
 impl std::error::Error for StoreSchemaMismatch {}
 
+/// How far a prompt search reaches. Wider scopes list the asking session's
+/// matches first, then the rest of the project's, then other projects', each
+/// newest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryScope {
-    Project,
+    /// This session's prompts and nothing else.
     Session,
+    /// This session's prompts, then other sessions in the project.
+    Project,
+    /// This session, then the project, then every other project.
     All,
 }
 

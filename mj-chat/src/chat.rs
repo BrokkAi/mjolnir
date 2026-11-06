@@ -518,11 +518,9 @@ pub struct ChatState {
     /// reads capture this value so a slow native read cannot paste into a new
     /// draft after the user has continued editing.
     input_generation: u64,
-    /// Stored prompts from other sessions in this project, oldest-first.
-    project_history: Vec<String>,
     /// Stored prompts from this session, oldest-first.
     session_history: Vec<String>,
-    project_history_error: Option<String>,
+    session_history_error: Option<String>,
     prompt_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
@@ -726,9 +724,8 @@ impl ChatState {
             submitting_images: Vec::new(),
             pending_attachment_markers: BTreeMap::new(),
             input_generation: 0,
-            project_history: Vec::new(),
             session_history: Vec::new(),
-            project_history_error: None,
+            session_history_error: None,
             prompt_history: Vec::new(),
             history_index: None,
             history_draft: String::new(),

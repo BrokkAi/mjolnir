@@ -1,5 +1,5 @@
 //! Prompt history: reverse-i-search over the stored prompts and the up/down
-//! walk through this session's and this project's earlier prompts.
+//! walk through this session's earlier prompts.
 
 use crate::theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -35,17 +35,10 @@ pub(super) struct HistorySearchRequest {
 }
 
 impl ChatState {
-    pub(super) fn set_project_history(&mut self, entries: Vec<PromptHistoryEntry>) {
-        self.project_history_error = None;
-        // Entries arrive newest-first; split this session's prompts from the
-        // rest of the project so history navigation reaches them first.
-        let (session, project): (Vec<_>, Vec<_>) = entries
-            .into_iter()
-            .partition(|entry| entry.session_id == self.session_id);
-        let session_history = session.into_iter().rev().map(|entry| entry.text).collect();
-        let project_history = project.into_iter().rev().map(|entry| entry.text).collect();
-        self.session_history = session_history;
-        self.project_history = project_history;
+    /// `entries` are this session's stored prompts, newest first.
+    pub(super) fn set_session_history(&mut self, entries: Vec<PromptHistoryEntry>) {
+        self.session_history_error = None;
+        self.session_history = entries.into_iter().rev().map(|entry| entry.text).collect();
         if let Some(index) = self.history_index
             && index >= self.navigation_history().len()
         {
@@ -55,9 +48,9 @@ impl ChatState {
         }
     }
 
-    pub(super) fn set_project_history_unavailable(&mut self, error: String) {
-        if self.project_history_error.as_deref() != Some(error.as_str()) {
-            self.project_history_error = Some(error);
+    pub(super) fn set_session_history_unavailable(&mut self, error: String) {
+        if self.session_history_error.as_deref() != Some(error.as_str()) {
+            self.session_history_error = Some(error);
         }
     }
 
@@ -69,7 +62,7 @@ impl ChatState {
             original_images: self.input_images.clone(),
             generation: self.next_history_search_generation,
             query: TextInput::new(),
-            scope: HistoryScope::Project,
+            scope: HistoryScope::All,
             matches: Vec::new(),
             selected: None,
             unavailable: None,
@@ -207,10 +200,11 @@ impl ChatState {
         let Some(search) = self.history_search.as_mut() else {
             return;
         };
+        // Each press narrows the search; the last wraps back to the widest.
         search.scope = match search.scope {
+            HistoryScope::All => HistoryScope::Project,
             HistoryScope::Project => HistoryScope::Session,
             HistoryScope::Session => HistoryScope::All,
-            HistoryScope::All => HistoryScope::Project,
         };
         self.refresh_history_search();
     }
@@ -289,8 +283,7 @@ impl ChatState {
     }
 
     fn navigation_history(&self) -> Vec<String> {
-        let mut history = self.project_history.clone();
-        history.extend(self.session_history.iter().cloned());
+        let mut history = self.session_history.clone();
         history.extend(self.prompt_history.iter().cloned());
         history
     }
@@ -300,7 +293,7 @@ impl ChatState {
         if let Some(error) = self
             .bundle_id
             .as_ref()
-            .and(self.project_history_error.as_ref())
+            .and(self.session_history_error.as_ref())
         {
             self.set_notice(format!("History unavailable: {error}"));
         }
@@ -338,8 +331,8 @@ impl ChatState {
 
 pub(super) fn history_scope_name(scope: HistoryScope) -> &'static str {
     match scope {
-        HistoryScope::Project => "project",
         HistoryScope::Session => "session",
+        HistoryScope::Project => "project",
         HistoryScope::All => "all projects",
     }
 }
@@ -561,25 +554,14 @@ mod tests {
 
     // Hard-won: b6b9787: this session's prompts appeared interleaved with other sessions' history
     #[test]
-    fn move_history_walks_this_session_before_the_rest_of_the_project() {
+    fn move_history_walks_only_this_sessions_prompts() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_history_context("bundle");
-        // Newest-first, with this session's prompts interleaved with another's.
-        chat.set_project_history(vec![
-            PromptHistoryEntry {
-                id: 4,
-                session_id: "other".into(),
-                text: "other newest".into(),
-            },
+        chat.set_session_history(vec![
             PromptHistoryEntry {
                 id: 3,
                 session_id: "1234567890".into(),
                 text: "mine newest".into(),
-            },
-            PromptHistoryEntry {
-                id: 2,
-                session_id: "other".into(),
-                text: "other oldest".into(),
             },
             PromptHistoryEntry {
                 id: 1,
@@ -590,19 +572,13 @@ mod tests {
         chat.record_prompt_history("this visit");
 
         let mut recalled = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..4 {
             chat.handle_key(key(KeyCode::Up));
             recalled.push(chat.input.clone());
         }
         assert_eq!(
             recalled,
-            vec![
-                "this visit",
-                "mine newest",
-                "mine oldest",
-                "other newest",
-                "other oldest",
-            ]
+            vec!["this visit", "mine newest", "mine oldest", "mine oldest"]
         );
     }
 }

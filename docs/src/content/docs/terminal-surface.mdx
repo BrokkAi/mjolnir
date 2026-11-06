@@ -450,8 +450,8 @@ changing the prompt draft.
 | `Esc` | Cancel the running turn or shell command |
 | `Page Up` / `Page Down` | Scroll the transcript |
 | `Ctrl+Page Up` | Browse earlier conversation pages; Enter loads an earlier page and Esc returns to the live conversation |
-| `↑` / `↓` | Move within multiline input or walk prompt history |
-| `Ctrl+R` | Search prompt history; `Alt+R` changes the search scope |
+| `↑` / `↓` | Move within multiline input or walk this session's earlier prompts |
+| `Ctrl+R` | Search prompt history; `Alt+R` narrows the search from all projects to this project to this session, then back to all projects |
 | `Ctrl+V` | Paste the system clipboard |
 | `Ctrl+A` / `Ctrl+E` | Move to the start or end of the line |
 | `Ctrl+B` / `Ctrl+F` | Move back or forward one character |
@@ -461,9 +461,9 @@ changing the prompt draft.
 | `Ctrl+U` / `Ctrl+K` | Delete to the start or end of the line |
 | `Ctrl+Y` | Yank the most recently killed text |
 | `Ctrl+C` | Save the current draft to history and clear Prompt |
-| `Ctrl+P` / `Ctrl+N` | Move to the previous or next line, then through history |
+| `Ctrl+P` / `Ctrl+N` | Move to the previous or next line, then through this session's earlier prompts |
 
-Inside history search, `Ctrl+R` or `↑` selects an older match, `Ctrl+S` or `↓` selects a newer match, `Enter` accepts it, and `Esc` or `Ctrl+C` cancels the search.
+History search starts across all projects. Matches from this session come first, then the rest of this project, then other projects, and each group runs newest first. Inside history search, `Ctrl+R` or `↑` selects an older match, `Ctrl+S` or `↓` selects a newer match, `Enter` accepts it, and `Esc` or `Ctrl+C` cancels the search.
 
 Toggling the transcript between rendered and raw text (`prefix+t`) and starting or stopping dictation (`prefix+m`) are prefix commands rather than composer-only keys; see [Prefix key](#prefix-key). They act on whichever session's conversation is visible, including from a pane other than Prompt.
 

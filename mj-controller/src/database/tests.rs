@@ -3385,6 +3385,135 @@ fn history_search_scopes_by_project_session_and_all_projects() {
 }
 
 #[test]
+fn wider_history_scopes_list_smaller_scopes_first_and_dedupe_at_the_smallest() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    // Oldest to newest. Date order alone would put "alpha elsewhere" and
+    // "alpha project" ahead of this session's older prompt.
+    for (ordinal, (session, bundle, text)) in [
+        ("session-1", "project-1", "alpha session old"),
+        ("session-2", "project-1", "alpha project"),
+        ("session-3", "project-2", "alpha elsewhere"),
+        ("session-2", "project-1", "alpha session old"),
+        ("session-1", "project-1", "alpha session new"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        record_prompt_to(
+            &database,
+            session,
+            bundle,
+            ordinal as u64,
+            Some("2026-08-12T00:00:00Z"),
+            text,
+        )
+        .unwrap();
+    }
+    let texts = |scope| {
+        search_prompts_from(&database, "session-1", "project-1", scope, "alpha")
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.text)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        texts(HistoryScope::All),
+        [
+            "alpha session new",
+            "alpha session old",
+            "alpha project",
+            "alpha elsewhere"
+        ]
+    );
+    assert_eq!(
+        texts(HistoryScope::Project),
+        ["alpha session new", "alpha session old", "alpha project"]
+    );
+    assert_eq!(
+        texts(HistoryScope::Session),
+        ["alpha session new", "alpha session old"]
+    );
+
+    let bounded = |limit| {
+        search_prompts_bounded_from(
+            &database,
+            "session-1",
+            "project-1",
+            HistoryScope::All,
+            "alpha",
+            limit,
+        )
+        .unwrap()
+    };
+    let three = bounded(3);
+    assert_eq!(three.entries.len(), 3);
+    assert!(three.truncated, "a fourth match exists");
+    assert!(!bounded(4).truncated);
+}
+
+#[test]
+fn bounded_history_search_spends_its_row_budget_on_smaller_scopes_first() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    record_prompt_to(
+        &database,
+        "session-1",
+        "project-1",
+        1,
+        Some("2026-08-12T00:00:00Z"),
+        "needle in this session",
+    )
+    .unwrap();
+    record_prompt_to(
+        &database,
+        "session-2",
+        "project-2",
+        1,
+        Some("2026-08-12T00:00:00Z"),
+        "unrelated",
+    )
+    .unwrap();
+    // More newer rows in another project than the search may scan.
+    let mut connection = open(&database).unwrap();
+    let tx = connection.transaction().unwrap();
+    for ordinal in 2..5_000 {
+        tx.execute(
+            "INSERT INTO prompt_history(session_id, event_ordinal, submitted_at, text)
+             VALUES ('session-2', ?1, '2026-08-12T00:00:00Z', 'unrelated')",
+            [ordinal],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    drop(connection);
+
+    let found = search_prompts_bounded_from(
+        &database,
+        "session-1",
+        "project-1",
+        HistoryScope::All,
+        "needle",
+        10,
+    )
+    .unwrap();
+
+    assert_eq!(
+        found
+            .entries
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect::<Vec<_>>(),
+        ["needle in this session"]
+    );
+    assert!(
+        found.truncated,
+        "the other project exhausted the row budget"
+    );
+}
+
+#[test]
 fn abandoned_prompts_are_searchable_in_session_and_project_history() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");

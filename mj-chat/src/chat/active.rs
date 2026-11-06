@@ -92,7 +92,7 @@ enum ChatIoUpdate {
             String,
         >,
     },
-    ProjectHistoryPrefetched(std::result::Result<Vec<PromptHistoryEntry>, String>),
+    SessionHistoryPrefetched(std::result::Result<Vec<PromptHistoryEntry>, String>),
     /// The history a large session did not convert when it opened, built off
     /// the event loop. `attempt` counts the tries so far, so a transcript that
     /// keeps changing under the conversion cannot retry for ever.
@@ -264,10 +264,10 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
                 chat.set_notice(format!("Earlier messages failed to load: {error}"));
             }
         },
-        ChatIoUpdate::ProjectHistoryPrefetched(Ok(entries)) => chat.set_project_history(entries),
-        ChatIoUpdate::ProjectHistoryPrefetched(Err(error)) => {
-            tracing::warn!(%error, "project chat history prefetch failed");
-            chat.set_project_history_unavailable(error);
+        ChatIoUpdate::SessionHistoryPrefetched(Ok(entries)) => chat.set_session_history(entries),
+        ChatIoUpdate::SessionHistoryPrefetched(Err(error)) => {
+            tracing::warn!(%error, "session chat history prefetch failed");
+            chat.set_session_history_unavailable(error);
         }
         ChatIoUpdate::ToolDiffstats {
             tool_call_id,
@@ -650,11 +650,11 @@ impl ActiveChat {
             let bundle_id = bundle_id.to_owned();
             tokio::spawn(async move {
                 let result = history_session
-                    .search_prompts(bundle_id, HistoryScope::Project, String::new())
+                    .search_prompts(bundle_id, HistoryScope::Session, String::new())
                     .await
                     .map_err(|error| format!("{error:#}"));
-                if let Err(error) = updates.send(ChatIoUpdate::ProjectHistoryPrefetched(result)) {
-                    tracing::debug!(%error, "project history result dropped because the chat closed");
+                if let Err(error) = updates.send(ChatIoUpdate::SessionHistoryPrefetched(result)) {
+                    tracing::debug!(%error, "session history result dropped because the chat closed");
                 }
             });
         }
