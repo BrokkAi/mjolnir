@@ -1,8 +1,10 @@
 //! Where a quota check runs the harness program it starts.
 //!
 //! Codex, Grok and Claude Code quota checks start the harness itself. With
-//! `[quota] runtime` at its default, the daemon runs that program inside the
-//! release's agent-dev image, which carries every harness at its pinned
+//! `[quota] runtime` at its default, the check runs on the host when the host
+//! already has that harness installed. Only when it does not, and a local
+//! Podman or Docker engine is available, the daemon runs the program inside
+//! the release's agent-dev image, which carries every harness at its pinned
 //! version, so a host that runs its sessions in containers needs no harness of
 //! its own. The profile's home is mounted at the same path, so the check reads
 //! the person's login and a refreshed token lands where the host expects it.
@@ -10,7 +12,10 @@
 //! The named container, not the engine client, owns the check: killing
 //! `podman run` leaves its container running. [`QuotaContainer`] removes it on
 //! every exit path, and [`sweep_quota_containers`] removes any a stopped
-//! daemon left behind.
+//! daemon left behind. Each container names the process that started it, and
+//! the sweep never removes one whose process is still running: every process
+//! on a host that shares the data directory, such as a test run, has the same
+//! instance identity as the daemon.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -26,6 +31,10 @@ use mj_core::targets::{
 
 /// Marks a container as a quota check, so a later daemon can find leftovers.
 pub(crate) const QUOTA_LABEL: &str = "dev.mj.quota";
+/// Names the process that started a quota check: its process id and birth
+/// identity, as [`owner_token`] writes them. The sweep removes a container
+/// only when that process is gone.
+pub(crate) const OWNER_LABEL: &str = "dev.mj.quota-owner";
 /// Bounds the engine's own bookkeeping commands: image lookup and removal.
 const ENGINE_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// The container's home and working directory. A tmpfs, so a check runs the
@@ -70,12 +79,23 @@ impl QuotaRuntime {
     /// image is the agent-dev image this module would otherwise start, and
     /// the container has no engine to start one with.
     ///
-    /// `Auto` uses a container only for an enabled local Podman or Docker
-    /// runtime whose engine is installed, and runs that runtime's image,
+    /// `host_has_harness` says whether this host can already run the harness
+    /// the check needs (see [`crate::codex_usage::host_has_codex`],
+    /// [`crate::grok_usage::host_has_grok`] and
+    /// [`crate::claude_usage::host_has_claude`]).
+    ///
+    /// `Auto` runs the check on this host when `host_has_harness` is true.
+    /// Otherwise it uses a container for an enabled local Podman or Docker
+    /// runtime whose engine is installed, running that runtime's image,
     /// which the daemon already keeps downloaded. With no such runtime the
-    /// check runs on this host, by design. A named engine that is missing is
-    /// an error the check reports.
-    pub(crate) fn resolve(config: &QuotaRuntimeConfig, path: Option<&OsStr>) -> Result<Self> {
+    /// check runs on this host, by design, and reports the missing harness.
+    /// A named engine that is missing is an error the check reports; a named
+    /// engine is used whether or not the host has the harness.
+    pub(crate) fn resolve(
+        config: &QuotaRuntimeConfig,
+        path: Option<&OsStr>,
+        host_has_harness: bool,
+    ) -> Result<Self> {
         if config.in_daemon_container {
             return Ok(Self::Host);
         }
@@ -88,6 +108,9 @@ impl QuotaRuntime {
         let (engine, program, image) = match config.choice {
             QuotaRuntimeChoice::Host => return Ok(Self::Host),
             QuotaRuntimeChoice::Auto => {
+                if host_has_harness {
+                    return Ok(Self::Host);
+                }
                 let found = [Engine::Podman, Engine::Docker]
                     .into_iter()
                     .find_map(|engine| Some((engine, installed(engine)?, image(engine)?)));
@@ -121,8 +144,12 @@ impl QuotaRuntime {
     }
 
     /// Resolve against this process's `PATH`.
-    pub(crate) fn current(config: &QuotaRuntimeConfig) -> Result<Self> {
-        Self::resolve(config, std::env::var_os("PATH").as_deref())
+    pub(crate) fn current(config: &QuotaRuntimeConfig, host_has_harness: bool) -> Result<Self> {
+        Self::resolve(
+            config,
+            std::env::var_os("PATH").as_deref(),
+            host_has_harness,
+        )
     }
 }
 
@@ -204,6 +231,9 @@ impl ContainerRuntime {
             "--label".to_owned(),
             format!("{QUOTA_LABEL}=true"),
         ];
+        if let Some(owner) = owner_token() {
+            command.extend(["--label".to_owned(), format!("{OWNER_LABEL}={owner}")]);
+        }
         command.extend(self.user_args());
         command.extend([
             "--tmpfs".to_owned(),
@@ -330,7 +360,15 @@ impl Drop for QuotaContainer {
 }
 
 fn remove_container(command: &CommandSpec, name: &str) {
-    match BoundedProcessExecutor::new(ENGINE_COMMAND_TIMEOUT).execute(command) {
+    remove_container_with(
+        &BoundedProcessExecutor::new(ENGINE_COMMAND_TIMEOUT),
+        command,
+        name,
+    )
+}
+
+fn remove_container_with(executor: &impl CommandExecutor, command: &CommandSpec, name: &str) {
+    match executor.execute(command) {
         Ok(output) if output.status == 0 || !remove_reports_failure(&output.stderr) => {}
         Ok(output) => tracing::warn!(
             container = name,
@@ -350,9 +388,73 @@ fn remove_reports_failure(stderr: &[u8]) -> bool {
     !stderr.contains("no such container")
 }
 
+/// This process as a container owner: `<pid>:<birth identity>`. The birth
+/// identity keeps a reused process id from passing for this process. `None`
+/// when the host cannot report it; the next daemon's sweep then removes a
+/// container this process left without an owner.
+fn owner_token() -> Option<&'static str> {
+    static OWNER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    OWNER
+        .get_or_init(|| {
+            let pid = std::process::id();
+            match mj_core::subprocess::process_birth_identity(pid) {
+                Ok(birth) => Some(format!("{pid}:{birth}")),
+                Err(error) => {
+                    tracing::warn!(%error, "quota containers will not name their owner");
+                    None
+                }
+            }
+        })
+        .as_deref()
+}
+
+/// Whether the process an owner label names is still running.
+fn owner_is_running(pid: u32, birth: &str) -> bool {
+    match mj_core::subprocess::process_birth_identity(pid) {
+        Ok(current) => current == birth,
+        // The identity could not be read. Only a process that does not exist
+        // is certainly gone.
+        Err(_) => mj_client::daemon::process_is_alive(pid),
+    }
+}
+
+/// Whether the sweep may remove a container with this owner label.
+///
+/// A label that names a process which is no longer running qualifies. So does
+/// a missing label: a build that did not record owners, or a host that cannot
+/// report a birth identity, started it. Only the daemon sweeps, before it
+/// starts any check of its own, and a daemon holds its instance alone, so such
+/// a container belongs to an earlier daemon. A label in another format is
+/// kept.
+fn owner_is_gone(label: &str, running: impl Fn(u32, &str) -> bool) -> bool {
+    let label = label.trim();
+    if label.is_empty() {
+        return true;
+    }
+    let Some((pid, birth)) = label.split_once(':') else {
+        return false;
+    };
+    let Ok(pid) = pid.parse::<u32>() else {
+        return false;
+    };
+    !running(pid, birth)
+}
+
 /// Remove every quota container this instance left behind, such as one whose
 /// daemon stopped mid-check. Runs on the engines installed on this host.
+///
+/// Containers whose owning process is still running stay. The instance
+/// identity comes from the data directory, so any other process on the same
+/// host that sweeps does so with the live daemon's identity.
 pub(crate) fn sweep_quota_containers(executor: &impl CommandExecutor, path: Option<&OsStr>) {
+    sweep_quota_containers_with(executor, path, &owner_is_running)
+}
+
+fn sweep_quota_containers_with(
+    executor: &impl CommandExecutor,
+    path: Option<&OsStr>,
+    running: &dyn Fn(u32, &str) -> bool,
+) {
     let instance = mj_core::config::instance_identity();
     for engine in [Engine::Podman, Engine::Docker] {
         let Some(program) = mj_core::program_path::find_program_on_path(engine.program(), path)
@@ -392,9 +494,30 @@ pub(crate) fn sweep_quota_containers(executor: &impl CommandExecutor, path: Opti
             }
         };
         for id in ids {
+            let inspect = CommandSpec::new(
+                program.as_str(),
+                [
+                    "container",
+                    "inspect",
+                    "--format",
+                    &format!("{{{{index .Config.Labels \"{OWNER_LABEL}\"}}}}"),
+                    id.as_str(),
+                ],
+            )
+            .purpose("read a quota check container's owner");
+            let label = match executor.execute(&inspect) {
+                Ok(output) if output.status == 0 => {
+                    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+                }
+                // Gone since the listing, or not readable: leave it.
+                _ => continue,
+            };
+            if !owner_is_gone(&label, running) {
+                continue;
+            }
             let command = CommandSpec::new(program.as_str(), ["rm", "--force", id.as_str()])
                 .purpose("remove a leftover quota check container");
-            remove_container(&command, &id);
+            remove_container_with(executor, &command, &id);
         }
     }
 }
@@ -420,13 +543,14 @@ impl ContainerCheck {
 
 /// Add the image quota checks run in to the daemon's background downloads,
 /// unless a configured runtime already downloads it from the same engine, as
-/// it does whenever `auto` chose that runtime.
+/// it does whenever `auto` chose that runtime. The image is wanted whenever a
+/// check could fall back to it, so this assumes the host lacks the harness.
 pub(crate) fn add_quota_image(
     plan: &mut Vec<mj_core::targets::ImageRefresh>,
     config: &QuotaRuntimeConfig,
     path: Option<&OsStr>,
 ) {
-    let Ok(QuotaRuntime::Container(runtime)) = QuotaRuntime::resolve(config, path) else {
+    let Ok(QuotaRuntime::Container(runtime)) = QuotaRuntime::resolve(config, path, false) else {
         return;
     };
     let host = match runtime.engine {
@@ -466,17 +590,151 @@ mod tests {
         (directory, path)
     }
 
+    /// Answers the sweep's engine commands from `containers` (id, owner label)
+    /// and records every `rm`.
+    struct FakeEngine {
+        containers: Vec<(&'static str, &'static str)>,
+        removed: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FakeEngine {
+        fn new(containers: Vec<(&'static str, &'static str)>) -> Self {
+            Self {
+                containers,
+                removed: Default::default(),
+            }
+        }
+
+        fn removed(&self) -> Vec<String> {
+            self.removed.lock().unwrap().clone()
+        }
+    }
+
+    impl CommandExecutor for FakeEngine {
+        fn execute(&self, command: &CommandSpec) -> Result<mj_core::targets::CommandOutput> {
+            let args = &command.args;
+            let stdout = match args[0].as_str() {
+                "ps" => self
+                    .containers
+                    .iter()
+                    .map(|(id, _)| format!("{id}\n"))
+                    .collect::<String>(),
+                "container" => {
+                    let id = args.last().unwrap();
+                    self.containers
+                        .iter()
+                        .find(|(candidate, _)| candidate == id)
+                        .map(|(_, label)| format!("{label}\n"))
+                        .unwrap_or_default()
+                }
+                "rm" => {
+                    self.removed
+                        .lock()
+                        .unwrap()
+                        .push(args.last().unwrap().clone());
+                    String::new()
+                }
+                other => panic!("unexpected engine command {other}"),
+            };
+            Ok(mj_core::targets::CommandOutput {
+                status: 0,
+                stdout: stdout.into_bytes(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    fn sweep_removed(
+        containers: Vec<(&'static str, &'static str)>,
+        running: &dyn Fn(u32, &str) -> bool,
+    ) -> Vec<String> {
+        let (_directory, path) = path_with(&["podman"]);
+        let engine = FakeEngine::new(containers);
+        sweep_quota_containers_with(&engine, Some(&path), running);
+        engine.removed()
+    }
+
+    #[test]
+    fn sweep_keeps_containers_whose_owner_is_running() {
+        let removed = sweep_removed(vec![("live", "4242:boot-a:77")], &|pid, birth| {
+            pid == 4242 && birth == "boot-a:77"
+        });
+        assert!(removed.is_empty(), "{removed:?}");
+    }
+
+    #[test]
+    fn sweep_removes_containers_whose_owner_is_gone() {
+        // Dead: no such process. Reused: the pid runs, but it was born later.
+        let removed = sweep_removed(
+            vec![("dead", "4242:boot-a:77"), ("reused", "4243:boot-a:78")],
+            &|pid, birth| pid == 4243 && birth == "boot-a:99",
+        );
+        assert_eq!(removed, ["dead", "reused"]);
+    }
+
+    #[test]
+    fn sweep_removes_only_the_dead_owners_among_several() {
+        let removed = sweep_removed(
+            vec![
+                ("live", "10:b:1"),
+                ("dead", "11:b:2"),
+                ("also-live", "10:b:1"),
+            ],
+            &|pid, _| pid == 10,
+        );
+        assert_eq!(removed, ["dead"]);
+    }
+
+    /// A container without an owner was started by a build that did not
+    /// record one, or on a host that cannot, and only an earlier daemon can own
+    /// it. A label in another format stays.
+    #[test]
+    fn sweep_removes_unowned_containers_and_keeps_unreadable_owners() {
+        let removed = sweep_removed(
+            vec![
+                ("legacy", ""),
+                ("no-pid", "not-a-pid:boot:1"),
+                ("no-birth", "4242"),
+            ],
+            &|_, _| false,
+        );
+        assert_eq!(removed, ["legacy"]);
+    }
+
+    #[test]
+    fn owner_token_names_this_process_as_running() {
+        let Some(token) = owner_token() else {
+            return;
+        };
+        assert!(owner_is_gone(token, |_, _| false));
+        assert!(!owner_is_gone(token, owner_is_running));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_exited_is_not_running() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        let birth = mj_core::subprocess::process_birth_identity(pid).ok();
+        child.wait().unwrap();
+        assert!(!owner_is_running(
+            pid,
+            birth.as_deref().unwrap_or("unknown")
+        ));
+    }
+
     /// Where `auto` runs a check for a config file with `targets` and these
     /// engines installed, as the daemon loads it: the loader adds the
     /// standard `podman` and `docker` runtimes the file does not name.
     fn auto_decision(targets: &str, engines: &[&str]) -> Option<(Engine, String)> {
-        decision(targets, engines, false)
+        decision(targets, engines, false, false)
     }
 
     fn decision(
         targets: &str,
         engines: &[&str],
         in_daemon_container: bool,
+        host_has_harness: bool,
     ) -> Option<(Engine, String)> {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("config.toml");
@@ -494,7 +752,7 @@ mod tests {
         let (_bin, path) = path_with(engines);
         let mut runtime = QuotaRuntimeConfig::of(&config);
         runtime.in_daemon_container = in_daemon_container;
-        match QuotaRuntime::resolve(&runtime, Some(&path)).unwrap() {
+        match QuotaRuntime::resolve(&runtime, Some(&path), host_has_harness).unwrap() {
             QuotaRuntime::Host => None,
             QuotaRuntime::Container(runtime) => {
                 assert_eq!(
@@ -540,10 +798,49 @@ mod tests {
         // config has the standard runtimes, but it has no engine to reach:
         // its checks run beside the daemon on the image's harnesses, even
         // when a named engine is chosen.
-        assert_eq!(decision("", &["podman", "docker"], true), None);
+        assert_eq!(decision("", &["podman", "docker"], true, false), None);
         assert_eq!(
-            decision("[quota]\nruntime = \"podman\"\n", &["podman"], true),
+            decision("[quota]\nruntime = \"podman\"\n", &["podman"], true, false),
             None
         );
+    }
+
+    #[test]
+    fn auto_prefers_a_harness_the_host_already_has_over_any_engine() {
+        let standard = mj_core::config::DEFAULT_CONTAINER_IMAGE.to_owned();
+        // Engine installed, harness on the host: no container.
+        assert_eq!(decision("", &["podman", "docker"], false, true), None);
+        assert_eq!(decision("", &["docker"], false, true), None);
+        // Engine installed, harness missing from the host: the engine's image.
+        assert_eq!(
+            decision("", &["podman"], false, false),
+            Some((Engine::Podman, standard))
+        );
+        // No engine: the host either way.
+        assert_eq!(decision("", &[], false, false), None);
+        assert_eq!(decision("", &[], false, true), None);
+    }
+
+    #[test]
+    fn named_runtimes_ignore_what_the_host_has() {
+        let named = |runtime: &str, engines: &[&str], host_has_harness: bool| {
+            decision(
+                &format!("[quota]\nruntime = \"{runtime}\"\n"),
+                engines,
+                false,
+                host_has_harness,
+            )
+        };
+        for host_has_harness in [false, true] {
+            assert_eq!(
+                named("podman", &["podman", "docker"], host_has_harness).map(|(engine, _)| engine),
+                Some(Engine::Podman)
+            );
+            assert_eq!(
+                named("docker", &["podman", "docker"], host_has_harness).map(|(engine, _)| engine),
+                Some(Engine::Docker)
+            );
+            assert_eq!(named("host", &["podman", "docker"], host_has_harness), None);
+        }
     }
 }

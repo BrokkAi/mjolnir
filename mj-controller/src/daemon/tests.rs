@@ -1160,6 +1160,7 @@ async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
         .unwrap();
     let (updates, mut receiver) = crate::session_manager::coalesced_update_channel();
     updates.send(crate::session_manager::SessionManagerUpdate {
+        raw_observation: None,
         session_id: "completed-turn".into(),
         view: ManagedSessionView::default(),
     });
@@ -1291,11 +1292,7 @@ async fn in_process_reviewer_forwarding_stops_when_the_caller_goes_away() {
         RemoteSessionRequest::Reviewer {
             session_id: "session-1".into(),
             role: None,
-            action: crate::session_manager::ReviewerAction::CaptureDelta {
-                repositories: None,
-                scope: Default::default(),
-                baselines: Default::default(),
-            },
+            action: crate::session_manager::ReviewerAction::CaptureDelta { repositories: None },
             reply,
         },
         manager.control.clone(),
@@ -3620,6 +3617,7 @@ async fn relay_turn_start_retires_only_the_recorded_public_lifecycle_failure() {
     observe(
         &mut view,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         },
@@ -3642,6 +3640,7 @@ async fn relay_turn_start_retires_only_the_recorded_public_lifecycle_failure() {
     observe(
         &mut view,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         },
@@ -5665,14 +5664,14 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
         "codex".into(),
         mj_core::config::HarnessProfile {
             enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home,
             environment: environment.into_iter().collect(),
             context_window_bytes: None,
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            models: Default::default(),
             legacy_subagents: None,
+            ..mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Codex, home)
         },
     );
     config.targets.insert(
@@ -6784,6 +6783,7 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
             }));
     }
     conversation.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "task-1".into(),
@@ -7071,15 +7071,10 @@ fn seed_live_session(directory: &Path, relay_root: &Path) {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: profile_home,
-                environment: Default::default(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    profile_home,
+                )
             },
         );
         Ok(())
@@ -8232,9 +8227,7 @@ async fn exercise_child_close_with_a_nested_workspace(
             TurnReviewSeed {
                 task: "review the changes".into(),
                 user_messages: Vec::new(),
-                baselines: Default::default(),
-                through_ordinal: 1,
-                prior_review: None,
+                declined: Vec::new(),
             },
             "failed-start".into(),
             std::num::NonZeroUsize::new(1).unwrap(),
@@ -8250,12 +8243,9 @@ async fn exercise_child_close_with_a_nested_workspace(
         crate::database::save_turn_review_state(
             parent_id,
             &crate::database::TurnReviewState {
-                pending_followup: false,
-                forward_attempts: 0,
                 active_group: Some(mj_core::storage::ActiveReviewGroup {
                     driver: driver.snapshot(),
                     reviewers: vec![Default::default()],
-                    scope: Default::default(),
                     registrations: vec![mj_core::storage::ReviewerRegistration {
                         role: "reviewer-1".into(),
                         request_key: relation.request_key.clone(),
@@ -8339,8 +8329,8 @@ async fn exercise_child_close_with_a_nested_workspace(
         assert!(
             crate::database::turn_review_state(parent_id)
                 .unwrap()
-                .baselines
-                .is_empty()
+                .push_findings
+                .is_none()
         );
         state.review_host.shutdown().await.unwrap();
     } else {
@@ -11122,15 +11112,10 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: project.path().join("codex-home"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    project.path().join("codex-home"),
+                )
             },
         );
         config.targets.insert(

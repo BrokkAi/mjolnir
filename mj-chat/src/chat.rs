@@ -123,14 +123,13 @@ pub use attachments::{CHAT_DRAFT_PREFIX, PromptImage, PromptPayload};
 
 /// What `/review status` reports, on every surface.
 ///
-/// It answers the two questions a person actually has: is every turn reviewed,
-/// and is one being reviewed right now.
+/// It answers the two questions a person actually has: does review run before
+/// push, and is one being reviewed right now.
 #[must_use]
 pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) -> String {
-    let armed = match review.trigger {
+    let armed = match review.trigger() {
         mj_core::config::ReviewTrigger::Push => "Review trigger is before push",
-        mj_core::config::ReviewTrigger::Turn => "Reviewing every completed turn",
-        mj_core::config::ReviewTrigger::Off => "Automatic review is off; /review reviews one turn",
+        mj_core::config::ReviewTrigger::Off => "Automatic review is off; /review reviews commits",
     };
     let count = review.reviewers.len();
     let armed = if count == 0 {
@@ -628,8 +627,6 @@ pub struct ChatState {
     task_dialog_form: Form<BackgroundTaskControl>,
     task_control_area: Option<Rect>,
     subagent_count: usize,
-    /// The session runs with Mjolnir sub-agents, whether or not any exist.
-    subagents_enabled: bool,
     subagent_working_count: usize,
     reviewers: ReviewerCounts,
     reviewer_control_area: Option<Rect>,
@@ -802,7 +799,6 @@ impl ChatState {
             task_dialog_form: Form::new(),
             task_control_area: None,
             subagent_count: 0,
-            subagents_enabled: false,
             subagent_working_count: 0,
             reviewers: ReviewerCounts::default(),
             reviewer_control_area: None,

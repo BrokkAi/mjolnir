@@ -310,6 +310,8 @@ pub fn classify_prompt_completion(stop_reason: &str) -> PromptCompletion {
 #[serde(deny_unknown_fields)]
 pub struct MaterializedTurnOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_through: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<crate::diagnostic::TurnDiagnostic>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -325,6 +327,20 @@ pub struct MaterializedTurnOutcome {
 }
 
 impl MaterializedTurnOutcome {
+    /// The highest acceptance answered by the projection, or a legacy row.
+    pub fn answered_ordinal(&self) -> Option<u64> {
+        self.answered_through.or_else(|| {
+            crate::subagent::reminded_turn_ordinal(&self.command_id).or(self.accepted_ordinal)
+        })
+    }
+
+    pub fn answers(&self, ordinal: u64) -> bool {
+        self.accepted_ordinal == Some(ordinal)
+            || self
+                .answered_ordinal()
+                .is_some_and(|through| through >= ordinal)
+    }
+
     /// Only work that actually started can have been interrupted.
     pub fn interruption_ordinal(&self) -> Option<u64> {
         (self.turn_start_position.is_some()
@@ -2115,24 +2131,49 @@ impl SessionRecord {
         Ok(())
     }
 
-    /// User-visible session name, independent of the initial prompt stored in `title`.
-    pub fn display_title(&self) -> &str {
+    /// The name a listing shows: a name a person or the harness gave, else the
+    /// title the session was created with, else its id. A session nobody
+    /// named would otherwise be named by its id, which every listing already
+    /// prints beside it; the title it was created with says more (launch
+    /// findings F-12 and R2-8). A name a person typed beats one the harness
+    /// generated. Every place that names a session uses this, or
+    /// [`listed_session_title`] where only the stored columns are at hand.
+    pub fn listed_title(&self) -> &str {
+        listed_session_title(
+            &self.id,
+            &self.title,
+            self.session_title_override.as_deref(),
+            self.acp_session_title.as_deref(),
+        )
+    }
+
+    /// The manual name, harness title, or first-prompt provisional title, as
+    /// opposed to the creation title. A manual name comes first. A rename
+    /// prompt starts from this; everything that only needs the name uses
+    /// [`Self::listed_title`].
+    pub fn given_name(&self) -> Option<&str> {
         self.session_title_override
             .as_deref()
             .or(self.acp_session_title.as_deref())
-            .unwrap_or(&self.id)
     }
 
-    /// The name a listing shows: the display title, except that a session
-    /// the harness has not named yet and nobody renamed would otherwise be
-    /// named by its id, which every listing already prints beside it. The
-    /// title it was created with says more (launch findings F-12 and R2-8).
-    pub fn listed_title(&self) -> &str {
-        let named = self.session_title_override.is_some() || self.acp_session_title.is_some();
-        if !named && !self.title.trim().is_empty() {
-            return &self.title;
-        }
-        self.display_title()
+    /// Whether this session has a manual name, harness title, or first-prompt
+    /// provisional title. Modes that number unnamed sessions use this.
+    pub fn has_given_name(&self) -> bool {
+        self.given_name().is_some()
+    }
+
+    /// Whether the session has no name but its id: the list would print the
+    /// id twice, so callers fall back to a description or the short id.
+    pub fn is_named_by_id(&self) -> bool {
+        self.listed_title() == self.id
+    }
+
+    /// The listed title as one bounded line, for text that goes to an agent or
+    /// into a message header: whitespace folds onto one line and a long title
+    /// is cut with an ellipsis. See [`bounded_one_line`].
+    pub fn message_name(&self) -> String {
+        bounded_one_line(self.listed_title(), MESSAGE_NAME_CHARS)
     }
 
     /// Project this session works in, as the session list and the chat header
@@ -2681,9 +2722,7 @@ impl State {
     #[must_use]
     pub fn session_notice_name(&self, session_id: &str) -> String {
         match self.sessions.get(session_id) {
-            Some(session) if session.listed_title() != session.id => {
-                session.listed_title().to_owned()
-            }
+            Some(session) if !session.is_named_by_id() => session.listed_title().to_owned(),
             _ => short_id(session_id).to_owned(),
         }
     }
@@ -2713,6 +2752,21 @@ impl State {
     #[must_use]
     pub fn is_subagent_session(&self, id: &str) -> bool {
         self.subagents.contains_key(id) || crate::native_agent::is_view_id(id)
+    }
+
+    /// Whether `id` is a Mjolnir sub-agent whose session has no live worker,
+    /// so its stored conversation can be read but not attached to.
+    ///
+    /// The terminal and the phone viewer both ask this, so they cannot
+    /// disagree about which children are readable. Callers that also know of
+    /// a transition bringing the session back add that check themselves.
+    #[must_use]
+    pub fn is_stopped_subagent(&self, id: &str) -> bool {
+        self.subagents.contains_key(id)
+            && self
+                .sessions
+                .get(id)
+                .is_some_and(|session| !session.state.has_live_worker())
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -2909,6 +2963,8 @@ impl State {
                 if let Some(updated) = after.profiles.get(&session.last_profile) {
                     comparable.enabled = updated.enabled;
                     comparable.legacy_subagents = updated.legacy_subagents.clone();
+                    // Which models are offered does not change a running session.
+                    comparable.models = updated.models.clone();
                 }
                 // A mismatched harness is already broken; allow repairing it.
                 profile.kind == session.harness_kind
@@ -2956,14 +3012,13 @@ impl State {
                     [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
                     [] => unreachable!("something changed"),
                 };
-                let title = session.display_title();
-                let named = if title == session.id {
+                let named = if session.is_named_by_id() {
                     format!(
                         "a running session in project {:?}",
                         session.project_name(before)
                     )
                 } else {
-                    format!("the running session {title:?}")
+                    format!("the running session {:?}", session.listed_title())
                 };
                 bail!(
                     "Setup would change the {used} that {named} uses. Save the new settings under a new name, or stop the session first."
@@ -3061,6 +3116,40 @@ fn truncate_session_title(title: String, maximum_chars: usize) -> String {
     }
     truncated.push('…');
     truncated
+}
+
+/// [`SessionRecord::listed_title`] from the stored columns, for code that
+/// reads a session's title fields without loading the record. The one place
+/// that decides which of the three titles names a session.
+#[must_use]
+pub fn listed_session_title<'a>(
+    id: &'a str,
+    title: &'a str,
+    title_override: Option<&'a str>,
+    acp_title: Option<&'a str>,
+) -> &'a str {
+    if let Some(name) = title_override.or(acp_title) {
+        return name;
+    }
+    if title.trim().is_empty() { id } else { title }
+}
+
+/// How many characters a session's name takes in text addressed to an agent.
+pub const MESSAGE_NAME_CHARS: usize = 80;
+
+/// A name as one line of at most `maximum_chars` characters: terminal
+/// controls are removed as [`normalize_session_title`] removes them (the
+/// creation title is stored as typed), whitespace, including line breaks,
+/// folds to single spaces, and a longer name is cut at a word boundary and
+/// ends with an ellipsis. The one bounding rule for names that reach agents;
+/// the terminal fits names by display cells instead.
+#[must_use]
+pub fn bounded_one_line(name: &str, maximum_chars: usize) -> String {
+    let visible = crate::transcript::sanitize_terminal_text(name);
+    truncate_session_title(
+        visible.split_whitespace().collect::<Vec<_>>().join(" "),
+        maximum_chars,
+    )
 }
 
 /// Build the short-lived title shown before the harness supplies its own.

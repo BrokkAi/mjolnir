@@ -190,7 +190,7 @@ enum Command {
     Resume(api_commands::ResumeArgs),
     /// Cancel the turn a session is running.
     InterruptTurn(api_commands::SessionArgs),
-    /// Start a review of a session's last turn, or show the review it has open.
+    /// Review a session's committed work, or show the review it has open.
     Review(api_commands::ReviewArgs),
     /// Stop a session's background task, or all tasks the worker can stop.
     StopTask(api_commands::StopTaskArgs),
@@ -547,8 +547,14 @@ fn main() -> Result<()> {
     result
 }
 
+/// Tokio starts one worker per CPU by default. The daemon mostly waits on I/O,
+/// and on a 120-CPU host the idle workers' wakeups cost more than they add.
+const MAX_RUNTIME_THREADS: usize = 16;
+
 fn run(cli: Cli) -> Result<()> {
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(cores.min(MAX_RUNTIME_THREADS))
         .enable_all()
         .build()
         .context("build Tokio runtime")?;
@@ -1024,7 +1030,7 @@ async fn run_command(
             if daemon::container::exec_in_container(&container_forwarded_args()).await? {
                 return Ok(DashboardExit::Normal);
             }
-            doctor(args).map(|()| DashboardExit::Normal)
+            doctor(args).await.map(|()| DashboardExit::Normal)
         }
         Some(Command::Setup(args)) => {
             if args.command.is_none()
@@ -2829,10 +2835,50 @@ fn setup(args: SetupArgs) -> Result<()> {
     }
 }
 
-fn doctor(args: DoctorArgs) -> Result<()> {
-    let checks = mj_controller::doctor::run_current(mj_controller::doctor::DoctorOptions {
+/// How long doctor waits for the daemon to report one profile's catalogue.
+/// A profile whose discovery is still running is reported as not checked.
+const CATALOG_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The catalogues each enabled profile advertises, read from a daemon that is
+/// already running. Doctor never starts one: it is a diagnostic, and the
+/// answer "not checked" is accurate when nothing has discovered the models.
+async fn doctor_catalogs(config: &mj_core::config::Config) -> mj_controller::doctor::Catalogs {
+    use mj_controller::doctor::Catalogs;
+    let ids = mj_controller::doctor::catalog_profile_ids(config);
+    if ids.is_empty() {
+        return Catalogs::Read(Default::default());
+    }
+    let client = match tokio::time::timeout(CATALOG_WAIT, api_client::ApiClient::connect_running())
+        .await
+    {
+        Ok(Ok(client)) => client,
+        Ok(Err(_)) | Err(_) => {
+            return Catalogs::NotChecked("no running Mjolnir daemon reported the models".into());
+        }
+    };
+    let read = futures::future::join_all(ids.iter().map(|id| async {
+        match tokio::time::timeout(CATALOG_WAIT, client.models(id, None, true)).await {
+            Ok(Ok(choices)) => Ok(choices),
+            Ok(Err(error)) => Err(format!("{error:#}")),
+            Err(_) => Err(format!(
+                "its models were still being discovered after {} seconds",
+                CATALOG_WAIT.as_secs()
+            )),
+        }
+    }))
+    .await;
+    Catalogs::Read(ids.into_iter().zip(read).collect())
+}
+
+async fn doctor(args: DoctorArgs) -> Result<()> {
+    let mut checks = mj_controller::doctor::run_current(mj_controller::doctor::DoctorOptions {
         smoke: args.smoke,
     });
+    // An unreadable configuration is already reported by the checks above.
+    if let Ok(config) = mj_core::config::Config::load_from(&mj_core::config::config_path()) {
+        let catalogs = doctor_catalogs(&config).await;
+        checks.extend(mj_controller::doctor::catalog_checks(&config, &catalogs));
+    }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&checks)?);
     } else {

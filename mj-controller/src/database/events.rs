@@ -739,8 +739,82 @@ mod tests {
         assert_eq!(back_count, 3);
     }
 
+    /// A child's question reaches its parent under the name the session list
+    /// shows for the child: a typed name first, then the harness's, then the
+    /// title it was created with, cut to one bounded line.
     #[test]
-    fn child_question_outbox_survives_cancellation_replay_and_reused_ids() {
+    fn a_child_question_names_the_child_as_the_session_list_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("question-names.sqlite");
+        let long_title = format!(
+            "Fix the parser\n\n{}",
+            "The prompt goes on for paragraphs. ".repeat(20)
+        );
+        let mut parent = super::super::tests::session("parent", "project-1");
+        parent.state = SessionState::Running;
+        save_session_to(&path, &parent).unwrap();
+        let cases = [
+            ("created-with", None, None),
+            ("harness", None, Some("Harness name")),
+            ("typed", Some("Typed name"), Some("Harness name")),
+        ];
+        let question = ElicitationRequest::from_acp_params("elicitation-1", serde_json::json!({
+            "mode":"form", "sessionId":"child", "message":"Which architecture?",
+            "requestedSchema":{"type":"object", "properties":{"choice":{"type":"string", "title":"Architecture", "enum":["Thin callers", "Thick callers"]}}}
+        })).unwrap();
+        for (id, title_override, acp_title) in cases {
+            let mut child = super::super::tests::session(id, "project-1");
+            child.state = SessionState::Running;
+            child.title = long_title.clone();
+            child.session_title_override = title_override.map(str::to_owned);
+            child.acp_session_title = acp_title.map(str::to_owned);
+            save_session_to(&path, &child).unwrap();
+            open(&path).unwrap().execute(
+                "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES (?1,'parent',?1,'{}')",
+                [id],
+            ).unwrap();
+            page_for(
+                &path,
+                id,
+                vec![RelayObservation::ElicitationRequested {
+                    request: question.clone(),
+                }],
+                false,
+            )
+            .unwrap();
+        }
+        let connection = open(&path).unwrap();
+        let sender_title = |child: &str| {
+            let json: String = connection
+                .query_row(
+                    "SELECT event_json FROM mailbox_outbox WHERE event_key LIKE ?1",
+                    [format!("subagent-question-{child}-%")],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mj_core::mailbox::MailboxEventBody::SessionMessage {
+                from: mj_core::mailbox::Sender::Session { id, title },
+                ..
+            } = serde_json::from_str::<mj_core::mailbox::MailboxEvent>(&json)
+                .unwrap()
+                .body
+            else {
+                panic!("session message expected")
+            };
+            assert_eq!(id, child);
+            title
+        };
+        let created_with = sender_title("created-with");
+        assert!(!created_with.contains('\n'), "{created_with:?}");
+        assert!(created_with.starts_with("Fix the parser The prompt goes on"));
+        assert!(created_with.ends_with('…'));
+        assert!(created_with.chars().count() <= mj_core::state::MESSAGE_NAME_CHARS);
+        assert_eq!(sender_title("harness"), "Harness name");
+        assert_eq!(sender_title("typed"), "Typed name");
+    }
+
+    #[test]
+    fn child_question_outbox_survives_cancellation_replay_and_reused_ids_and_skips_approvals() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("questions.sqlite");
         for id in ["session-1", "parent"] {
@@ -752,29 +826,33 @@ mod tests {
             "mode":"form", "sessionId":"session-1", "message":"Which architecture?",
             "requestedSchema":{"type":"object", "properties":{"choice":{"type":"string", "title":"Architecture", "enum":["Thin callers", "Thick callers"]}}}
         })).unwrap();
+        let mut reused = question.clone();
+        reused.message = "Which database?".into();
         let mut permission = question.clone();
+        permission.id = "tool-permission-1".into();
         permission.message = "May I run this command?".into();
         permission.tool_permission = Some(mj_core::elicitation::ToolPermissionForm { skip: true });
+        let mut secret = question.clone();
+        secret.message = "Paste the token".into();
+        secret.fields[0].secret = true;
+        let mut plan = question.clone();
+        plan.id = format!("{}1", mj_core::acp::PLAN_REVIEW_ID_PREFIX);
+        plan.message = "Approve this plan?".into();
         let observations = || {
-            vec![
-                RelayObservation::ElicitationRequested {
-                    request: question.clone(),
-                },
-                RelayObservation::ElicitationResolved {
-                    elicitation_id: question.id.clone(),
+            let mut observations = Vec::new();
+            // A restarted harness may reuse the same question id. A parent
+            // cannot grant approvals, so they stay with the person.
+            for request in [&question, &reused, &permission, &secret, &plan] {
+                observations.push(RelayObservation::ElicitationRequested {
+                    request: request.clone(),
+                });
+                observations.push(RelayObservation::ElicitationResolved {
+                    elicitation_id: request.id.clone(),
                     action: "cancel".into(),
                     reply: None,
-                },
-                // A restarted harness may reuse the same question id.
-                RelayObservation::ElicitationRequested {
-                    request: permission.clone(),
-                },
-                RelayObservation::ElicitationResolved {
-                    elicitation_id: permission.id.clone(),
-                    action: "cancel".into(),
-                    reply: None,
-                },
-            ]
+                });
+            }
+            observations
         };
         // A top-level form remains local.
         page(&path, observations(), false).unwrap();
@@ -799,7 +877,7 @@ mod tests {
                 .unwrap()
                 .events
                 .len(),
-            4,
+            10,
             "outbox failure rolls back its API events too"
         );
         connection
@@ -812,7 +890,7 @@ mod tests {
             .unwrap();
         assert!(
             current.pending_elicitations.is_empty(),
-            "both forms resolved in this same projection page"
+            "every form resolved in this same projection page"
         );
         apply_projection_event_to(
             &path,
@@ -865,10 +943,13 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("Which architecture?"))
         );
+        assert!(texts.iter().any(|text| text.contains("Which database?")));
         assert!(
-            texts
+            !texts
                 .iter()
-                .any(|text| text.contains("May I run this command?"))
+                .any(|text| text.contains("May I run this command?")
+                    || text.contains("Paste the token")
+                    || text.contains("Approve this plan?"))
         );
         assert_eq!(
             super::super::subagent_questions::reconcile_pending_subagent_questions_with(
@@ -889,7 +970,7 @@ mod tests {
         )
         .unwrap();
         let connection = open(&path).unwrap();
-        assert_eq!(connection.query_row("SELECT count(*) FROM api_events WHERE json_extract(body,'$.type')='input_required'", [], |r| r.get::<_,u64>(0)).unwrap(), 4);
+        assert_eq!(connection.query_row("SELECT count(*) FROM api_events WHERE json_extract(body,'$.type')='input_required'", [], |r| r.get::<_,u64>(0)).unwrap(), 10);
         assert_eq!(
             connection
                 .query_row("SELECT count(*) FROM mailbox_outbox", [], |r| r

@@ -96,7 +96,7 @@ export default defineConfig({
             { label: 'Terminal surface', slug: 'terminal-surface' },
             { label: 'Daemon in a container', slug: 'daemon-container' },
             { label: 'Web viewer and desktop app', slug: 'web-viewer' },
-            { label: 'Independent turn review', slug: 'turn-review' },
+            { label: 'Code review', slug: 'turn-review' },
             { label: 'Durability and recovery', slug: 'durability' },
           ],
         },

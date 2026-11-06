@@ -52,15 +52,7 @@ fn add_codex_profile(config: &mut Config, home: &Path) {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: home.to_path_buf(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, home.to_path_buf())
         },
     );
 }
@@ -1433,9 +1425,13 @@ fn in_place_move_retains_running_and_parked_children_and_roleless_refusal_names_
     let mut running = parent.clone();
     running.id = "child-running".into();
     running.state = SessionState::Running;
+    // The Move text names a child as the session list does, so a rename wins
+    // over the task name the relation holds.
+    running.session_title_override = Some("Renamed implementer".into());
     let mut parked = parent.clone();
     parked.id = "child-parked".into();
     parked.state = SessionState::Parked;
+    parked.session_title_override = Some("review the tests".into());
     let relation = |child_session_id: &str, task_name: &str| mj_core::subagent::SubagentRecord {
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
@@ -1485,8 +1481,9 @@ fn in_place_move_retains_running_and_parked_children_and_roleless_refusal_names_
     let refusal =
         super::roleless_move_children_error(&super::live_move_children(&state, &parent.id))
             .unwrap();
-    assert!(refusal.contains("implement the change"));
+    assert!(refusal.contains("Renamed implementer"));
     assert!(refusal.contains("child-running"));
+    assert!(!refusal.contains("implement the change"));
     assert!(!refusal.contains("review the tests"));
 
     // A live oracle alone never refuses a Move to a harness without parent
@@ -2782,14 +2779,14 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
                 id.into(),
                 HarnessProfile {
                     enabled: true,
-                    kind,
-                    home: home.clone(),
                     environment: Default::default(),
                     context_window_bytes: None,
+                    models: Default::default(),
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
                     codex_profile: None,
                     muse_auto_review: None,
+                    ..mj_core::config::HarnessProfile::new(kind, home.clone())
                 },
             );
         }
@@ -3030,6 +3027,7 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
     let mut child = fixture.controller.state.sessions[parent_id].clone();
     child.id = "live-child".into();
     child.state = SessionState::Running;
+    child.session_title_override = Some("finish the migration".into());
     child.target = Some(TargetLocator::LocalBare {
         worker_root: fixture._directory.path().join("live-child"),
     });
@@ -3038,7 +3036,7 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         reviewer_launch: None,
         child_session_id: child.id.clone(),
         parent_session_id: parent_id.into(),
-        task_name: "finish the migration".into(),
+        task_name: "spawned as an audit".into(),
         profile_id: "codex".into(),
         model: None,
         effort: None,

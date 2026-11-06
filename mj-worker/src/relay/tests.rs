@@ -1816,6 +1816,7 @@ fn idle_clock_waits_for_background_work_and_persists_its_completion() {
     );
     relay
         .record_observation(RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         })
@@ -2909,6 +2910,7 @@ fn codex_replies_preserve_the_user_turn_and_only_autonomous_work_adds_a_notice()
     }
 }
 
+// Hard-won: #1450 review: autonomous outcomes must preserve turn identity and queued work.
 #[test]
 fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
     use mj_core::config::HarnessKind;
@@ -2945,10 +2947,18 @@ fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
         .unwrap();
     let state = relay.operational_state();
     assert!(state.active_prompt.is_none());
+    assert!(relay.originating_command_id().is_none());
+    let completion = state.turn_completion.clone();
     assert!(state.harness_turn.is_some());
     assert_eq!(state.execution, RelayExecutionState::Running);
     assert!(!state.safe_to_replace(HarnessKind::Codex));
     assert!(!state.safe_for_checkpoint(HarnessKind::Codex));
+    submit_relay(&mut relay, "stop-tail", RelayCommand::CancelTurn);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed("stop-tail", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    assert!(relay.snapshot.cancelling_harness_turn.is_none());
     relay
         .record_session_update(metadata(
             serde_json::json!({"execution":{"version":1,"status":"idle","turnId":"autonomous"}}),
@@ -2958,11 +2968,42 @@ fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
         relay.operational_state().execution,
         RelayExecutionState::Idle
     );
+    assert_eq!(relay.operational_state().turn_completion, completion);
+    assert!(matches!(
+        observations(&relay).last(),
+        Some(RelayObservation::HarnessTurnSettled {
+            autonomous: None,
+            ..
+        })
+    ));
     assert!(
         !relay
             .operational_state()
             .safe_to_replace(HarnessKind::Codex),
         "between goal turns is not safe to kill"
+    );
+    relay
+        .record_session_update(metadata(
+            serde_json::json!({"execution":{"version":1,"status":"running","turnId":"next"}}),
+        ))
+        .unwrap();
+    let start = relay
+        .snapshot
+        .autonomous_harness_turn()
+        .unwrap()
+        .first_ordinal;
+    submit_relay(&mut relay, "stop-goal", RelayCommand::CancelTurn);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed("stop-goal", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    relay
+        .record_session_update(metadata(
+            serde_json::json!({"execution":{"version":1,"status":"idle","turnId":"next"}}),
+        ))
+        .unwrap();
+    assert!(
+        matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.start_ordinal == start && turn.stop_reason == "cancelled")
     );
     drop(relay);
     let mut relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
@@ -3379,6 +3420,7 @@ fn observations(relay: &DurableRelay) -> Vec<RelayObservation> {
 /// quota ends like any other cycle: the marker is gone, no tool is left in
 /// flight and a prompt could start. (Session e33442fe's recovery was lost to a
 /// checkpoint, not to a leftover fact; this pins that the facts are clean.)
+// Hard-won: #1450 review: autonomous outcomes must preserve turn identity and queued work.
 #[test]
 fn a_harness_turn_refused_for_quota_ends_with_nothing_left_set() {
     let temp = tempfile::tempdir().unwrap();
@@ -3404,6 +3446,10 @@ fn a_harness_turn_refused_for_quota_ends_with_nothing_left_set() {
     .unwrap()
     .unwrap();
     relay.claude_turn_result(&refusal).unwrap();
+    // Hard-won: #1450 review: quota refusals were recorded as successful turns.
+    assert!(
+        matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.stop_reason == "error")
+    );
     let facts = relay.operational_state().facts();
     assert_eq!(facts.harness_turn_started_at_ms, None);
     assert!(facts.tools_in_flight.is_empty());
@@ -3509,7 +3555,7 @@ fn a_claude_harness_turn_settles_on_its_result_and_not_on_the_origin_marker() {
     assert!(relay.operational_state().harness_turn.is_none());
     assert!(matches!(
         observations(&relay).last(),
-        Some(RelayObservation::HarnessTurnSettled { origin, prompt_in_flight: false })
+        Some(RelayObservation::HarnessTurnSettled { origin, prompt_in_flight: false, .. })
             if origin.as_deref() == Some("human")
     ));
 
@@ -3713,6 +3759,9 @@ fn a_stop_the_harness_never_answers_ends_the_self_started_turn() {
     relay
         .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
+    assert!(
+        matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.stop_reason == "cancelled" && turn.start_ordinal == first_ordinal)
+    );
     assert!(relay.unanswered_harness_turn_stop().is_none());
     let before = relay.operational_state().latest_ordinal;
     assert!(
@@ -3721,6 +3770,82 @@ fn a_stop_the_harness_never_answers_ends_the_self_started_turn() {
             .unwrap()
     );
     assert_eq!(relay.operational_state().latest_ordinal, before);
+
+    // Hard-won: #1450 review: a result that beat the cancel's acknowledgement settled the stopped turn as finished
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay
+        .record_session_update(agent_text_chunk("Summarizing"))
+        .unwrap();
+    submit_relay(&mut relay, "stop-fast", RelayCommand::CancelTurn);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    assert!(
+        matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.stop_reason == "cancelled")
+    );
+    relay
+        .record_command_completed("stop-fast", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    assert!(relay.snapshot.cancelling_harness_turn.is_none());
+    assert!(relay.unanswered_harness_turn_stop().is_none());
+
+    // A stop the runtime could not send leaves the turn to end as it does.
+    relay
+        .record_session_update(agent_text_chunk("Again"))
+        .unwrap();
+    submit_relay(&mut relay, "stop-refused", RelayCommand::CancelTurn);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_rejected(
+            "stop-refused",
+            mj_core::event_outcome::OutcomeReason::CommandFailed,
+            "cancel ACP prompt: closed",
+        )
+        .unwrap();
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    assert!(
+        matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.stop_reason == "end_turn")
+    );
+
+    // Hard-won: 3b2f0d538: a second stop downgraded an applied stop and its rejection cleared it
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay
+        .record_session_update(agent_text_chunk("Summarizing"))
+        .unwrap();
+    submit_relay(&mut relay, "stop-first", RelayCommand::CancelTurn);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed("stop-first", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    submit_relay(&mut relay, "stop-second", RelayCommand::Cancel);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_rejected(
+            "stop-second",
+            mj_core::event_outcome::OutcomeReason::CommandFailed,
+            "cancel ACP prompt: closed",
+        )
+        .unwrap();
+    let first_ordinal = relay
+        .unanswered_harness_turn_stop()
+        .expect("the acknowledged first stop outlives the refused second one");
+    // The target is journal state, so a restarted worker still has it.
+    drop(relay);
+    let mut relay = claude_relay(temp.path());
+    assert_eq!(relay.unanswered_harness_turn_stop(), Some(first_ordinal));
+    assert!(
+        relay
+            .end_unanswered_harness_turn_stop(first_ordinal)
+            .unwrap()
+    );
+    assert!(
+        matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.stop_reason == "cancelled")
+    );
 }
 
 // Hard-won: 1389c545: Claude work without a prompt looked idle and allowed a recovery checkpoint mid-cycle.
@@ -5601,6 +5726,7 @@ fn continuation_expectation_is_process_local_and_clears_when_a_harness_turn_open
     assert_eq!(relay.activity_facts().expected_continuation, None);
     relay
         .record_observation(RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         })
@@ -7750,7 +7876,7 @@ fn push_review_requests_require_protocol_43_and_old_turn_captures_still_decode()
     let legacy = ReviewerRequest::CaptureDelta {
         repositories: None,
         baselines: Default::default(),
-        scope: CaptureScope::TurnDelta,
+        scope: CaptureScope::PushableCommits,
     };
     assert!(
         !serde_json::to_string(&legacy)
@@ -7765,7 +7891,7 @@ fn push_review_requests_require_protocol_43_and_old_turn_captures_still_decode()
         old,
         ReviewerRequest::CaptureDelta {
             repositories: None,
-            scope: CaptureScope::TurnDelta,
+            scope: CaptureScope::PushableCommits,
             ..
         }
     ));
@@ -7774,6 +7900,41 @@ fn push_review_requests_require_protocol_43_and_old_turn_captures_still_decode()
             role: None,
             request: old
         }
-        .supported_at(42)
+        .supported_at(43)
+    );
+}
+
+// Hard-won: #1450: a settled harness turn could not admit its handback reminder.
+#[test]
+fn settled_harness_turn_admits_only_its_current_reminder() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    relay.open_harness_turn_if_allowed().unwrap();
+    let id = relay.originating_command_id().unwrap();
+    relay.settle_harness_turn(None, "end_turn").unwrap();
+    let completion = relay.operational_state().turn_completion.unwrap();
+    assert_eq!(completion.command_id, id);
+    let stale = relay
+        .submit_command(
+            "stale-reminder",
+            RelayCommand::HandbackReminder {
+                completed_command_id: "harness-turn-0".into(),
+                completed_ordinal: completion.completed_ordinal,
+            },
+        )
+        .unwrap();
+    assert!(stale.is_err());
+    submit_relay(
+        &mut relay,
+        "current-reminder",
+        RelayCommand::HandbackReminder {
+            completed_command_id: id,
+            completed_ordinal: completion.completed_ordinal,
+        },
     );
 }

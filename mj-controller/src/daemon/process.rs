@@ -180,6 +180,7 @@ pub(super) async fn run_daemon_runtime(
     // below have an awaited epilogue just like failures in the serving loop.
     let (delegation_tx, delegation_updates) = crate::session_manager::delegation_channel();
     let manager = crate::session_manager::spawn_session_manager_observed(Some(delegation_tx))?;
+    manager.control.update_model_policies(&controller);
     let manager_targets = manager.targets;
     manager_targets.send_replace(dashboard_worker_targets(&controller));
     let manager_updates = manager.updates;
@@ -277,7 +278,7 @@ pub(super) async fn run_daemon_runtime(
             );
             record_daemon_cleanup(
                 &mut outcome,
-                "shut down turn review host after bootstrap failure",
+                "shut down code review host after bootstrap failure",
                 state
                     .review_host()
                     .shutdown()
@@ -767,6 +768,33 @@ pub(super) async fn run_daemon_runtime(
                     // continuation service and closes this channel, so a
                     // closed channel is not evidence of a failure.
                     let Some(update) = update? else { break };
+                    if let Some(raw) = update.raw_observation.as_ref()
+                        && raw.native_session_is_ready()
+                        && let Some(build) = update.view.snapshot.as_ref().and_then(|snapshot| snapshot.worker_build.clone())
+                    {
+                        let observation = {
+                            let owner = state.owner();
+                            owner.controller().state.sessions.get(&update.session_id).and_then(|session| {
+                                Some((session.last_profile.clone(), crate::controller::profile_config::observation_check(session.target.as_ref()?)?))
+                            })
+                        };
+                        if let Some((profile, check)) = observation {
+                            let raw = raw.clone();
+                            let state = state.clone();
+                            client_tasks.spawn(async move {
+                                let Ok(_activity) = crate::upgrade::activity("profile choice cache") else { return; };
+                                match crate::controller::profile_config::observe(profile.clone(), build, raw, check).await {
+                                    Ok(true) => {
+                                        if let Some(backend) = state.report_backend.get().and_then(std::sync::Weak::upgrade) {
+                                            backend.profile_catalog().reread_failed(&profile);
+                                        }
+                                    }
+                                    Ok(false) => {},
+                                    Err(error) => tracing::warn!(%error, "could not cache observed profile choices"),
+                                }
+                            });
+                        }
+                    }
                     if let Some((detail, observed_updated_at)) =
                         state.missing_target_record(&update.session_id, &update.view)
                     {
@@ -897,7 +925,7 @@ pub(super) async fn run_daemon_runtime(
     );
     epilogue.record(
         &mut outcome,
-        "shut down turn review host",
+        "shut down code review host",
         state
             .review_host()
             .shutdown()
@@ -1194,7 +1222,9 @@ pub(super) fn spawn_manager_target_refresher(
                 }
                 owner.pollable_worker_inputs()
             };
-            let config = inputs.controller().config;
+            let controller = inputs.controller();
+            state.session_manager.update_model_policies(&controller);
+            let config = controller.config;
             if auth_profiles.as_ref() != Some(&config.profiles) {
                 let mut cache = auth.clone();
                 let profiles = config.profiles.clone();

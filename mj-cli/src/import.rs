@@ -84,8 +84,10 @@ pub(crate) struct NativeImportArgs {
     /// Reviewer model and optional effort; final colon suffix is effort only for known efforts (minimal, low, medium, high, xhigh, max); trailing colon escapes it. Repeat up to three times.
     #[arg(long = "reviewer", value_name = "MODEL[:EFFORT]")]
     reviewers: Vec<String>,
-    /// Review trigger for the imported session, overriding `[review]`.
-    #[arg(long, value_parser = ["off", "turn", "push"])]
+    /// Whether the imported session is reviewed before push (`push`) or not
+    /// (`off`). Omitted follows `[review]`: review runs when reviewers are
+    /// configured.
+    #[arg(long, value_name = "off|push")]
     review: Option<String>,
     #[command(flatten)]
     pub(crate) workspace: crate::WorkspaceName,
@@ -1094,14 +1096,14 @@ mod tests {
     fn an_import_reads_the_configured_profiles_home_not_the_stock_one() {
         let profile = |kind: HarnessKind, home: &str| mj_core::config::HarnessProfile {
             enabled: true,
-            kind,
-            home: PathBuf::from(home),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             muse_auto_review: None,
             codex_profile: None,
+            ..mj_core::config::HarnessProfile::new(kind, PathBuf::from(home))
         };
         let mut config = Config::default();
         config
@@ -1166,15 +1168,31 @@ mod tests {
                 reviewers: Some(vec![choice.clone()])
             })
         );
-        for trigger in [ReviewTrigger::Off, ReviewTrigger::Turn, ReviewTrigger::Push] {
+        for (global_reviewers, trigger) in [
+            (Vec::new(), ReviewTrigger::Push),
+            (vec![choice.clone()], ReviewTrigger::Push),
+        ] {
             let global = ReviewConfig {
-                trigger,
+                reviewers: global_reviewers,
                 ..Default::default()
             };
             let effective = global.for_session(inherited.as_ref());
-            assert_eq!(effective.trigger, trigger);
+            assert_eq!(effective.trigger(), trigger);
             assert_eq!(effective.reviewers, vec![choice.clone()]);
         }
+        let (_, turn) = parse_import(&[
+            "mj",
+            "import",
+            "codex",
+            "--session",
+            "native-1",
+            "--review",
+            "turn",
+        ]);
+        let refused = crate::api_commands::session_review(turn.review.as_deref(), &turn.reviewers)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("--review push"), "{refused}");
         assert!(
             crate::Cli::try_parse_from([
                 "mj",
@@ -1294,15 +1312,15 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                kind: HarnessKind::Codex,
-                home,
                 enabled: true,
                 environment: Default::default(),
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 muse_auto_review: None,
                 codex_profile: None,
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, home)
             },
         );
         let controller = Controller {

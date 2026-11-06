@@ -93,15 +93,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         profiles: BTreeMap::from([(
             "codex-1".into(),
             HarnessProfile {
-                enabled: true,
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
-                kind: HarnessKind::Codex,
-                home: "/highly/secret/codex".into(),
                 environment: BTreeMap::from([("GH_TOKEN".into(), "secret-token".into())]).into(),
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, "/highly/secret/codex")
             },
         )]),
         bundles: BTreeMap::from([(
@@ -709,7 +702,7 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
         legacy: None,
-        trigger: mj_core::config::ReviewTrigger::Turn,
+        disabled: false,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "private-review-model".into(),
@@ -724,7 +717,7 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     assert_eq!(
         value.get("review_config"),
         Some(&serde_json::json!({
-            "trigger": "turn",
+            "trigger": "push",
             "reviewers": [{"model":"private-review-model","effort":"private-review-effort"},{"model":"private-review-model","effort":"private-review-effort"}],
         }))
     );
@@ -794,11 +787,74 @@ fn target_snapshot_uses_each_raw_host_project_history_and_leaves_managed_empty()
 }
 
 #[test]
+fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
+    let (config, mut state) = sample_config_state();
+    let parent = state.sessions["session-1"].clone();
+    for (id, kind) in [
+        ("worker", mj_core::subagent::SubagentKind::Worker),
+        ("reviewer", mj_core::subagent::SubagentKind::Reviewer),
+    ] {
+        let mut child = parent.clone();
+        child.id = id.into();
+        child.state = if id == "reviewer" {
+            mj_core::state::SessionState::Error
+        } else {
+            mj_core::state::SessionState::Stopped
+        };
+        state.sessions.insert(id.into(), child);
+        state.subagents.insert(
+            id.into(),
+            mj_core::subagent::SubagentRecord {
+                kind,
+                reviewer_launch: None,
+                child_session_id: id.into(),
+                parent_session_id: "session-1".into(),
+                task_name: id.into(),
+                profile_id: "codex-1".into(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                initial_prompt: String::new(),
+                request_key: id.into(),
+                created_at: "now".into(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            }
+            .into(),
+        );
+    }
+
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let row = |id: &str| snapshot.sessions.0.get(id).unwrap();
+    assert_eq!(
+        row("session-1").subagent_session_ids,
+        ["reviewer", "worker"]
+    );
+    assert_eq!(row("session-1").reviewer_session_ids, ["reviewer"]);
+    assert!(row("worker").reviewer_session_ids.is_empty());
+    assert!(row("reviewer").active);
+    assert!(!row("worker").active);
+
+    // The summary rows a compact client sees carry both lists, so Reviewers
+    // and Subagents never wait for a child's own record.
+    let mut stopped = state.clone();
+    stopped.sessions.get_mut("session-1").unwrap().state = mj_core::state::SessionState::Stopped;
+    let snapshot = ViewerSnapshot::from_config_state(&config, &stopped, 1);
+    let wire = viewer_wire::row(snapshot.sessions.0.get("session-1").unwrap()).unwrap();
+    assert_eq!(wire.row["detail"], false);
+    assert_eq!(
+        wire.row["reviewer_session_ids"],
+        serde_json::json!(["reviewer"])
+    );
+}
+
+#[test]
 fn public_snapshot_exposes_only_review_status_configuration() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
         legacy: None,
-        trigger: mj_core::config::ReviewTrigger::Turn,
+        disabled: false,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "private-review-model".into(),
@@ -814,7 +870,7 @@ fn public_snapshot_exposes_only_review_status_configuration() {
     assert_eq!(
         value.get("review_config"),
         Some(&serde_json::json!({
-            "trigger": "turn",
+            "trigger": "push",
             "reviewers": [{"model":"private-review-model","effort":"private-review-effort"},{"model":"private-review-model","effort":"private-review-effort"}],
         }))
     );
@@ -834,7 +890,7 @@ fn session_review_count_overrides_phone_status_projection() {
         2
     ];
     state.sessions.get_mut("session-1").unwrap().review =
-        Some(mj_core::config::SessionReview::Turn {
+        Some(mj_core::config::SessionReview::Push {
             reviewers: Some(vec![mj_core::config::SubagentChoice {
                 model: "model-b".into(),
                 effort: None,
@@ -843,7 +899,7 @@ fn session_review_count_overrides_phone_status_projection() {
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 9);
     assert_eq!(snapshot.review_config.reviewers.len(), 2);
     let session = snapshot.sessions.get("session-1").unwrap();
-    assert_eq!(session.review_trigger, mj_core::config::ReviewTrigger::Turn);
+    assert_eq!(session.review_trigger, mj_core::config::ReviewTrigger::Push);
     assert_eq!(session.review_count, 1);
     let wire = serde_json::to_value(session).unwrap();
     assert_eq!(wire["review_count"], 1);
@@ -2984,15 +3040,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
     config.profiles.insert(
         "claude-1".into(),
         HarnessProfile {
-            enabled: true,
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
-            kind: HarnessKind::Claude,
-            home: "/secret/claude".into(),
-            environment: Default::default(),
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, "/secret/claude")
         },
     );
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
@@ -3044,7 +3092,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
 #[test]
 fn a_running_review_projects_to_the_phone() {
     use crate::review_host::{RuntimeReviewView, VerdictKind, VerdictView};
-    use mj_core::review::driver::{Resolution, RoleState, RoleStatus, TurnReviewPhase};
+    use mj_core::review::driver::{RoleState, RoleStatus, TurnReviewPhase};
 
     let review = RuntimeReviewView {
         child_session_id: None,
@@ -3072,11 +3120,7 @@ fn a_running_review_projects_to_the_phone() {
         verdict: Some(VerdictView {
             kind: VerdictKind::Findings,
             text: "[P1] src/lib.rs:1 -- unbounded retry".into(),
-            allowed: vec![
-                Resolution::Forwarded,
-                Resolution::Dismissed,
-                Resolution::Cancelled,
-            ],
+            allowed: Vec::new(),
         }),
     };
 

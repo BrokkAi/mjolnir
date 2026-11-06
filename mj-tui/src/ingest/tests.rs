@@ -730,6 +730,7 @@ fn failed_closing_record_is_recovery_status_not_an_active_transition() {
 fn inferred_input_request_clears_when_a_later_prompt_starts() {
     let mut materialized = MaterializedSession::empty("session-1");
     materialized.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "prompt".into(),

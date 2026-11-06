@@ -1061,7 +1061,9 @@ mod settled_task_tests {
                 .unwrap(),
             )
             .unwrap();
-        relay.settle_harness_turn(Some("test".into())).unwrap();
+        relay
+            .settle_harness_turn(Some("test".into()), "end_turn")
+            .unwrap();
         relay.prepare_pending_assessment().unwrap();
         let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
         assert_eq!(
@@ -1177,7 +1179,9 @@ mod settled_task_tests {
                 .unwrap(),
             )
             .unwrap();
-        relay.settle_harness_turn(Some("test".into())).unwrap();
+        relay
+            .settle_harness_turn(Some("test".into()), "end_turn")
+            .unwrap();
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, _) = relay.pending_replied_verdict().unwrap();
         relay
@@ -1236,7 +1240,7 @@ mod settled_task_tests {
     fn a_verdict_stays_with_its_own_turn_in_the_published_state() {
         use crate::relay::test_support::{prompt, submit_relay};
         use agent_client_protocol::v1::schema::{ContentBlock, ContentChunk, TextContent};
-        use mj_core::activity::verdict::{Decision, TurnCompletion};
+        use mj_core::activity::verdict::Decision;
         use mj_core::assessment::{Action, Failure, Input, Judgment, Verdict, Work};
         use mj_core::relay::RelayCommandOutcome;
         let verdict = |work| Verdict {
@@ -1277,7 +1281,7 @@ mod settled_task_tests {
         relay.claim_pending_commands(true).unwrap();
         relay.set_air_tasks(vec![task("build")]).unwrap();
         say(&mut relay, "The build is running in the background.");
-        let completed = relay
+        relay
             .record_command_completed(
                 "api-turn-20",
                 RelayCommandOutcome::Prompt {
@@ -1313,7 +1317,10 @@ mod settled_task_tests {
             })
             .unwrap();
         say(&mut relay, "The build passed.");
-        relay.settle_harness_turn(Some("end_turn".into())).unwrap();
+        relay
+            .settle_harness_turn(Some("end_turn".into()), "end_turn")
+            .unwrap();
+        let completion = relay.operational_state().turn_completion;
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, identity) = relay.pending_replied_verdict().unwrap();
         assert!(
@@ -1337,14 +1344,12 @@ mod settled_task_tests {
         assert!(assessment.turn_id.starts_with("harness-turn-"));
         assert_eq!(assessment.action, Some(Action::Uncertain));
         assert_eq!(
-            state.turn_completion,
-            Some(TurnCompletion {
-                command_id: "api-turn-20".into(),
-                completed_ordinal: completed,
-                decision: Decision::KeepCurrent,
-            }),
-            "the prompt's completion identity, with no verdict copied into it"
+            state.turn_completion, completion,
+            "assessment keeps the harness settlement identity"
         );
+        let completion = state.turn_completion.unwrap();
+        assert_eq!(completion.command_id, assessment.turn_id);
+        assert_eq!(completion.decision, Decision::KeepCurrent);
     }
 
     // Hard-won: 1ee54bfa: a disabled continuation left its unconsumed Continue verdict holding `mj wait` open.

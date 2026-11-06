@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 fn clear_review_legacy(draft: &mut Value) {
     if let Some(review) = draft.get_mut("review").and_then(Value::as_object_mut) {
+        review.remove("trigger");
         review.remove("count");
         review.remove("profile");
         review.remove("effort");
@@ -453,5 +454,46 @@ mod review_tests {
         for field in ["count", "profile", "effort"] {
             assert!(draft["review"].get(field).is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod models_tests {
+    use super::*;
+    use crate::settings::draft;
+    use mj_core::config::{Config, HarnessProfile};
+    use serde_json::json;
+
+    /// The generic list page edits a profile's `models` allow-list as a list
+    /// of strings, and an untouched empty list stays out of the saved file.
+    #[test]
+    fn a_profile_models_list_is_edited_as_a_list_of_strings() {
+        let mut config = Config::default();
+        config.profiles.insert(
+            "ds8bit".to_owned(),
+            serde_json::from_value::<HarnessProfile>(
+                json!({"kind": "open-code", "home": "/home/agent/ds8bit"}),
+            )
+            .unwrap(),
+        );
+        let (_, mut draft) = draft::open(&config);
+        assert_eq!(draft["profiles"]["ds8bit"]["models"], json!([]));
+        assert_eq!(
+            draft::config_from_draft(draft.clone()).unwrap().profiles["ds8bit"].models,
+            Vec::<String>::new()
+        );
+
+        let list = ["profiles", "ds8bit", "models"].map(str::to_owned);
+        let entry = add_entry(&mut draft, &list, None).unwrap();
+        apply_value(
+            &mut draft,
+            &entry,
+            SettingInput::Text("openrouter/deepseek/deepseek-v4.1-flash-1017".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            draft::config_from_draft(draft).unwrap().profiles["ds8bit"].models,
+            ["openrouter/deepseek/deepseek-v4.1-flash-1017"]
+        );
     }
 }

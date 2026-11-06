@@ -4,6 +4,7 @@ use crate::server_runtime::profile_catalog::{ProfileCatalog, counting_probe, tes
 use mj_core::config::HarnessKind;
 use mj_core::state::SessionRecord;
 
+// Hard-won: #1450 review: autonomous outcomes must preserve turn identity and queued work.
 #[test]
 fn child_progress_uses_the_published_turn_and_report_together() {
     let mut committed = crate::database::CommittedState {
@@ -17,6 +18,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
         wait_revisions: Default::default(),
     };
     let turn = mj_core::state::MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "task".into(),
@@ -46,7 +48,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
     );
     let progress = child_progress(&committed, "child");
     assert_eq!(progress.finished_span, Some((8, 12)));
-    assert_eq!(progress.answered_ordinal, Some(7));
+    assert!(progress.answer.as_ref().unwrap().answers(7));
     assert!(
         progress.awaiting_prompt(None),
         "an older completed turn cannot answer the new prompt"
@@ -56,6 +58,18 @@ fn child_progress_uses_the_published_turn_and_report_together() {
         Some("interrupted")
     );
     assert_eq!(progress.report_dir.as_deref(), Some("/reports/child"));
+    let mut harness = committed.turns.get("child").unwrap().clone();
+    let outcome = harness.state.2.as_mut().unwrap();
+    outcome.command_id = "harness-turn-20".into();
+    outcome.accepted_ordinal = None;
+    outcome.turn_start_position = Some(20);
+    committed
+        .turns
+        .insert_shared("child".into(), harness.clone());
+    assert!(child_progress(&committed, "child").awaiting_prompt(None));
+    harness.state.2.as_mut().unwrap().answered_through = Some(14);
+    committed.turns.insert_shared("child".into(), harness);
+    assert!(child_progress(&committed, "child").awaiting_prompt(None));
     assert_eq!(child_progress(&committed, "other").failed_turn, None);
 }
 
@@ -136,16 +150,27 @@ fn models_probe(offers: &[(&str, &[&str])]) -> Arc<crate::server_runtime::profil
 struct RecordingExports {
     parent: SessionRecord,
     registered: std::sync::Mutex<Option<crate::controller::RegisterSubagentRequest>>,
-    override_call: std::sync::Mutex<Option<(String, String)>>,
+    override_call: std::sync::Mutex<Option<(String, Vec<mj_core::subagent::ReviewOverride>)>>,
+    base_call: std::sync::Mutex<Option<(String, String, Option<String>)>>,
 }
 
 impl ExportRuntime for RecordingExports {
+    fn set_review_baseline(
+        &self,
+        session_id: String,
+        commit: String,
+        path: Option<String>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        *self.base_call.lock().unwrap() = Some((session_id, commit, path));
+        Box::pin(async { Ok(serde_json::json!({"accepted": true})) })
+    }
+
     fn override_review(
         &self,
         session_id: String,
-        reason: String,
+        overrides: Vec<mj_core::subagent::ReviewOverride>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
-        *self.override_call.lock().unwrap() = Some((session_id, reason));
+        *self.override_call.lock().unwrap() = Some((session_id, overrides));
         Box::pin(async { Ok(serde_json::json!({"accepted": true})) })
     }
 
@@ -192,7 +217,11 @@ impl RecordingExports {
             .expect("the spawn reached registration")
     }
 
-    fn override_call(&self) -> Option<(String, String)> {
+    fn base_call(&self) -> Option<(String, String, Option<String>)> {
+        self.base_call.lock().unwrap().clone()
+    }
+
+    fn override_call(&self) -> Option<(String, Vec<mj_core::subagent::ReviewOverride>)> {
         self.override_call.lock().unwrap().clone()
     }
 }
@@ -239,6 +268,7 @@ async fn selection_backend_refusing(
         parent: parent_record("parent-1", "parent"),
         registered: std::sync::Mutex::new(None),
         override_call: std::sync::Mutex::new(None),
+        base_call: std::sync::Mutex::new(None),
     });
     let backend = Arc::new(
         ApiBackend::new(
@@ -351,7 +381,7 @@ async fn legacy_list_profiles_is_refused() {
 }
 
 #[tokio::test]
-async fn override_review_dispatch_forwards_parent_and_reason_to_export() {
+async fn override_review_dispatch_forwards_parent_and_pairs_to_export() {
     let (backend, exports) = selection_backend(SAME_MODELS, None).await;
     let result = backend
         .execute_subagent_tool(
@@ -361,7 +391,10 @@ async fn override_review_dispatch_forwards_parent_and_reason_to_export() {
                 request_id: "override-review".into(),
                 created_at_ms: 0,
                 action: mj_core::subagent::SubagentToolAction::OverrideReview {
-                    reason: "finding is unreasonable".into(),
+                    overrides: vec![mj_core::subagent::ReviewOverride {
+                        finding: "F".into(),
+                        reason: "finding is unreasonable".into(),
+                    }],
                 },
             },
         )
@@ -369,7 +402,41 @@ async fn override_review_dispatch_forwards_parent_and_reason_to_export() {
     assert!(!result.is_error, "{}", result.message);
     assert_eq!(
         exports.override_call(),
-        Some(("parent-1".into(), "finding is unreasonable".into()))
+        Some((
+            "parent-1".into(),
+            vec![mj_core::subagent::ReviewOverride {
+                finding: "F".into(),
+                reason: "finding is unreasonable".into(),
+            }]
+        ))
+    );
+}
+
+#[tokio::test]
+async fn set_review_baseline_dispatch_forwards_parent_commit_and_path_to_export() {
+    let (backend, exports) = selection_backend(SAME_MODELS, None).await;
+    let result = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "set-review-baseline".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::SetReviewBaseline {
+                    commit: "abc1234".into(),
+                    path: Some("/workspace/linked".into()),
+                },
+            },
+        )
+        .await;
+    assert!(!result.is_error, "{}", result.message);
+    assert_eq!(
+        exports.base_call(),
+        Some((
+            "parent-1".into(),
+            "abc1234".into(),
+            Some("/workspace/linked".into())
+        ))
     );
 }
 
@@ -1448,6 +1515,7 @@ fn a_worker_refusal_is_read_without_the_log_lines_beside_it() {
 
 fn finished_turn(command_id: &str) -> mj_core::state::MaterializedTurnOutcome {
     mj_core::state::MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: command_id.into(),
@@ -1823,7 +1891,11 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
                 last_completed_ordinal: answered.map(|ordinal| ordinal + 1),
                 report: ReportState::Fallback,
                 awaited_ordinal: awaited,
-                answered_ordinal: answered,
+                answer: answered.map(|ordinal| {
+                    let mut turn = finished_turn("task");
+                    turn.accepted_ordinal = Some(ordinal);
+                    turn
+                }),
                 failed_turn: failed.map(|(state, reason)| (state, reason.to_owned())),
                 login_failure: None,
                 provider_failure: None,
@@ -1895,7 +1967,11 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         last_completed_ordinal: Some(21),
         report: ReportState::Fallback,
         awaited_ordinal: Some(20),
-        answered_ordinal: Some(20),
+        answer: Some({
+            let mut turn = finished_turn("task");
+            turn.accepted_ordinal = Some(20);
+            turn
+        }),
         failed_turn: Some((
             "failed",
             "Your access token could not be refreshed. Please log out and sign in again.".into(),
@@ -1946,15 +2022,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
     )
     .unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
     let mut rejected = mj_core::credentials::RejectedLogins::default();
     rejected.observe(
@@ -2695,6 +2763,87 @@ async fn send_message_to_peer_queues_typed_event_with_the_calling_session_as_sen
     assert!(rendered.contains("Message from session \"parent\" (parent-1):"));
     assert!(rendered.contains("session_id parent-1"));
     assert!(rendered.contains("Please check the retry path."));
+}
+
+/// The sender of a peer message is named as the session list names it: a name
+/// a person typed first, then the harness's, then the title it was created
+/// with, which is cut to one bounded line.
+#[tokio::test]
+async fn send_message_names_the_sender_as_the_session_list_does() {
+    if !isolated_parked_test("send_message_names_the_sender_as_the_session_list_does") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut peer = parent_record("peer-1", "peer");
+    peer.no_github_events = true;
+    crate::database::save_session(&peer).unwrap();
+    let exports = ParkingExports::with_modern_worker(SessionState::Running, None, true);
+    let (backend, _) = message_backend_for_session(
+        "peer-1",
+        exports,
+        &[],
+        Arc::new(|| {}),
+        mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL,
+    );
+    let sender_name = |request_id: &'static str| {
+        let backend = backend.clone();
+        async move {
+            let request = mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: request_id.into(),
+                created_at_ms: mj_core::clock::epoch_millis(),
+                action: mj_core::subagent::SubagentToolAction::SendMessage {
+                    child_session_id: "peer-1".into(),
+                    message: "hello".into(),
+                },
+            };
+            let answer = backend
+                .execute_subagent_tool("parent-1".into(), request)
+                .await;
+            assert!(!answer.is_error, "{}", answer.message);
+            let key = format!("session-message-{request_id}");
+            let pending = crate::database::pending_mailbox_events(10).unwrap();
+            let row = pending
+                .iter()
+                .find(|row| {
+                    serde_json::from_str::<mj_core::mailbox::MailboxEvent>(&row.event_json)
+                        .is_ok_and(|event| event.key == key)
+                })
+                .expect("the message was queued");
+            let event: mj_core::mailbox::MailboxEvent =
+                serde_json::from_str(&row.event_json).unwrap();
+            let mj_core::mailbox::MailboxEventBody::SessionMessage {
+                from: mj_core::mailbox::Sender::Session { id, title },
+                ..
+            } = event.body
+            else {
+                panic!("a session message names its sender");
+            };
+            assert_eq!(id, "parent-1");
+            title
+        }
+    };
+
+    let mut parent = parent_record("parent-1", "parent");
+    parent.title = format!(
+        "Fix the parser\n\n{}",
+        "The prompt goes on for paragraphs. ".repeat(20)
+    );
+    crate::database::save_session(&parent).unwrap();
+    let created_with = sender_name("sender-created-with").await;
+    assert!(!created_with.contains('\n'), "{created_with:?}");
+    assert!(created_with.starts_with("Fix the parser The prompt goes on"));
+    assert!(created_with.ends_with('…'));
+    assert!(created_with.chars().count() <= mj_core::state::MESSAGE_NAME_CHARS);
+
+    parent.acp_session_title = Some("Harness name".into());
+    crate::database::save_session(&parent).unwrap();
+    assert_eq!(sender_name("sender-harness").await, "Harness name");
+
+    parent.session_title_override = Some("Typed name".into());
+    crate::database::save_session(&parent).unwrap();
+    assert_eq!(sender_name("sender-typed").await, "Typed name");
 }
 
 #[tokio::test]
@@ -4066,6 +4215,62 @@ async fn delayed_handback_uses_worker_origin_instead_of_current_turn() {
     assert_eq!(report.handback.unwrap().command_id, "original-turn");
 }
 
+#[tokio::test]
+async fn harness_handback_uses_worker_turn_identity() {
+    if !isolated_parked_test("harness_handback_uses_worker_turn_identity") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut view = ready_view("model");
+    view.snapshot.as_mut().unwrap().materialized.active_turn =
+        Some(mj_core::state::MaterializedTurn {
+            command_id: "newer-turn".into(),
+            accepted_ordinal: Some(10),
+            turn_start_position: 11,
+            started_at_ms: 10,
+            steered_into: None,
+        });
+    let (submitted, _) = mpsc::unbounded_channel();
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 12,
+            submitted,
+            view: Some(view),
+        })),
+        running_states(),
+        ParkingExports::new(SessionState::Running, None),
+    ));
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: Some("harness-turn-7".into()),
+        request_id: "delayed-report".into(),
+        created_at_ms: 1,
+        action: mj_core::subagent::SubagentToolAction::Handback {
+            message: "original report".into(),
+        },
+    };
+    let result = backend
+        .execute_subagent_tool_durable("child-1".into(), request)
+        .await
+        .unwrap();
+    assert!(!result.result.is_error, "{}", result.result.message);
+    let report = crate::database::load_subagent_report("child-1").unwrap();
+    assert_eq!(report.handback.unwrap().command_id, "harness-turn-7");
+    let mut session = mj_core::state::MaterializedSession::empty("child-1");
+    session.applied_event_ordinal = 9;
+    session.applied_event_digest = format!("{:064x}", 9);
+    let mut outcome = finished_turn("harness-turn-7");
+    outcome.accepted_ordinal = None;
+    outcome.turn_start_position = Some(7);
+    outcome.completed_ordinal = 9;
+    session.last_turn_outcome = Some(outcome);
+    crate::database::save_materialized_session(&session).unwrap();
+    let progress = load_child_progress("child-1").unwrap();
+    assert!(matches!(progress.report, ReportState::Delivered(_)));
+    assert_eq!(progress.finished_span, Some((7, 9)));
+}
+
 /// The prompts that reached the child's relay, by text.
 fn delivered_prompts(
     delivered: &mut mpsc::UnboundedReceiver<(String, RelayCommand)>,
@@ -4420,6 +4625,61 @@ async fn report_reconcile_fails_while_the_parent_queue_connects_and_a_retry_reco
             .event_json
             .contains("report after the queue connects")
     );
+}
+
+/// A person may rename a child after the parent spawned it. The parent's
+/// listing and the child's report show the name the session list shows, beside
+/// the task name and the id the parent acts on.
+#[tokio::test]
+async fn child_listings_and_reports_carry_the_childs_live_name() {
+    if !isolated_parked_test("child_listings_and_reports_carry_the_childs_live_name") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    record_finished_child("child-1", "task-1", "all done", 3, 9, 7);
+    let (backend, exports) = report_backend(active_parent_view("working"));
+    exports
+        .records
+        .lock()
+        .unwrap()
+        .get_mut("child-1")
+        .unwrap()
+        .session_title_override = Some("Renamed child".into());
+
+    let answer = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "observe".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::ListAgents,
+            },
+        )
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    let listing: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+    assert_eq!(listing["agents"][0]["name"], "Renamed child");
+    assert_eq!(listing["agents"][0]["task_name"], "audit deps");
+    assert_eq!(listing["agents"][0]["child_session_id"], "child-1");
+
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&pending[0].event_json).unwrap();
+    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = &event.body else {
+        panic!("wrong event: {event:?}")
+    };
+    assert_eq!(report.child_name.as_deref(), Some("Renamed child"));
+    assert_eq!(report.task_name, "audit deps");
+    let rendered = mj_core::mailbox::render_mailbox_event(&event);
+    assert!(
+        rendered.contains("child task Renamed child finished (child-1)."),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("audit deps"), "{rendered}");
 }
 
 #[tokio::test]
@@ -4866,6 +5126,43 @@ async fn provider_failed_child_report_names_its_turn_profile_and_backoff() {
     assert!(
         mj_core::mailbox::render_mailbox_event(&event).contains(&format!("Failure: {expected}"))
     );
+}
+
+// Hard-won: 193e758af: refresh exempted the old default instead of the new one.
+#[tokio::test]
+async fn forced_refresh_uses_the_new_default_for_the_allowlist() {
+    for selected in [None, Some("allowed".to_owned())] {
+        let mut calls = Vec::new();
+        let (mut choices, default) = refreshed_profile_choices(selected.clone(), |model| {
+            calls.push(model.clone());
+            std::future::ready(Ok(mj_core::worker_launch::ProfileConfig {
+                model: model.or(Some("new-default".into())),
+                models: ["old-default", "new-default", "allowed"]
+                    .map(|value| mj_core::acp::SessionConfigChoice {
+                        value: value.into(),
+                        name: value.into(),
+                        description: None,
+                    })
+                    .to_vec(),
+                efforts: Vec::new(),
+                observed_at: 0,
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.first(), Some(&None));
+        assert_eq!(choices.model, selected.or(Some("new-default".into())));
+        choices.model = default;
+        let choices = choices.restricted_to(&["allowed".into()]);
+        assert_eq!(
+            choices
+                .models
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            ["new-default", "allowed"]
+        );
+    }
 }
 
 /// The daemon side of a primary and its oracles: it registers each requested

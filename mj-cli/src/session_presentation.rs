@@ -145,15 +145,10 @@ mod tests {
         config.profiles.insert(
             "profile-1".into(),
             HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Codex,
-                home: PathBuf::from("/profiles/profile-1"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                muse_auto_review: None,
-                codex_profile: None,
+                ..mj_core::config::HarnessProfile::new(
+                    HarnessKind::Codex,
+                    PathBuf::from("/profiles/profile-1"),
+                )
             },
         );
         config

@@ -61,15 +61,10 @@ fn podman_controller(state: SessionState) -> Controller {
     config.profiles.insert(
         "codex".into(),
         mj_core::config::HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: PathBuf::from("/home/dev/.codex"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                PathBuf::from("/home/dev/.codex"),
+            )
         },
     );
     config.targets.insert(
@@ -1100,14 +1095,14 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
             kind.id().into(),
             mj_core::config::HarnessProfile {
                 enabled: true,
-                kind,
-                home: home.clone(),
                 environment: Default::default(),
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(kind, home.clone())
             },
         );
         controller.config.targets.insert(
@@ -1195,14 +1190,14 @@ fn credential_sync_skips_a_local_login_file_linked_to_the_profile() {
             kind.id().into(),
             mj_core::config::HarnessProfile {
                 enabled: true,
-                kind,
-                home: home.clone(),
                 environment: Default::default(),
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(kind, home.clone())
             },
         );
         controller.config.targets.insert(
@@ -1257,15 +1252,10 @@ fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_conta
     controller.config.profiles.insert(
         "codex4".into(),
         mj_core::config::HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: home.path().to_path_buf(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                home.path().to_path_buf(),
+            )
         },
     );
     controller.config.targets.insert(

@@ -82,7 +82,7 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |
-| `review` | table | no | default `[review]` values | Automatic review trigger and reviewer settings. |
+| `review` | table | no | default `[review]` values | Reviewer settings for push review. |
 | `continuation` | table | no | enabled | Automatic continuation of already-requested unfinished work; also requires Jev. |
 | `jev` | table | no | enabled | Hosted turn classification, continuation checks, and semantic help search. |
 | `daemon` | table | no | runs on the host | Where the daemon runs: on this computer or in a Podman or Docker container. |
@@ -337,8 +337,6 @@ precedence. See [Web viewer and desktop app](/web-viewer/) for access and login.
 
 ```toml
 [review]
-trigger = "turn"
-
 [[review.reviewers]]
 model = "gpt-6.10-terra"
 effort = "xhigh"
@@ -350,16 +348,15 @@ effort = "medium"
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `trigger` | string enum | no | `"off"` | `"off"` disables automatic review, `"turn"` reviews completed turns, and `"push"` reviews commits before push. |
 | `reviewers` | array of tables | no | empty | Up to three choices, each with a nonempty `model` and optional `effort`. Each choice is served by an enabled profile offering that model and effort. |
 
-An empty reviewer list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers from enabled profiles' advertised models. The first available combination wins: Terra, Sol, and Haiku; Terra and Sol; two Haiku; two DeepSeek Flash; Grok; or Kimi K3.1 or newer. Within a family, the newest advertised version wins. If no match exists, choose reviewers in **Settings → Code Review**. Reviewers run as hidden child sessions with independent conversations. See [Code review](/turn-review/).
+An empty reviewer list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers from enabled profiles' advertised models. The first available combination wins: Terra, Sol, and Haiku; Terra and Sol; three Haiku; two DeepSeek Flash; Grok; or Kimi K3.1 or newer. Within a family, the newest advertised version wins. If no match exists, choose reviewers in **Settings → Code Review**. Reviewers run as hidden child sessions with independent conversations. See [Code review](/turn-review/).
 
 Push review is available for Claude Code, Codex, and DSH primaries, the harnesses that receive Mjolnir delegation tools. They receive `request_review` and a pre-push gate; other harnesses run without review and receive a transcript notice.
 
-Older `enabled`, `count`, `profile`, `model`, `effort`, and `tier` settings remain readable. Saving writes the new reviewer list and trigger. An old explicit model becomes up to three reviewer choices. On daemon startup, an old Auto selection is upgraded once after capability discovery and saved as chosen reviewer rows, or as an empty list when no model qualifies.
+Older `enabled`, `count`, `profile`, `model`, `effort`, and `tier` settings remain readable. Saving writes the new reviewer list. An old explicit model becomes up to three reviewer choices. On daemon startup, an old Auto selection is upgraded once after capability discovery and saved as chosen reviewer rows, or as an empty list when no model qualifies.
 
-`mj new` and `mj import <harness>` accept `--review off|turn|push` and repeatable `--reviewer MODEL[:EFFORT]` (up to three). The list replaces `[review]` for that session. `/review` remains available when the trigger is `off`.
+`mj new` and `mj import <harness>` accept `--review off|push` and repeatable `--reviewer MODEL[:EFFORT]` (up to three). A session-level reviewer choice replaces `[review]` for that session and enables review unless the session uses `--review off`. `/review` starts a push review of committed work.
 
 In the terminal, these review fields are edited inside **Settings** so one Save or
 Cancel applies to the entire configuration draft. Settings can discover the
@@ -626,6 +623,7 @@ home = "/home/me/.codex-work"
 # enabled = false
 # context_window_bytes = 131072
 # guardian_review_model = "newest-flash"
+# models = ["openrouter/deepseek/deepseek-v4.1-flash-1017"]
 
 [profiles.codex-work.environment]
 # PATH = "/opt/node/bin:/usr/local/bin:/usr/bin:/bin"
@@ -636,11 +634,12 @@ home = "/home/me/.codex-work"
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
 | `enabled` | boolean | no | `true` | Disabled profiles stay configured but cannot be selected for new work, login, import, review, quota reporting, or utility-model inference. Existing running sessions continue. |
-| `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `muse`, `opencode`, or `dsh`. `deepseek`, the removed DeepSeek harness, fails to load. A profile whose kind is `mimo`, the removed MiMo Code harness, is ignored with a warning when the configuration loads and is removed from the file on the next save. |
+| `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `muse`, `open-code` (OpenCode), or `dsh`. `deepseek`, the removed DeepSeek harness, fails to load. A profile whose kind is `mimo`, the removed MiMo Code harness, is ignored with a warning when the configuration loads and is removed from the file on the next save. |
 | `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
 | `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` reads that variable from the environment Mjolnir started with unless it is set here; when it is set in neither, the profile cannot start, the configuration still loads, and `mj doctor` says how to supply it. A DSH profile takes `DEEPSEEK_API_KEY` from the key saved in DSH (`.credentials.yaml` in its home) first, then the environment Mjolnir started with, then `.env` in its home, and only then from this table. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
 | `guardian_review_model` | string | no | unset (`newest-flash`) | Which model reviews escalated actions in Codex's guardian mode: `newest-flash`, `session`, or a slug from the provider's model catalog. Only valid on a Codex profile whose `config.toml` names a custom model provider. See [Profiles](/profiles/#choose-the-guardian-review-model). |
+| `models` | array of strings | no | empty (offer everything) | Exact model values, as `mj models --profile <id> --unrestricted` lists them, that Mjolnir offers from this profile in session model pickers, sub-agent choices, review slots and Autoconfigure. The profile's current model is always offered. Edits apply without rediscovery. `mj doctor` warns when a profile advertises more than 50 models without this list, and about entries the profile does not advertise. See [Profiles](/profiles/#limit-the-models-a-profile-offers). |
 | `muse_auto_review` | boolean | no | unset (`false`) | Whether an unconstrained Muse session (containers, EC2, `yolo` SSH) keeps muse-acp's auto-review on. Unset or `false` runs without permission checks, like OpenCode's `permission = "allow"`. `true` restores the reviewer inside the container boundary. Only valid on a Muse profile; guardian targets always review. |
 
 The profile's harness-home variable cannot appear in `environment`; set `home`
@@ -666,7 +665,9 @@ use their image-provided runtime or the documented installer fallback. The
 
 Profiles do not accept `model` or `reasoning_effort`. Use `/model` and `/effort`
 or `/config` inside a session, or configure the harness's own defaults in its
-home. For
+home. For example, an OpenCode profile's default model and OpenRouter provider
+routing go in `opencode.json` in its home, which sessions receive unchanged
+except for `permission`. For
 credential files, staging allowlists, skills, quotas, and harness limitations,
 see [Profiles and harnesses](/profiles/).
 

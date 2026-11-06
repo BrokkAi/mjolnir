@@ -193,14 +193,8 @@ pub struct WorkerLaunchConfig {
     /// that one wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_model: Option<String>,
-    /// Whether a review can ever run for this session, which is the only
-    /// reason to spend anything on capturing the working tree.
-    ///
-    /// The controller decides it: `[review] profile` has to name a reviewer,
-    /// and a sub-agent child is never reviewed. A session with this off does
-    /// no Git work at startup at all, which is what makes starting a session
-    /// in a large working tree cheap.
-    #[serde(default)]
+    /// Accepted from older daemon launch files; no longer used or written.
+    #[serde(default, skip_serializing)]
     pub review_capture: bool,
     #[serde(default)]
     pub review_trigger: crate::config::ReviewTrigger,
@@ -613,6 +607,22 @@ pub struct ProfileConfig {
     pub observed_at: i64,
 }
 
+impl ProfileConfig {
+    /// The catalogue as Mjolnir offers it under a profile's `models`
+    /// allow-list: the listed models plus the profile's current model, which
+    /// stays so a session never runs a model its picker hides. An empty list
+    /// offers everything.
+    pub fn restricted_to(mut self, allowed: &[String]) -> Self {
+        if !allowed.is_empty() {
+            let current = self.model.clone();
+            self.models.retain(|choice| {
+                allowed.contains(&choice.value) || current.as_ref() == Some(&choice.value)
+            });
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -629,6 +639,21 @@ mod tests {
         })
     }
 
+    /// A launch file written before per-turn review was removed still names
+    /// `"turn"`. It must keep parsing, and reads as the push gate.
+    #[test]
+    fn a_launch_file_written_for_turn_review_still_parses_as_push() {
+        let mut json = launch_json();
+        json["review_trigger"] = serde_json::json!("turn");
+        json["review_capture"] = serde_json::json!(true);
+        let launch: WorkerLaunchConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(launch.review_trigger, crate::config::ReviewTrigger::Push);
+        assert!(launch.review_gate());
+        let rewritten = serde_json::to_value(&launch).unwrap();
+        assert_eq!(rewritten["review_trigger"], "push");
+        assert!(rewritten.get("review_capture").is_none());
+    }
+
     // Hard-won: 32d96d199: push reviews exposed delegation tools with subagents=None.
     #[test]
     fn persisted_review_trigger_controls_primary_mcp_without_leaking_to_children() {
@@ -642,7 +667,6 @@ mod tests {
         ] {
             for trigger in [
                 crate::config::ReviewTrigger::Off,
-                crate::config::ReviewTrigger::Turn,
                 crate::config::ReviewTrigger::Push,
             ] {
                 let mut json = launch_json();

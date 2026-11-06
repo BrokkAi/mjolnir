@@ -35,6 +35,7 @@ fn session_metadata_text(
         false,
         false,
         crate::AttentionLevel::Idle,
+        None,
         operation,
         now_epoch_seconds,
         &session_target_label(&State::default(), session, operation, config),
@@ -2878,6 +2879,123 @@ fn sessions_pane_keeps_the_keyboard_selection_centred_and_pins_the_ends() {
         let _ = crate::test_support::drawn(&mut dashboard, 120, 40);
     }
     assert_eq!(dashboard.sessions_scroll.get(), 0);
+}
+
+// The wheel scrolls the Sessions list and leaves the selection where it was,
+// even when that scrolls the selected row out of view.
+#[test]
+fn sessions_wheel_scrolls_past_the_selection_until_it_changes() {
+    let names = (0..30).map(|n| format!("child-{n:02}")).collect::<Vec<_>>();
+    let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+    let (mut dashboard, parent) = dashboard_with_subagents(&refs);
+    dashboard.open_subagent_workspace(parent);
+    dashboard.clear_sessions_filter();
+    dashboard.select_active_session("child-00");
+    dashboard.focus = Focus::Sessions;
+    let _ = crate::test_support::drawn(&mut dashboard, 120, 40);
+
+    for _ in 0..8 {
+        dashboard.scroll_sessions_view(1);
+    }
+    let lines = crate::test_support::drawn(&mut dashboard, 120, 40);
+    assert_eq!(dashboard.selected_session_id(), Some("child-00"));
+    assert!(row_of_title(&lines, "child-00").is_none(), "{lines:#?}");
+    let scrolled = dashboard.sessions_scroll.get();
+    assert!(scrolled > 0);
+
+    // Later frames keep the wheel's offset.
+    let _ = crate::test_support::drawn(&mut dashboard, 120, 40);
+    assert_eq!(dashboard.sessions_scroll.get(), scrolled);
+
+    // Choosing the row that is already selected, as Home does, brings it back.
+    dashboard.set_selection_for(Focus::Sessions, 0);
+    let lines = crate::test_support::drawn(&mut dashboard, 120, 40);
+    assert!(row_of_title(&lines, "child-00").is_some(), "{lines:#?}");
+
+    // Moving the selection brings it back into view.
+    for _ in 0..8 {
+        dashboard.scroll_sessions_view(1);
+    }
+    let _ = crate::test_support::drawn(&mut dashboard, 120, 40);
+    dashboard.move_selection(1);
+    let lines = crate::test_support::drawn(&mut dashboard, 120, 40);
+    assert_eq!(dashboard.selected_session_id(), Some("child-01"));
+    assert!(row_of_title(&lines, "child-01").is_some(), "{lines:#?}");
+}
+
+// Hard-won: review of the wheel change: the table scrolled a partly visible
+// selected row into view, so click areas pointed at other sessions.
+#[test]
+fn sessions_wheel_scroll_keeps_click_areas_on_the_rows_drawn() {
+    let names = (0..30).map(|n| format!("child-{n:02}")).collect::<Vec<_>>();
+    let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+    let (mut dashboard, parent) = dashboard_with_subagents(&refs);
+    dashboard.open_subagent_workspace(parent);
+    dashboard.clear_sessions_filter();
+    dashboard.select_active_session("child-29");
+    dashboard.focus = Focus::Sessions;
+    // Heights that leave the selected row cut off at the bottom for some offsets.
+    for height in [33, 34, 35, 36, 37] {
+        dashboard.sessions_wheel_scrolled_from.take();
+        dashboard.select_active_session("child-29");
+        let _ = crate::test_support::drawn(&mut dashboard, 120, height);
+        for _ in 0..28 {
+            dashboard.scroll_sessions_view(-1);
+            let lines = crate::test_support::drawn(&mut dashboard, 120, height);
+            for (index, area) in dashboard.session_row_areas.iter() {
+                let title = dashboard.ordered_sessions()[*index].title.clone();
+                assert!(
+                    lines[usize::from(area.y)].contains(&title),
+                    "height {height}: area for {title} shows {:?}",
+                    lines[usize::from(area.y)]
+                );
+            }
+        }
+    }
+}
+
+// Hard-won: review of the wheel change: with a pane shorter than the last
+// session row the wheel scrolled past every session and drew an empty list.
+#[test]
+fn sessions_wheel_stops_at_the_last_session_in_a_short_pane() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["worker-a", "worker-b"]);
+    dashboard.open_subagent_workspace(parent);
+    dashboard.clear_sessions_filter();
+    dashboard.select_active_session("worker-a");
+    dashboard.focus = Focus::Sessions;
+    // Room for the borders, the action row and two lines of a row.
+    let mut terminal = Terminal::new(TestBackend::new(60, 5)).unwrap();
+    for _ in 0..10 {
+        dashboard.scroll_sessions_view(1);
+        terminal
+            .draw(|frame| {
+                let layout = crate::render::SessionsLayout::new(&dashboard, frame.area().width - 2);
+                crate::render::render_sessions(frame, frame.area(), &dashboard, &layout);
+            })
+            .unwrap();
+    }
+    let rows = terminal.backend().to_string();
+    assert!(rows.contains("worker-b"), "{rows}");
+    assert!(!rows.contains("No sessions"), "{rows}");
+
+    // With the last session selected and taller than the pane, the wheel
+    // must not hand the table a selection it would scroll past.
+    dashboard.select_active_session("worker-b");
+    for delta in [-1, 1, 1, -1] {
+        dashboard.scroll_sessions_view(delta);
+        terminal
+            .draw(|frame| {
+                let layout = crate::render::SessionsLayout::new(&dashboard, frame.area().width - 2);
+                crate::render::render_sessions(frame, frame.area(), &dashboard, &layout);
+            })
+            .unwrap();
+        let rows = terminal.backend().to_string();
+        assert!(!rows.contains("No sessions"), "{rows}");
+        assert!(
+            rows.contains("worker-a") || rows.contains("worker-b"),
+            "{rows}"
+        );
+    }
 }
 
 #[test]

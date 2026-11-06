@@ -24,7 +24,7 @@ pub(super) async fn report_worker_upgrade(
                 .get(session_id)
                 .map_or_else(
                     || session_id.clone(),
-                    |session| session.display_title().to_owned(),
+                    |session| session.listed_title().to_owned(),
                 );
             state.push_notice(session_id, format!("Upgraded the worker for {name}."));
         }

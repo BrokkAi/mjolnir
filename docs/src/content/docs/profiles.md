@@ -402,6 +402,38 @@ The setting applies only to a Codex profile with a custom provider, because
 Mjolnir generates a catalog only for those. Setting it on any other profile is a
 configuration error.
 
+## Limit the models a profile offers
+
+Some harnesses advertise very large catalogues. OpenCode with an OpenRouter key
+lists several hundred models, and they all appear in session model pickers,
+sub-agent choices, review slots and Autoconfigure. OpenCode ignores its own
+provider `whitelist` and `blacklist`, so Mjolnir has its own list. Set `models`
+on the profile to the exact model values you want offered:
+
+```toml
+[profiles.ds8bit]
+kind = "opencode"
+home = "/home/me/.opencode-ds8bit"
+models = ["openrouter/deepseek/deepseek-v4.1-flash-1017"]
+```
+
+`mj models --profile ds8bit --unrestricted` prints every value the profile
+advertises, ignoring `models`. Without `--unrestricted`, `mj models` prints what
+Mjolnir offers. A profile without `models`, or with an empty list, offers
+everything it advertises. You can also edit the list in Settings, under the
+profile's **Offered models**.
+
+The profile's current model stays offered even when `models` omits it, so a
+session never runs a model its picker hides. Edits to `models` take effect
+without rediscovering the profile's catalogue. A Settings draft that changes
+only `models` shows the saved list in its pickers until you save.
+
+`mj doctor` warns when an enabled profile advertises more than 50 models and has
+no `models` list, and gives the line to add. It also warns about entries the
+profile does not advertise and about a current model outside the list. The check
+reads the catalogue from a running daemon; without one, or while discovery is
+still running, it reports "Not checked" and does not fail.
+
 ## Codex profile files
 
 Codex reads profile files beside its `config.toml`: `codex -p ds` layers
@@ -540,7 +572,7 @@ configuration copy and stores native history under that copy's `.data/muse/`
 tree, including on a bare runtime on this machine. Do not override `XDG_CONFIG_HOME` or
 `XDG_DATA_HOME` in the profile environment.
 
-For OpenCode, configure `kind = "opencode"` and a home ending in `opencode`,
+For OpenCode, configure `kind = "open-code"` and a home ending in `opencode`,
 for example `home = "/home/me/.config/opencode"` or
 `/home/me/accounts/work/opencode`. Discovery uses `$XDG_CONFIG_HOME/opencode`
 when set. OpenCode 2 keeps its logins in its database, `opencode.db`, in its
@@ -570,6 +602,33 @@ variables a provider in your `opencode.json` or `opencode.jsonc` lists under
 wins over a key for the same provider, as it does in OpenCode. Export the key
 before running `mj`, and run `mj daemon restart` after exporting a new one;
 `mj doctor` names the keys a profile is using.
+
+Mjolnir copies the profile's `opencode.json` to each session unchanged and adds
+its own permission rules on top, so any OpenCode setting in it applies. For example, to set a
+default model and send every OpenRouter request for it to one provider, with
+no fallback to others:
+
+```json
+{
+  "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+  "provider": {
+    "openrouter": {
+      "models": {
+        "deepseek/deepseek-v4.1-flash-1017": {
+          "options": {
+            "provider": { "only": ["morph"], "allow_fallbacks": false }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+The `provider` object under `options` is OpenRouter's provider routing
+preference, sent with each request. Provider names are the endpoint tags that
+`https://openrouter.ai/api/v1/models/<model>/endpoints` lists, such as
+`morph` for `morph/fp8`.
 
 For DSH, configure `kind = "dsh"`, for example with
 `home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its

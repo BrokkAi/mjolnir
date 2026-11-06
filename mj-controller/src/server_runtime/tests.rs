@@ -7,7 +7,8 @@ use agent_client_protocol::v1::schema::{
     SessionConfigSelectOptions,
 };
 use mj_core::config::{
-    CONFIG_VERSION, Config, HarnessKind, ProjectBundle, ProjectRepository, TargetTemplate,
+    CONFIG_VERSION, Config, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository,
+    TargetTemplate,
 };
 use mj_core::state::SessionState;
 
@@ -321,18 +322,12 @@ fn golden_phone_new_session_preflight() {
     config.profiles.insert(
         "codex".into(),
         mj_core::config::HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: PathBuf::from("/home/dev/.codex"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                PathBuf::from("/home/dev/.codex"),
+            )
         },
     );
-    config.review.trigger = mj_core::config::ReviewTrigger::Turn;
     config.review.reviewers = vec![mj_core::config::SubagentChoice {
         model: "gpt-6-astra".into(),
         effort: None,
@@ -513,6 +508,82 @@ fn a_session_whose_turn_outlives_the_daemon_is_not_reported_idle() {
         !session.is_idle,
         "missing operational state is not confirmed idle"
     );
+}
+
+#[test]
+fn only_a_stopped_sub_agent_can_read_its_history() {
+    let mut controller = controller_with_profiles(&["codex"]);
+    for (id, state) in [
+        ("parent", SessionState::Stopped),
+        ("live-child", SessionState::Running),
+        ("stopped-child", SessionState::Stopped),
+        ("stopped-other", SessionState::Stopped),
+    ] {
+        let mut record = phone_session(id, 0);
+        record.state = state;
+        controller.state.sessions.insert(id.to_owned(), record);
+    }
+    for id in ["live-child", "stopped-child"] {
+        controller.state.subagents.insert(
+            id.into(),
+            mj_core::subagent::SubagentRecord {
+                kind: mj_core::subagent::SubagentKind::Reviewer,
+                reviewer_launch: None,
+                child_session_id: id.into(),
+                parent_session_id: "parent".into(),
+                task_name: id.into(),
+                profile_id: "codex".into(),
+                model: None,
+                effort: None,
+                working_directory: PathBuf::new(),
+                initial_prompt: String::new(),
+                request_key: id.into(),
+                created_at: "now".into(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            }
+            .into(),
+        );
+    }
+    let snapshot = viewer_snapshot(
+        &controller,
+        &[],
+        &std::collections::BTreeMap::new(),
+        &PhoneSessionViews {
+            native_agents: &Default::default(),
+            conversations: &mj_core::snapshot_map::SnapshotMap::new(),
+            queued_prompts: &std::collections::BTreeMap::new(),
+            active_user_shells: &std::collections::BTreeMap::new(),
+            pending_elicitations: &std::collections::BTreeMap::new(),
+            prompt_images: &std::collections::BTreeSet::new(),
+            operational: &std::collections::BTreeMap::new(),
+            materialized_activity: &std::collections::BTreeMap::new(),
+            project_sources: &PhoneProjectSources::default(),
+            operations: &std::collections::BTreeMap::new(),
+            move_recoveries: &std::collections::BTreeMap::new(),
+            capacity: &[],
+            launch_failures: &[],
+            reviews: &std::collections::BTreeMap::new(),
+        },
+        1,
+    );
+    let read_history = |id: &str| {
+        snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == id)
+            .unwrap()
+            .capabilities
+            .read_history
+    };
+    assert!(read_history("stopped-child"), "a stopped sub-agent");
+    assert!(!read_history("live-child"), "a sub-agent with a worker");
+    assert!(
+        !read_history("stopped-other"),
+        "a stopped top-level session"
+    );
+    assert!(!read_history("parent"), "a stopped parent");
 }
 
 #[test]
@@ -1375,15 +1446,10 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
                     (
                         (*id).to_owned(),
                         HarnessProfile {
-                            enabled: true,
-                            context_window_bytes: None,
-                            legacy_subagents: Default::default(),
-                            guardian_review_model: None,
-                            codex_profile: None,
-                            muse_auto_review: None,
-                            kind: HarnessKind::Codex,
-                            home: PathBuf::from("/home/agent").join(id),
-                            environment: Default::default(),
+                            ..mj_core::config::HarnessProfile::new(
+                                HarnessKind::Codex,
+                                PathBuf::from("/home/agent").join(id),
+                            )
                         },
                     )
                 })
@@ -2005,13 +2071,11 @@ fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do(
 #[test]
 fn a_profile_added_while_the_server_runs_reaches_the_quota_refresher() {
     let (profiles_tx, profiles_rx) = tokio::sync::watch::channel(QuotaRefreshBatch::default());
-    let mut published = std::collections::BTreeMap::new();
     let mut batch = QuotaRefreshBatch::default();
     let controller = controller_with_profiles(&["codex"]);
 
     assert!(republish_quota_profiles(
         &controller,
-        &mut published,
         &mut batch,
         &profiles_tx
     ));
@@ -2030,19 +2094,13 @@ fn a_profile_added_while_the_server_runs_reaches_the_quota_refresher() {
     // must not restart a harness process per profile.
     assert!(!republish_quota_profiles(
         &controller,
-        &mut published,
         &mut batch,
         &profiles_tx
     ));
     assert_eq!(profiles_rx.borrow().generation, first_generation);
 
     let grown = controller_with_profiles(&["claude", "codex"]);
-    assert!(republish_quota_profiles(
-        &grown,
-        &mut published,
-        &mut batch,
-        &profiles_tx
-    ));
+    assert!(republish_quota_profiles(&grown, &mut batch, &profiles_tx));
     assert_eq!(
         profiles_rx
             .borrow()
@@ -2053,6 +2111,41 @@ fn a_profile_added_while_the_server_runs_reaches_the_quota_refresher() {
         vec!["claude".to_owned(), "codex".to_owned()]
     );
     assert!(profiles_rx.borrow().generation > first_generation);
+}
+
+#[test]
+fn a_quota_runtime_change_reaches_the_quota_refresher() {
+    let (profiles_tx, profiles_rx) = tokio::sync::watch::channel(QuotaRefreshBatch::default());
+    let mut batch = QuotaRefreshBatch::default();
+    let mut controller = controller_with_profiles(&["codex"]);
+    controller.config.quota.runtime = mj_core::config::QuotaRuntimeChoice::Auto;
+    assert!(republish_quota_profiles(
+        &controller,
+        &mut batch,
+        &profiles_tx
+    ));
+    let first_generation = profiles_rx.borrow().generation;
+
+    // The profiles stay as they are; only where a check runs changes.
+    controller.config.quota.runtime = mj_core::config::QuotaRuntimeChoice::Host;
+    assert!(republish_quota_profiles(
+        &controller,
+        &mut batch,
+        &profiles_tx
+    ));
+    let sent = profiles_rx.borrow().clone();
+    assert!(sent.generation > first_generation);
+    assert_eq!(
+        sent.profiles[0].runtime.choice,
+        mj_core::config::QuotaRuntimeChoice::Host
+    );
+
+    assert!(!republish_quota_profiles(
+        &controller,
+        &mut batch,
+        &profiles_tx
+    ));
+    assert_eq!(profiles_rx.borrow().generation, sent.generation);
 }
 
 #[test]

@@ -1004,6 +1004,10 @@ pub struct DashboardState {
     /// direction of the latest keyboard or wheel navigation, when it fits.
     /// This is consumed by that pane's renderer after the movement.
     pub(crate) recenter_on_selection: Cell<Option<Focus>>,
+    /// The selected session the user scrolled the Sessions list away from with
+    /// the wheel. While that session stays selected, the renderer keeps the
+    /// wheel's offset instead of scrolling the selection back into view.
+    pub(crate) sessions_wheel_scrolled_from: RefCell<Option<String>>,
     pub(crate) capacity_index: usize,
     /// Last rendered Disks button bounds, indexed like `capacity_details`.
     /// Keyboard commands use this geometry to anchor the details dropdown.
@@ -1190,6 +1194,7 @@ pub struct DashboardState {
 #[derive(Debug, Clone)]
 struct WorkspaceViewState {
     sessions_scroll: usize,
+    sessions_wheel_scrolled_from: Option<String>,
     targets_scroll: usize,
     quota_scroll: usize,
     capacity_index: usize,
@@ -1204,6 +1209,7 @@ impl WorkspaceViewState {
     fn from_dashboard(dashboard: &DashboardState) -> Self {
         Self {
             sessions_scroll: dashboard.sessions_scroll.get(),
+            sessions_wheel_scrolled_from: dashboard.sessions_wheel_scrolled_from.borrow().clone(),
             targets_scroll: dashboard.targets_scroll.get(),
             quota_scroll: dashboard.quota_scroll.get(),
             capacity_index: dashboard.capacity_index,
@@ -1311,6 +1317,7 @@ impl DashboardState {
             targets_scroll: Cell::new(0),
             quota_scroll: Cell::new(0),
             recenter_on_selection: Cell::new(None),
+            sessions_wheel_scrolled_from: RefCell::new(None),
             capacity_index: 0,
             quota_index: 0,
             focus: Focus::Sessions,

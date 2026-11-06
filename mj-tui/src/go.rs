@@ -117,8 +117,8 @@ impl DashboardState {
         let Some(session) = self.state.sessions.get(session_id) else {
             return "Conversation".into();
         };
-        if session.display_title() != session.id {
-            return session.display_title().to_owned();
+        if session.has_given_name() {
+            return session.listed_title().to_owned();
         }
         let mut sessions = self
             .state

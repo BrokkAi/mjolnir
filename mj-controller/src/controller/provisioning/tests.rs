@@ -92,15 +92,10 @@ fn ssh_docker_registration_config() -> Config {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: PathBuf::from("/home/dev/.codex"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            codex_profile: None,
-            muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Codex,
+                PathBuf::from("/home/dev/.codex"),
+            )
         },
     );
     config.bundles.insert(

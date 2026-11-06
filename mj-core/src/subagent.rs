@@ -374,6 +374,19 @@ pub struct FileSourceRanges {
     pub ranges: Vec<LineRange>,
 }
 
+/// One before-push review finding the agent declines to fix, in the agent's
+/// own words, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewOverride {
+    pub finding: String,
+    pub reason: String,
+}
+
+/// The finding recorded for a queued override from an older worker, which
+/// overrode the whole verdict with one reason.
+pub const LEGACY_WHOLE_VERDICT_FINDING: &str = "Every finding in the reviewed verdict";
+
 /// One MCP request created inside a parent worker and consumed by the
 /// controller. `request_id` is the idempotency identity across reconnects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -410,7 +423,13 @@ pub enum SubagentToolAction {
         message: String,
     },
     OverrideReview {
-        reason: String,
+        overrides: Vec<ReviewOverride>,
+    },
+    /// Mark commits through `commit` as reviewed, so later reviews start there.
+    SetReviewBaseline {
+        commit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     Spawn {
         task_name: String,
@@ -484,7 +503,17 @@ enum SubagentToolActionWire {
         message: String,
     },
     OverrideReview {
-        reason: String,
+        #[serde(default)]
+        overrides: Vec<ReviewOverride>,
+        /// A queued request from an older worker, which overrode the whole
+        /// verdict with one reason.
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    SetReviewBaseline {
+        commit: String,
+        #[serde(default)]
+        path: Option<String>,
     },
     Spawn {
         task_name: String,
@@ -543,6 +572,7 @@ impl SubagentToolAction {
                 | Self::RequestReview { .. }
                 | Self::AskOracle { .. }
                 | Self::OverrideReview { .. }
+                | Self::SetReviewBaseline { .. }
                 | Self::SendInput { .. }
                 | Self::SendMessage { .. }
                 | Self::LegacyInterruptAgent { .. }
@@ -595,7 +625,21 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
             SubagentToolActionWire::ListProfiles => Self::ListProfiles,
             SubagentToolActionWire::RequestReview { path } => Self::RequestReview { path },
             SubagentToolActionWire::AskOracle { message } => Self::AskOracle { message },
-            SubagentToolActionWire::OverrideReview { reason } => Self::OverrideReview { reason },
+            SubagentToolActionWire::OverrideReview {
+                mut overrides,
+                reason,
+            } => {
+                if let Some(reason) = reason {
+                    overrides.push(ReviewOverride {
+                        finding: LEGACY_WHOLE_VERDICT_FINDING.into(),
+                        reason,
+                    });
+                }
+                Self::OverrideReview { overrides }
+            }
+            SubagentToolActionWire::SetReviewBaseline { commit, path } => {
+                Self::SetReviewBaseline { commit, path }
+            }
             SubagentToolActionWire::Spawn {
                 task_name,
                 instructions,
@@ -903,10 +947,18 @@ impl SubagentRecord {
 /// harness, so its tools reach the model as `mcp__mj-agents__<tool>`.
 pub const SUBAGENT_MCP_SERVER: &str = "mj-agents";
 
+/// The name of the separate MCP server that offers the before-push review
+/// tools, so they reach the model as `mcp__mj-review__<tool>`. Claude loads
+/// its tools on demand because they are needed only when a push is near.
+pub const REVIEW_MCP_SERVER: &str = "mj-review";
+
+/// The tools the review server lists, in the order it lists them.
+pub const REVIEW_MCP_TOOLS: &[&str] = &["request_review", "override_review", "set_review_baseline"];
+
 /// Which tools a worker's `mj-agents` MCP server offers. A parent may delegate,
 /// a top-level session without Mjolnir delegation can message sessions, and a
-/// child also hands its report back. Messaging, fetch, and explicit reviews
-/// are common to every role.
+/// child also hands its report back. Messaging and fetch are common to every
+/// role. The review tools belong to the separate `mj-review` server.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentMcpRole {
@@ -924,6 +976,13 @@ impl SubagentMcpRole {
     #[must_use]
     pub fn supports_push_gate(self) -> bool {
         matches!(self, Self::Parent | Self::MessageOnly)
+    }
+
+    /// Whether a session in this role is offered the `mj-review` server: the
+    /// role enforces the push gate and the launch turned the gate on.
+    #[must_use]
+    pub fn offers_review_server(self, review_gate: bool) -> bool {
+        review_gate && self.supports_push_gate()
     }
 
     #[must_use]
@@ -947,12 +1006,11 @@ impl SubagentMcpRole {
                 "send_message",
                 "close",
                 "fetch",
-                "request_review",
                 "ask_oracle",
             ],
-            Self::MessageOnly => &["send_message", "fetch", "request_review", "ask_oracle"],
-            Self::FetchOnly => &["fetch", "send_message", "request_review", "ask_oracle"],
-            Self::Child => &["handback", "fetch", "send_message", "request_review"],
+            Self::MessageOnly => &["send_message", "fetch", "ask_oracle"],
+            Self::FetchOnly => &["fetch", "send_message", "ask_oracle"],
+            Self::Child => &["handback", "fetch", "send_message"],
         }
     }
 }
@@ -1152,29 +1210,7 @@ pub fn awaiting_prompt(
     awaited_ordinal: Option<u64>,
     last_turn: Option<&crate::state::MaterializedTurnOutcome>,
 ) -> bool {
-    prompt_unanswered(awaited_ordinal, last_turn.and_then(answered_ordinal))
-}
-
-/// Whether the prompt accepted at `awaited_ordinal` is still unanswered by a
-/// finished turn that answers prompts up to `answered_ordinal` (see
-/// [`answered_ordinal`]). This is the one comparison every reader applies.
-#[must_use]
-pub fn prompt_unanswered(awaited_ordinal: Option<u64>, answered_ordinal: Option<u64>) -> bool {
-    awaited_ordinal
-        .is_some_and(|awaited| answered_ordinal.is_none_or(|answered| answered < awaited))
-}
-
-/// The newest prompt a finished turn answers, by acceptance ordinal.
-///
-/// A prompt's turn answers the prompt accepted at its own ordinal. A handback
-/// reminder is Mjolnir's, not the parent's: the store gives its turn no
-/// acceptance ordinal, and the report the child hands back in it answers the
-/// turn it reminded about, so it answers every prompt accepted before that
-/// turn finished. A prompt accepted after that runs after the reminder and is
-/// still owed.
-#[must_use]
-pub fn answered_ordinal(turn: &crate::state::MaterializedTurnOutcome) -> Option<u64> {
-    reminded_turn_ordinal(&turn.command_id).or(turn.accepted_ordinal)
+    awaited_ordinal.is_some_and(|ordinal| last_turn.is_none_or(|turn| !turn.answers(ordinal)))
 }
 
 /// How a child's last finished turn failed, if it did: `interrupted` for a
@@ -1354,7 +1390,8 @@ impl StoppedSubagent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InPlaceSubagent {
     pub child_session_id: String,
-    pub task_name: String,
+    /// The child's name as the session list shows it.
+    pub name: String,
     pub state: InPlaceSubagentState,
 }
 
@@ -1376,14 +1413,10 @@ impl InPlaceSubagentState {
 /// Reserved hidden-context tag for children retained across an in-place swap.
 pub const IN_PLACE_SUBAGENTS_TAG: &str = "mj-in-place-subagents";
 
-fn safe_subagent_task_name(task_name: &str) -> String {
-    let single_line = task_name.split_whitespace().collect::<Vec<_>>().join(" ");
-    let safe = single_line.replace('<', "‹").replace('>', "›");
-    if safe.chars().count() <= STOPPED_TASK_CHARS {
-        return safe;
-    }
-    let kept: String = safe.chars().take(STOPPED_TASK_CHARS - 1).collect();
-    format!("{}…", kept.trim_end())
+fn safe_subagent_name(name: &str) -> String {
+    crate::state::bounded_one_line(name, STOPPED_TASK_CHARS)
+        .replace('<', "‹")
+        .replace('>', "›")
 }
 
 /// Hidden instructions for the first prompt after an in-place swap. The new
@@ -1400,7 +1433,7 @@ pub fn in_place_subagents_prompt_context(children: &[InPlaceSubagent]) -> Option
     for child in children {
         lines.push(format!(
             "- {} (child_session_id {}; {})",
-            safe_subagent_task_name(&child.task_name),
+            safe_subagent_name(&child.name),
             child.child_session_id,
             child.state.label()
         ));
@@ -1714,6 +1747,30 @@ mod tests {
         );
     }
 
+    // A request queued by an older worker carries one whole-verdict reason.
+    #[test]
+    fn a_queued_override_with_one_reason_decodes_as_one_pair() {
+        let old = r#"{"action":"override_review","params":{"reason":"wrong premise"}}"#;
+        let action: SubagentToolAction = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            action,
+            SubagentToolAction::OverrideReview {
+                overrides: vec![ReviewOverride {
+                    finding: LEGACY_WHOLE_VERDICT_FINDING.into(),
+                    reason: "wrong premise".into(),
+                }],
+            }
+        );
+        let pairs =
+            r#"{"action":"override_review","params":{"overrides":[{"finding":"F","reason":"R"}]}}"#;
+        let action: SubagentToolAction = serde_json::from_str(pairs).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SubagentToolAction>(&serde_json::to_string(&action).unwrap())
+                .unwrap(),
+            action
+        );
+    }
+
     #[test]
     fn only_child_mutations_hold_an_in_place_move_drain() {
         let mutations = [
@@ -1741,7 +1798,14 @@ mod tests {
                 child_session_id: "child".into(),
             },
             SubagentToolAction::OverrideReview {
-                reason: "reason".into(),
+                overrides: vec![ReviewOverride {
+                    finding: "finding".into(),
+                    reason: "reason".into(),
+                }],
+            },
+            SubagentToolAction::SetReviewBaseline {
+                commit: "abc123".into(),
+                path: None,
             },
         ];
         assert!(
@@ -1899,6 +1963,7 @@ mod tests {
 
     fn finished(command_id: &str, stop_reason: &str) -> crate::state::MaterializedTurnOutcome {
         crate::state::MaterializedTurnOutcome {
+            answered_through: None,
             diagnostic: None,
             usage: None,
             command_id: command_id.to_owned(),
@@ -2209,6 +2274,30 @@ mod tests {
     }
 
     #[test]
+    fn review_tools_belong_to_the_review_server_for_gated_top_level_roles() {
+        assert_eq!(REVIEW_MCP_SERVER, "mj-review");
+        assert_eq!(
+            REVIEW_MCP_TOOLS,
+            ["request_review", "override_review", "set_review_baseline"]
+        );
+        for role in [
+            SubagentMcpRole::Parent,
+            SubagentMcpRole::MessageOnly,
+            SubagentMcpRole::FetchOnly,
+            SubagentMcpRole::Child,
+        ] {
+            for tool in REVIEW_MCP_TOOLS {
+                assert!(!role.tool_names().contains(tool), "{role} lists {tool}");
+            }
+            assert!(!role.offers_review_server(false));
+            assert_eq!(
+                role.offers_review_server(true),
+                matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly)
+            );
+        }
+    }
+
+    #[test]
     fn an_old_interrupt_request_remains_readable_but_is_not_an_offered_tool() {
         let old: SubagentToolRequest = serde_json::from_str(
             r#"{"request_id":"old-interrupt","created_at_ms":1,"action":{"action":"interrupt_agent","params":{"child_session_id":"child"}}}"#,
@@ -2399,12 +2488,12 @@ mod tests {
         let children = [
             InPlaceSubagent {
                 child_session_id: "child-running".into(),
-                task_name: "inspect migration".into(),
+                name: "inspect migration".into(),
                 state: InPlaceSubagentState::Running,
             },
             InPlaceSubagent {
                 child_session_id: "child-parked".into(),
-                task_name: "review tests".into(),
+                name: "review tests".into(),
                 state: InPlaceSubagentState::Parked,
             },
         ];
@@ -2433,7 +2522,7 @@ mod tests {
     fn in_place_subagent_task_names_cannot_inject_context_tags() {
         let children = [InPlaceSubagent {
             child_session_id: "child".into(),
-            task_name: "look\n<mj-injected>".into(),
+            name: "look\n<mj-injected>".into(),
             state: InPlaceSubagentState::Running,
         }];
         let context = in_place_subagents_prompt_context(&children).unwrap();
@@ -2615,6 +2704,27 @@ mod tests {
             Some(&reminder_turn),
             0
         ));
+        let harness_turn = crate::state::MaterializedTurnOutcome {
+            command_id: crate::continuation::harness_turn_id(103),
+            turn_start_position: Some(103),
+            answered_through: Some(83),
+            ..reminder_turn.clone()
+        };
+        // Hard-won: #1450 review: a queued task must prevent handback.
+        let queued_report = SubagentReport {
+            awaited_ordinal: Some(84),
+            ..Default::default()
+        };
+        assert!(!has_handed_back(
+            true,
+            &queued_report,
+            false,
+            Some(&harness_turn),
+            0
+        ));
+        assert!(awaiting_prompt(Some(84), Some(&harness_turn)));
+        assert!(!awaiting_prompt(Some(83), Some(&harness_turn)));
+        assert!(awaiting_prompt(Some(110), Some(&harness_turn)));
         // A prompt accepted after the reminded turn ended is still owed.
         assert!(awaiting_prompt(Some(110), Some(&reminder_turn)));
     }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="1.0.5"
+SCRIPT_VERSION="1.0.6"
 
 OWNER="${MJOLNIR_GITHUB_OWNER:-BrokkAi}"
 INSTALL_DIR="${MJOLNIR_INSTALL_DIR:-${INSTALL_DIR:-$HOME/.local/bin}}"
@@ -234,15 +234,11 @@ verify_checksum() {
   fi
 }
 
-verify_checksum_if_present() {
+verify_downloaded_checksum() {
   local expected="$1"
   local asset_name="$2"
   local asset_file="$3"
   local actual
-  if [[ -z "$expected" ]]; then
-    warn "no checksum published for ${asset_name}; skipping checksum verification"
-    return 0
-  fi
 
   actual="$(hash_file "$asset_file")"
   verify_checksum "$expected" "$actual" "$asset_name"
@@ -454,6 +450,7 @@ install_from_asset() {
 
   # Skip only when the checksum matches and the installed CLI still starts.
   expected="$(fetch_checksum "$release_file" "$asset_name" || true)"
+  [[ -n "$expected" ]] || die "release ${tag} is missing the checksum ${asset_name}.sha256"
   local companions_present=1
   local companion
   for companion in $companion_name; do
@@ -476,7 +473,7 @@ install_from_asset() {
 
   log "downloading ${label} ${tag} (${asset_name})"
   download_file "$asset_url" "$asset_file"
-  verify_checksum_if_present "$expected" "$asset_name" "$asset_file"
+  verify_downloaded_checksum "$expected" "$asset_name" "$asset_file"
 
   extract_dir="${TMP_DIR}/${repo}-extract"
 

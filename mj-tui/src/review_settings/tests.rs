@@ -246,14 +246,12 @@ fn quota_updates_refresh_the_open_dialogs_suggestion() {
 #[test]
 fn an_opencode_profile_without_a_report_is_usage_priced() {
     let mut config = config();
-    config.profiles.insert(
-        "openrouter".into(),
-        mj_core::config::HarnessProfile {
-            kind: mj_core::config::HarnessKind::OpenCode,
-            home: "/profiles/openrouter/opencode".into(),
-            ..config.profiles["codex-1"].clone()
-        },
-    );
+    config.profiles.insert("openrouter".into(), {
+        let mut profile = config.profiles["codex-1"].clone();
+        profile.kind = mj_core::config::HarnessKind::OpenCode;
+        profile.home = "/profiles/openrouter/opencode".into();
+        profile
+    });
     let mut dashboard = DashboardState::new(config, Default::default(), Default::default());
     assert_eq!(
         dashboard.usage_priced_profiles(&dashboard.config),
@@ -299,9 +297,7 @@ fn autoconfigure_disabled_without_supported_models() {
             .borrow()
             .is_enabled(ReviewSettingsFocus::Autoconfigure)
     );
-    assert!(dialog.can_save()); // Off accepts an empty list.
-    dialog.review.trigger = ReviewTrigger::Turn;
-    assert!(!dialog.can_save());
+    assert!(dialog.can_save()); // No reviewers means review is off.
 }
 
 #[test]
@@ -443,24 +439,6 @@ fn adding_reviewer_during_legacy_upgrade_serializes_the_edit() {
             .get("reviewers")
             .is_some()
     );
-}
-
-#[test]
-fn save_validation_requires_rows_only_for_automatic_trigger() {
-    let config = config();
-    let mut dialog = ReviewSettingsDialog::new(&config);
-    assert!(dialog.can_save());
-    dialog.review.trigger = ReviewTrigger::Push;
-    assert!(!dialog.can_save());
-    assert!(
-        ReviewSettingsDialog::validation_error(&dialog.validation_snapshot(), &dialog.review)
-            .is_some()
-    );
-    dialog.review.reviewers.push(SubagentChoice {
-        model: "gpt-6-terra".into(),
-        effort: None,
-    });
-    assert!(dialog.can_save());
 }
 
 #[test]

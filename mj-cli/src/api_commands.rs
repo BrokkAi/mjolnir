@@ -176,8 +176,9 @@ pub(crate) struct NewArgs {
     /// Reviewer model and optional effort; final colon suffix is effort only when a known effort (minimal, low, medium, high, xhigh, max); trailing colon escapes it. Repeat up to three times.
     #[arg(long = "reviewer", value_name = "MODEL[:EFFORT]")]
     reviewers: Vec<String>,
-    /// Review trigger for this session, overriding `[review]`.
-    #[arg(long, value_parser = ["off", "turn", "push"])]
+    /// Whether this session is reviewed before push (`push`) or not (`off`).
+    /// Omitted follows `[review]`: review runs when reviewers are configured.
+    #[arg(long, value_name = "off|push")]
     review: Option<String>,
     /// Start this session with no project memory: nothing from the
     /// workspace's project memory is loaded into the harness, and the harness
@@ -1160,6 +1161,9 @@ pub(crate) fn subagent_policy(
     })
 }
 
+/// Said when a session asks for the review mode that was removed.
+const TURN_REVIEW_REMOVED: &str = "Per-turn review was removed. Use `--review push`, or omit `--review` to review before push when reviewers are configured.";
+
 /// The session's review overrides, or `None` to follow all of `[review]`.
 fn new_session_review(args: &NewArgs) -> Result<Option<mj_core::config::SessionReview>> {
     session_review(args.review.as_deref(), &args.reviewers)
@@ -1209,8 +1213,8 @@ pub(crate) fn session_review(
     Ok(Some(match trigger {
         "off" => SessionReview::Off,
         "push" => SessionReview::Push { reviewers },
-        "turn" => SessionReview::Turn { reviewers },
-        _ => unreachable!("clap validates the review trigger"),
+        "turn" => bail!("{TURN_REVIEW_REMOVED}"),
+        other => bail!("unknown --review value {other:?}; use off or push"),
     }))
 }
 
@@ -1599,15 +1603,19 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
         ));
     }
     lines.push(summary);
-    // A wait for turn N answers with the latest turn that ended, which is a
-    // later turn when the session has moved on. Say so rather than let the
-    // reply read as turn N's.
-    if let (Some(requested), Some(answered)) = (response.requested_turn_id, response.turn_id)
-        && answered > requested
+    // A wait for turn N answers with the latest turn that ended, which can be
+    // another turn: a later one, an earlier one that ended after N was
+    // removed from the queue, or one the session ran without a prompt. Only
+    // an answer about a finished turn has a turn number.
+    if let Some(requested) = response.requested_turn_id
+        && response.turn_number.is_some()
+        && response.turn_id != Some(requested)
     {
-        lines.push(format!(
-            "this is turn {answered}, which ended after turn {requested}; a session keeps only its latest turn's outcome and reply"
-        ));
+        let answered = response.turn_id.map_or_else(
+            || "a turn the session ran without a prompt".to_owned(),
+            |turn| format!("turn {turn}"),
+        );
+        lines.push(format!("this is the outcome of {answered}, not of turn {requested}; a session keeps only its latest turn's outcome and reply"));
     }
     // The wait's message, the diagnostic and the agent's last message are
     // often one sentence (a Codex quota error was printed three times,
@@ -2434,6 +2442,10 @@ pub(crate) struct ModelsArgs {
     /// List the efforts this model offers instead of the default model's.
     #[arg(long)]
     model: Option<String>,
+    /// List every model the harness advertises, ignoring the profile's
+    /// `models` allow-list. Use it to find the exact values to put there.
+    #[arg(long, conflicts_with = "model")]
+    unrestricted: bool,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -2467,7 +2479,7 @@ pub(crate) async fn models(args: ModelsArgs) -> Result<()> {
         .unwrap_or(mj_client::quota::QuotaBilling::Unknown);
     let choices = ApiClient::connect()
         .await?
-        .models(&args.profile, args.model)
+        .models(&args.profile, args.model, args.unrestricted)
         .await?;
     let rendered = render_models(&choices, billing, args.json)?;
     println!("{rendered}");
@@ -3114,18 +3126,32 @@ mod tests {
                 reviewers: Some(choices.clone())
             }
         );
-        for trigger in [ReviewTrigger::Off, ReviewTrigger::Turn, ReviewTrigger::Push] {
+        // Session reviewer flags enable review even without global reviewers.
+        for (global_reviewers, trigger) in [
+            (Vec::new(), ReviewTrigger::Push),
+            (vec![choices[1].clone()], ReviewTrigger::Push),
+        ] {
             let global = ReviewConfig {
-                trigger,
+                reviewers: global_reviewers,
                 ..Default::default()
             };
-            assert_eq!(global.for_session(Some(&inherited)).trigger, trigger);
+            assert_eq!(global.for_session(Some(&inherited)).trigger(), trigger);
             assert_eq!(global.for_session(Some(&inherited)).reviewers, choices);
         }
         assert_eq!(
             parse(&["--review", "off"]).unwrap().unwrap(),
             Some(SessionReview::Off)
         );
+        assert_eq!(
+            parse(&["--review", "push"]).unwrap().unwrap(),
+            Some(SessionReview::Push { reviewers: None })
+        );
+        // Per-turn review was removed; the refusal says what to use instead.
+        let refused = parse(&["--review", "turn"])
+            .unwrap()
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("--review push"), "{refused}");
         assert!(
             parse(&[
                 "--reviewer",
@@ -3536,12 +3562,35 @@ mod tests {
         // A wait for an earlier turn answers about the later one, and says so.
         let later = wait_response(
             "finished",
-            serde_json::json!({"turn_id": 87, "requested_turn_id": 82}),
+            serde_json::json!({"turn_id": 87, "requested_turn_id": 82, "turn_number": 5}),
         );
         assert!(
-            wait_report_lines(&later)[1].contains("turn 87, which ended after turn 82"),
+            wait_report_lines(&later)[1].contains("outcome of turn 87, not of turn 82"),
             "{:?}",
             wait_report_lines(&later)
+        );
+        // Hard-won: #1450 review: autonomous outcomes hid which turn answered.
+        let autonomous = wait_response(
+            "finished",
+            serde_json::json!({"requested_turn_id":82, "turn_number":5}),
+        );
+        assert_eq!(
+            wait_report_lines(&autonomous)[1],
+            "this is the outcome of a turn the session ran without a prompt, not of turn 82; a session keeps only its latest turn's outcome and reply"
+        );
+        // An answer with no finished turn, such as a failed session, is not one.
+        let earlier = wait_response(
+            "finished",
+            serde_json::json!({"turn_id": 80, "requested_turn_id":82, "turn_number":5}),
+        );
+        assert!(wait_report_lines(&earlier)[1].contains("outcome of turn 80, not of turn 82"));
+        let failed = wait_response("error", serde_json::json!({"requested_turn_id":82}));
+        assert!(
+            !wait_report_lines(&failed)
+                .iter()
+                .any(|line| line.contains("this is the outcome")),
+            "{:?}",
+            wait_report_lines(&failed)
         );
         let same = wait_response(
             "finished",

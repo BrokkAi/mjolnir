@@ -61,7 +61,7 @@ mj ui settings notify.bell=false advanced.auto_afk_minutes=30
 `mj ui settings` opens Settings on the page of the first change with every
 change filled in but not saved; tell the user to review it and press Save.
 Paths are the configuration reference's keys joined with dots (`theme`,
-`keys.prefix`, `review.trigger`); a value that reads as JSON is used as JSON,
+`keys.prefix`); a value that reads as JSON is used as JSON,
 anything else as text, and `null` clears a field. The whole request is checked
 first: an unknown setting or value is refused with the reason and nothing
 changes, so correct it and send it again. A 409 means no dashboard is open;
