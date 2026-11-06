@@ -42,6 +42,7 @@ pub(crate) enum ReviewSettingsOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReviewSettingsValidation {
     reviewers: Vec<SubagentChoice>,
+    legacy: bool,
     models: Vec<SessionConfigChoice>,
     models_known: bool,
     efforts: Vec<Vec<SessionConfigChoice>>,
@@ -120,9 +121,13 @@ impl ReviewSettingsDialog {
             self.suggested = None;
         }
         if let Some((draft, started)) = &self.pending_autoconfigure {
-            let ready = draft
-                .iter()
-                .all(|choice| snapshot.options(config, Some(&choice.model)).is_some());
+            let ready = draft.iter().all(|choice| {
+                snapshot
+                    .options(config, Some(&choice.model))
+                    .is_some_and(|options| {
+                        options.unavailable.is_empty() || !options.efforts.is_empty()
+                    })
+            });
             if ready || started.elapsed() >= Duration::from_secs(20) {
                 let mut resolved = draft.clone();
                 for choice in &mut resolved {
@@ -132,7 +137,10 @@ impl ReviewSettingsDialog {
                             !options.efforts.iter().any(|item| item.value == effort)
                         }) {
                             choice.effort = None;
-                            if offered.is_none() {
+                            if offered
+                                .as_ref()
+                                .is_none_or(|options| !options.unavailable.is_empty())
+                            {
                                 self.effort_notice = Some(
                                     "Some reviewer efforts could not be checked; using defaults."
                                         .into(),
@@ -140,6 +148,17 @@ impl ReviewSettingsDialog {
                             }
                         }
                     }
+                }
+                let failures = resolved
+                    .iter()
+                    .filter_map(|choice| snapshot.options(config, Some(&choice.model)))
+                    .flat_map(|options| options.unavailable)
+                    .collect::<Vec<_>>();
+                if !failures.is_empty() {
+                    self.effort_notice = Some(format!(
+                        "Reviewer effort discovery failed: {}; using defaults.",
+                        failures.join("; ")
+                    ));
                 }
                 self.review.reviewers = resolved;
                 self.review.clear_legacy();
@@ -186,7 +205,10 @@ impl ReviewSettingsDialog {
         {
             return false;
         }
-        if self.review.trigger != ReviewTrigger::Off && self.review.reviewers.is_empty() {
+        if self.review.trigger != ReviewTrigger::Off
+            && self.review.reviewers.is_empty()
+            && !self.review.is_legacy()
+        {
             return false;
         }
         self.review
@@ -207,6 +229,7 @@ impl ReviewSettingsDialog {
     pub(crate) fn validation_snapshot(&self) -> ReviewSettingsValidation {
         ReviewSettingsValidation {
             reviewers: self.review.reviewers.clone(),
+            legacy: self.review.is_legacy(),
             models: self.models.clone(),
             models_known: self.models_known,
             efforts: self.efforts.clone(),
@@ -218,8 +241,13 @@ impl ReviewSettingsDialog {
         snapshot: &ReviewSettingsValidation,
         review: &ReviewConfig,
     ) -> Option<String> {
+        if review.is_legacy() && snapshot.legacy {
+            return None;
+        }
         if review.reviewers.len() > MAX_REVIEWERS
-            || (review.trigger != ReviewTrigger::Off && review.reviewers.is_empty())
+            || (review.trigger != ReviewTrigger::Off
+                && review.reviewers.is_empty()
+                && !review.is_legacy())
         {
             return Some("Choose 1–3 reviewers for automatic review.".into());
         }
@@ -417,7 +445,9 @@ impl ReviewSettingsDialog {
                         dashboard
                             .profile_capabilities
                             .options(&config, Some(&choice.model))
-                            .is_none()
+                            .is_none_or(|options| {
+                                !options.unavailable.is_empty() && options.efforts.is_empty()
+                            })
                     });
                     if unknown {
                         let key = config.capability_demand_key();

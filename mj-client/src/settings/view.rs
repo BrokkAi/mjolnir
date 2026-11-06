@@ -17,6 +17,8 @@ pub struct SettingsPage {
     pub breadcrumb: Vec<String>,
     pub help: String,
     pub groups: Vec<SettingsGroup>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<SettingsAction>,
     /// Adding an entry, on a page that lists entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub add: Option<AddEntry>,
@@ -25,6 +27,14 @@ pub struct SettingsPage {
     /// What this page cannot do here, and where it can be done.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsAction {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +119,9 @@ pub enum SettingsEdit {
     /// Remove the entry whose page is `path`.
     Remove {
         path: Vec<String>,
+    },
+    Action {
+        id: String,
     },
 }
 
@@ -331,6 +344,15 @@ pub fn render_page(draft: &Value, path: &[String]) -> Result<SettingsPage, Strin
             .unwrap_or("Changes stay in this draft until you save.")
             .to_owned(),
         groups,
+        actions: if path == ["review"] {
+            vec![SettingsAction {
+                id: "review.autoconfigure".into(),
+                label: "Autoconfigure".into(),
+                disabled_reason: None,
+            }]
+        } else {
+            Vec::new()
+        },
         add,
         removable: edit::removable(draft, path),
         notices: {
@@ -367,6 +389,7 @@ pub fn apply(
         notice,
     };
     match change {
+        SettingsEdit::Action { .. } => Err("This action is available in the web viewer.".into()),
         SettingsEdit::Set { path, text, choice } => match (offered(&path), text, choice) {
             (Some(SettingsControl::Text { .. } | SettingsControl::Hidden), Some(text), None) => {
                 if schema::path_kind(&path) == Some(schema::PathKind::Target)
@@ -440,5 +463,7 @@ mod review_tests {
             &draft
         ));
         assert!(!read_only(&path(&["review", "trigger"]), &draft));
+        let page = render_page(&draft, &path(&["review"])).unwrap();
+        assert_eq!(page.actions[0].id, "review.autoconfigure");
     }
 }

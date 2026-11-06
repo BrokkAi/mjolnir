@@ -1421,3 +1421,20 @@ test('Move keeps legacy delegation unchanged without resending obsolete selector
     assert.deepEqual(JSON.parse(JSON.stringify(context.moveSubagentChange(draft))), { mode: select.value });
   }
 });
+
+
+test('review settings action renders a button that sends its action id', () => {
+  const calls = [];
+  const context = vm.createContext({
+    settingsEntryActions: makeNode(),
+    el: (tag, className, text) => Object.assign(makeNode(tag), { className, textContent: text || '' }),
+    button: label => Object.assign(makeNode('button'), { textContent: label }),
+    editSettings: (page, edit) => calls.push({ page, edit }),
+  });
+  vm.runInContext(sourceBetween('function renderSettingsEntryActions(', '\nfunction renderSettingsSavebar('), context);
+  vm.runInContext(`renderSettingsEntryActions({path: ['review'], actions: [{id: 'review.autoconfigure', label: 'Autoconfigure'}]})`, context);
+  const control = context.settingsEntryActions.children[0];
+  assert.equal(control.textContent, 'Autoconfigure');
+  control.onclick();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{page: ['review'], edit: {kind: 'action', id: 'review.autoconfigure'}}]);
+});

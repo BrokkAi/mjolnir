@@ -81,6 +81,7 @@ pub fn hidden_root_key(key: &str) -> bool {
             | "keys"
             | "_subagent_options"
             | "_reviewer_options"
+            | "_review_action_reason"
     )
 }
 

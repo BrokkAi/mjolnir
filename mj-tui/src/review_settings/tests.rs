@@ -461,3 +461,44 @@ fn autoconfigure_timeout_finishes_on_clock_tick_without_a_catalog_update() {
         Some("Some reviewer efforts could not be checked; using defaults.")
     );
 }
+
+#[test]
+fn unchanged_legacy_review_remains_valid_during_unrelated_save() {
+    let mut config = config();
+    config.review = ReviewConfig::legacy_default();
+    let dialog = ReviewSettingsDialog::new(&config);
+    assert!(dialog.can_save());
+    assert!(
+        ReviewSettingsDialog::validation_error(&dialog.validation_snapshot(), &dialog.review)
+            .is_none()
+    );
+}
+
+#[test]
+fn failed_effort_discovery_is_reported_when_autoconfigure_times_out() {
+    let config = config();
+    let mut snapshot = catalog(&config, &["gpt-6-terra"]);
+    for profile in snapshot.profiles.values_mut() {
+        profile.efforts.insert(
+            "gpt-6-terra".into(),
+            CapabilityState::Failed("probe failed".into()),
+        );
+    }
+    let mut dialog = ReviewSettingsDialog::new(&config);
+    dialog.pending_autoconfigure = Some((
+        vec![SubagentChoice {
+            model: "gpt-6-terra".into(),
+            effort: Some("high".into()),
+        }],
+        Instant::now() - Duration::from_secs(21),
+    ));
+    dialog.update_choices(&config, &snapshot);
+    assert_eq!(dialog.review.reviewers[0].effort, None);
+    assert!(
+        dialog
+            .effort_notice
+            .as_deref()
+            .unwrap()
+            .contains("probe failed")
+    );
+}

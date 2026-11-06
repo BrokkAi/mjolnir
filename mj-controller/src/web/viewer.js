@@ -839,6 +839,15 @@ function renderSettingsEntryActions(page) {
       actions.push(add);
     }
   }
+  for (const action of page.actions || []) {
+    const control = button(action.label, 'secondary');
+    control.type = 'button';
+    control.disabled = !!action.disabled_reason;
+    if (action.disabled_reason) control.title = action.disabled_reason;
+    control.onclick = () => editSettings(page.path, { kind: 'action', id: action.id });
+    actions.push(control);
+    if (action.disabled_reason) actions.push(el('span', 'dim', action.disabled_reason));
+  }
   if (page.removable) {
     const remove = button('Remove', 'danger');
     remove.type = 'button';
