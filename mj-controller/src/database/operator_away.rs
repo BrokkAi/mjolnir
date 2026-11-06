@@ -54,14 +54,17 @@ pub(super) fn project_event(
     ) {
         return Ok(());
     }
-    // Child forms go to their parent, not operator presence. Exclude their
-    // resolutions too, since no operator-away request was captured for them.
+    // A child's questions go to its parent, not operator presence. Its
+    // approvals wait for a person, so AFK answers and notices apply to them
+    // as to any session's.
     let subagent: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM subagent_sessions WHERE child_session_id=?1)",
         [session],
         |row| row.get(0),
     )?;
-    if subagent {
+    if subagent
+        && matches!(event, ApiEventData::InputRequired { request: Some(request), .. } if request.goes_to_parent())
+    {
         return Ok(());
     }
     let (away, period): (bool, i64) = tx.query_row(
@@ -113,7 +116,9 @@ pub(super) fn project_event(
                 if !away && action != OPERATOR_AWAY_ACTION {
                     tx.execute("DELETE FROM operator_away_requests WHERE session_id=?1 AND requested_seq=?2", params![session,requested])?;
                 }
-            } else if action == OPERATOR_AWAY_ACTION {
+            } else if action == OPERATOR_AWAY_ACTION && !subagent {
+                // A child question has no capture: older workers can still
+                // answer it while away (#1444).
                 bail!(
                     "operator away resolution for {session}/{elicitation_id} has no captured request"
                 );
@@ -245,5 +250,49 @@ mod tests {
         let tx = connection.transaction().unwrap();
         let error = super::super::insert_api_event(&tx, "parent", 3, &resolved).unwrap_err();
         assert!(error.to_string().contains("has no captured request"));
+        drop(tx);
+
+        // A child's approval waits for a person, so AFK answers it and the
+        // child is told, as any session would be.
+        assert!(set_with(&mut connection, true).unwrap());
+        let permission = ElicitationRequest {
+            id: "tool-permission-1".into(),
+            message: "May I run this command?".into(),
+            title: None,
+            description: None,
+            fields: vec![],
+            tool_permission: Some(mj_core::elicitation::ToolPermissionForm { skip: true }),
+        };
+        let tx = connection.transaction().unwrap();
+        super::super::insert_api_event(
+            &tx,
+            "child",
+            4,
+            &ApiEventData::InputRequired {
+                request: Some(permission),
+                turn_id: None,
+            },
+        )
+        .unwrap();
+        super::super::insert_api_event(
+            &tx,
+            "child",
+            5,
+            &ApiEventData::InputResolved {
+                elicitation_id: "tool-permission-1".into(),
+                turn_id: None,
+                action: OPERATOR_AWAY_ACTION.into(),
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let notice: String = connection
+            .query_row(
+                "SELECT event_json FROM mailbox_outbox WHERE target_session_id='child' AND event_key LIKE 'operator-away-%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(notice.contains("May I run this command?"), "{notice}");
     }
 }

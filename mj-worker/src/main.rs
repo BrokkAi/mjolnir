@@ -133,8 +133,14 @@ enum WorkerCommand {
         /// spawn tool then offers no task type.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         subtle_subagents: bool,
-        #[arg(long)]
+        /// Accepted for configurations written by older workers; the review
+        /// tools now belong to the `--review-server` server.
+        #[arg(long, hide = true)]
         review_gate: bool,
+        /// Serve the before-push review tools as `mj-review` instead of the
+        /// delegation tools.
+        #[arg(long)]
+        review_server: bool,
     },
     /// Print a unified diff of the session's work in one repository.
     Diff {
@@ -553,18 +559,24 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             role,
             agent_mailboxes_enabled,
             subtle_subagents,
-            review_gate,
-        } => mj_worker::subagent_mcp::run_mcp_stdio(
-            &socket,
-            harness,
-            role,
-            mj_worker::subagent_mcp::ParentTools {
-                oracle: false,
-                agent_mailboxes_enabled,
-                subtle_subagents,
-                review_gate,
-            },
-        ),
+            review_gate: _,
+            review_server,
+        } => {
+            if review_server {
+                mj_worker::subagent_mcp::run_review_mcp_stdio(&socket, harness)
+            } else {
+                mj_worker::subagent_mcp::run_mcp_stdio(
+                    &socket,
+                    harness,
+                    role,
+                    mj_worker::subagent_mcp::ParentTools {
+                        oracle: false,
+                        agent_mailboxes_enabled,
+                        subtle_subagents,
+                    },
+                )
+            }
+        }
         WorkerCommand::Diff {
             repository,
             base,

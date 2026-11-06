@@ -441,7 +441,6 @@ fn validate_action_against(
             if let Some(review) = review {
                 let reviewers = match review {
                     mj_core::config::SessionReview::Inherit { reviewers }
-                    | mj_core::config::SessionReview::Turn { reviewers }
                     | mj_core::config::SessionReview::Push { reviewers } => {
                         reviewers.as_deref().unwrap_or_default()
                     }

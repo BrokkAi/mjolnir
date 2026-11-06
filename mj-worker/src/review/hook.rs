@@ -23,9 +23,9 @@ if [ "${MJ_REVIEW_GATE:-}" = "1" ]; then
       *) continue ;;
     esac
     tree=$(git rev-parse --verify "$local_sha^{tree}") || exit 1
-    if ! git show-ref --verify --quiet "refs/mj/reviewed/$tree"; then
+    if ! git show-ref --verify --quiet "refs/mj/reviewed/$tree" && ! git show-ref --verify --quiet "refs/mj/overridden/$tree"; then
       echo "mj: $local_ref (tree $tree) has not been reviewed." >&2
-      echo "mj: call the mj-agents request_review tool with path \"$(git rev-parse --show-toplevel)\", wait for the verdict message, then push again." >&2
+      echo "mj: call the mj-review request_review tool with path \"$(git rev-parse --show-toplevel)\", wait for the verdict message, then push again." >&2
       exit 1
     fi
   done < "$tmp"
@@ -172,7 +172,9 @@ mod tests {
     use super::*;
     use crate::review::capture::push_tests::{commit, repository};
     use crate::test_support::git;
-    use mj_checkpoint::archive::{GitCommand, GitOutput, SystemGit, record_reviewed_tree};
+    use mj_checkpoint::archive::{
+        GitCommand, GitOutput, SystemGit, record_overridden_tree, record_reviewed_tree,
+    };
 
     fn push(root: &Path, gate: bool, refs: &[&str]) -> GitOutput {
         let mut arguments = vec!["push".into(), "origin".into()];
@@ -214,12 +216,39 @@ mod tests {
         let stderr = String::from_utf8_lossy(&rejected.stderr);
         assert!(stderr.contains("mj: HEAD (tree "), "{stderr}");
         assert!(stderr.contains("has not been reviewed."), "{stderr}");
-        assert!(stderr.contains(&format!("call the mj-agents request_review tool with path \"{}\", wait for the verdict message, then push again.", root.display())), "{stderr}");
+        assert!(stderr.contains(&format!("call the mj-review request_review tool with path \"{}\", wait for the verdict message, then push again.", root.display())), "{stderr}");
         reviewed(&root);
         assert_eq!(push(&root, true, &["HEAD:refs/heads/feature"]).status, 0);
         commit(&root, "gate off");
         assert_eq!(push(&root, false, &["HEAD:refs/heads/feature"]).status, 0);
         assert_eq!(push(&root, true, &[":refs/heads/feature"]).status, 0);
+    }
+
+    // An overridden tree may be pushed, and a hook written before overridden
+    // refs existed is replaced when the hook is installed again.
+    #[test]
+    fn hook_accepts_an_overridden_tree_and_a_reinstall_replaces_the_old_script() {
+        let temp = repository();
+        let root = temp.path().join("checkout").canonicalize().unwrap();
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        let hook = root.join(".git/hooks/pre-push");
+        let old = SCRIPT.replace(
+            " && ! git show-ref --verify --quiet \"refs/mj/overridden/$tree\"",
+            "",
+        );
+        assert_ne!(old, SCRIPT);
+        fs::write(&hook, &old).unwrap();
+        let head = commit(&root, "overridden");
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_overridden_tree(&SystemGit, &root, &tree, &head).unwrap();
+        assert_ne!(push(&root, true, &["HEAD:refs/heads/feature"]).status, 0);
+        assert_eq!(
+            install_pre_push_hook(&SystemGit, &root).unwrap(),
+            HookInstall::Rewritten
+        );
+        assert_eq!(fs::read_to_string(&hook).unwrap(), SCRIPT);
+        assert!(!root.join(".git/hooks/pre-push.before-mj").exists());
+        assert_eq!(push(&root, true, &["HEAD:refs/heads/feature"]).status, 0);
     }
 
     #[test]

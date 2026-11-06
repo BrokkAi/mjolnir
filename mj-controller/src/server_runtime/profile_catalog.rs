@@ -605,10 +605,9 @@ impl ProfileCatalog {
             if upgrade_definitions(config) != definitions {
                 anyhow::bail!("profile definitions changed during reviewer discovery");
             }
+            // With no reviewers to choose, clearing the pending request is
+            // what turns review off.
             config.review.reviewers = reviewers;
-            if disable_auto {
-                config.review.trigger = mj_core::config::ReviewTrigger::Off;
-            }
             config.review.clear_legacy();
             Ok(true)
         })?;
@@ -2662,7 +2661,6 @@ mod tests {
             }
         }
         config.review = mj_core::config::ReviewConfig::legacy_default();
-        config.review.trigger = mj_core::config::ReviewTrigger::Turn;
         config.save_to(path).unwrap();
     }
 
@@ -3046,21 +3044,41 @@ mod tests {
         );
         let upgraded = Config::load_from(&path).unwrap();
         assert!(!upgraded.review.is_legacy());
-        assert_eq!(upgraded.review.trigger, mj_core::config::ReviewTrigger::Off);
+        assert_eq!(
+            upgraded.review.trigger(),
+            mj_core::config::ReviewTrigger::Off
+        );
         assert!(upgraded.review.reviewers.is_empty());
     }
 
     #[test]
-    fn missing_review_table_upgrades_and_unrelated_save_keeps_auto() {
+    fn pending_automatic_review_upgrades_and_unrelated_save_keeps_it() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
+        // A configuration that asked for review without naming a model. One
+        // with no `[review]` table never asked, so it stays off and is not
+        // given reviewers.
         std::fs::write(
             &path,
-            format!("version = {}\n# keep\n", mj_core::config::CONFIG_VERSION),
+            format!(
+                "version = {}\n# keep\n[review]\ntrigger = \"push\"\n",
+                mj_core::config::CONFIG_VERSION
+            ),
         )
         .unwrap();
         let config = Config::load_from(&path).unwrap();
         assert!(config.review.is_legacy());
+        std::fs::write(
+            directory.path().join("none.toml"),
+            format!("version = {}\n", mj_core::config::CONFIG_VERSION),
+        )
+        .unwrap();
+        assert!(
+            !Config::load_from(&directory.path().join("none.toml"))
+                .unwrap()
+                .review
+                .is_legacy()
+        );
         config.save_to(&path).unwrap();
         assert!(Config::load_from(&path).unwrap().review.is_legacy());
         assert!(

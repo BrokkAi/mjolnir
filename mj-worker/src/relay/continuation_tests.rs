@@ -418,6 +418,7 @@ fn self_started_turn(relay: &mut DurableRelay) -> u64 {
     let start = relay.snapshot.latest_ordinal;
     relay
         .record_observation(RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         })
@@ -479,6 +480,7 @@ fn a_start_inside_our_prompt_is_not_a_turn_of_its_own() {
         .unwrap();
     relay
         .record_observation(RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         })
@@ -769,6 +771,7 @@ fn handback_reminder_rejects_a_newer_native_turn_after_it_settles() {
         .unwrap();
     relay
         .record_observation(RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         })

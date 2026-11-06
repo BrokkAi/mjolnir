@@ -1496,14 +1496,20 @@ function sessionCard(session) {
   return card;
 }
 
+function pendingFormCount(session) {
+  return session.detail === false
+    ? session.pending_elicitation_count || 0
+    : (session.pending_elicitations || []).length;
+}
+
+/// A child's open form is an approval only a person can give, and the child
+/// has no card in the main list, so its parent's card says so.
 function attentionParts(session) {
   const parts = [];
   if (session.operation?.kind === 'move') parts.push(['→', 'Moving']);
   if (session.has_error) parts.push(['!', 'Error']);
-  const pending = session.detail === false
-    ? session.pending_elicitation_count || 0
-    : (session.pending_elicitations || []).length;
-  if (pending) parts.push(['?', 'Input needed']);
+  if (pendingFormCount(session)) parts.push(['?', 'Input needed']);
+  else if (waitingChildCount(session)) parts.push(['?', 'Sub-agent input needed']);
   const queued = session.detail === false
     ? session.queued_prompt_count || 0
     : (session.queued_prompts || []).length;
@@ -1556,7 +1562,7 @@ function updateSessionCard(card, session) {
   renderSessionTitle(card._heading, session);
   card._attention.replaceChildren(
     ...attention.map(([glyph, label]) => {
-      const node = el('span', `session-attention-item ${label === 'Error' || label === 'Input needed' ? 'alert' : ''}`, glyph);
+      const node = el('span', `session-attention-item ${['Error', 'Input needed', 'Sub-agent input needed'].includes(label) ? 'alert' : ''}`, glyph);
       node.setAttribute('aria-label', label);
       node.setAttribute('role', 'img');
       node.title = label;
@@ -5498,6 +5504,18 @@ function workingChildCount(session) {
     .length;
 }
 
+/// Children with an open form, which only a person can answer, counting a
+/// child whose own reviewer holds one. Validation rejects ownership cycles;
+/// `seen` keeps a malformed snapshot finite anyway.
+function waitingChildCount(session, seen = new Set()) {
+  if (!session || seen.has(session.id)) return 0;
+  seen.add(session.id);
+  return (session.subagent_session_ids || [])
+    .map(id => sessionById(id))
+    .filter(child => child && (pendingFormCount(child) || waitingChildCount(child, seen)))
+    .length;
+}
+
 function sessionInWorkspace(id, workspace) {
   const session = sessionById(id);
   return session?.workspace_id === workspace ? session : undefined;
@@ -7646,8 +7664,7 @@ function sessionReviewStatusConfig(snapshot, session) {
 function reviewStatusLine(review, open) {
   const trigger = review?.trigger;
   const armed = trigger === "push" ? "Review trigger is before push"
-    : trigger === "turn" ? "Reviewing every completed turn"
-      : "Automatic review is off; /review reviews one turn";
+    : "Automatic review is off; /review reviews commits";
   const count = review?.count ?? review?.reviewers?.length ?? 0;
   const status = count === 0 ? `${armed}; no reviewers`
     : `${armed}; ${count} reviewer${count === 1 ? '' : 's'}`;
@@ -7765,9 +7782,9 @@ async function runLocalCommand(text) {
         return true;
       }
       if (scope === 'on' || scope === 'off') {
-        // Arming review is configuration, not a session gesture.
+        // Review runs when reviewers are configured: not a session gesture.
         error.textContent =
-          'automatic review is configured in config.toml: [review] trigger';
+          'review runs before push when reviewers are set in Settings › Code Review';
         setComposerText('');
         return true;
       }
@@ -8666,13 +8683,26 @@ function renderConversationHeader(session) {
   const working = children.filter(id => sessionById(id)?.chat_phase === 'running').length
     + new Set(native.filter(a => a.state === 'running').map(a => a.stable_id || a.session_id)).size;
   const total = children.length + native.length;
+  // A child's approval is not shown in this conversation, so say it is waiting.
+  const waiting = waitingChildCount(session);
   for (const button of [subagentsButton, subagentsDesktopButton]) {
     if (!button) continue;
-    button.textContent = `Subagents · ${working}`;
-    button.title = `${total} retained agents`;
+    button.textContent = waiting
+      ? `Subagents · ${working} · ${waiting} need${waiting === 1 ? 's' : ''} you`
+      : `Subagents · ${working}`;
+    button.title = waiting
+      ? `${total} retained agents; ${waiting} waiting for your answer`
+      : `${total} retained agents`;
+    button.classList.toggle('alert', waiting > 0);
+    button.setAttribute('aria-label', waiting
+      ? `Open sub-agent workspace; ${waiting} waiting for your answer`
+      : 'Open sub-agent workspace');
+    // Inside a sub-agent context the button opens this child's own children
+    // only when one of them waits for the person, such as a reviewer of the
+    // child's work; otherwise it stays hidden there.
     button.classList.toggle(
       'hidden',
-      total === 0 || Boolean(route.subagentParentId),
+      total === 0 || (Boolean(route.subagentParentId) && waiting === 0),
     );
   }
   // Reviewers stay reachable once any exist, so a finished review's

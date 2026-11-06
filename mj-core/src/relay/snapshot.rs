@@ -1239,6 +1239,9 @@ pub enum RelayObservation {
     /// The harness reached a turn boundary on its own. `origin` is the
     /// adapter's reported origin kind, kept for diagnostics.
     HarnessTurnSettled {
+        /// Present only for an autonomous turn; absent in older journals to preserve digests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        autonomous: Option<SettledHarnessTurn>,
         origin: Option<String>,
         /// Whether a prompt of ours was still running when the turn settled.
         /// The relay keeps `Running` for it; the projection cannot see
@@ -1352,6 +1355,16 @@ pub struct StoredHarnessTurn {
     pub started_at_ms: i64,
     /// Ordinal of the `harness_turn_started` event that opened this turn.
     pub first_ordinal: u64,
+}
+
+/// A stop aimed at one open autonomous harness turn, named by the ordinal that
+/// opened it. The journal's `Cancel`/`CancelTurn` events own it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessTurnCancel {
+    pub first_ordinal: u64,
+    /// The runtime acknowledged a stop of this turn.
+    pub applied: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1540,6 +1553,13 @@ pub struct RelaySnapshot {
     pub harness_turn: Option<StoredHarnessTurn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_harness_turn_started_ordinal: Option<u64>,
+    /// The stop aimed at the open autonomous harness turn, while that turn is
+    /// open. Set when a `Cancel` or `CancelTurn` is accepted with no prompt of
+    /// ours running, so every settle the stop causes finds it however the
+    /// harness's result and the acknowledgement race. Never serialized once
+    /// the turn settles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelling_harness_turn: Option<HarnessTurnCancel>,
     /// Ignored. Protocol 26 workers persisted durable command receipts here;
     /// the field stays so their stores still open after an upgrade.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -1551,7 +1571,18 @@ pub struct RelaySnapshot {
     pub dispatches: BTreeMap<String, RelayDispatchRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettledHarnessTurn {
+    pub start_ordinal: u64,
+    pub stop_reason: String,
+}
+
 impl RelaySnapshot {
+    /// The open turn that began without a prompt.
+    pub fn autonomous_harness_turn(&self) -> Option<StoredHarnessTurn> {
+        self.harness_turn
+            .filter(|turn| self.continuation.autonomous_turn_started == Some(turn.first_ordinal))
+    }
     pub fn new(session_id: String) -> Self {
         Self {
             assessment_questions: Default::default(),
@@ -1608,6 +1639,7 @@ impl RelaySnapshot {
             checkpoint_ready_digest: None,
             harness_turn: None,
             last_harness_turn_started_ordinal: None,
+            cancelling_harness_turn: None,
             retained_command_receipts: BTreeSet::new(),
             cancelled_command_admissions: BTreeSet::new(),
             handled_commands: BTreeMap::new(),

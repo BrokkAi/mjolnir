@@ -1292,11 +1292,7 @@ async fn in_process_reviewer_forwarding_stops_when_the_caller_goes_away() {
         RemoteSessionRequest::Reviewer {
             session_id: "session-1".into(),
             role: None,
-            action: crate::session_manager::ReviewerAction::CaptureDelta {
-                repositories: None,
-                scope: Default::default(),
-                baselines: Default::default(),
-            },
+            action: crate::session_manager::ReviewerAction::CaptureDelta { repositories: None },
             reply,
         },
         manager.control.clone(),
@@ -3621,6 +3617,7 @@ async fn relay_turn_start_retires_only_the_recorded_public_lifecycle_failure() {
     observe(
         &mut view,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         },
@@ -3643,6 +3640,7 @@ async fn relay_turn_start_retires_only_the_recorded_public_lifecycle_failure() {
     observe(
         &mut view,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         },
@@ -6785,6 +6783,7 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
             }));
     }
     conversation.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "task-1".into(),
@@ -8228,9 +8227,7 @@ async fn exercise_child_close_with_a_nested_workspace(
             TurnReviewSeed {
                 task: "review the changes".into(),
                 user_messages: Vec::new(),
-                baselines: Default::default(),
-                through_ordinal: 1,
-                prior_review: None,
+                declined: Vec::new(),
             },
             "failed-start".into(),
             std::num::NonZeroUsize::new(1).unwrap(),
@@ -8246,12 +8243,9 @@ async fn exercise_child_close_with_a_nested_workspace(
         crate::database::save_turn_review_state(
             parent_id,
             &crate::database::TurnReviewState {
-                pending_followup: false,
-                forward_attempts: 0,
                 active_group: Some(mj_core::storage::ActiveReviewGroup {
                     driver: driver.snapshot(),
                     reviewers: vec![Default::default()],
-                    scope: Default::default(),
                     registrations: vec![mj_core::storage::ReviewerRegistration {
                         role: "reviewer-1".into(),
                         request_key: relation.request_key.clone(),
@@ -8335,8 +8329,8 @@ async fn exercise_child_close_with_a_nested_workspace(
         assert!(
             crate::database::turn_review_state(parent_id)
                 .unwrap()
-                .baselines
-                .is_empty()
+                .push_findings
+                .is_none()
         );
         state.review_host.shutdown().await.unwrap();
     } else {

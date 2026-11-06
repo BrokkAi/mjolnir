@@ -22,7 +22,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
         }
         // Only the section itself: its reviewer entries are SubagentChoice
         // tables, which reject unknown keys.
-        "review" if path.len() == 1 => json!({"trigger":"off"}),
+        "review" if path.len() == 1 => json!({}),
         "continuation" => json!({"enabled":true}),
         "github" if path.len() == 1 => json!({"watch":{}}),
         "github" if key == "watch" => {
@@ -503,19 +503,18 @@ pub fn section_summary(
             }
         }
         "review" => {
-            let trigger = match section["trigger"].as_str().unwrap_or("off") {
-                "turn" => "Every turn",
-                "push" => "Before push",
-                _ => return Some("Off".to_owned()),
-            };
+            // Review is on exactly when reviewers are configured. A draft
+            // that still has to choose them automatically has no list yet.
             let reviewers = section["reviewers"].as_array().map_or(0, Vec::len);
-            if reviewers == 0 {
-                format!("{trigger} · no reviewers")
-            } else {
+            if reviewers > 0 {
                 format!(
-                    "{trigger} · {reviewers} reviewer{}",
+                    "Before push · {reviewers} reviewer{}",
                     if reviewers == 1 { "" } else { "s" }
                 )
+            } else if section.get("reviewers").is_none() && section["trigger"] == "push" {
+                "Before push · automatic reviewers".to_owned()
+            } else {
+                "Off".to_owned()
             }
         }
         "continuation" => {
@@ -596,15 +595,6 @@ pub fn choice_label(path: &[String], value: &Value, draft: &Value) -> String {
             value.to_string()
         };
     };
-    if path == ["review", "trigger"] {
-        return match value {
-            "off" => "Off",
-            "turn" => "End of turn",
-            "push" => "Before push",
-            _ => value,
-        }
-        .to_owned();
-    }
     // Only the theme field: `auto` is also an image pull policy.
     if super::draft::storage_path(path) == ["theme"]
         && let Ok(choice) = serde_json::from_value::<ThemeChoice>(Value::String(value.into()))
@@ -742,7 +732,6 @@ pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         return choices;
     }
     let values: &[&str] = match key {
-        "trigger" if path == ["review", "trigger"] => &["off", "turn", "push"],
         "sessions_side" => &["left", "right"],
         "session_order" => &["project", "priority"],
         "symbols" => &["unicode", "ascii"],
@@ -963,9 +952,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         "repositories" => {
             "Set either a local repository directory or a GitHub source for each repository."
         }
-        "review" => {
-            "Review triggers and reviewers. An empty reviewer list means no reviewers are configured."
-        }
+        "review" => "Reviewers for code review before push. With no reviewers, review is off.",
         "continuation" => {
             "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
         }
@@ -1086,7 +1073,7 @@ mod review_tests {
     #[test]
     fn expanding_a_draft_leaves_reviewer_entries_unchanged() {
         let reviewer = json!({"model": "gpt-6-terra", "effort": "xhigh"});
-        let mut draft = json!({"review": {"trigger": "push", "reviewers": [reviewer]}});
+        let mut draft = json!({"review": {"reviewers": [reviewer]}});
         expand(&mut draft, &mut Vec::new());
         assert_eq!(draft["review"]["reviewers"], json!([reviewer]));
     }
@@ -1094,30 +1081,28 @@ mod review_tests {
     #[test]
     fn legacy_review_defaults_do_not_insert_reviewers() {
         let path = ["review".to_owned()];
-        assert_eq!(defaults(&path, &json!({})), json!({"trigger": "off"}));
+        assert_eq!(defaults(&path, &json!({})), json!({}));
     }
 
     #[test]
-    fn review_summary_names_the_trigger_and_reviewer_count() {
+    fn review_summary_is_off_without_reviewers_and_counts_them_otherwise() {
         let theme = |_: &Value, _: &Value| String::new();
         let summary =
             |review: Value| section_summary("review", &json!({ "review": review }), &theme);
         let reviewer = json!({"model": "gpt-6-terra", "effort": "xhigh"});
+        assert_eq!(summary(json!({"reviewers": []})).as_deref(), Some("Off"));
+        assert_eq!(summary(json!({})).as_deref(), Some("Off"));
         assert_eq!(
-            summary(json!({"trigger": "off", "reviewers": [reviewer]})).as_deref(),
-            Some("Off")
-        );
-        assert_eq!(
-            summary(json!({"trigger": "turn", "reviewers": []})).as_deref(),
-            Some("Every turn · no reviewers")
-        );
-        assert_eq!(
-            summary(json!({"trigger": "push", "reviewers": [reviewer]})).as_deref(),
+            summary(json!({"reviewers": [reviewer]})).as_deref(),
             Some("Before push · 1 reviewer")
         );
         assert_eq!(
-            summary(json!({"trigger": "push", "reviewers": [reviewer, reviewer]})).as_deref(),
+            summary(json!({"reviewers": [reviewer, reviewer]})).as_deref(),
             Some("Before push · 2 reviewers")
+        );
+        assert_eq!(
+            summary(json!({"trigger": "push"})).as_deref(),
+            Some("Before push · automatic reviewers")
         );
     }
 }

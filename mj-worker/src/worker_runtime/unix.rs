@@ -23,8 +23,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::review_capture::ReviewCapture;
 use super::{
-    AcpSupervisorSpec, CredentialEndpoint, REVIEW_UNTRACKED_FILE, WorkerLaunchConfig,
-    acp_additional_directories, reviewer_workspace_directories,
+    AcpSupervisorSpec, CredentialEndpoint, WorkerLaunchConfig, acp_additional_directories,
+    reviewer_workspace_directories,
 };
 
 use crate::acp::{self, CommandRequest, LaunchSpec, RuntimeEvent};
@@ -91,9 +91,6 @@ struct HarnessPreparationCompletion {
     idle_dispatch_wakes: Option<mpsc::Receiver<()>>,
 }
 
-pub(super) type UntrackedReviewEntries =
-    Arc<Mutex<std::collections::BTreeMap<PathBuf, Vec<crate::review::capture::UntrackedEntry>>>>;
-
 struct HarnessPreparationSetup {
     root: PathBuf,
     config: WorkerLaunchConfig,
@@ -101,8 +98,6 @@ struct HarnessPreparationSetup {
     session_git_config_include: Option<PathBuf>,
     credentials: std::result::Result<CredentialEndpoint, String>,
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
-    relay_state_exists: bool,
-    untracked_at_start: UntrackedReviewEntries,
     resume_session: Option<String>,
     native_session_may_have_history: bool,
 }
@@ -143,10 +138,12 @@ struct AcpPreparationSetup {
     session_environment: BTreeMap<String, String>,
     supervisor_spec: AcpSupervisorSpec,
     relay: Arc<Mutex<DurableRelay>>,
-    untracked_at_start: UntrackedReviewEntries,
     resume_session: Option<String>,
     native_session_may_have_history: bool,
     profile_registration: bool,
+    /// Read from the launch before preparation strips the marker from the
+    /// harness environment, so the ACP runtime knows the session is a child.
+    managed_subagent: bool,
     subagent_role: Option<mj_core::subagent::SubagentMcpRole>,
     runtime: tokio::runtime::Handle,
     managed_cache_root: Option<PathBuf>,
@@ -230,10 +227,10 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         session_environment,
         supervisor_spec,
         relay,
-        untracked_at_start,
         resume_session,
         native_session_may_have_history,
         profile_registration,
+        managed_subagent,
         subagent_role,
         runtime,
         managed_cache_root,
@@ -258,8 +255,6 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         session_id: config.session_id.clone(),
         cwd: config.cwd.clone(),
         additional_directories: reviewer_workspace_directories(&config),
-        review_capture: config.review_capture,
-        untracked_at_start,
         primary_relay: relay.clone(),
         operation: tokio::sync::Mutex::new(()),
     });
@@ -315,7 +310,6 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         &session_environment,
         &mut additional_directories,
     );
-    let managed_subagent = config.is_managed_subagent();
     let acp_spec = LaunchSpec {
         operator_away: relay
             .lock()
@@ -795,7 +789,6 @@ pub async fn run_daemon_owned(
     }
     let relay_state_exists = root.join(RELAY_STATE_FILE).exists();
     let restarting = relay_state_exists || root.join(RESTORED_RELAY_SEED_FILE).exists();
-    let untracked_at_start = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
     // Validate and recover durable state before publishing a socket. A
     // failed startup must never leave a fresh endpoint that looks live.
     super::record_startup_step(&root, "durable-relay");
@@ -918,11 +911,7 @@ pub async fn run_daemon_owned(
         .await;
     }
 
-    let initial_step = if config.review_capture {
-        "review-baseline"
-    } else {
-        "login-resolve"
-    };
+    let initial_step = "login-resolve";
     let (preparation_tx, preparation_rx) = watch::channel(PreparationSnapshot {
         state: Some(mj_core::relay::HarnessPreparation::Preparing {
             step: initial_step.to_owned(),
@@ -966,8 +955,6 @@ pub async fn run_daemon_owned(
         session_git_config_include,
         credentials,
         kimi_task_home,
-        relay_state_exists,
-        untracked_at_start,
         resume_session,
         native_session_may_have_history,
     };
@@ -1401,21 +1388,6 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-fn reuse_review_baselines(
-    relay_state_exists: bool,
-    recorded: &std::collections::BTreeMap<PathBuf, Vec<crate::review::capture::UntrackedEntry>>,
-    git: &dyn mj_checkpoint::archive::GitCommandRunner,
-    session: &str,
-) -> bool {
-    relay_state_exists
-        || (!recorded.is_empty()
-            && crate::review::capture::session_holds_review_baselines(
-                git,
-                &recorded.keys().cloned().collect::<Vec<_>>(),
-                session,
-            ))
-}
-
 async fn prepare_and_start_harness(
     setup: HarnessPreparationSetup,
     dispatch_wake_rx: &mut Option<mpsc::Receiver<()>>,
@@ -1429,91 +1401,16 @@ async fn prepare_and_start_harness(
         session_git_config_include,
         credentials,
         kimi_task_home,
-        relay_state_exists,
-        untracked_at_start,
         resume_session,
         native_session_may_have_history,
     } = setup;
-    if config.is_managed_subagent() {
+    let managed_subagent = config.is_managed_subagent();
+    if managed_subagent {
         config.review_trigger = Default::default();
     }
     let review_gate = config.review_gate();
     let subagent_role = config.subagent_mcp_role();
     let root = root_path.as_path();
-    // The first capture must precede the primary harness, so pre-existing
-    // edits are not reported as this session's turn. Restarts and in-place moves
-    // retain their original baseline and untracked list.
-    if config.review_capture {
-        let budget = preparation_step(
-            root,
-            status,
-            "review-baseline",
-            LOCAL_PREPARATION_STEP_TIMEOUT,
-            cancel,
-        )
-        .await?;
-        let record = root.join(REVIEW_UNTRACKED_FILE);
-        let recorded: std::collections::BTreeMap<
-            PathBuf,
-            Vec<crate::review::capture::UntrackedEntry>,
-        > = {
-            let read_record = record.clone();
-            bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
-                if step_cancel.is_cancelled() {
-                    anyhow::bail!("preparation cancelled before reading review baseline");
-                }
-                Ok(std::fs::read(&read_record)
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                    .unwrap_or_default())
-            })
-            .await?
-        };
-        let recorded = {
-            let mut workspace_roots = vec![config.cwd.clone()];
-            workspace_roots.extend(reviewer_workspace_directories(&config));
-            let session_id = config.session_id.clone();
-            bounded_preparation_step(&budget, async move {
-                let git = crate::review::capture::BoundedGit::new(
-                    crate::review::capture::WORKSPACE_STATE_TIMEOUT,
-                );
-                let _cancel_git = git.cancellation_guard();
-                tokio::task::spawn_blocking(move || {
-                    if reuse_review_baselines(relay_state_exists, &recorded, &git, &session_id) {
-                        return Ok(recorded);
-                    }
-                    let repositories =
-                        crate::review::capture::discover_repositories(&git, &workspace_roots);
-                    crate::review::capture::initialize_review_baselines(
-                        &git,
-                        &repositories,
-                        &session_id,
-                    )
-                })
-                .await
-                .map_err(|error| {
-                    anyhow::anyhow!("review baseline initialization stopped: {error}")
-                })?
-            })
-            .await?
-        };
-        let untracked_root = record;
-        let untracked_at_start = untracked_at_start.clone();
-        bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
-            if step_cancel.is_cancelled() {
-                anyhow::bail!("preparation cancelled before recording review baseline");
-            }
-            if let Ok(bytes) = serde_json::to_vec_pretty(&recorded) {
-                let _ = mj_core::config::atomic_write(&untracked_root, &bytes);
-            }
-            *untracked_at_start
-                .lock()
-                .expect("untracked-at-start lock poisoned") = recorded;
-            Ok(())
-        })
-        .await?;
-    }
-
     let login_budget = preparation_step(
         root,
         status,
@@ -1665,8 +1562,8 @@ async fn prepare_and_start_harness(
                             oracle: false,
                             agent_mailboxes_enabled: mailboxes_enabled,
                             subtle_subagents,
-                            review_gate,
                         },
+                        review_gate,
                     )?;
                     Ok((registered, environment))
                 })
@@ -1871,10 +1768,10 @@ async fn prepare_and_start_harness(
         session_environment: prepared_harness.environment,
         supervisor_spec: prepared_harness.spec,
         relay: relay.clone(),
-        untracked_at_start,
         resume_session,
         native_session_may_have_history,
         profile_registration,
+        managed_subagent,
         subagent_role,
         runtime: tokio::runtime::Handle::current(),
         managed_cache_root,
@@ -2556,43 +2453,6 @@ mod preparation_tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
-    // Hard-won: c29b1379c: an in-place Move's relay reset made review rescan the checkout and refuse it.
-    #[test]
-    fn review_baseline_reuse_survives_relay_reset_only_with_a_record_and_owned_pins() {
-        use crate::test_support::git;
-        use mj_checkpoint::archive::SystemGit;
-
-        let repository = tempfile::tempdir().unwrap();
-        let root = repository.path();
-        git(root, &["init", "-q"]);
-        git(root, &["config", "user.name", "Review Test"]);
-        git(root, &["config", "user.email", "review@example.test"]);
-        git(root, &["commit", "--allow-empty", "-qm", "base"]);
-        let empty = std::collections::BTreeMap::new();
-        assert!(reuse_review_baselines(true, &empty, &SystemGit, "session"));
-        assert!(!reuse_review_baselines(
-            false, &empty, &SystemGit, "session"
-        ));
-        let recorded = crate::review::capture::initialize_review_baselines(
-            &SystemGit,
-            &[root.to_path_buf()],
-            "session",
-        )
-        .unwrap();
-        assert!(reuse_review_baselines(
-            false, &recorded, &SystemGit, "session"
-        ));
-        assert!(!reuse_review_baselines(
-            false, &recorded, &SystemGit, "other"
-        ));
-        assert!(reuse_review_baselines(true, &recorded, &SystemGit, "other"));
-        let reference = mj_checkpoint::archive::review_baseline_ref(&SystemGit, root).unwrap();
-        git(root, &["update-ref", "-d", &reference]);
-        assert!(!reuse_review_baselines(
-            false, &recorded, &SystemGit, "session"
-        ));
-    }
-
     type TestReader = BufReader<OwnedReadHalf>;
 
     fn test_relay(root: &std::path::Path) -> Arc<Mutex<DurableRelay>> {
@@ -2675,8 +2535,6 @@ mod preparation_tests {
                     session_id: "preparation-test".into(),
                     cwd: root.into(),
                     additional_directories: Vec::new(),
-                    review_capture: false,
-                    untracked_at_start: Arc::new(Mutex::new(BTreeMap::new())),
                     primary_relay: relay.clone(),
                     operation: tokio::sync::Mutex::new(()),
                 }),

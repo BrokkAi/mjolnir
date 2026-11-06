@@ -473,25 +473,9 @@ pub fn has_origin_refs(runner: &dyn GitCommandRunner, repository: &Path) -> Resu
     Ok(!refs.is_empty())
 }
 
-/// Ref pinning the review point a completed review advanced its baseline to,
-/// for a repository's main worktree; a linked worktree has its own (see
-/// [`review_baseline_ref`]).
-///
-/// This is the one kind of ref Mjolnir writes into a user's repository, and it
-/// earns its place. A baseline is HEAD's tree plus one blob for each file the
-/// checkout was already dirty with; HEAD's own objects are reachable from the
-/// branch, but those few blobs are reachable from nothing else. A session can
-/// run for days between reviews, so without this ref an ordinary `git gc`
-/// would eventually collect them, `tree_exists` would then find no usable
-/// baseline, and that repository's next review would report no coverage
-/// instead of the turn's work.
-///
-/// The ref names a review point (see [`record_review_point`]); one pinned by an
-/// earlier release names the bare tree. Either resolves with `^{tree}`.
-///
-/// A capture taken during a review is deliberately not pinned. It is consumed
-/// inside that review, and if the review completes it is pinned here as the
-/// new baseline.
+/// Historical review baseline pin, retained in checkpoints and existing repositories.
+/// Push review derives its session-start ref name from this worktree-specific name.
+/// Older pins name a review point or a bare tree; both resolve with `^{tree}`.
 pub const REVIEW_BASELINE_REF: &str = "refs/mj/review-baseline";
 
 /// Where linked worktrees pin their review baselines, as
@@ -1504,6 +1488,22 @@ pub fn record_reviewed_tree(
     )
 }
 
+/// Records an overridden review of `tree` at `commit`. A push of the tree is
+/// allowed, but capture never takes the commit as the base of the next review.
+pub fn record_overridden_tree(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    tree: &str,
+    commit: &str,
+) -> Result<()> {
+    pin_review_tree(
+        runner,
+        repository,
+        &format!("refs/mj/overridden/{tree}"),
+        commit,
+    )
+}
+
 /// The empty tree of this repository's object format, read from Git rather
 /// than hardcoded so a SHA-256 repository works as well as a SHA-1 one.
 pub fn empty_tree_id(runner: &dyn GitCommandRunner, repository: &Path) -> Result<String> {
@@ -2174,7 +2174,9 @@ pub(crate) fn restore_git_snapshot_for_session(
                     String::new()
                 };
                 if !old.is_empty() {
-                    if name.starts_with("refs/mj/reviewed/") {
+                    if name.starts_with("refs/mj/reviewed/")
+                        || name.starts_with("refs/mj/overridden/")
+                    {
                         continue;
                     }
                     let owned_start = session.is_some_and(|session| {

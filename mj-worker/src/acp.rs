@@ -5,7 +5,7 @@
 //! [`surface`] projects protocol capabilities for the chat control surface.
 
 mod air_tasks;
-mod drive;
+pub(crate) mod drive;
 mod launch;
 mod native_agents;
 mod opencode_logins;
@@ -35,6 +35,7 @@ mod grok_usage;
 mod grok_usage_tests;
 mod kimi_tasks;
 mod muse_usage;
+mod opencode_usage;
 pub use kimi_tasks::resolve_session_dir as resolve_kimi_session_dir;
 pub use kimi_tasks::*;
 #[cfg(test)]
