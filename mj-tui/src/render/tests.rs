@@ -35,6 +35,7 @@ fn session_metadata_text(
         false,
         false,
         crate::AttentionLevel::Idle,
+        None,
         operation,
         now_epoch_seconds,
         &session_target_label(&State::default(), session, operation, config),
