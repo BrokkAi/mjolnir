@@ -255,7 +255,7 @@ pub(super) fn github_access_check(
             check_id,
             title,
             format!(
-                "Git on {location} rewrites {} to HTTPS, but {gap}. Fetches and pushes to those GitHub remotes will fail.",
+                "Git on {location} rewrites {} to HTTPS, but {gap}. Mjolnir's source fetch and publication checks there will fail for those GitHub remotes; agents' pushes in a session use the session's synced GitHub token instead.",
                 remotes(&over_https)
             ),
             format!(
@@ -286,7 +286,7 @@ pub(super) fn github_access_check(
                 "{location} cannot reach GitHub noninteractively. SSH: {}. HTTPS: {gap}.",
                 ssh_gap(refusal)
             ),
-            no_access_remediation(location, refusal.kind),
+            no_access_remediation(location, refusal.kind, !over_https.is_empty()),
         ),
     }
 }
@@ -305,7 +305,9 @@ fn ssh_gap(refusal: &SshRefusal) -> String {
     }
 }
 
-fn no_access_remediation(location: &str, ssh: SshFailure) -> String {
+/// `rewritten`: Git already sends some SSH spelling over HTTPS, so an SSH key
+/// alone would not fix it.
+fn no_access_remediation(location: &str, ssh: SshFailure, rewritten: bool) -> String {
     let ssh_fix = match ssh {
         SshFailure::UntrustedHostKey => format!(
             "Trust GitHub's SSH host key on {location}: run `ssh -T git@github.com` there by hand, accept the key only if its fingerprint matches {FINGERPRINTS_URL}, and if the key changed run `ssh-keygen -R github.com` first"
@@ -318,6 +320,13 @@ fn no_access_remediation(location: &str, ssh: SshFailure) -> String {
                 "Add a GitHub SSH key to {location} (`ssh-keygen -t ed25519`, then add the public key at https://github.com/settings/keys)"
             )
         }
+    };
+    let ssh_fix = if rewritten {
+        format!(
+            "{ssh_fix}, and remove the HTTPS rewrite with `git config --global --unset-all url.https://github.com/.insteadOf`"
+        )
+    } else {
+        ssh_fix
     };
     format!(
         "{ssh_fix}. Or use HTTPS: on {location}, run `gh auth login` then `gh auth setup-git` (it records gh's absolute path, which non-interactive SSH needs when gh is not on PATH), then run `{}` and `{}`. Rerun `mj doctor` afterwards.",
@@ -467,6 +476,12 @@ mod tests {
                 ],
                 CheckStatus::Warning,
                 "GitHub accepted no SSH key",
+            ),
+            // Hard-won: f37af2cdd: the SSH remedy left a rewrite sending GitHub over HTTPS without credentials.
+            (
+                vec![rewritten(), unrewritten(), denied(), no_password()],
+                CheckStatus::Warning,
+                "remove the HTTPS rewrite with `git config --global --unset-all url.https://github.com/.insteadOf`",
             ),
             // Hard-won: e32a6aeef: a working SSH key reported ready although insteadOf sent GitHub over HTTPS without credentials.
             (
