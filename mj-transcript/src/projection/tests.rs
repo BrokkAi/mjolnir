@@ -1349,6 +1349,18 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
         RelayObservation::HarnessTurnStarted { started_at_ms: 40 },
     );
     let start = session.applied_event_ordinal;
+    // Hard-won: #1450 review: a queued configuration change held back the answer for a removed prompt
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "set-config".into(),
+            command: RelayCommand::SetConfig {
+                key: "model".into(),
+                value: "gpt-9".into(),
+            },
+            created_at_ms: 40,
+        },
+    );
     apply_observation(
         &mut session,
         RelayObservation::CommandQueued {

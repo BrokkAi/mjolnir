@@ -927,6 +927,11 @@ pub(super) fn project_observation(
 /// every prompt accepted before it, unless one is still queued or running,
 /// and never fewer than the previous outcome answered.
 ///
+/// One number records this, so a prompt settled out of order (a queued prompt
+/// rejected or removed while an earlier one still runs or waits) is answered
+/// by its own outcome, and by later outcomes only once the prompts ahead of it
+/// have ended. A wait for it can therefore end late, but never early.
+///
 /// While another turn runs, its own prompt is still owed and every earlier
 /// prompt settled before it started, so the outcome adds nothing. The running
 /// turn's ordinal is never read: steering replaces it with the steered
@@ -947,7 +952,9 @@ fn answered_through(
         match current
             .queued_prompts
             .iter()
-            .filter(|prompt| prompt.command_id != ending)
+            // A queued configuration change answers no prompt and ends in no
+            // turn outcome, so it never holds the answer back.
+            .filter(|queued| queued.kind.is_prompt() && queued.command_id != ending)
             .filter_map(|prompt| prompt.accepted_ordinal)
             .min()
         {
