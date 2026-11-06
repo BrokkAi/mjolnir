@@ -30,7 +30,6 @@ pub mod readline;
 pub mod recovery;
 pub mod review_host;
 pub(crate) mod review_selection;
-pub mod review_settings;
 pub mod server;
 pub mod session_manager;
 pub mod sessionwiki;

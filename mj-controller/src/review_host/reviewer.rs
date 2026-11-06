@@ -232,8 +232,7 @@ pub(super) async fn prepare_scoped(
             scope,
             state,
             // No reviewer process starts for a turn with nothing to review.
-            reviewer: ReviewerIdentity::default(),
-            count: config.count,
+            reviewers: vec![ReviewerIdentity::default()],
             materialized: Box::new(snapshot.materialized),
             resume_forward: None,
             captured,
@@ -248,18 +247,19 @@ pub(super) async fn prepare_scoped(
     if cancelled.load(std::sync::atomic::Ordering::Acquire) {
         return Err(StartRefusal("review preparation cancelled".into()));
     }
-    let profile = reviewer.profile.clone();
-    let session = session_id.to_owned();
-    let environment = environment.clone();
-    tokio::task::spawn_blocking(move || environment.check(&session, &profile))
-        .await
-        .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
-        .map_err(StartRefusal)?;
+    for selected in &reviewer {
+        let profile = selected.profile.clone();
+        let session = session_id.to_owned();
+        let environment = environment.clone();
+        tokio::task::spawn_blocking(move || environment.check(&session, &profile))
+            .await
+            .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
+            .map_err(StartRefusal)?;
+    }
     Ok(Prepared {
         scope,
         state,
-        reviewer: reviewer.clone(),
-        count: config.count,
+        reviewers: reviewer.clone(),
         materialized: Box::new(snapshot.materialized),
         resume_forward: None,
         captured,
@@ -310,8 +310,7 @@ pub(super) async fn prepare_recovery(
         scope: Default::default(),
         state,
         // No reviewer process is started for a handoff-only recovery.
-        reviewer: ReviewerIdentity::default(),
-        count: mj_core::config::default_review_count(),
+        reviewers: vec![ReviewerIdentity::default()],
         materialized: Box::new(snapshot.materialized),
         resume_forward: Some(pending),
         captured: None,

@@ -66,14 +66,19 @@ fn idle_background_work_and_working_review_keep_animation_independent() {
 #[test]
 fn review_status_omits_the_deprecated_tier() {
     let review = mj_core::config::ReviewConfig {
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Turn,
-        tier: Some("extended".into()),
-        profile: Some("reviewer".into()),
-        ..Default::default()
+        reviewers: vec![
+            mj_core::config::SubagentChoice {
+                model: "gpt-6-terra".into(),
+                effort: None
+            };
+            2
+        ],
     };
     assert_eq!(
         review_status_line(&review, true),
-        "Reviewing every completed turn with [review] profile \"reviewer\"; 2 reviewers. A review is open now."
+        "Reviewing every completed turn; 2 reviewers. A review is open now."
     );
 }
 

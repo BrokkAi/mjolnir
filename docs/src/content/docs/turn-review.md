@@ -1,68 +1,34 @@
 ---
 title: Turn review
-description: Configure one independent reviewer and resolve findings between agent turns.
+description: Configure independent reviewers and resolve findings between agent turns.
 ---
 
-Mjolnir can review work at the end of each turn or before an agent pushes commits. Choose the trigger in **Settings → Code Review** or in `config.toml`. A reviewer runs as a hidden child session of the session it reviews. It uses the profile, model, and effort selected in review settings. It does not appear in the agent's `list_agents` results or count against the child-session limit. Open **Reviewers** on the prompt’s bottom border to read its conversation in a virtual workspace.
+Mjolnir can review work at the end of each turn or before an agent pushes commits. Choose the trigger in **Settings → Code Review** or in `config.toml`. A reviewer runs as a hidden child session of the session it reviews. It uses the model and effort selected for its reviewer slot. It does not appear in the agent's `list_agents` results or count against the child-session limit. Open **Reviewers** on the prompt’s bottom border to read its conversation in a virtual workspace.
 
-## Configure a reviewer
+## Configure reviewers
 
-**Settings → Code Review** selects the trigger and reviewer settings. The trigger choices are **Off**, **End of turn**, and **Before push**. Choose **Auto** or a named [harness profile](/profiles/). A named profile may also be the primary session's profile; the reviewer still has its own conversation and private harness home.
-
-Auto is the default. In `config.toml`, omit `profile`, `model`, and `effort`:
+**Settings → Code Review** selects the trigger and up to three reviewer rows. Each row has a model and effort. **Autoconfigure** fills the rows from models offered by enabled profiles. At review time, Mjolnir chooses an enabled profile offering each row's model and effort through the same load balancer used for subagents.
 
 ```toml
 [review]
 trigger = "turn"
+
+[[review.reviewers]]
+model = "gpt-6.10-terra"
+effort = "xhigh"
+
+[[review.reviewers]]
+model = "gpt-6.1-sol"
+effort = "medium"
 ```
 
-Auto uses this priority list, always at **High** reasoning effort:
+An empty list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers. It chooses the first available combination: Terra, Sol, and Haiku; Terra and Sol; two Haiku; two DeepSeek Flash; Grok; or Kimi K3.1 or newer. It uses the newest advertised model within each family. If no combination is available, choose reviewers in **Settings → Code Review**.
 
-1. GPT Terra
-2. DeepSeek Flash
-3. Claude Haiku
-4. Grok
-
-It first tries these families on subscriptions, then the same list on usage-priced API profiles. Within either group it moves the primary session's model family to the end: a Terra primary prefers Flash, and a Flash primary prefers Terra. A subscription option still wins over an API option even when it shares the primary's family. Each family resolves to its newest advertised version, such as GPT 6.1 Terra when that is the newest available Terra.
-
-If none of the preferred families can run, Auto tries the other advertised models by estimated price, while preferring a different model from the primary. Price compares equal amounts of ordinary input and output tokens using the same base API rates as usage reports. Unknown prices sort after known prices; if only unpriced models can run, the reviewer selection says `price unavailable`.
-
-An exhausted quota window excludes the models it applies to. Missing or failed quota readings stay eligible; quota headroom does not change the priority list. Auto checks exact model and `high` effort support, skips unusable candidates, and explains why if none can run. Discovery remains cancellable. A manually selected profile fails visibly instead of changing profiles.
-
-To choose a profile, model, or effort manually:
-
-```toml
-[review]
-count = 2
-profile = "reviewer"
-# model = "provider-model-id"
-# effort = "high"
-```
-
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `trigger` | `"off"` | `"off"` disables automatic review, `"turn"` reviews completed turns, and `"push"` reviews commits before push. |
-| `count` | `2` | Independent reviewer sessions per review. 1–3 reviewers are reasonable; more have diminishing returns. Counts above 3 are allowed. |
-| `profile` | Auto | Omit for Auto or name an enabled review-capable profile. |
-| `model` | harness default for a named profile | Optional reviewer model override. `[review]` accepts it only with a named profile; a session's `--review-model` also works with Auto. |
-| `effort` | harness default for a named profile | Optional reviewer effort override for a named profile. Auto always uses `high`, including when a session specifies another effort. |
-
-The old `tier` configuration field is deprecated and ignored. Existing
-`quick` and `extended` values remain readable for compatibility.
-
-An older configuration with `enabled = true` still loads as `trigger = "turn"`; `enabled = false` loads as `"off"`. Saving settings writes `trigger`, not `enabled`. `/review` remains available when the trigger is off. Each new review reads current settings; an already-open review keeps its selection. Reviewer children do not appear in the main session navigation or Resume list.
+Old `count`, `profile`, `model`, `effort`, `tier`, and `enabled` config keys remain readable. An existing config without `[review]`, or a `[review]` table without `reviewers` and `model`, retains the old Auto selection. The daemon saves reviewer rows after capability discovery succeeds; if discovery fails, it retries. Other settings saves preserve this pending selection. A fresh config starts with no reviewers. An explicit `reviewers = []` stays empty.
 
 ### Per-session settings
 
-`mj new` and `mj import <harness>` can override these settings for one session:
-
-- `--review off|turn|push` selects that session's trigger, overriding `[review]`.
-- `--review-count <count>` overrides the number of independent reviewers while keeping the configured trigger.
-- `--review-model <model>` pins the reviewer model for that session. With Auto, any enabled profile offering it can qualify; Auto still tries subscriptions before API billing and always uses High effort. `--review-effort <effort>` overrides effort for a named reviewer profile; Auto keeps High. These reviewer options keep the configured trigger; use `--review turn` or `--review push` to select a trigger explicitly.
-- `--review-tier quick|extended` is deprecated. It still accepts either value
-  but has no effect and does not change the configured trigger.
-
-The choice is stored with the session and kept when it resumes. A session created without these flags follows `[review]`.
+`mj new` and `mj import <harness>` accept `--review off|turn|push` and repeatable `--reviewer MODEL[:EFFORT]` (up to three). The reviewer list replaces `[review]` for that session. Without these flags, the session follows `[review]`.
 
 Review needs a committed Git checkout to capture changes. A local bare session
 whose directory is not a committed checkout is created with review off for that
@@ -74,7 +40,7 @@ changes.
 
 Each reviewer follows the Codex `/review` rubric and answers in plain text. The exact reply `No findings.` means that reviewer found no issues. Any other non-empty reply is findings, and an empty reply is a failed review.
 
-By default, two separate reviewer sessions inspect the same captured change in parallel using the same resolved profile and model. The primary receives every reviewer's findings, labeled with its session. Reports may contain redundant findings; Mjolnir keeps them separate. Multiple clean results become one clean verdict only after every reviewer finishes cleanly. If a reviewer fails, completed findings still reach the primary, but the review remains incomplete and coverage does not advance.
+Reviewer sessions inspect the same captured change in parallel using their independently resolved models and profiles. The primary receives every reviewer's findings, labeled with its session. Reports may contain redundant findings; Mjolnir keeps them separate. Multiple clean results become one clean verdict only after every reviewer finishes cleanly. If a reviewer fails, completed findings still reach the primary, but the review remains incomplete and coverage does not advance.
 
 The initial prompt includes the user's messages and a per-file diffstat, not the full diff. For each repository it gives the reviewer the root, the baseline tree, the captured tree, and the command:
 
@@ -143,7 +109,7 @@ A clean review advances the reviewed boundary automatically. Findings are sent t
 
 ## Lifecycle behavior
 
-New eligible primary sessions capture a review baseline even when automatic review is off. A session is eligible when its review settings, with its own per-session choice applied, name an enabled profile or let Auto choose one. A session started without a baseline must be resumed or restarted after configuring an eligible reviewer. Child sessions do not capture independent review baselines.
+New eligible primary sessions capture a review baseline even when automatic review is off. A session is eligible when an enabled profile can serve review choices. A session started without a baseline must be resumed or restarted after configuring an eligible reviewer. Child sessions do not capture independent review baselines.
 
 Suspending a session while a review is open preserves its result for reference. The reviewer's worker cannot continue after the target is destroyed. A later review starts a new reviewer child session.
 

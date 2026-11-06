@@ -583,7 +583,7 @@ impl ReviewEnvironment for FakeEnvironment {
         _cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> mj_client::session::BoxFuture<
         'a,
-        Result<mj_core::review::settings::ResolvedReviewSettings, String>,
+        Result<Vec<mj_core::review::settings::ResolvedReviewSettings>, String>,
     > {
         let refusal = self
             .resolve_refusals
@@ -600,15 +600,19 @@ impl ReviewEnvironment for FakeEnvironment {
             {
                 std::future::pending::<()>().await;
             }
-            Ok(mj_core::review::settings::ResolvedReviewSettings {
-                profile: config.profile.unwrap_or_else(|| "auto-reviewer".into()),
-                main: mj_core::review::settings::ReviewModelSettings {
-                    model: config.model,
-                    effort: config.effort,
-                    fast_mode: false,
-                },
-                ..Default::default()
-            })
+            Ok(config
+                .reviewers
+                .iter()
+                .map(|choice| mj_core::review::settings::ResolvedReviewSettings {
+                    profile: "reviewer".into(),
+                    main: mj_core::review::settings::ReviewModelSettings {
+                        model: Some(choice.model.clone()),
+                        effort: choice.effort.clone(),
+                        fast_mode: false,
+                    },
+                    ..Default::default()
+                })
+                .collect())
         })
     }
 
@@ -825,24 +829,21 @@ async fn a_review_refused_for_another_reason_does_not_wait() {
     host.shutdown().await.unwrap();
 }
 
-fn armed(profile: Option<&str>) -> ReviewConfigSource {
-    let profile = profile.map(str::to_owned);
-    Arc::new(move |_| ReviewConfig {
-        trigger: mj_core::config::ReviewTrigger::Turn,
-        tier: None,
-        profile: profile.clone(),
-        model: None,
-        effort: None,
-        count: std::num::NonZeroUsize::new(1).unwrap(),
-    })
+fn armed(_profile: Option<&str>) -> ReviewConfigSource {
+    armed_count(1)
 }
 
 fn armed_count(count: usize) -> ReviewConfigSource {
     Arc::new(move |_| ReviewConfig {
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Turn,
-        profile: Some("reviewer".into()),
-        count: std::num::NonZeroUsize::new(count).unwrap(),
-        ..Default::default()
+        reviewers: vec![
+            mj_core::config::SubagentChoice {
+                model: "test-reviewer".into(),
+                effort: None
+            };
+            count
+        ],
     })
 }
 
@@ -1226,12 +1227,12 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
     let mut manager = FakeManager::new(session).await;
     let environment = FakeEnvironment::new();
     let config: ReviewConfigSource = Arc::new(|_| ReviewConfig {
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Off,
-        tier: None,
-        profile: Some("reviewer".to_owned()),
-        model: None,
-        effort: None,
-        count: std::num::NonZeroUsize::new(1).unwrap(),
+        reviewers: vec![mj_core::config::SubagentChoice {
+            model: "test-reviewer".into(),
+            effort: None,
+        }],
     });
     let host = TurnReviewHost::spawn_in(manager.control.clone(), config, environment);
 
@@ -2152,10 +2153,44 @@ async fn parallel_findings_keep_launch_order_when_children_finish_out_of_order()
     let session = session_id("parallel-order");
     let mut manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
-    let host =
-        TurnReviewHost::spawn_in(manager.control.clone(), armed_count(2), environment.clone());
+    let choices = vec![
+        mj_core::config::SubagentChoice {
+            model: "gpt-6-terra".into(),
+            effort: Some("xhigh".into()),
+        },
+        mj_core::config::SubagentChoice {
+            model: "gpt-6-sol".into(),
+            effort: Some("medium".into()),
+        },
+    ];
+    let config: ReviewConfigSource = Arc::new(move |_| ReviewConfig {
+        legacy: None,
+        trigger: mj_core::config::ReviewTrigger::Turn,
+        reviewers: choices.clone(),
+    });
+    let host = TurnReviewHost::spawn_in(manager.control.clone(), config, environment.clone());
     open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
     let children = wait_for_group_children(&environment, &host, &session, 2).await;
+    let models = {
+        let registered = environment.children.lock().unwrap();
+        children
+            .iter()
+            .map(|child| {
+                registered
+                    .iter()
+                    .find(|(id, _, _)| id == child)
+                    .unwrap()
+                    .1
+                    .main
+                    .model
+                    .clone()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        models,
+        [Some("gpt-6-terra".into()), Some("gpt-6-sol".into())]
+    );
     finish_child(
         &host,
         &environment,
@@ -2569,7 +2604,7 @@ async fn startup_restores_group_before_push_or_override_admission() {
         active: Some("group-1".into()),
         active_group: Some(mj_core::storage::ActiveReviewGroup {
             driver: driver.snapshot(),
-            reviewer: ReviewerIdentity::default(),
+            reviewers: vec![ReviewerIdentity::default()],
             scope: mj_core::relay::CaptureScope::PushableCommits,
             registrations: vec![mj_core::storage::ReviewerRegistration {
                 role: "reviewer-1".into(),
@@ -2694,7 +2729,7 @@ async fn startup_reaps_settled_and_orphaned_reviewers_but_preserves_their_busy_p
         active: Some("partly-failed-group".into()),
         active_group: Some(mj_core::storage::ActiveReviewGroup {
             driver: driver.snapshot(),
-            reviewer: Default::default(),
+            reviewers: vec![ReviewerIdentity::default(); 2],
             scope: Default::default(),
             registrations,
         }),
@@ -2851,6 +2886,7 @@ async fn push_trigger_does_not_arm_review_at_the_end_of_a_turn() {
     let session = session_id("pushtrigger");
     let mut manager = FakeManager::new(&session).await;
     let config: ReviewConfigSource = Arc::new(|_| ReviewConfig {
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Push,
         ..Default::default()
     });
@@ -2867,19 +2903,26 @@ async fn push_trigger_does_not_arm_review_at_the_end_of_a_turn() {
 
 fn push_config() -> ReviewConfigSource {
     Arc::new(|_| ReviewConfig {
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Push,
-        profile: Some("reviewer".into()),
-        count: std::num::NonZeroUsize::new(1).unwrap(),
-        ..Default::default()
+        reviewers: vec![mj_core::config::SubagentChoice {
+            model: "test-reviewer".into(),
+            effort: None,
+        }],
     })
 }
 
 fn push_config_count(count: usize) -> ReviewConfigSource {
     Arc::new(move |_| ReviewConfig {
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Push,
-        profile: Some("reviewer".into()),
-        count: std::num::NonZeroUsize::new(count).unwrap(),
-        ..Default::default()
+        reviewers: vec![
+            mj_core::config::SubagentChoice {
+                model: "test-reviewer".into(),
+                effort: None
+            };
+            count
+        ],
     })
 }
 
@@ -3336,10 +3379,12 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
             _ => mj_core::config::ReviewTrigger::Push,
         };
         let config: ReviewConfigSource = Arc::new(move |_| ReviewConfig {
+            legacy: None,
             trigger,
-            profile: Some("reviewer".into()),
-            count: std::num::NonZeroUsize::new(1).unwrap(),
-            ..Default::default()
+            reviewers: vec![mj_core::config::SubagentChoice {
+                model: "test-reviewer".into(),
+                effort: None,
+            }],
         });
         let host = TurnReviewHost::spawn_in(manager.control.clone(), config, environment.clone());
         let child = open_push(&mut manager, &host, &environment).await;

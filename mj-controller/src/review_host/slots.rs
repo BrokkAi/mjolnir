@@ -73,10 +73,22 @@ impl ReviewSlot {
             roles,
             // A review that needed no reviewer (nothing changed, or only a
             // handoff to finish) has no reviewer to describe.
-            status: if self.reviewer.profile.is_empty() {
+            status: if self
+                .reviewers
+                .iter()
+                .all(|reviewer| reviewer.profile.is_empty())
+            {
                 self.driver.status().to_owned()
             } else {
-                format!("{} · {}", self.reviewer.description(), self.driver.status())
+                format!(
+                    "{} · {}",
+                    self.reviewers
+                        .iter()
+                        .map(ReviewerIdentity::description)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                    self.driver.status()
+                )
             },
             verdict,
         }

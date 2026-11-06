@@ -67,7 +67,7 @@
 === live container session with a second workspace (1 session card) ===
 {
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -168,7 +168,7 @@
 {
   "row": {
     "review_trigger": "off",
-    "review_count": 2,
+    "review_count": 0,
     "subagents": {
       "mode": "native"
     },
@@ -273,7 +273,7 @@
 === only workspace (1 session card) ===
 {
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -361,7 +361,7 @@
   "session": {
     "row": {
       "review_trigger": "off",
-      "review_count": 2,
+      "review_count": 0,
       "subagents": {
         "mode": "native"
       },
@@ -458,7 +458,7 @@
   "session": {
     "row": {
       "review_trigger": "off",
-      "review_count": 2,
+      "review_count": 0,
       "subagents": {
         "mode": "native"
       },
@@ -552,7 +552,7 @@
 {
   "parent": {
     "review_trigger": "off",
-    "review_count": 2,
+    "review_count": 0,
     "subagents": {
       "mode": "native"
     },
@@ -635,7 +635,7 @@
   },
   "child": {
     "review_trigger": "off",
-    "review_count": 2,
+    "review_count": 0,
     "subagents": {
       "mode": "native"
     },
@@ -722,7 +722,7 @@
 === bare target (1 session card) ===
 {
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -806,7 +806,7 @@
 === stopped session without recovery copy (1 session card) ===
 {
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -954,7 +954,7 @@
 === last top-level message time (1 session card) ===
 {
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -1032,7 +1032,7 @@
 === messages without recorded times (1 session card) ===
 {
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -1108,7 +1108,7 @@
 === conversation not available (1 session card) ===
 {
   "review_trigger": "off",
-  "review_count": 2,
+  "review_count": 0,
   "subagents": {
     "mode": "native"
   },
@@ -1181,7 +1181,7 @@
 {
   "session": {
     "review_trigger": "off",
-    "review_count": 2,
+    "review_count": 0,
     "subagents": {
       "mode": "native"
     },

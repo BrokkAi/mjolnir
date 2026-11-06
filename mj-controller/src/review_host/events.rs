@@ -185,8 +185,7 @@ pub(super) enum ReviewStep {
 pub(super) struct Prepared {
     pub(super) scope: mj_core::relay::CaptureScope,
     pub(super) state: TurnReviewState,
-    pub(super) reviewer: ReviewerIdentity,
-    pub(super) count: std::num::NonZeroUsize,
+    pub(super) reviewers: Vec<ReviewerIdentity>,
     /// Read from the live actor after the admission hold is installed and a
     /// reviewer status command drains every actor command ahead of it.
     pub(super) materialized: Box<MaterializedSession>,
@@ -224,7 +223,7 @@ pub(super) struct ReviewSlot {
     /// name another are dropped.
     pub(super) epoch: u64,
     pub(super) driver: TurnReviewDriver,
-    pub(super) reviewer: ReviewerIdentity,
+    pub(super) reviewers: Vec<ReviewerIdentity>,
     pub(super) state: TurnReviewState,
     /// Released when the slot is removed, which is how every review ends.
     pub(super) _background: Option<BackgroundHold>,

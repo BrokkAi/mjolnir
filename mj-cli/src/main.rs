@@ -51,7 +51,7 @@ use mj_controller::targets::ProcessExecutor;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use crate::dashboard::{DashboardExit, run_dashboard_for_workspace};
+use crate::dashboard::{DashboardExit, DetachedSessions, run_dashboard_for_workspace};
 use crate::import::{ImportArgs, import};
 
 #[derive(Debug, Parser)]
@@ -569,10 +569,12 @@ fn run(cli: Cli) -> Result<()> {
         shutdown_daemon_runtime(runtime);
     } else if matches!(
         &result,
-        Ok(DashboardExit::Detached | DashboardExit::Interrupted | DashboardExit::Restart { .. })
+        Ok(DashboardExit::Detached(_) | DashboardExit::Interrupted | DashboardExit::Restart { .. })
     ) {
-        let detached = matches!(result, Ok(DashboardExit::Detached))
-            .then(|| runtime.block_on(detach_notice()));
+        let detached = match &result {
+            Ok(DashboardExit::Detached(sessions)) => Some(detach_notice(*sessions)),
+            _ => None,
+        };
         // A dashboard has already drained durable mutations and restored its
         // terminal. Do not let disposable blocking reads delay process exit.
         shutdown_dashboard_runtime(runtime);
@@ -592,41 +594,28 @@ fn run(cli: Cli) -> Result<()> {
     }
 }
 
-/// How long a detaching terminal waits to count the daemon's sessions before
-/// it leaves without the count.
-const DETACH_COUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
-
 /// What a detaching terminal says it leaves behind: the daemon, how many
 /// sessions it is still running, and the command that stops them all.
-async fn detach_notice() -> String {
-    let count = tokio::time::timeout(DETACH_COUNT_TIMEOUT, active_session_count())
-        .await
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("no answer within {DETACH_COUNT_TIMEOUT:?}")));
+fn detach_notice(sessions: DetachedSessions) -> String {
     let stop_all = mj_command("daemon stop --suspend-sessions");
-    match count {
-        Ok(0) => format!(
+    match sessions {
+        DetachedSessions::Known(0) => format!(
             "The Mjolnir daemon is still running with no active sessions. \
              `{}` stops it.",
             mj_command("daemon stop")
         ),
-        Ok(count) => format!(
+        DetachedSessions::Known(count) => format!(
             "The Mjolnir daemon is still running, and {count} active session{} keep{} working; \
              Mjolnir reattaches to them on your next invocation.\n\
              `{stop_all}` suspends every session and stops the daemon.",
             if count == 1 { "" } else { "s" },
             if count == 1 { "s" } else { "" },
         ),
-        Err(error) if daemon::daemon_not_running(&error).is_some() => format!(
+        DetachedSessions::DaemonNotRunning => format!(
             "The Mjolnir daemon is not running. Sessions whose workers are still running \
              keep working; `{stop_all}` suspends them."
         ),
-        // Whether a daemon is running is not known here: it may be busy, or
-        // may have left its endpoint behind when it exited.
-        Err(error) => {
-            tracing::warn!(
-                error = format!("{error:#}"),
-                "could not count active sessions on detach"
-            );
+        DetachedSessions::Unknown => {
             format!(
                 "Active sessions keep working; Mjolnir reattaches to them on your next invocation.\n\
                  `{stop_all}` suspends every session and stops the daemon."
@@ -658,24 +647,31 @@ struct ListedSession {
 async fn session_roots(
     client: &mut daemon::DaemonClient,
 ) -> Result<BTreeMap<String, ListedSession>> {
-    use mj_controller::server::ViewerLifecycleCategory;
     let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } =
         client.runtime_changes(None, false).await?
     else {
         bail!("the daemon answered a request for its sessions without a snapshot");
     };
+    Ok(session_roots_from_projection(
+        &projection.records,
+        &projection.subagents,
+    ))
+}
+
+fn session_roots_from_projection(
+    records: &mj_core::snapshot_map::SnapshotMap<String, mj_core::state::SessionRecord>,
+    subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentMetadata>,
+) -> BTreeMap<String, ListedSession> {
+    use mj_controller::server::ViewerLifecycleCategory;
     let active = |id: &str| {
-        projection
-            .records
+        records
             .get(id)
             .is_some_and(|record| ViewerLifecycleCategory::of(record.state).is_dashboard_visible())
     };
-    Ok(projection
-        .records
+    records
         .values()
         .filter(|record| {
-            !projection
-                .subagents
+            !subagents
                 .get(&record.id)
                 .is_some_and(|child| active(&child.parent_session_id))
         })
@@ -688,7 +684,7 @@ async fn session_roots(
                 },
             )
         })
-        .collect())
+        .collect()
 }
 
 /// The roots the daemon still holds on its dashboard: the same lifecycle
@@ -699,14 +695,6 @@ async fn active_sessions(
     let mut sessions = session_roots(client).await?;
     sessions.retain(|_, session| session.lifecycle.is_dashboard_visible());
     Ok(sessions)
-}
-
-/// How many sessions the running daemon is still running. It never starts a
-/// daemon.
-async fn active_session_count() -> Result<usize> {
-    Ok(active_sessions(&mut daemon::connect_existing().await?)
-        .await?
-        .len())
 }
 
 /// Wait for a session that is already suspending, or being destroyed, to

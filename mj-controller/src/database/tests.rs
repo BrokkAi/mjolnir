@@ -1282,10 +1282,10 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
     record.review = Some(mj_core::config::SessionReview::Turn {
-        count: None,
-        model: Some("gpt-6-astra".into()),
-        effort: Some("high".into()),
-        tier: Some("extended".into()),
+        reviewers: Some(vec![mj_core::config::SubagentChoice {
+            model: "gpt-6-astra".into(),
+            effort: Some("high".into()),
+        }]),
     });
     save_session_to(&database, &record).unwrap();
     record.state = SessionState::Running;
@@ -1295,10 +1295,10 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     assert_eq!(
         loaded.sessions["session-1"].review,
         Some(mj_core::config::SessionReview::Turn {
-            count: None,
-            model: Some("gpt-6-astra".into()),
-            effort: Some("high".into()),
-            tier: None,
+            reviewers: Some(vec![mj_core::config::SubagentChoice {
+                model: "gpt-6-astra".into(),
+                effort: Some("high".into())
+            }]),
         }),
         "writes omit the legacy tier while preserving the review choice"
     );
@@ -1311,10 +1311,13 @@ fn inherited_session_review_survives_lifecycle_writes_and_keeps_trigger_inherita
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
     record.review = Some(mj_core::config::SessionReview::Inherit {
-        count: std::num::NonZeroUsize::new(3),
-        model: Some("gpt-6-astra".into()),
-        effort: Some("high".into()),
-        tier: None,
+        reviewers: Some(vec![
+            mj_core::config::SubagentChoice {
+                model: "gpt-6-astra".into(),
+                effort: Some("high".into())
+            };
+            3
+        ]),
     });
     save_session_to(&database, &record).unwrap();
     record.state = SessionState::Running;
@@ -1325,10 +1328,13 @@ fn inherited_session_review_survives_lifecycle_writes_and_keeps_trigger_inherita
     assert_eq!(
         review,
         &mj_core::config::SessionReview::Inherit {
-            count: std::num::NonZeroUsize::new(3),
-            model: Some("gpt-6-astra".into()),
-            effort: Some("high".into()),
-            tier: None,
+            reviewers: Some(vec![
+                mj_core::config::SubagentChoice {
+                    model: "gpt-6-astra".into(),
+                    effort: Some("high".into())
+                };
+                3
+            ]),
         }
     );
     for trigger in [
@@ -1337,12 +1343,13 @@ fn inherited_session_review_survives_lifecycle_writes_and_keeps_trigger_inherita
         mj_core::config::ReviewTrigger::Push,
     ] {
         let global = mj_core::config::ReviewConfig {
+            legacy: None,
             trigger,
             ..mj_core::config::ReviewConfig::default()
         };
         let effective = global.for_session(Some(review));
         assert_eq!(effective.trigger, trigger);
-        assert_eq!(effective.count.get(), 3);
+        assert_eq!(effective.reviewers.len(), 3);
     }
 }
 
@@ -4592,7 +4599,7 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
     );
     let group = mj_core::storage::ActiveReviewGroup {
         driver: driver.snapshot(),
-        reviewer: Default::default(),
+        reviewers: vec![Default::default(); 2],
         scope: mj_core::relay::CaptureScope::TurnDelta,
         registrations: vec![
             mj_core::storage::ReviewerRegistration {

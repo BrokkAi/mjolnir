@@ -576,7 +576,7 @@ fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRegistration {
     pub id: String,
-    pub review_turned_off: bool,
+    pub review_notice: Option<&'static str>,
 }
 
 pub struct SessionLaunchOptions {
@@ -1023,7 +1023,11 @@ impl Controller {
                 profile.kind.display_name()
             );
         }
-        let mut review_turned_off = false;
+        let mut review_notice = None;
+        if mj_core::review::settings::no_reviewers_turns_review_off(&self.config, review.as_ref()) {
+            review = Some(mj_core::config::SessionReview::Off);
+            review_notice = Some(mj_core::review::settings::NO_REVIEWERS_REVIEW_OFF);
+        }
         let (bundle_id, project) = if let Some(bundle) = bundle {
             let project = crate::project_catalog::snapshot(bundle, executor, true)?;
             let canonical = crate::database::store_catalog_project(bundle_id, &project, true)?;
@@ -1043,7 +1047,7 @@ impl Controller {
                 )
             {
                 review = Some(mj_core::config::SessionReview::Off);
-                review_turned_off = true;
+                review_notice = Some(mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF);
             }
             let (id, project) =
                 crate::project_catalog::accept_resolved_directory(host, directory, resolved)?;
@@ -1140,10 +1144,7 @@ impl Controller {
                 ),
             }
         }
-        Ok(SessionRegistration {
-            id,
-            review_turned_off,
-        })
+        Ok(SessionRegistration { id, review_notice })
     }
 
     pub fn rename_session(&mut self, session_id: &str, title: &str) -> Result<String> {

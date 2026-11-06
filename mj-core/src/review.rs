@@ -5,3 +5,5 @@ pub mod lanes;
 pub mod verdict;
 
 pub mod settings;
+
+pub mod autoconfigure;

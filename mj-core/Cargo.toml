@@ -15,6 +15,7 @@ include = [
     "tests/jev-gates.json",
     # Turn-classifier questions shared with the hosted proxy.
     "src/activity/verdict_questions.json",
+    "src/activity/question_locator.json",
     "src/help_search/question.json",
     "src/continuation/questions.json",
     "src/github_item/questions.json",

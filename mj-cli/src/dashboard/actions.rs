@@ -1,7 +1,7 @@
 //! What the dashboard does with the work its key handling asks for.
 //!
-//! Every arm here either updates UI state directly or starts a background job;
-//! none of them block the loop.
+//! Every arm here either updates UI state directly or starts a background job,
+//! except `SetupLogin`, which hands the terminal to `mj login` and waits for it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +11,6 @@ use mj_core::config::is_bare_project_target;
 use mj_core::state::{MoveSelection, MoveSessionRequest};
 
 use mj_controller::controller::ResumeRepositorySourceReceipt;
-use mj_controller::review_settings::ReviewDiscoveryRequest;
 use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::WebViewerAccess;
 use mj_tui::{DashboardAction, SessionOperationKind};
@@ -23,9 +22,9 @@ use crate::dashboard::io::{
     spawn_cancellable_io, spawn_cancellable_io_with_token, spawn_clipboard_read,
     spawn_config_rename, spawn_create_bundle, spawn_dashboard_change_workspace,
     spawn_dashboard_container_settings, spawn_dashboard_create_session, spawn_dashboard_rename,
-    spawn_lifecycle_operation, spawn_remove_bundle, spawn_review_settings_discovery,
-    spawn_workspace_close, spawn_workspace_close_cancel, spawn_workspace_create,
-    spawn_workspace_draft_recovery, spawn_workspace_management_load, spawn_workspace_rename,
+    spawn_lifecycle_operation, spawn_remove_bundle, spawn_workspace_close,
+    spawn_workspace_close_cancel, spawn_workspace_create, spawn_workspace_draft_recovery,
+    spawn_workspace_management_load, spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -637,9 +636,6 @@ pub(crate) async fn apply_dashboard_action(
             original,
             updated,
         } => {
-            if let Some(cancelled) = context.review_discovery_cancel.take() {
-                cancelled.store(true, Ordering::Release);
-            }
             super::io::spawn_setup_save(
                 generation,
                 original,
@@ -655,9 +651,6 @@ pub(crate) async fn apply_dashboard_action(
             updated,
             profile_id,
         } => {
-            if let Some(cancelled) = context.review_discovery_cancel.take() {
-                cancelled.store(true, Ordering::Release);
-            }
             super::io::spawn_setup_save(
                 generation,
                 original,
@@ -675,34 +668,10 @@ pub(crate) async fn apply_dashboard_action(
             profile_id,
         } => {
             let result = run_setup_login(context, &profile_id).await;
+            context.loop_stalls.forget_pass();
             context
                 .dashboard
                 .setup_login_finished(generation, &profile_id, result);
-        }
-        DashboardAction::DiscoverReviewSettings {
-            generation,
-            profile_id,
-            model,
-        } => {
-            if let Some(cancelled) = context.review_discovery_cancel.take() {
-                cancelled.store(true, Ordering::Release);
-            }
-            let request = ReviewDiscoveryRequest {
-                profile: profile_id,
-                model,
-            };
-            context.review_discovery_cancel = Some(spawn_review_settings_discovery(
-                context.review_capabilities.clone(),
-                request,
-                generation,
-                context.dashboard_io_tx.clone(),
-                context.critical_operations.clone(),
-            ));
-        }
-        DashboardAction::CancelReviewSettingsDiscovery => {
-            if let Some(cancelled) = context.review_discovery_cancel.take() {
-                cancelled.store(true, Ordering::Release);
-            }
         }
         // One key refreshes both panes, so it runs both requests rather than
         // leaving the user to focus each pane in turn.

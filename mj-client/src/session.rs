@@ -169,14 +169,6 @@ pub trait SessionHandleBackend: Send + Sync {
         scope: mj_core::storage::HistoryScope,
         query: String,
     ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>>;
-    fn resolve_review_settings(
-        &self,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
-    ) -> BoxFuture<'_, Result<mj_core::review::settings::ResolvedReviewSettings>> {
-        let _ = cancelled;
-        Box::pin(async { anyhow::bail!("review settings resolution is unavailable") })
-    }
-
     fn config_result(&self, command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>>;
 
     fn clone_box(&self) -> Box<dyn SessionHandleBackend>;
@@ -228,13 +220,6 @@ impl SessionHandle {
         query: String,
     ) -> Result<Vec<mj_core::storage::PromptHistoryEntry>> {
         self.backend.search_prompts(bundle_id, scope, query).await
-    }
-
-    pub async fn resolve_review_settings(
-        &self,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<mj_core::review::settings::ResolvedReviewSettings> {
-        self.backend.resolve_review_settings(cancelled).await
     }
 
     pub fn new(backend: impl SessionHandleBackend + 'static) -> Self {

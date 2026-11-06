@@ -108,6 +108,14 @@ impl DashboardState {
             .retain(|key, _| self.profile_hydration_requests.contains_key(key));
         self.profile_capabilities = snapshot;
         self.take_setup_subagent_choices();
+        if let Mode::Setup(dialog) = &mut self.mode
+            && let Some(review) = dialog.review_editor.as_mut()
+            && let Ok(config) = config_from_draft(dialog.draft.clone())
+        {
+            review.update_choices(&config, &self.profile_capabilities);
+            let review = review.as_ref().clone();
+            dialog.sync_review_validation(&review);
+        }
         self.take_subagent_discovery();
     }
 
@@ -187,7 +195,15 @@ impl DashboardState {
         let Mode::Setup(dialog) = &self.mode else {
             return None;
         };
-        let config = config_from_draft(dialog.draft.clone()).ok()?;
+        let mut config = config_from_draft(dialog.draft.clone()).ok()?;
+        if let Some(review) = dialog.review_editor.as_ref()
+            && let Some(choices) = review.pending_autoconfigure_choices()
+        {
+            config.review.reviewers = choices.to_vec();
+            // A legacy review serializes without its reviewer list, so the
+            // newly selected models would not be warmed.
+            config.review.clear_legacy();
+        }
         // A selected model's efforts are discovered only once it is selected,
         // so a draft choosing another model is warmed like a new profile.
         let key = config.capability_demand_key();
@@ -220,6 +236,30 @@ impl DashboardState {
             self.profile_hydration_errors.insert(key, error.clone());
             self.set_notice(format!("Profile capability hydration failed: {error}"));
         }
+    }
+
+    /// The one-second UI clock completes an Autoconfigure wait even if discovery
+    /// never publishes another snapshot.
+    pub fn tick_review_autoconfigure(&mut self) -> bool {
+        let Mode::Setup(dialog) = &mut self.mode else {
+            return false;
+        };
+        let Some(review) = dialog.review_editor.as_mut() else {
+            return false;
+        };
+        if !review.checking_efforts() {
+            return false;
+        }
+        let Ok(config) = config_from_draft(dialog.draft.clone()) else {
+            return false;
+        };
+        review.update_choices(&config, &self.profile_capabilities);
+        let changed = !review.checking_efforts();
+        if changed {
+            let review = review.as_ref().clone();
+            dialog.sync_review_validation(&review);
+        }
+        changed
     }
 
     pub(crate) fn take_setup_subagent_choices(&mut self) -> Option<DashboardAction> {
@@ -259,8 +299,8 @@ impl DashboardState {
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                 );
             if save_shortcut {
-                if review.parsed_reviewer_count().is_none() {
-                    review.save_error = Some("Enter a positive number of reviewers.".into());
+                if !review.can_save() {
+                    review.save_error = Some("Choose 1–3 reviewers for automatic review.".into());
                     dialog.review_editor = Some(review);
                     self.mode = Mode::Setup(dialog);
                     return DashboardAction::None;
@@ -277,10 +317,16 @@ impl DashboardState {
                 }
                 return action;
             }
-            let (mut action, outcome) = review.handle_event(self, event);
+            let review_config =
+                config_from_draft(dialog.draft.clone()).unwrap_or_else(|_| self.config.clone());
+            let (mut action, outcome) = review.handle_event(self, &review_config, event);
             match outcome {
                 ReviewSettingsOutcome::Continue => {
                     dialog.sync_review_validation(&review);
+                    if let Ok(config) = config_from_draft(dialog.draft.clone()) {
+                        review.update_choices(&config, &self.profile_capabilities);
+                        dialog.sync_review_validation(&review);
+                    }
                     dialog.review_editor = Some(review);
                 }
                 ReviewSettingsOutcome::Back => {
@@ -289,7 +335,6 @@ impl DashboardState {
                     dialog.focus_path(&["review".to_owned()]);
                 }
                 ReviewSettingsOutcome::CancelSetup => {
-                    review.cancel_discovery(self);
                     dialog.sync_review_validation(&review);
                     dialog.review_editor = Some(review);
                     dialog.prepare();

@@ -99,7 +99,7 @@
                   "review"
                 ],
                 "label": "Code Review",
-                "help": "Used by turn review. Auto picks another provider with quota.",
+                "help": "Review triggers and reviewers. An empty reviewer list means no reviewers are configured.",
                 "control": "page",
                 "summary": "Off"
               },
@@ -440,7 +440,7 @@
                   "review"
                 ],
                 "label": "Code Review",
-                "help": "Used by turn review. Auto picks another provider with quota.",
+                "help": "Review triggers and reviewers. An empty reviewer list means no reviewers are configured.",
                 "control": "page",
                 "summary": "Off"
               },
@@ -791,7 +791,7 @@
                   "review"
                 ],
                 "label": "Code Review",
-                "help": "Used by turn review. Auto picks another provider with quota.",
+                "help": "Review triggers and reviewers. An empty reviewer list means no reviewers are configured.",
                 "control": "page",
                 "summary": "Off"
               },

@@ -467,7 +467,7 @@ struct NotificationChildSnapshot {
 }
 
 impl ApiBackend {
-    async fn discover_profile_candidates(
+    pub(crate) async fn discover_profile_candidates(
         &self,
         mut ids: Vec<(String, mj_core::config::HarnessKind)>,
         candidate_kind: &str,
@@ -553,6 +553,13 @@ impl ApiBackend {
             );
         }
         Ok(candidates)
+    }
+
+    pub(crate) async fn reviewer_candidates(
+        &self,
+    ) -> Result<crate::server::api::SubagentCandidates> {
+        self.discover_profile_candidates(self.profile_catalog.candidates()?, "reviewer")
+            .await
     }
 
     pub(crate) async fn start_followup_with_id(
@@ -2798,6 +2805,12 @@ impl SubagentBackend for ApiBackend {
         self.profile_catalog.ensure(config);
     }
 
+    fn profile_capabilities_snapshot(
+        &self,
+    ) -> Option<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot> {
+        Some(self.profile_catalog.snapshot().into_inner())
+    }
+
     fn subagent_candidates(
         &self,
         _parent_profile: String,
@@ -2805,6 +2818,152 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             let ids = self.profile_catalog.candidates()?;
             self.discover_profile_candidates(ids, "sub-agent").await
+        })
+    }
+
+    fn reviewer_candidates(&self) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
+        Box::pin(ApiBackend::reviewer_candidates(self))
+    }
+
+    fn reviewer_candidates_for_model(
+        &self,
+        model: String,
+        tried: Vec<String>,
+    ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
+        Box::pin(async move {
+            use futures::StreamExt;
+            let mut pending = futures::stream::FuturesUnordered::new();
+            for (id, _) in self.profile_catalog.candidates()? {
+                let catalog = &self.profile_catalog;
+                pending.push(async move {
+                    let result = catalog.capabilities(std::slice::from_ref(&id)).await;
+                    (id, result)
+                });
+            }
+            while let Some((id, result)) = pending.next().await {
+                if !tried.contains(&id)
+                    && let Ok(choices) = result
+                    && choices
+                        .iter()
+                        .any(|choice| choice.models.iter().any(|item| item.value == model))
+                {
+                    drop(pending);
+                    let mut candidates = self.reviewer_ready_candidates(model).await?;
+                    candidates
+                        .offered
+                        .retain(|candidate| !tried.contains(&candidate.profile_id));
+                    candidates.unavailable.retain(|(id, _)| !tried.contains(id));
+                    return Ok(candidates);
+                }
+            }
+            anyhow::bail!("no further enabled reviewer profile offers model {model:?}")
+        })
+    }
+
+    fn reviewer_autoconfigure_candidates(
+        &self,
+    ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
+        Box::pin(async move {
+            use futures::StreamExt;
+            let ids = self.profile_catalog.candidates()?;
+            let mut pending = futures::stream::FuturesUnordered::new();
+            for (id, _) in &ids {
+                let id = id.clone();
+                let catalog = &self.profile_catalog;
+                pending.push(async move {
+                    let result = catalog.capabilities(std::slice::from_ref(&id)).await;
+                    (id, result)
+                });
+            }
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+            let mut answered = Vec::new();
+            let mut models = Vec::new();
+            while let Ok(Some((id, result))) =
+                tokio::time::timeout_at(deadline, pending.next()).await
+            {
+                if let Ok(choices) = result {
+                    for choice in choices {
+                        models.extend(choice.models);
+                    }
+                    answered.push(id);
+                    if mj_core::review::autoconfigure::autoconfigure(&models, |_| None).is_some() {
+                        break;
+                    }
+                }
+            }
+            drop(pending);
+            self.discover_profile_candidates(
+                ids.into_iter()
+                    .filter(|(id, _)| answered.contains(id))
+                    .collect(),
+                "reviewer",
+            )
+            .await
+        })
+    }
+
+    fn reviewer_ready_candidates(
+        &self,
+        model: String,
+    ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
+        Box::pin(async move {
+            let ids = self.profile_catalog.ready_candidates(&model)?;
+            let config = self.profile_catalog.live()?;
+            let snapshot = self.profile_catalog.snapshot();
+            let rejected = self
+                .rejected_logins
+                .lock()
+                .map_err(|_| anyhow!("refused logins lock poisoned"))?;
+            let quota_reports = self
+                .quota_reports
+                .lock()
+                .map_err(|_| anyhow!("profile quota reports lock poisoned"))?;
+            let health = crate::profile_health::shared()
+                .lock()
+                .map_err(|_| anyhow!("profile health lock poisoned"))?;
+            let now = std::time::SystemTime::now();
+            let mut candidates = crate::server::api::SubagentCandidates::default();
+            for (profile_id, harness) in ids {
+                if let Some(reason) = rejected.refusal(&profile_id) {
+                    candidates.unavailable.push((profile_id, reason));
+                    continue;
+                }
+                let Some(profile) = config.enabled_profile(&profile_id) else {
+                    continue;
+                };
+                let Some(entry) = snapshot
+                    .profiles
+                    .get(&profile.capabilities_key(&profile_id))
+                else {
+                    continue;
+                };
+                let mj_core::profile_capabilities::CapabilityState::Ready(choices) = &entry.choices
+                else {
+                    continue;
+                };
+                let unhealthy = choices
+                    .models
+                    .iter()
+                    .filter_map(|model| {
+                        health
+                            .unhealthy(&profile_id, &model.value, now)
+                            .cloned()
+                            .map(|mark| (model.value.clone(), mark))
+                    })
+                    .collect();
+                candidates
+                    .offered
+                    .push(crate::server::api::SubagentCandidate {
+                        profile_id: profile_id.clone(),
+                        harness,
+                        choices: choices.clone(),
+                        quota: crate::server::api::CandidateQuota::from_report(
+                            quota_reports.get(&profile_id),
+                        ),
+                        unhealthy,
+                    });
+            }
+            Ok(candidates)
         })
     }
 

@@ -867,6 +867,71 @@ fn spawn_backend(catalog: Arc<ProfileCatalog>) -> Arc<ApiBackend> {
 }
 
 #[tokio::test]
+async fn reviewer_ready_candidates_do_not_trigger_stalled_muse_refresh() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stalled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = calls.clone();
+    let stall_probe = stalled.clone();
+    let probe: Arc<crate::server_runtime::profile_catalog::Probe> = Arc::new(move |_| {
+        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let stall = stall_probe.load(std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            if stall {
+                return std::future::pending().await;
+            }
+            Ok(mj_core::worker_launch::ProfileConfig {
+                model: Some("muse-model".into()),
+                models: vec![mj_core::acp::SessionConfigChoice {
+                    value: "muse-model".into(),
+                    name: "Muse".into(),
+                    description: None,
+                }],
+                efforts: Vec::new(),
+                observed_at: 1,
+            })
+        })
+    });
+    let catalog = ProfileCatalog::with_probe(probe);
+    let config = test_config(&[("muse", HarnessKind::Muse)]);
+    catalog.sync_now(&config).await;
+    let key = config.profiles["muse"].capabilities_key("muse");
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if catalog.snapshot().profiles.get(&key).is_some_and(|entry| {
+                matches!(
+                    &entry.choices,
+                    mj_core::profile_capabilities::CapabilityState::Ready(_)
+                )
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Muse choices published");
+    assert_eq!(
+        catalog.ready_candidates("muse-model").unwrap().len(),
+        1,
+        "{:?}",
+        catalog.snapshot().profiles
+    );
+    stalled.store(true, std::sync::atomic::Ordering::SeqCst);
+    let before = calls.load(std::sync::atomic::Ordering::SeqCst);
+    let backend = spawn_backend(catalog);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        backend.reviewer_ready_candidates("muse-model".into()),
+    )
+    .await
+    .expect("ready pass must not wait on the Muse refresh")
+    .unwrap();
+    assert_eq!(result.offered.len(), 1);
+    assert_eq!(result.offered[0].profile_id, "muse");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), before);
+}
+
+#[tokio::test]
 async fn spawn_refuses_a_model_no_enabled_profile_offers() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));

@@ -218,6 +218,14 @@ fn app_with(
     conversations: BTreeMap<String, BrowserTranscript>,
     adjust: impl FnOnce(&mut ViewerSnapshot),
 ) -> TestServer {
+    app_with_backend(conversations, adjust, None)
+}
+
+fn app_with_backend(
+    conversations: BTreeMap<String, BrowserTranscript>,
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+    backend: Option<Arc<dyn api::SubagentBackend>>,
+) -> TestServer {
     let (config, state) = sample_config_state();
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     adjust(&mut snapshot);
@@ -240,6 +248,10 @@ fn app_with(
         client_state_tx,
     )
     .with_test_credentials("123456", b"01234567890123456789012345678901");
+    let mut options = options;
+    if let Some(backend) = backend {
+        options.set_subagent_backend(backend);
+    }
     (
         router(options),
         action_rx,
@@ -693,12 +705,15 @@ fn generated_code_and_cookie_attributes_are_phone_safe() {
 fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Turn,
-        count: mj_core::config::default_review_count(),
-        tier: Some("extended".into()),
-        profile: Some("reviewer-1".into()),
-        model: Some("private-review-model".into()),
-        effort: Some("private-review-effort".into()),
+        reviewers: vec![
+            mj_core::config::SubagentChoice {
+                model: "private-review-model".into(),
+                effort: Some("private-review-effort".into())
+            };
+            2
+        ],
     };
 
     let value =
@@ -707,8 +722,7 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
         value.get("review_config"),
         Some(&serde_json::json!({
             "trigger": "turn",
-            "profile": "reviewer-1",
-            "count": 2,
+            "reviewers": [{"model":"private-review-model","effort":"private-review-effort"},{"model":"private-review-model","effort":"private-review-effort"}],
         }))
     );
     let json = value.to_string();
@@ -717,8 +731,8 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     assert!(!json.contains("secret-target"));
     assert!(!json.contains("secret.registry"));
     assert!(!json.contains("native-secret-id"));
-    assert!(!json.contains("private-review-model"));
-    assert!(!json.contains("private-review-effort"));
+    assert!(json.contains("private-review-model"));
+    assert!(json.contains("private-review-effort"));
     assert!(json.contains("\"has_error\":true"));
 }
 
@@ -780,12 +794,15 @@ fn target_snapshot_uses_each_raw_host_project_history_and_leaves_managed_empty()
 fn public_snapshot_exposes_only_review_status_configuration() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Turn,
-        count: mj_core::config::default_review_count(),
-        tier: Some("extended".into()),
-        profile: Some("reviewer-1".into()),
-        model: Some("private-review-model".into()),
-        effort: Some("private-review-effort".into()),
+        reviewers: vec![
+            mj_core::config::SubagentChoice {
+                model: "private-review-model".into(),
+                effort: Some("private-review-effort".into())
+            };
+            2
+        ],
     };
 
     let value =
@@ -795,31 +812,36 @@ fn public_snapshot_exposes_only_review_status_configuration() {
         value.get("review_config"),
         Some(&serde_json::json!({
             "trigger": "turn",
-            "profile": "reviewer-1",
-            "count": 2,
+            "reviewers": [{"model":"private-review-model","effort":"private-review-effort"},{"model":"private-review-model","effort":"private-review-effort"}],
         }))
     );
     let json = value.to_string();
-    assert!(!json.contains("private-review-model"));
-    assert!(!json.contains("private-review-effort"));
+    assert!(json.contains("private-review-model"));
+    assert!(json.contains("private-review-effort"));
 }
 
 #[test]
 fn session_review_count_overrides_phone_status_projection() {
     let (mut config, mut state) = sample_config_state();
-    config.review.count = mj_core::config::default_review_count();
+    config.review.reviewers = vec![
+        mj_core::config::SubagentChoice {
+            model: "model-a".into(),
+            effort: None
+        };
+        2
+    ];
     state.sessions.get_mut("session-1").unwrap().review =
         Some(mj_core::config::SessionReview::Turn {
-            count: std::num::NonZeroUsize::new(1),
-            model: None,
-            effort: None,
-            tier: None,
+            reviewers: Some(vec![mj_core::config::SubagentChoice {
+                model: "model-b".into(),
+                effort: None,
+            }]),
         });
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 9);
-    assert_eq!(snapshot.review_config.count.get(), 2);
+    assert_eq!(snapshot.review_config.reviewers.len(), 2);
     let session = snapshot.sessions.get("session-1").unwrap();
     assert_eq!(session.review_trigger, mj_core::config::ReviewTrigger::Turn);
-    assert_eq!(session.review_count.get(), 1);
+    assert_eq!(session.review_count, 1);
     let wire = serde_json::to_value(session).unwrap();
     assert_eq!(wire["review_count"], 1);
 }
@@ -4978,4 +5000,152 @@ async fn settings_save_refuses_a_stale_draft_without_writing() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("hidden value of LAB_TOKEN"), "{body}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+struct SettingsReviewBackend;
+
+impl api::SubagentBackend for SettingsReviewBackend {
+    fn session_handle(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<mj_client::session::SessionHandle>>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+    fn prompt(&self, _: String, _: String) -> futures::future::BoxFuture<'_, anyhow::Result<u64>> {
+        Box::pin(async { anyhow::bail!("unused") })
+    }
+    fn turn_state(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::TurnState>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn turn_summary(
+        &self,
+        _: String,
+        _: api::TurnSpan,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<api::TurnSummary>> {
+        Box::pin(async { anyhow::bail!("unused") })
+    }
+    fn start_followup(
+        &self,
+        _: String,
+        _: api::StartFollowup,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { anyhow::bail!("unused") })
+    }
+    fn start_status(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::StartStatus>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn transcript(
+        &self,
+        _: String,
+        _: u64,
+        _: usize,
+        _: Vec<mj_core::transcript::TranscriptRole>,
+        _: bool,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::TranscriptPage>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn diff(
+        &self,
+        _: String,
+        _: api::DiffOptions,
+    ) -> futures::future::BoxFuture<'_, Result<String, api::ExportError>> {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+    fn read_file(
+        &self,
+        _: String,
+        _: std::path::PathBuf,
+        _: mj_checkpoint::archive::FetchMode,
+    ) -> futures::future::BoxFuture<'_, Result<mj_checkpoint::archive::FetchedPath, api::ExportError>>
+    {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+    fn push_branch(
+        &self,
+        _: String,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, Result<api::PushedBranch, api::ExportError>> {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+    fn bundle(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, Result<api::BundleExport, api::ExportError>> {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+
+    fn profile_config(
+        &self,
+        _profile: String,
+        model: Option<String>,
+        _refresh: bool,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<mj_core::worker_launch::ProfileConfig>> {
+        Box::pin(async move {
+            Ok(mj_core::worker_launch::ProfileConfig {
+                model: model.clone(),
+                models: vec![mj_core::acp::SessionConfigChoice {
+                    value: model.unwrap_or_else(|| "claude-haiku-4.5".into()),
+                    name: "Terra".into(),
+                    description: None,
+                }],
+                efforts: vec![mj_core::acp::SessionConfigChoice {
+                    value: "high".into(),
+                    name: "High".into(),
+                    description: None,
+                }],
+                observed_at: 0,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn settings_review_autoconfigure_returns_preset_draft_without_saving() {
+    if !in_isolated_store("settings_review_autoconfigure_returns_preset_draft_without_saving") {
+        return;
+    }
+    let path = mj_core::config::config_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "version = {}\n[profiles.claude]\nkind = \"claude\"\nhome = \"/tmp/test-claude\"\n[review]\ntrigger = \"push\"\n",
+            mj_core::config::CONFIG_VERSION
+        ),
+    )
+    .unwrap();
+    let stored = std::fs::read(&path).unwrap();
+    let identity = Config::load_from(&path).unwrap().profiles["claude"].capabilities_key("claude");
+    let capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot = serde_json::from_value(serde_json::json!({"profiles": {identity: {
+        "choices": {"status": "ready", "value": {"model": "claude-haiku-4.5", "observed_at": 0, "efforts": [{"value": "high", "name": "High", "description": null}],
+            "models": [{"value": "claude-haiku-4.5", "name": "Terra", "description": null}]}},
+        "efforts": {"claude-haiku-4.5": {"status": "ready", "value": [{"value": "high", "name": "High", "description": null}]}}
+    }}})).unwrap();
+    let (app, ..) = app_with_backend(
+        BTreeMap::new(),
+        move |snapshot| snapshot.profile_capabilities = capabilities.into(),
+        Some(Arc::new(SettingsReviewBackend)),
+    );
+    let cookie = login_cookie(&app).await;
+    let (status, body) = settings_request(&app, &cookie, "/api/settings", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let opened: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let request = serde_json::json!({"draft": opened["draft"], "page": ["review"], "edit": {"kind": "action", "id": "review.autoconfigure"}});
+    let (status, body) =
+        settings_request(&app, &cookie, "/api/settings/edit", Some(&request)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        reply["draft"]["review"]["reviewers"][0]["model"],
+        "claude-haiku-4.5"
+    );
+    assert!(reply["draft"]["review"].get("profile").is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), stored);
 }

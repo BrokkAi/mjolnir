@@ -1122,6 +1122,7 @@ fn simple_mode_detaches_on_direct_ctrl_q_and_never_claims_ctrl_b() {
     assert!(status.success(), "PTY child exit: {status}");
 }
 
+// Hard-won: 69ada9be4: a fresh daemon could miss the detach count deadline.
 #[test]
 fn dashboard_detach_restores_terminal_then_exits_promptly_with_final_message() {
     const REATTACH_MESSAGE: &str = "The Mjolnir daemon is still running with no active sessions. \

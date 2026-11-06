@@ -212,12 +212,13 @@ fn editing_a_profile_disables_sign_in_until_the_change_is_saved() {
 }
 
 #[test]
-fn disabling_a_profile_clears_references_and_reports_the_cleanup() {
+fn disabling_a_profile_keeps_model_based_reviewers() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.config.review.trigger = mj_core::config::ReviewTrigger::Turn;
-    dashboard.config.review.profile = Some("codex-1".into());
-    dashboard.config.review.model = Some("review-model".into());
-    dashboard.config.review.effort = Some("high".into());
+    dashboard.config.review.reviewers = vec![mj_core::config::SubagentChoice {
+        model: "review-model".into(),
+        effort: Some("high".into()),
+    }];
     dashboard.begin_setup();
     choose(&mut dashboard, "profiles");
     choose(&mut dashboard, "codex-1");
@@ -234,12 +235,12 @@ fn disabling_a_profile_clears_references_and_reports_the_cleanup() {
         panic!("settings");
     };
     assert_eq!(dialog.draft["profiles"]["codex-1"]["enabled"], false);
-    assert!(dialog.draft["review"]["profile"].is_null());
-    assert_eq!(dialog.draft["review"]["trigger"], "off");
-    assert_eq!(dialog.draft["review"]["model"], "review-model");
-    assert_eq!(dialog.draft["review"]["effort"], "high");
-    let notice = dialog.notice.as_deref().unwrap();
-    assert!(notice.contains("Code Review"), "{notice}");
+    assert_eq!(dialog.draft["review"]["trigger"], "turn");
+    assert_eq!(
+        dialog.draft["review"]["reviewers"][0]["model"],
+        "review-model"
+    );
+    assert_eq!(dialog.draft["review"]["reviewers"][0]["effort"], "high");
 
     terminal
         .draw(|frame| crate::render::render(frame, &mut dashboard))

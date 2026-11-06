@@ -26,8 +26,7 @@ use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::{
     DashboardAction, DetectScope, PreparedMaterializedSessionDetail,
     PreparedMaterializedSessionSummary, RejectedRuntime, RemoteRepositoryPreview,
-    ReviewSettingsChoices, ReviewSettingsDiscoveryResult, SessionOperationKind, SetupDetection,
-    WebViewerAccess,
+    SessionOperationKind, SetupDetection, WebViewerAccess,
 };
 use mj_tui::{WorkspaceDraftEntry, WorkspaceManagementEntry};
 use tokio::sync::mpsc::UnboundedSender;
@@ -329,18 +328,6 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         older_than_days: Option<u32>,
         result: std::result::Result<mj_core::state::ArchiveSpacePreview, String>,
-    },
-    ReviewSettingsDiscovered {
-        generation: u64,
-        profile_id: String,
-        model: Option<String>,
-        result: std::result::Result<ReviewSettingsDiscoveryResult, String>,
-    },
-    ReviewSettingsChoices {
-        generation: u64,
-        profile_id: String,
-        model: Option<String>,
-        choices: mj_controller::review_settings::ReviewCapabilityChoices,
     },
     SpinnerStyleSaved {
         result: std::result::Result<Config, String>,
@@ -1370,34 +1357,6 @@ impl DashboardContext {
                     self.dashboard.queue_setup_login(generation, profile_id);
                 }
             }
-            DashboardIoUpdate::ReviewSettingsChoices {
-                generation,
-                profile_id,
-                model,
-                choices,
-            } => {
-                self.dashboard.apply_review_settings_choices(
-                    generation,
-                    &profile_id,
-                    model.as_deref(),
-                    review_settings_choices(choices),
-                );
-            }
-            DashboardIoUpdate::ReviewSettingsDiscovered {
-                generation,
-                profile_id,
-                model,
-                result,
-            } => {
-                if self.dashboard.apply_review_settings_discovery(
-                    generation,
-                    &profile_id,
-                    model.as_deref(),
-                    result,
-                ) {
-                    self.review_discovery_cancel = None;
-                }
-            }
             DashboardIoUpdate::SpinnerStyleSaved { result } => match result {
                 Ok(config) => {
                     let style = config.spinner;
@@ -2406,7 +2365,10 @@ mod tests {
             .contains("another client")
         );
         let mut invalid = original.clone();
-        invalid.review.profile = Some("missing".into());
+        invalid.review.reviewers = vec![mj_core::config::SubagentChoice {
+            model: String::new(),
+            effort: None,
+        }];
         assert!(
             save_setup_at(
                 &path,

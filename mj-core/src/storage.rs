@@ -263,11 +263,41 @@ impl TurnReviewState {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "ActiveReviewGroupInput")]
 pub struct ActiveReviewGroup {
     pub driver: crate::review::driver::ReviewDriverSnapshot,
-    pub reviewer: crate::review::settings::ResolvedReviewSettings,
+    pub reviewers: Vec<crate::review::settings::ResolvedReviewSettings>,
     pub scope: crate::relay::CaptureScope,
     pub registrations: Vec<ReviewerRegistration>,
+}
+
+#[derive(serde::Deserialize)]
+struct ActiveReviewGroupInput {
+    driver: crate::review::driver::ReviewDriverSnapshot,
+    #[serde(default)]
+    reviewers: Vec<crate::review::settings::ResolvedReviewSettings>,
+    #[serde(default)]
+    reviewer: Option<crate::review::settings::ResolvedReviewSettings>,
+    scope: crate::relay::CaptureScope,
+    registrations: Vec<ReviewerRegistration>,
+}
+impl From<ActiveReviewGroupInput> for ActiveReviewGroup {
+    fn from(input: ActiveReviewGroupInput) -> Self {
+        let reviewers = if input.reviewers.is_empty() {
+            input
+                .reviewer
+                .map(|reviewer| vec![reviewer; input.driver.roles.len()])
+                .unwrap_or_default()
+        } else {
+            input.reviewers
+        };
+        Self {
+            driver: input.driver,
+            reviewers,
+            scope: input.scope,
+            registrations: input.registrations,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

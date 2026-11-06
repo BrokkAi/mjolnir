@@ -2,18 +2,6 @@ use super::*;
 
 pub(super) use mj_client::settings::draft::{config_from_draft, pointer, storage_path};
 
-pub(super) fn changed_profile_ids(
-    draft: &Config,
-    current: &Config,
-) -> std::collections::BTreeSet<String> {
-    draft
-        .profiles
-        .keys()
-        .chain(current.profiles.keys())
-        .filter(|profile| draft.profiles.get(*profile) != current.profiles.get(*profile))
-        .cloned()
-        .collect()
-}
 impl SetupDialog {
     pub(super) fn current(&self) -> &Value {
         self.draft
@@ -415,16 +403,12 @@ impl SetupDialog {
             }
         };
         let mut review = ReviewSettingsDialog::new(&config);
-        review.blocked_profile_ids = changed_profile_ids(&config, &dashboard.config);
-        let action = if review.review.profile.is_some() {
-            review.start_initial_discovery(dashboard)
-        } else {
-            DashboardAction::None
-        };
+        review.update_choices(&config, &dashboard.profile_capabilities);
+        self.sync_review_validation(&review);
         self.review_editor = Some(Box::new(review));
         self.form = RefCell::new(Dialog::default());
         self.prepare();
-        action
+        DashboardAction::None
     }
 
     pub(super) fn sync_review(&mut self, review: &mj_core::config::ReviewConfig) {
@@ -441,10 +425,7 @@ impl SetupDialog {
     }
 
     pub(super) fn invalidate_review_validation_for(&mut self, profile_id: Option<&str>) {
-        let invalidated = self.review_validation.as_ref().is_some_and(|snapshot| {
-            profile_id.is_none() || snapshot.profile.as_deref() == profile_id
-        });
-        if invalidated {
+        if profile_id.is_some() || self.review_validation.is_some() {
             self.review_validation = None;
         }
     }

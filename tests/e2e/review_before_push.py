@@ -100,7 +100,9 @@ model = {json.dumps(args.model)}
 effort = "medium"
 [review]
 trigger = "push"
-profile = "live"
+[[review.reviewers]]
+model = {json.dumps(args.model)}
+effort = "high"
 ''')
     isolated_config = (config / "config.toml").read_text()
     assert str(source_home) not in isolated_config, "isolated config contains the real harness home"

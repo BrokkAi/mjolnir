@@ -227,6 +227,7 @@ impl DurableRelay {
         Ok(())
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn question_locator_request(
         &self,
         revision: u64,
@@ -244,6 +245,7 @@ impl DurableRelay {
         (!request.message_ids.is_empty()).then_some(request)
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn store_question_target(&mut self, revision: u64, stable_id: &str) -> Result<bool> {
         let Some(mut assessment) = self.snapshot.assessment.clone().filter(|a| {
             a.revision == revision

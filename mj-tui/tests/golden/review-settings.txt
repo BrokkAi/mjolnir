@@ -1,17 +1,10 @@
-=== Code Review opens without a selected session (100x30) ===
+=== Wide (100x30) ===
 
 
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
-  │Trigger   Off ▾                                                                               │
-  │Profile   Auto ▾                                                                              │
-  │Model     Auto policy ▾                                                                       │
-  │Effort    Auto policy ▾                                                                       │
-  │Reviewers 2                                                                                   │
-  │                                                                                              │
-  │                                                                                              │
-  │Changes stay in the Settings draft until you save Settings.                                   │
-  │Auto resolves a reviewer when review starts                                                   │
-  │1–3 reviewers are reasonable; more have diminishing returns.                                  │
+  │Trigger     Off ▾                                                                             │
+  │  Add reviewer     Autoconfigure                                                              │
+  │Choose each reviewer’s model and effort.                                                      │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -24,237 +17,44 @@
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
-  │Tab moves · Enter opens choices · Esc goes back                                               │
-  │  Cancel     Back     Refresh choices     Save Settings                                       │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │  Cancel     Back     Save Settings                                                           │
   ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
 
-action: None
-selected session: None
-
-=== command palette exposes Setup without a selected session (100x30) ===
-╭ Workspaces                                                                            ── ◇   ⋯───╮
-│ default                                                                                          │
-╰───────────  ╭ × ✦ Commands ─────────────────────────────────────────── 49 commands ╮             │
-╭ Sessions ─  │Search commands…                                                      │             │
-│ Create   O  │  Sessions pane  ───────────────────────────────────────────────────  │             │
-│No sessions  │› Create session                                    n / N / ctrl+b c ▐│             │
-│Create new   │  Mark all read                                             ctrl+b a ▐│             │
-│             │  Search sessions                                                  / ▐│             │
-│             │  Panes  ─────────────────────────────────────────────────────────── ▐│             │
-│             │  Split right                                               ctrl+b v ▐│             │
-│             │  Split down                                                ctrl+b - ▐│             │
-│             │  Close pane                                                ctrl+b x ▐│             │
-│             │  Focus pane left                                           ctrl+b h ││             │
-│             │  Focus pane down                                           ctrl+b j ││             │
-│             │  Focus pane up                                             ctrl+b k ││             │
-│             │  Focus pane right                                          ctrl+b l ││  ───────────╯
-│             │  Focus last pane                                           ctrl+b ; ││  ───────────╮
-│             │  Zoom pane                                                 ctrl+b z ││             │
-│             │  Resize panes                                              ctrl+b r ││  to find    │
-│             │  Swap pane left                                      ctrl+b shift+h ││  ───────────╯
-│             │  Swap pane down                                      ctrl+b shift+j ││  ──── ▁   ▄ ╮
-│             │  Swap pane up                                        ctrl+b shift+k ││             │
-│             │  Swap pane right                                     ctrl+b shift+l ││  ───────────╯
-│             │  Resize pane left                                                   ││  ──── ▁   ▄ ╮
-│             │  Resize pane down                                                    │   Resets    │
-│             │Choose the profile, project, target, and mounts in the full wizard.   │             │
-│             │  Run                                                                 │             │
-│             ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ───────────────╯             │
-╰───────────                                                                            ───────────╯
-/ search (fi                                                                            / ? palette
-Setup command available: true
-
-=== global review form (100x30) ===
+=== Narrow (60x30) ===
 
 
-  ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
-  │Trigger   Off ▾                                                                               │
-  │Profile   Auto ▾                                                                              │
-  │Model     Auto policy ▾                                                                       │
-  │Effort    Auto policy ▾                                                                       │
-  │Reviewers 2                                                                                   │
-  │                                                                                              │
-  │                                                                                              │
-  │Changes stay in the Settings draft until you save Settings.                                   │
-  │Auto resolves a reviewer when review starts                                                   │
-  │1–3 reviewers are reasonable; more have diminishing returns.                                  │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │Tab moves · Enter opens choices · Esc goes back                                               │
-  │  Cancel     Back     Refresh choices     Save Settings                                       │
-  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
-
-
-action: None
-
-=== four reviewers remain selectable (100x30) ===
-
-
-  ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
-  │Trigger   Off ▾                                                                               │
-  │Profile   Auto ▾                                                                              │
-  │Model     Auto policy ▾                                                                       │
-  │Effort    Auto policy ▾                                                                       │
-  │Reviewers 4                                                                                   │
-  │                                                                                              │
-  │                                                                                              │
-  │Changes stay in the Settings draft until you save Settings.                                   │
-  │Auto resolves a reviewer when review starts                                                   │
-  │1–3 reviewers are reasonable; more have diminishing returns.                                  │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │Tab moves · Enter opens choices · Esc goes back                                               │
-  │  Cancel     Back     Refresh choices     Save Settings                                       │
-  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
-
-
-
-=== save applies only global review values (100x30) ===
-
-
-  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
-  │ Changes stay in this draft until you save.                                                   │
-  │                                                                                              │
-  │                                                                                              │
-  │   Setup                                                                                      │
-  │   Agent Profiles                  claude-1, codex-1, codex-2                                 │
-  │   Projects                        hel                                                        │
-  │   Runtimes                        podman                                                     │
-  │   Machines                        local                                                      │
-  │   Daemon                          Host                                                       │
-  │                                                                                              │
-  │   Sessions                                                                                   │
-  │   Code Review                     Off                                                        │
-  │   Continuation                    On · 3 continuations plus quota recovery                   │
-  │   Sub-agents                      Up to 6 at once                                            │
-  │   Quota checks                    Auto · container when available                            │
-  │   SessionWiki                     Keeps every session                                        │
-  │   Web Access                      On · 127.0.0.1:3765                                        │
-  │                                                                                              │
-  │   Display                                                                                    │
-  │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │
-  │   Notifications                   Terminal                                                   │
-  │   Advanced                        All off                                                    │
-  │ Saving settings…                                                                             │
-  │   Saving…                                                                                    │
-  ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
-
-
-discovery action: DiscoverReviewSettings { generation: 1, profile_id: "claude-1", model: None }
-saved global review: {"trigger":"off","count":4,"profile":"claude-1"}
-
-=== Auto profile leaves manual overrides disabled (100x30) ===
-
-
-  ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
-  │Trigger   Off ▾                                                                               │
-  │Profile   Auto ▾                                                                              │
-  │Model     Auto policy ▾                                                                       │
-  │Effort    Auto policy ▾                                                                       │
-  │Reviewers 2                                                                                   │
-  │                                                                                              │
-  │                                                                                              │
-  │Changes stay in the Settings draft until you save Settings.                                   │
-  │Auto resolves a reviewer when review starts                                                   │
-  │1–3 reviewers are reasonable; more have diminishing returns.                                  │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │Tab moves · Enter opens choices · Esc goes back                                               │
-  │  Cancel     Back     Refresh choices     Save Settings                                       │
-  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
-
-
-profile: Auto; model enabled: false; effort enabled: false; save enabled: true
-
-=== review trigger choices (100x30) ===
-
-
-  ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
-  │Trigger   Off ▾                                                                               │
-  │Profile   ╭ values · ↑/↓ select · Tab/Enter accept ╮                                          │
-  │Model     │Off                                     │                                          │
-  │Effort    │End of turn                             │                                          │
-  │Reviewers │Before push                             │                                          │
-  │          ╰────────────────────────────────────────╯                                          │
-  │                                                                                              │
-  │Changes stay in the Settings draft until you save Settings.                                   │
-  │Auto resolves a reviewer when review starts                                                   │
-  │1–3 reviewers are reasonable; more have diminishing returns.                                  │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │Tab moves · Enter opens choices · Esc goes back                                               │
-  │  Cancel     Back     Refresh choices     Save Settings                                       │
-  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
-
-
-
-=== before-push review selected (100x30) ===
-
-
-  ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
-  │Trigger   Before push ▾                                                                       │
-  │Profile   Auto ▾                                                                              │
-  │Model     Auto policy ▾                                                                       │
-  │Effort    Auto policy ▾                                                                       │
-  │Reviewers 2                                                                                   │
-  │                                                                                              │
-  │                                                                                              │
-  │Changes stay in the Settings draft until you save Settings.                                   │
-  │Auto resolves a reviewer when review starts                                                   │
-  │1–3 reviewers are reasonable; more have diminishing returns.                                  │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │Tab moves · Enter opens choices · Esc goes back                                               │
-  │  Cancel     Back     Refresh choices     Save Settings                                       │
-  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+  ╭ × Settings › Code Review ────────────────────────────╮
+  │Trigger             Off ▾                             │
+  │  Add reviewer     Autoconfigure                      │
+  │Choose each reviewer’s model and effort.              │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │                                                      │
+  │  Cancel     Back     Save Settings                   │
+  ╰──────────────────────────────────────────────────────╯

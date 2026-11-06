@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 110;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 111;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1992,18 +1992,31 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
-    // Breaking: older daemons cannot decode durable per-finding
-    // `override_review` or `set_review_baseline` requests, and never clear the
-    // declined findings when a baseline moves, so a later daemon would tell
-    // reviewers to skip findings of a scope that no longer exists.
+    // Breaking: older readers require ActiveReviewGroup `reviewer` and reject
+    // SessionReview `reviewers` and retained legacy override fields.
     if version < 110 {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
-             ALTER TABLE turn_review_state ADD COLUMN declined_findings TEXT;
              UPDATE schema_compatibility SET minimum_compatible_version = 110 WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (110, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
              PRAGMA user_version = 110;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: older daemons cannot decode durable per-finding
+    // `override_review` or `set_review_baseline` requests, and never clear the
+    // declined findings when a baseline moves, so a later daemon would tell
+    // reviewers to skip findings of a scope that no longer exists.
+    if version < 111 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE turn_review_state ADD COLUMN declined_findings TEXT;
+             UPDATE schema_compatibility SET minimum_compatible_version = 111 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (111, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 111;
              COMMIT;",
         )?;
     }
@@ -2482,7 +2495,7 @@ pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
 /// Historical fixtures must remove review columns introduced afterward.
 #[cfg(test)]
 pub(super) fn restore_review_state_schema(connection: &Connection, version: i64) {
-    if version < 110
+    if version < 111
         && legacy_schema::table_has_column(connection, "turn_review_state", "declined_findings")
             .unwrap()
     {
