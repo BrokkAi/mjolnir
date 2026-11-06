@@ -73,6 +73,7 @@ pub struct CodexUsageClient {
     launcher: CodexLauncher,
     /// The managed installation's lease, held while its launcher runs.
     lease: Option<FileLock>,
+    _node: Option<mj_core::harness_install::ManagedNodeRuntime>,
     /// The container the app-server runs in, removed when the client stops.
     container: Option<crate::quota_runtime::QuotaContainer>,
     stdin: crate::streamed_child::ProxyWriter,
@@ -89,21 +90,22 @@ impl CodexUsageClient {
         env: HashMap<String, String>,
         launcher: &CodexLauncher,
     ) -> Result<Self, QueryError> {
-        let (stdio, lease, container) = match launcher {
+        let (stdio, lease, container, node) = match launcher {
             CodexLauncher::Managed(cache_root) => {
                 let cache_root = match cache_root {
                     Some(root) => root.clone(),
                     None => process_managed_cache_root()?,
                 };
-                let (stdio, lease) = spawn_codex(cwd, env, cache_root).await?;
-                (stdio, Some(lease), None)
+                let (stdio, lease, node) = spawn_codex(cwd, env, cache_root).await?;
+                (stdio, Some(lease), None, node)
             }
             CodexLauncher::Container(check) => {
                 let (stdio, container) = spawn_codex_in_container(check, env).await?;
-                (stdio, None, Some(container))
+                (stdio, None, Some(container), None)
             }
             CodexLauncher::Image => (
                 spawn_app_server(Path::new("codex"), cwd, env).await?,
+                None,
                 None,
                 None,
             ),
@@ -119,6 +121,7 @@ impl CodexUsageClient {
             child,
             launcher: launcher.clone(),
             lease,
+            _node: node,
             container,
             stdin,
             stdout: BufReader::new(stdout),
@@ -543,11 +546,29 @@ async fn spawn_codex_in_container(
     Ok((stdio, launch.container))
 }
 
+#[cfg(all(test, unix))]
+pub(crate) fn install_fake_node_tools(bin: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(bin).unwrap();
+    for name in ["node", "npm", "npx"] {
+        let path = bin.join(name);
+        std::fs::write(&path, "#!/bin/sh\necho v24.22.1\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 async fn spawn_codex(
     cwd: PathBuf,
     env: HashMap<String, String>,
     cache_root: PathBuf,
-) -> Result<(crate::streamed_child::ProxyStdio, FileLock), QueryError> {
+) -> Result<
+    (
+        crate::streamed_child::ProxyStdio,
+        FileLock,
+        Option<mj_core::harness_install::ManagedNodeRuntime>,
+    ),
+    QueryError,
+> {
     let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
 
     #[cfg(not(unix))]
@@ -564,7 +585,13 @@ async fn spawn_codex(
         let lease = open_managed_codex_lease(&install)?;
         let launcher = managed_codex_launcher(&install)?;
 
-        let stdio = spawn_app_server(&launcher, cwd, env)
+        let mut environment = node_environment(&env);
+        let node = mj_core::harness_install::existing_node_runtime(&mut environment)
+            .await
+            .map_err(|error| {
+                QueryError::Launch(format!("resolve Codex Node.js runtime: {error:#}"))
+            })?;
+        let stdio = spawn_app_server(&launcher, cwd, environment.into_iter().collect())
             .await
             .map_err(|error| match error {
                 QueryError::NotInstalled { detail, .. } => QueryError::NotInstalled {
@@ -573,7 +600,7 @@ async fn spawn_codex(
                 },
                 other => other,
             })?;
-        Ok((stdio, lease))
+        Ok((stdio, lease, node))
     }
 }
 
@@ -609,10 +636,21 @@ fn managed_codex_launcher(install: &Path) -> Result<PathBuf, QueryError> {
     Ok(launcher)
 }
 
+// Quota commands inherit the daemon environment and overlay the profile.
+#[cfg(unix)]
+fn node_environment(env: &HashMap<String, String>) -> std::collections::BTreeMap<String, String> {
+    let mut environment = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
+    environment.extend(env.iter().map(|(key, value)| (key.clone(), value.clone())));
+    environment
+}
+
 /// Whether this host holds the managed Codex installation a host check would
-/// start: the same lease, receipt and launcher checks `spawn_codex` makes,
+/// start: the same runtime, lease, receipt and launcher checks `spawn_codex` makes,
 /// without taking the lease. `cache_root` is as in [`CodexLauncher::Managed`].
-pub(crate) fn host_has_codex(cache_root: Option<&Path>) -> bool {
+pub(crate) async fn host_has_codex(
+    cache_root: Option<&Path>,
+    env: &HashMap<String, String>,
+) -> bool {
     #[cfg(unix)]
     {
         let cache_root = match cache_root {
@@ -623,11 +661,15 @@ pub(crate) fn host_has_codex(cache_root: Option<&Path>) -> bool {
             },
         };
         let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
-        install.join(LEASE_FILE).is_file() && managed_codex_launcher(&install).is_ok()
+        install.join(LEASE_FILE).is_file()
+            && managed_codex_launcher(&install).is_ok()
+            && mj_core::harness_install::existing_node_runtime(&mut node_environment(env))
+                .await
+                .is_ok()
     }
     #[cfg(not(unix))]
     {
-        let _ = cache_root;
+        let _ = (cache_root, env);
         false
     }
 }
@@ -900,6 +942,7 @@ mod tests {
     ) -> (HashMap<String, String>, PathBuf) {
         let cache_root = test_cache_root(temp);
         install_fake_managed_codex(&cache_root, script);
+        install_fake_node_tools(temp.path());
 
         let log = temp.path().join("requests.jsonl");
         let env = HashMap::from([
@@ -1036,22 +1079,68 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn host_has_codex_only_for_a_complete_managed_install() {
+    #[tokio::test]
+    async fn host_has_codex_only_for_a_complete_managed_install() {
         let temp = tempfile::tempdir().expect("tempdir");
         let cache_root = test_cache_root(&temp);
-        assert!(!host_has_codex(Some(&cache_root)));
+        install_fake_node_tools(temp.path());
+        let env = HashMap::from([("PATH".into(), temp.path().to_string_lossy().into_owned())]);
+        assert!(!host_has_codex(Some(&cache_root), &env).await);
 
         let install = install_fake_managed_codex(&cache_root, "#!/bin/sh\nexit 0\n");
-        assert!(host_has_codex(Some(&cache_root)));
+        assert!(host_has_codex(Some(&cache_root), &env).await);
 
         // A `codex` on PATH is not the managed install.
         let other = tempfile::tempdir().expect("tempdir");
-        assert!(!host_has_codex(Some(&other.path().join("cache"))));
+        assert!(!host_has_codex(Some(&other.path().join("cache")), &env).await);
 
         std::fs::remove_file(install.join(mj_core::harness_runtime::MANIFEST_FILE))
             .expect("remove manifest");
-        assert!(!host_has_codex(Some(&cache_root)));
+        assert!(!host_has_codex(Some(&cache_root), &env).await);
+    }
+
+    // Hard-won: host quota selection omitted the managed Node runtime.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn host_has_codex_requires_node_and_launch_receives_managed_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_root = test_cache_root(&temp);
+        install_fake_managed_codex(&cache_root, "#!/bin/sh\necho \"$PATH\"\n");
+        let mut env = HashMap::from([
+            (
+                "PATH".into(),
+                temp.path().join("empty").to_string_lossy().into_owned(),
+            ),
+            (
+                "XDG_CACHE_HOME".into(),
+                temp.path().to_string_lossy().into_owned(),
+            ),
+        ]);
+        assert!(!host_has_codex(Some(&cache_root), &env).await);
+        let metadata: Value =
+            serde_json::from_str(include_str!("../../mj-core/assets/node/runtime.json")).unwrap();
+        let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let target = metadata["platforms"][&key]["target"].as_str().unwrap();
+        let root = temp.path().join("mjolnir/node");
+        let install = root.join(format!(
+            "node-v{}-{target}",
+            mj_core::harness_runtime::NODE_VERSION
+        ));
+        let bin = install.join("bin");
+        install_fake_node_tools(&bin);
+        std::fs::write(root.join(".install.lock"), "").unwrap();
+        std::fs::write(install.join(".lease"), "").unwrap();
+        assert!(host_has_codex(Some(&cache_root), &env).await);
+        let (mut stdio, _lease, _node) =
+            spawn_codex(temp.path().to_path_buf(), env.clone(), cache_root.clone())
+                .await
+                .unwrap();
+        let mut output = String::new();
+        use tokio::io::AsyncReadExt;
+        stdio.stdout.read_to_string(&mut output).await.unwrap();
+        assert_eq!(std::env::split_paths(output.trim()).next().unwrap(), bin);
+        env.insert("PATH".into(), bin.to_string_lossy().into_owned());
+        assert!(host_has_codex(Some(&cache_root), &env).await);
     }
 
     #[cfg(unix)]

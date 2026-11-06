@@ -1155,6 +1155,38 @@ pub async fn ensure_node_runtime(
         .map(Some)
 }
 
+/// Resolve an already installed runtime without downloading or repairing it.
+/// Uses the same compatibility checks and leases as managed harness launches.
+pub async fn existing_node_runtime(
+    environment: &mut BTreeMap<String, String>,
+) -> Result<Option<ManagedNodeRuntime>> {
+    if system_node_is_compatible(environment).await {
+        return Ok(None);
+    }
+    let root = managed_node_cache_root(
+        environment.get("XDG_CACHE_HOME").map(OsStr::new),
+        environment.get("HOME").map(OsStr::new),
+    )?;
+    let metadata: serde_json::Value =
+        serde_json::from_str(include_str!("../assets/node/runtime.json"))?;
+    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let target = metadata["platforms"][&key]["target"]
+        .as_str()
+        .context("no managed Node.js runtime for this platform")?;
+    let install = root.join(format!("node-v{NODE_VERSION}-{target}"));
+    // Serialize health validation and lease acquisition with cache repair.
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join(INSTALL_LOCK_FILE))?;
+    let _lock = lock_file(lock, false, "managed Node.js lookup").await?;
+    ensure!(
+        managed_node_health(&install, environment).await? == ManagedNodeHealth::Usable,
+        "no usable installed Node.js runtime"
+    );
+    lease_node_runtime(install, environment).await.map(Some)
+}
+
 #[cfg(test)]
 async fn ensure_node_runtime_from_metadata(
     root: &Path,
@@ -1265,14 +1297,20 @@ async fn install_managed_node(
             }
         }
     }
+    let runtime = lease_node_runtime(install, environment).await?;
+    gc_node_root(root, &folder)?;
+    drop(install_lock);
+    Ok(runtime)
+}
+
+async fn lease_node_runtime(
+    install: PathBuf,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<ManagedNodeRuntime> {
     let lease_path = install.join(LEASE_FILE);
     let lease = open_lock(&lease_path)?;
     let lease = lock_file(lease, true, "managed Node.js lease").await?;
-    gc_node_root(root, &folder)?;
-    drop(install_lock);
-
-    let bin = install.join("bin");
-    prepend_path(environment, &bin)?;
+    prepend_path(environment, &install.join("bin"))?;
     Ok(ManagedNodeRuntime {
         path: install,
         lease_path,

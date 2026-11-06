@@ -332,6 +332,7 @@ fn fake_codex_app_server(
     script: &str,
 ) -> (BTreeMap<String, String>, std::path::PathBuf) {
     crate::codex_usage::install_fake_managed_codex(&managed_codex_cache_root(directory), script);
+    crate::codex_usage::install_fake_node_tools(directory);
     let log = directory.join("requests.jsonl");
     let environment = BTreeMap::from([
         ("PATH".to_owned(), directory.to_string_lossy().into_owned()),
@@ -1437,6 +1438,7 @@ fn process_is_gone(pid: i32) -> bool {
 async fn dropping_a_profile_from_the_configuration_stops_its_codex_quota_client() {
     let directory = tempfile::tempdir().unwrap();
     let pid_file = directory.path().join("codex.pid");
+    crate::codex_usage::install_fake_node_tools(directory.path());
     // A `codex app-server` stand-in: answer one quota refresh, then stay
     // alive on stdin the way the real one does between refreshes. The managed
     // launcher runs the script directly, so `$$` is the spawned process.
