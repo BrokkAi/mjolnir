@@ -246,11 +246,22 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // Hard-won: 803c9fe1: rewound upgrade fixtures retained the later mailbox failure column.
     // Hard-won: #1302: the old-store fixture must also remove the notification epoch.
     // Hard-won: 5f5e74082: kept current GitHub watch tables, so migration 85 found no v84 columns to drop.
+    // Hard-won: a58ad7eb8: kept migration 116's prompt_history triggers, which name sessions, so migration 68's table rebuild failed.
     // Restore the singleton preference table used before schema 101.
     // Restore the review table before migrations 104 and 106 add these columns.
+    // Restore prompt_history before migration 116 adds its triggers, search table and command column.
     connection
         .execute_batch(
-            "ALTER TABLE turn_review_state DROP COLUMN active_group;
+            "DROP TRIGGER prompt_history_top_level_only;
+         DROP TRIGGER prompt_history_child_registered;
+         DROP TRIGGER prompt_history_session_destroyed;
+         DROP TRIGGER prompt_history_text_insert;
+         DROP TRIGGER prompt_history_text_delete;
+         DROP TRIGGER prompt_history_text_update;
+         DROP TABLE prompt_history_text;
+         DROP INDEX prompt_history_command;
+         ALTER TABLE prompt_history DROP COLUMN command_id;
+         ALTER TABLE turn_review_state DROP COLUMN active_group;
          ALTER TABLE turn_review_state DROP COLUMN push_findings;
          ALTER TABLE turn_review_state DROP COLUMN pending_followup;
          ALTER TABLE turn_review_state DROP COLUMN forward_attempts;
