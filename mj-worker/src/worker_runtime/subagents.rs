@@ -2298,7 +2298,7 @@ enabled = false
             endpoint.enqueue(report).unwrap();
             let owner = relay.lock().unwrap();
             let expected = owner.originating_command_id().unwrap();
-            assert!(mj_core::continuation::is_harness_turn_id(&expected));
+            assert!(expected.starts_with("harness-turn-"));
             assert_eq!(
                 endpoint.snapshot().0[0].originating_command_id.as_deref(),
                 Some(expected.as_str())

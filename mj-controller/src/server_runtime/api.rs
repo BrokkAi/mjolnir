@@ -1051,7 +1051,7 @@ impl ApiBackend {
                             last_completed_ordinal: None,
                             report: ReportState::Fallback,
                             awaited_ordinal: None,
-                            answered_ordinal: None,
+                            answer: None,
                             failed_turn: None,
                             login_failure: None,
                             provider_failure: None,
@@ -1980,9 +1980,8 @@ pub(crate) struct ChildProgress {
     pub report: ReportState,
     /// The newest prompt the parent gave the child, by acceptance ordinal.
     pub awaited_ordinal: Option<u64>,
-    /// The newest prompt the child's last finished turn answers; see
-    /// [`mj_core::subagent::answered_ordinal`].
-    pub answered_ordinal: Option<u64>,
+    /// The outcome owning the child's answer.
+    pub answer: Option<mj_core::state::MaterializedTurnOutcome>,
     /// How that turn failed, when it did: `failed` or `interrupted`, and why.
     pub failed_turn: Option<(&'static str, String)>,
     /// The child's profile, when that turn failed because the provider
@@ -2006,7 +2005,7 @@ impl ChildProgress {
             last_completed_ordinal: Some(1),
             report,
             awaited_ordinal: None,
-            answered_ordinal: None,
+            answer: None,
             failed_turn: None,
             login_failure: None,
             provider_failure: None,
@@ -2020,10 +2019,15 @@ impl ChildProgress {
     /// `submitted` is the first prompt's ordinal while startup remembers it.
     fn awaiting_prompt(&self, submitted: Option<u64>) -> bool {
         self.last_completed_ordinal.is_none()
-            || mj_core::subagent::prompt_unanswered(
-                self.awaited_ordinal.max(submitted),
-                self.answered_ordinal,
-            )
+            || self
+                .awaited_ordinal
+                .into_iter()
+                .chain(submitted)
+                .any(|ordinal| {
+                    self.answer
+                        .as_ref()
+                        .is_none_or(|turn| !turn.answers(ordinal))
+                })
     }
 }
 
@@ -2054,13 +2058,7 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
             mj_core::clock::epoch_millis(),
         ),
         awaited_ordinal: recorded.awaited_ordinal,
-        answered_ordinal: last.and_then(|last| {
-            last.answered_ordinal(mj_core::state::OutstandingPrompts::new(
-                active,
-                turn.into_iter()
-                    .flat_map(|turn| turn.queued_ordinals.iter().copied()),
-            ))
-        }),
+        answer: last.cloned(),
         failed_turn: last.and_then(|last| {
             mj_core::subagent::failed_turn(
                 last,
@@ -2092,7 +2090,6 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         return Ok(child_progress(&committed, child_id));
     }
     let subagent = crate::database::load_subagent(child_id)?;
-    let queued = crate::database::load_materialized_session_queued_prompts(child_id)?;
     let handback_tool = subagent.as_ref().is_some_and(|record| record.handback_tool);
     let recorded = crate::database::load_subagent_report(child_id)?;
     let (active, last) = crate::database::load_materialized_turn_outcome(child_id)?
@@ -2130,12 +2127,7 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         last_completed_ordinal: last.as_ref().map(|turn| turn.completed_ordinal),
         report,
         awaited_ordinal: recorded.awaited_ordinal,
-        answered_ordinal: last.as_ref().and_then(|last| {
-            last.answered_ordinal(mj_core::state::OutstandingPrompts::new(
-                active.as_ref(),
-                queued.iter().map(|prompt| prompt.accepted_ordinal),
-            ))
-        }),
+        answer: last.clone(),
         failed_turn,
         login_failure,
         provider_failure: last.as_ref().and_then(provider_failure),
@@ -3146,7 +3138,6 @@ impl SubagentBackend for ApiBackend {
                 return Ok(committed.turns.get(&session_id).map(|turn| {
                     let (execution, active_turn, last_turn_outcome) = turn.state.clone();
                     TurnState {
-                        queued_ordinals: turn.queued_ordinals.clone(),
                         execution,
                         active_turn,
                         last_turn_outcome,
@@ -3154,15 +3145,9 @@ impl SubagentBackend for ApiBackend {
                 }));
             }
             blocking("load turn outcome", move || {
-                let queued: Vec<_> =
-                    crate::database::load_materialized_session_queued_prompts(&session_id)?
-                        .iter()
-                        .map(|prompt| prompt.accepted_ordinal)
-                        .collect();
                 Ok(
                     crate::database::load_materialized_turn_outcome(&session_id)?.map(
                         |(execution, active_turn, last_turn_outcome)| TurnState {
-                            queued_ordinals: queued.clone(),
                             execution,
                             active_turn,
                             last_turn_outcome,

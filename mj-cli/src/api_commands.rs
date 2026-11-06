@@ -1561,24 +1561,19 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
         ));
     }
     lines.push(summary);
-    // A wait for turn N answers with the latest turn that ended, which is a
-    // later turn when the session has moved on. Say so rather than let the
-    // reply read as turn N's.
-    if let (Some(requested), Some(answered)) = (response.requested_turn_id, response.turn_id)
-        && answered > requested
+    // A wait for turn N answers with the latest turn that ended, which can be
+    // another turn: a later one, an earlier one that ended after N was
+    // removed from the queue, or one the session ran without a prompt. Only
+    // an answer about a finished turn has a turn number.
+    if let Some(requested) = response.requested_turn_id
+        && response.turn_number.is_some()
+        && response.turn_id != Some(requested)
     {
-        lines.push(format!(
-            "this is turn {answered}, which ended after turn {requested}; a session keeps only its latest turn's outcome and reply"
-        ));
-    }
-    // A turn the session ran without a prompt has no turn ID. Only an answer
-    // about a finished turn has a turn number; an error or a question does not.
-    if let (Some(requested), None, Some(_)) = (
-        response.requested_turn_id,
-        response.turn_id,
-        response.turn_number,
-    ) {
-        lines.push(format!("this is a later turn the session ran without a prompt, which ended after turn {requested}; a session keeps only its latest turn's outcome and reply"));
+        let answered = response.turn_id.map_or_else(
+            || "a turn the session ran without a prompt".to_owned(),
+            |turn| format!("turn {turn}"),
+        );
+        lines.push(format!("this is the outcome of {answered}, not of turn {requested}; a session keeps only its latest turn's outcome and reply"));
     }
     // The wait's message, the diagnostic and the agent's last message are
     // often one sentence (a Codex quota error was printed three times,
@@ -3457,10 +3452,10 @@ mod tests {
         // A wait for an earlier turn answers about the later one, and says so.
         let later = wait_response(
             "finished",
-            serde_json::json!({"turn_id": 87, "requested_turn_id": 82}),
+            serde_json::json!({"turn_id": 87, "requested_turn_id": 82, "turn_number": 5}),
         );
         assert!(
-            wait_report_lines(&later)[1].contains("turn 87, which ended after turn 82"),
+            wait_report_lines(&later)[1].contains("outcome of turn 87, not of turn 82"),
             "{:?}",
             wait_report_lines(&later)
         );
@@ -3471,14 +3466,19 @@ mod tests {
         );
         assert_eq!(
             wait_report_lines(&autonomous)[1],
-            "this is a later turn the session ran without a prompt, which ended after turn 82; a session keeps only its latest turn's outcome and reply"
+            "this is the outcome of a turn the session ran without a prompt, not of turn 82; a session keeps only its latest turn's outcome and reply"
         );
         // An answer with no finished turn, such as a failed session, is not one.
+        let earlier = wait_response(
+            "finished",
+            serde_json::json!({"turn_id": 80, "requested_turn_id":82, "turn_number":5}),
+        );
+        assert!(wait_report_lines(&earlier)[1].contains("outcome of turn 80, not of turn 82"));
         let failed = wait_response("error", serde_json::json!({"requested_turn_id":82}));
         assert!(
             !wait_report_lines(&failed)
                 .iter()
-                .any(|line| line.contains("later turn")),
+                .any(|line| line.contains("this is the outcome")),
             "{:?}",
             wait_report_lines(&failed)
         );

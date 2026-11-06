@@ -75,12 +75,6 @@ pub struct HarnessCompletion {
 
 const HARNESS_TURN_ID_PREFIX: &str = "harness-turn-";
 
-/// Whether `id` was made by [`harness_turn_id`].
-pub fn is_harness_turn_id(id: &str) -> bool {
-    id.strip_prefix(HARNESS_TURN_ID_PREFIX)
-        .is_some_and(|ordinal| ordinal.parse::<u64>().is_ok())
-}
-
 pub fn harness_turn_id(start_ordinal: u64) -> String {
     format!("{HARNESS_TURN_ID_PREFIX}{start_ordinal}")
 }

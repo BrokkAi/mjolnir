@@ -437,6 +437,7 @@ fn same_header(header: &MaterializedSession, materialized: &MaterializedSession)
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionTailReply {
     Tail {
+        #[serde(serialize_with = "serialize_client_projection")]
         header: Box<MaterializedSession>,
         window: ProjectionWindow,
         /// Oldest first.
@@ -481,6 +482,7 @@ impl SessionTail {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptItems {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_client_projection")]
     pub header: Option<Box<MaterializedSession>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<ProjectionWindow>,
@@ -683,6 +685,21 @@ impl RuntimeReplica {
             }
         }
     }
+}
+
+/// Older clients strictly decode the shared internal outcome inside projections.
+pub(crate) fn serialize_client_projection<T: Serialize, S: serde::Serializer>(
+    projection: &T,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut value = serde_json::to_value(projection).map_err(serde::ser::Error::custom)?;
+    if let Some(outcome) = value
+        .get_mut("last_turn_outcome")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        outcome.remove("answered_through");
+    }
+    value.serialize(serializer)
 }
 
 #[cfg(test)]
@@ -892,6 +909,47 @@ mod tests {
             SessionTail::from_parts(*header, fetched_window, fetched),
         );
         assert_eq!(replica.projection.transcripts["s"], daemon);
+        let mut with_answer = daemon.clone();
+        with_answer.header.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+            answered_through: Some(50),
+            diagnostic: None,
+            usage: None,
+            command_id: "task".into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: Some(2),
+            completed_ordinal: 50,
+            completed_at_ms: 100,
+            outcome: mj_core::state::TurnOutcomeKind::Completed {
+                stop_reason: "end_turn".into(),
+            },
+        });
+        let reply = serde_json::to_value(SessionTailReply::of(&with_answer)).unwrap();
+        assert!(
+            reply["header"]["last_turn_outcome"]
+                .get("answered_through")
+                .is_none()
+        );
+        assert_eq!(
+            with_answer
+                .header
+                .last_turn_outcome
+                .as_ref()
+                .unwrap()
+                .answered_through,
+            Some(50)
+        );
+        let delta = TranscriptItems {
+            header: Some(Box::new(with_answer.header.clone())),
+            window: None,
+            upserts: vec![],
+            removes: vec![],
+        };
+        let encoded = serde_json::to_value(delta).unwrap();
+        assert!(
+            encoded["header"]["last_turn_outcome"]
+                .get("answered_through")
+                .is_none()
+        );
 
         type Step = Box<dyn Fn(&mut Vec<Arc<TranscriptItem>>)>;
         let steps: Vec<Step> = vec![

@@ -61,8 +61,6 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
         ("startup_steps", "startup", "session_id"),
         ("subagent_handbacks", "report", "child_session_id"),
         ("materialized_sessions", "turn", "session_id"),
-        // A queued prompt is still owed whatever the newest outcome says.
-        ("materialized_queued_prompts", "turn", "session_id"),
     ] {
         // Observe tables that exist; opening a connection must not depend on
         // an unrelated optional table. Its own read/write still reports damage.
@@ -92,7 +90,7 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
                     format!("SELECT mj_changed_record('{kind}', {key});")
                 })
                 .collect::<String>();
-            let condition = if table == "materialized_sessions" && event == "UPDATE" {
+            let condition = if kind == "turn" && event == "UPDATE" {
                 " WHEN OLD.session_id IS NOT NEW.session_id
                    OR OLD.execution_state IS NOT NEW.execution_state
                    OR OLD.running_started_at_ms IS NOT NEW.running_started_at_ms
@@ -143,7 +141,6 @@ pub struct CommittedState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommittedTurn {
-    pub queued_ordinals: Vec<Option<u64>>,
     pub state: materialized::MaterializedTurnState,
     /// Read once when a failed turn changes, never on each observation.
     pub failed_message: Option<String>,
@@ -172,10 +169,6 @@ impl CommittedTurn {
             _ => None,
         };
         Ok(Some(Self {
-            queued_ordinals: materialized::read_materialized_queued_prompts(connection, id)?
-                .iter()
-                .map(|prompt| prompt.accepted_ordinal)
-                .collect(),
             state,
             failed_message,
         }))

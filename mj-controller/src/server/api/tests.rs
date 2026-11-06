@@ -3124,10 +3124,10 @@ async fn cancel_turn_is_refused_when_there_is_no_turn_to_cancel() {
 async fn wait_for_an_earlier_turn_names_the_later_turn_it_answers_about() {
     let backend = Arc::new(FakeBackend {
         turn_states: Mutex::new(vec![Some(TurnState {
-            queued_ordinals: vec![],
             execution: MaterializedExecutionState::Idle,
             active_turn: None,
             last_turn_outcome: Some(MaterializedTurnOutcome {
+                answered_through: None,
                 diagnostic: None,
                 usage: None,
                 command_id: "prompt-2".into(),
@@ -3175,9 +3175,9 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
     })).unwrap();
     let mut turn = completed(5, "QuotaLimit");
     turn.diagnostic = Some(diagnostic.clone());
+    turn.answered_through = Some(9);
     let backend = Arc::new(FakeBackend {
         turn_states: Mutex::new(vec![Some(TurnState {
-            queued_ordinals: vec![],
             execution: MaterializedExecutionState::Idle,
             active_turn: None,
             last_turn_outcome: Some(turn),
@@ -3211,6 +3211,11 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
     assert!(body["capacity_retry"].is_null());
     assert!(
         body["session"]["last_turn_outcome"]
+            .get("answered_through")
+            .is_none()
+    );
+    assert!(
+        body["session"]["last_turn_outcome"]
             .get("diagnostic")
             .is_none()
     );
@@ -3220,7 +3225,6 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
 async fn wait_reports_a_timeout_rather_than_guessing_at_a_running_turn() {
     let backend = Arc::new(FakeBackend {
         turn_states: Mutex::new(vec![Some(TurnState {
-            queued_ordinals: vec![],
             execution: MaterializedExecutionState::Running { started_at_ms: 10 },
             active_turn: Some(MaterializedTurn {
                 command_id: "prompt-1".into(),
@@ -3263,7 +3267,6 @@ async fn a_wait_ended_by_an_upgrade_handoff_tells_its_client_to_ask_the_next_dae
     for handoff in [true, false] {
         let backend = Arc::new(FakeBackend {
             turn_states: Mutex::new(vec![Some(TurnState {
-                queued_ordinals: vec![],
                 execution: MaterializedExecutionState::Running { started_at_ms: 10 },
                 active_turn: Some(MaterializedTurn {
                     command_id: "prompt-1".into(),
@@ -3323,7 +3326,6 @@ async fn a_wait_ended_by_an_upgrade_handoff_tells_its_client_to_ask_the_next_dae
 async fn a_wait_whose_feed_closes_during_a_handoff_still_sends_its_client_on() {
     let backend = Arc::new(FakeBackend {
         turn_states: Mutex::new(vec![Some(TurnState {
-            queued_ordinals: vec![],
             execution: MaterializedExecutionState::Running { started_at_ms: 10 },
             active_turn: Some(MaterializedTurn {
                 command_id: "prompt-1".into(),
@@ -3473,6 +3475,7 @@ fn an_unanswered_turn_reaches_wait_as_a_named_error() {
 
 fn completed(accepted_ordinal: u64, stop_reason: &str) -> MaterializedTurnOutcome {
     MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: format!("prompt-{accepted_ordinal}"),
@@ -3515,7 +3518,6 @@ fn a_wait_never_concludes_finished_while_the_session_is_unaccounted_for() {
         Some(1),
     ));
     let durable = TurnState {
-        queued_ordinals: vec![],
         execution: MaterializedExecutionState::Running { started_at_ms: 1 },
         active_turn: Some(MaterializedTurn {
             command_id: "api-1".into(),
@@ -3598,7 +3600,6 @@ fn a_wait_without_a_turn_waits_until_the_session_can_take_a_prompt() {
 async fn a_wait_right_after_creating_with_a_prompt_waits_for_that_prompt() {
     let idle_session = || {
         Some(TurnState {
-            queued_ordinals: vec![],
             execution: MaterializedExecutionState::Idle,
             active_turn: None,
             last_turn_outcome: None,
@@ -3812,6 +3813,7 @@ fn a_stored_expect_continuation_verdict_holds_no_wait_on_an_idle_session() {
     use mj_core::activity::{ActivityState, verdict};
     use mj_core::assessment::{Action, Status};
     let turn = MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "api-b098".into(),
@@ -4119,6 +4121,7 @@ fn rejections_stopped_sessions_and_an_empty_session_each_end_the_wait() {
 
     let mut rejected = idle(None);
     rejected.last_turn_outcome = Some(MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "prompt-1".into(),
@@ -5766,6 +5769,7 @@ async fn missing_target_access_returns_actionable_conflict_for_branch_and_bundle
 
 fn finished_child_turn(command_id: &str) -> MaterializedTurnOutcome {
     MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: command_id.into(),
@@ -5935,7 +5939,6 @@ async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own
     let backend = Arc::new(FakeBackend {
         live_view: Some(actor_without_projection()),
         turn_states: Mutex::new(vec![Some(TurnState {
-            queued_ordinals: vec![],
             execution: MaterializedExecutionState::Running { started_at_ms: 10 },
             active_turn: Some(MaterializedTurn {
                 command_id: "prompt-1".into(),
@@ -6026,7 +6029,6 @@ async fn a_waiter_answers_a_durable_turn_change_before_the_viewer_row_changes() 
     let backend = Arc::new(FakeBackend {
         live_view: Some(actor_without_projection()),
         turn_states: Mutex::new(vec![Some(TurnState {
-            queued_ordinals: vec![],
             execution: MaterializedExecutionState::Running { started_at_ms: 10 },
             active_turn: Some(MaterializedTurn {
                 command_id: "task".into(),
@@ -6051,7 +6053,6 @@ async fn a_waiter_answers_a_durable_turn_change_before_the_viewer_row_changes() 
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert!(!waiter.is_finished());
     *backend.turn_states.lock().unwrap() = vec![Some(TurnState {
-        queued_ordinals: vec![],
         execution: MaterializedExecutionState::Idle,
         active_turn: None,
         last_turn_outcome: Some(finished_child_turn("task")),
@@ -6082,7 +6083,6 @@ async fn a_waiter_answers_when_its_child_s_report_lands() {
     let backend = Arc::new(FakeBackend {
         live_view: Some(actor_without_projection()),
         turn_states: Mutex::new(vec![Some(TurnState {
-            queued_ordinals: vec![],
             execution: MaterializedExecutionState::Idle,
             active_turn: None,
             last_turn_outcome: Some(finished_child_turn("task")),
@@ -6524,6 +6524,7 @@ fn harness_completion_answers_started_prompts_but_not_queued_prompts() {
     outcome.command_id = mj_core::continuation::harness_turn_id(15);
     outcome.accepted_ordinal = None;
     outcome.turn_start_position = Some(15);
+    outcome.answered_through = Some(15);
     let mut observation = idle(Some(outcome));
     observation.activity = mj_core::activity::ActivityState::Idle { since_ms: None };
     observation.start_status = Some(StartStatus::Submitted { turn_id: 7 });
@@ -6533,24 +6534,26 @@ fn harness_completion_answers_started_prompts_but_not_queued_prompts() {
         ..Default::default()
     };
     assert!(resolve_wait(&observation, &request).is_some());
-    // Hard-won: #1450 review: durable waits lost queued acceptance ordinals.
+    observation
+        .last_turn_outcome
+        .as_mut()
+        .unwrap()
+        .answered_through = Some(6);
+    // Stored answers do not change when the queue changes.
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let durable = TurnState {
         execution: MaterializedExecutionState::Idle,
         active_turn: None,
         last_turn_outcome: observation.last_turn_outcome.clone(),
-        queued_ordinals: vec![Some(7)],
     };
     let durable_observation =
         build_observation(&snapshot, &snapshot.sessions[0], None, Some(&durable), None);
     assert!(resolve_wait(&durable_observation, &request).is_none());
     observation.queued.push("queued-prompt".into());
-    observation.queued_ordinals.push(Some(7));
     assert!(resolve_wait(&observation, &request).is_none());
     // Hard-won: #1450 review: a queued prompt that started read as answered by the older harness turn.
     observation.queued.clear();
-    observation.queued_ordinals.clear();
     observation.active_turn = Some(MaterializedTurn {
         command_id: "queued-prompt".into(),
         accepted_ordinal: Some(7),
@@ -6559,4 +6562,36 @@ fn harness_completion_answers_started_prompts_but_not_queued_prompts() {
         steered_into: None,
     });
     assert!(resolve_wait(&observation, &request).is_none());
+}
+
+// Hard-won: #1450 review: a wait for a running prompt ended on a queued prompt's rejection
+#[test]
+fn queued_rejection_does_not_finish_the_running_prompt_wait() {
+    let mut outcome = completed(7, "error");
+    outcome.answered_through = Some(4);
+    outcome.outcome = TurnOutcomeKind::Rejected {
+        reason: None,
+        message: "transport failed".into(),
+    };
+    let observation = idle(Some(outcome));
+    assert!(
+        resolve_wait(
+            &observation,
+            &WaitRequest {
+                turn_id: Some(5),
+                ..Default::default()
+            }
+        )
+        .is_none()
+    );
+    assert!(
+        resolve_wait(
+            &observation,
+            &WaitRequest {
+                turn_id: Some(7),
+                ..Default::default()
+            }
+        )
+        .is_some()
+    );
 }

@@ -1251,13 +1251,6 @@ fn load_transcribed_session_activity_from(path: &Path) -> Result<BTreeMap<String
 /// Load only the durable prompt queues without deserializing transcript rows.
 /// Dashboard startup uses this path so work is proportional to queued prompts,
 /// not to the complete retained conversation history.
-pub fn load_materialized_session_queued_prompts(
-    session_id: &str,
-) -> Result<Vec<MaterializedQueuedPrompt>> {
-    let connection = open_reader(&database_path())?;
-    read_materialized_queued_prompts(&connection, session_id)
-}
-
 pub fn load_materialized_queued_prompts() -> Result<BTreeMap<String, Vec<MaterializedQueuedPrompt>>>
 {
     load_materialized_queued_prompts_from(&database_path())

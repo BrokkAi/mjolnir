@@ -18,6 +18,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
         wait_revisions: Default::default(),
     };
     let turn = mj_core::state::MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "task".into(),
@@ -33,7 +34,6 @@ fn child_progress_uses_the_published_turn_and_report_together() {
     committed.turns.insert_shared(
         "child".into(),
         crate::database::CommittedTurn {
-            queued_ordinals: vec![],
             state: (MaterializedExecutionState::Idle, None, Some(turn)),
             failed_message: Some("owned failure details".into()),
         },
@@ -48,7 +48,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
     );
     let progress = child_progress(&committed, "child");
     assert_eq!(progress.finished_span, Some((8, 12)));
-    assert_eq!(progress.answered_ordinal, Some(7));
+    assert!(progress.answer.as_ref().unwrap().answers(7));
     assert!(
         progress.awaiting_prompt(None),
         "an older completed turn cannot answer the new prompt"
@@ -66,8 +66,8 @@ fn child_progress_uses_the_published_turn_and_report_together() {
     committed
         .turns
         .insert_shared("child".into(), harness.clone());
-    assert!(!child_progress(&committed, "child").awaiting_prompt(None));
-    harness.queued_ordinals.push(Some(15));
+    assert!(child_progress(&committed, "child").awaiting_prompt(None));
+    harness.state.2.as_mut().unwrap().answered_through = Some(14);
     committed.turns.insert_shared("child".into(), harness);
     assert!(child_progress(&committed, "child").awaiting_prompt(None));
     assert_eq!(child_progress(&committed, "other").failed_turn, None);
@@ -1460,6 +1460,7 @@ fn a_worker_refusal_is_read_without_the_log_lines_beside_it() {
 
 fn finished_turn(command_id: &str) -> mj_core::state::MaterializedTurnOutcome {
     mj_core::state::MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: command_id.into(),
@@ -1835,7 +1836,11 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
                 last_completed_ordinal: answered.map(|ordinal| ordinal + 1),
                 report: ReportState::Fallback,
                 awaited_ordinal: awaited,
-                answered_ordinal: answered,
+                answer: answered.map(|ordinal| {
+                    let mut turn = finished_turn("task");
+                    turn.accepted_ordinal = Some(ordinal);
+                    turn
+                }),
                 failed_turn: failed.map(|(state, reason)| (state, reason.to_owned())),
                 login_failure: None,
                 provider_failure: None,
@@ -1907,7 +1912,11 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         last_completed_ordinal: Some(21),
         report: ReportState::Fallback,
         awaited_ordinal: Some(20),
-        answered_ordinal: Some(20),
+        answer: Some({
+            let mut turn = finished_turn("task");
+            turn.accepted_ordinal = Some(20);
+            turn
+        }),
         failed_turn: Some((
             "failed",
             "Your access token could not be refreshed. Please log out and sign in again.".into(),

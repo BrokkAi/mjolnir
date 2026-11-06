@@ -715,12 +715,6 @@ pub fn subagent_has_handed_back(child_session_id: &str) -> Result<bool> {
         working,
         last_turn.as_ref(),
         mj_core::clock::epoch_millis(),
-        mj_core::state::OutstandingPrompts::new(
-            active_turn.as_ref(),
-            crate::database::load_materialized_session_queued_prompts(child_session_id)?
-                .iter()
-                .map(|prompt| prompt.accepted_ordinal),
-        ),
     ))
 }
 

@@ -1296,6 +1296,71 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
     assert_eq!(outcome.accepted_ordinal, Some(second));
     assert!(second > first);
     assert_eq!(outcome.turn_start_position, Some(turn.turn_start_position));
+    assert!(outcome.answers(first));
+    assert!(outcome.answers(second));
+
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 35 },
+    );
+    let first_harness = session.applied_event_ordinal;
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                start_ordinal: first_harness,
+                stop_reason: "end_turn".into(),
+            }),
+            origin: None,
+            prompt_in_flight: false,
+        },
+    );
+    assert!(session.last_turn_outcome.as_ref().unwrap().answers(second));
+
+    // Hard-won: #1450 review: a prompt removed from the queue counted as answered by a later harness turn
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 40 },
+    );
+    let start = session.applied_event_ordinal;
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "removed".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("removed")],
+            },
+            created_at_ms: 41,
+        },
+    );
+    let removed = session.applied_event_ordinal;
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: Some(RelayCommandKind::RemoveQueuedPrompt),
+            command_id: "remove".into(),
+            outcome: RelayCommandOutcome::QueueChanged {
+                removed_command_ids: vec!["removed".into()],
+            },
+        },
+    );
+    assert!(!session.last_turn_outcome.as_ref().unwrap().answers(removed));
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                start_ordinal: start,
+                stop_reason: "end_turn".into(),
+            }),
+            origin: None,
+            prompt_in_flight: false,
+        },
+    );
+    let outcome = session.last_turn_outcome.as_ref().unwrap();
+    assert!(outcome.answers(first));
+    assert!(outcome.answers(second));
+    assert!(outcome.answers(removed));
 }
 
 #[test]
@@ -1415,6 +1480,25 @@ fn a_rejected_queued_prompt_records_its_acceptance_ordinal_without_a_turn_start(
     apply_observation(
         &mut session,
         RelayObservation::CommandQueued {
+            command_id: "running".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("run")],
+            },
+            created_at_ms: 1,
+        },
+    );
+    let running = session.applied_event_ordinal;
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandStarted {
+            command_id: "running".into(),
+            started_at_ms: 2,
+        },
+    );
+
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
             command_id: "prompt-1".into(),
             command: RelayCommand::Prompt {
                 prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from("go")],
@@ -1434,9 +1518,11 @@ fn a_rejected_queued_prompt_records_its_acceptance_ordinal_without_a_turn_start(
         },
     );
 
-    assert!(session.active_turn.is_none());
+    assert!(session.active_turn.is_some());
     assert!(session.queued_prompts.is_empty());
     let outcome = session.last_turn_outcome.clone().expect("an outcome");
+    assert!(outcome.answers(accepted));
+    assert!(!outcome.answers(running));
     assert_eq!(outcome.accepted_ordinal, Some(accepted));
     assert_eq!(
         outcome.turn_start_position, None,

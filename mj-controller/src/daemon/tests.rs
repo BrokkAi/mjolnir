@@ -6781,6 +6781,7 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
             }));
     }
     conversation.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "task-1".into(),

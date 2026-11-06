@@ -60,7 +60,7 @@ pub struct WaitObservation {
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
     /// Command ids of the prompts queued behind the active turn.
     pub queued: Vec<String>,
-    pub queued_ordinals: Vec<Option<u64>>,
+
     pub capacity_retry: Option<CapacityRetry>,
     pub retry_assessment_pending: bool,
     pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
@@ -92,12 +92,6 @@ impl WaitObservation {
             .queued_prompts
             .iter()
             .map(|prompt| prompt.command_id.clone())
-            .collect();
-        self.queued_ordinals = snapshot
-            .materialized
-            .queued_prompts
-            .iter()
-            .map(|prompt| prompt.accepted_ordinal)
             .collect();
         self.capacity_retry = snapshot.operational.capacity_retry.clone();
         self.retry_assessment_pending = snapshot.operational.retry_assessment_pending;
@@ -189,13 +183,6 @@ impl WaitObservation {
             || self.queued.iter().any(|command_id| retries(command_id))
     }
 
-    fn outstanding_prompts(&self) -> mj_core::state::OutstandingPrompts {
-        mj_core::state::OutstandingPrompts::new(
-            self.active_turn.as_ref(),
-            self.queued_ordinals.iter().copied(),
-        )
-    }
-
     /// Whether the session has settled. The worker's activity state owns this.
     /// The rest are facts the worker cannot know: whether the daemon can hand
     /// the session a prompt, a prompt queued behind the active turn, and a
@@ -207,8 +194,7 @@ impl WaitObservation {
             Some(StartStatus::Submitted { turn_id }) => self
                 .last_turn_outcome
                 .as_ref()
-                .and_then(|turn| turn.answered_ordinal(self.outstanding_prompts()))
-                .is_none_or(|ordinal| ordinal < *turn_id),
+                .is_none_or(|turn| !turn.answers(*turn_id)),
             _ => false,
         };
         self.activity.is_idle()
@@ -442,11 +428,7 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
         let ended = observation
             .last_turn_outcome
             .as_ref()
-            .filter(|outcome| {
-                outcome
-                    .answered_ordinal(observation.outstanding_prompts())
-                    .is_some_and(|ordinal| ordinal >= target)
-            })
+            .filter(|outcome| outcome.answers(target))
             .and_then(|outcome| observation.turn_end(outcome));
         return match ended {
             None if request.return_on_input => observation.input_request(),

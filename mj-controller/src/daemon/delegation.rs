@@ -437,6 +437,7 @@ mod tests {
             in_flight: Vec::new(),
             credential_signal: None,
             outcome: Some(mj_core::state::MaterializedTurnOutcome {
+                answered_through: None,
                 diagnostic: None,
                 usage: None,
                 command_id: "turn".into(),

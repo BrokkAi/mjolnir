@@ -436,6 +436,7 @@ pub(super) fn project_observation(
                         .as_ref()
                         .filter(|turn| turn.belongs_to(command_id));
                     mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                        answered_through: None,
                         diagnostic: diagnostic.clone(),
                         usage: usage.clone(),
                         command_id: command_id.clone(),
@@ -561,6 +562,7 @@ pub(super) fn project_observation(
                     .filter(|turn| turn.belongs_to(command_id));
                 let outcome_text = message.clone();
                 mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                    answered_through: None,
                     diagnostic: None,
                     usage: None,
                     command_id: command_id.clone(),
@@ -853,6 +855,7 @@ pub(super) fn project_observation(
                         .is_some_and(|turn| turn.command_id == command_id)
                     {
                         mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                            answered_through: None,
                             command_id,
                             accepted_ordinal: None,
                             turn_start_position: Some(start),
@@ -914,7 +917,40 @@ pub(super) fn project_observation(
         | RelayObservation::TurnAssessmentUpdated { .. }
         | RelayObservation::RetryAssessmentResolved { .. } => {}
     }
+    if let Some(outcome) = &mut mutation.last_turn_outcome {
+        outcome.answered_through = answered_through(current, event, &outcome.command_id);
+    }
     Ok(())
+}
+
+/// The projection alone decides which accepted prompts a completion answers.
+fn answered_through(
+    current: &MaterializedSession,
+    event: &RelayEvent,
+    ending: &str,
+) -> Option<u64> {
+    let owed = current
+        .queued_prompts
+        .iter()
+        .filter(|prompt| prompt.command_id != ending)
+        .filter_map(|prompt| prompt.accepted_ordinal)
+        .chain(
+            current
+                .active_turn
+                .as_ref()
+                .filter(|turn| !turn.belongs_to(ending))
+                .and_then(|turn| turn.accepted_ordinal),
+        )
+        .min();
+    let own = match owed {
+        Some(first) => first.checked_sub(1).map(|cap| cap.min(event.ordinal)),
+        None => Some(event.ordinal),
+    };
+    current
+        .last_turn_outcome
+        .as_ref()
+        .and_then(|turn| turn.answered_ordinal())
+        .max(own)
 }
 
 /// The row that lists one delivery's external events, such as GitHub activity.
@@ -1083,6 +1119,7 @@ fn end_cancelled_harness_turn(
         mj_core::transcript::TURN_INTERRUPTED_TEXT,
     );
     mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: turn_id,

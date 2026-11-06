@@ -310,6 +310,8 @@ pub fn classify_prompt_completion(stop_reason: &str) -> PromptCompletion {
 #[serde(deny_unknown_fields)]
 pub struct MaterializedTurnOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_through: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<crate::diagnostic::TurnDiagnostic>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -324,51 +326,19 @@ pub struct MaterializedTurnOutcome {
     pub outcome: TurnOutcomeKind,
 }
 
-/// Prompts a session accepted that no finished turn can have answered: the
-/// one running and those queued behind it. A turn the harness started can end
-/// after a prompt was accepted without having run it, so a finished turn's own
-/// ordinal is not enough on its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OutstandingPrompts {
-    earliest: Option<u64>,
-}
-
-impl OutstandingPrompts {
-    /// Readers pass both facts: when a queued prompt starts it leaves the
-    /// queue and becomes the active turn, and it stays outstanding across
-    /// that step.
-    pub fn new(
-        active: Option<&MaterializedTurn>,
-        queued: impl IntoIterator<Item = Option<u64>>,
-    ) -> Self {
-        Self {
-            earliest: active
-                .and_then(|turn| turn.accepted_ordinal)
-                .into_iter()
-                .chain(queued.into_iter().flatten())
-                .min(),
-        }
-    }
-}
-
 impl MaterializedTurnOutcome {
-    /// The newest prompt acceptance this finished turn can answer, capped
-    /// below the earliest prompt still outstanding.
-    pub fn answered_ordinal(&self, outstanding: OutstandingPrompts) -> Option<u64> {
-        let first = outstanding.earliest;
-        let answer = {
-            if let Some(ordinal) = crate::subagent::reminded_turn_ordinal(&self.command_id) {
-                Some(ordinal)
-            } else if crate::continuation::is_harness_turn_id(&self.command_id) {
-                self.turn_start_position
-            } else {
-                self.accepted_ordinal
-            }
-        }?;
-        match first {
-            Some(first) if first <= answer => first.checked_sub(1),
-            _ => Some(answer),
-        }
+    /// The highest acceptance answered by the projection, or a legacy row.
+    pub fn answered_ordinal(&self) -> Option<u64> {
+        self.answered_through.or_else(|| {
+            crate::subagent::reminded_turn_ordinal(&self.command_id).or(self.accepted_ordinal)
+        })
+    }
+
+    pub fn answers(&self, ordinal: u64) -> bool {
+        self.accepted_ordinal == Some(ordinal)
+            || self
+                .answered_ordinal()
+                .is_some_and(|through| through >= ordinal)
     }
 
     /// Only work that actually started can have been interrupted.
