@@ -567,7 +567,7 @@ impl Controller {
                 let session = self.state.sessions.get(&child.child_session_id)?;
                 session.state.has_live_worker().then(|| LiveSubagent {
                     child_session_id: child.child_session_id.clone(),
-                    title: session.listed_title().to_owned(),
+                    title: session.message_name(),
                     state: live_subagent_state(session),
                 })
             })
@@ -731,8 +731,7 @@ pub fn stopped_subagent(
     let title = state
         .sessions
         .get(child_session_id)
-        .map_or(relation.task_name.as_str(), SessionRecord::listed_title)
-        .to_owned();
+        .map_or_else(|| relation.task_name.clone(), SessionRecord::message_name);
     let report_dir = crate::database::load_subagent_report(child_session_id)?.report_dir;
     let launch = crate::database::load_subagent(child_session_id)?
         .context("sub-agent launch record is missing")?;

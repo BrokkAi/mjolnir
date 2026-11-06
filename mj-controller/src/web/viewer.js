@@ -9044,7 +9044,7 @@ async function runSessionAction(dataset, errorNode, extra) {
   const body = { action: dataset.action, session_id: dataset.id, ...extra };
   if (dataset.action === 'rename') {
     const session = sessionById(dataset.id);
-    const title = prompt('New session name', session?.title || '');
+    const title = prompt('New session name', session?.given_title || '');
     if (title === null || !title.trim()) return;
     body.title = title.trim();
   }

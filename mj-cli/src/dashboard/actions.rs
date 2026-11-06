@@ -974,7 +974,10 @@ pub(crate) async fn apply_dashboard_action(
                 .filter(|session| session.draft_input == prompt.payload.encode_draft())
                 .map(|session| session.draft_input.clone());
             context.startup_prompts.enqueue(
-                session_id,
+                super::io::NamedSession {
+                    name: super::io::session_notice_name(&context.controller.state, &session_id),
+                    id: session_id,
+                },
                 prompt,
                 inherited_draft,
                 context.dashboard_io_tx.clone(),
@@ -983,7 +986,10 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::WithdrawStartupPrompt { session_id, prompt } => {
             context.startup_prompts.withdraw(
-                session_id,
+                super::io::NamedSession {
+                    name: super::io::session_notice_name(&context.controller.state, &session_id),
+                    id: session_id,
+                },
                 prompt,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
@@ -991,8 +997,10 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::RenameSession { session_id, title } => {
             context.dashboard.set_notice("Renaming session…");
+            let session_name = context.session_notice_name(&session_id);
             spawn_dashboard_rename(
                 session_id,
+                &session_name,
                 title,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
@@ -1004,8 +1012,10 @@ pub(crate) async fn apply_dashboard_action(
             workspace_name,
         } => {
             context.dashboard.set_notice("Moving session…");
+            let session_name = context.session_notice_name(&session_id);
             spawn_dashboard_change_workspace(
                 session_id,
+                &session_name,
                 workspace_id,
                 workspace_name,
                 context.dashboard_io_tx.clone(),
@@ -1022,6 +1032,7 @@ pub(crate) async fn apply_dashboard_action(
             context
                 .dashboard
                 .set_notice("Saving container size and mounts…");
+            let session_name = context.session_notice_name(&session_id);
             spawn_dashboard_container_settings(
                 ContainerSettingsRequest {
                     session_id,
@@ -1030,6 +1041,7 @@ pub(crate) async fn apply_dashboard_action(
                     additional_mounts,
                     mount_history,
                 },
+                &session_name,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );
@@ -1170,7 +1182,10 @@ pub(crate) async fn apply_dashboard_action(
             let generation = context.dashboard.session_preflight_generation();
             spawn_cancellable_io(
                 context.critical_operations.clone(),
-                format!("updating repository for {}", short_id(&session_id)),
+                format!(
+                    "updating repository for {}",
+                    context.session_notice_name(&session_id)
+                ),
                 context.dashboard_io_tx.clone(),
                 move |_cancelled| {
                     let preflight = mj_core::runtime::block_on(async {
@@ -1747,7 +1762,10 @@ pub(crate) fn start_resume_repository_preflight(
         .set_notice("Checking checkpoint repository history…");
     spawn_cancellable_io(
         context.critical_operations.clone(),
-        format!("checking repositories for {}", short_id(&session_id)),
+        format!(
+            "checking repositories for {}",
+            context.session_notice_name(&session_id)
+        ),
         context.dashboard_io_tx.clone(),
         move |_cancelled| {
             let preflight = mj_core::runtime::block_on(async {
@@ -1992,6 +2010,7 @@ impl DashboardContext {
         );
         LifecycleOperationRequest {
             session_id: session_id.to_owned(),
+            session_name: self.session_notice_name(session_id),
             kind,
             cancelled,
             updates: self.lifecycle_updates_tx.clone(),

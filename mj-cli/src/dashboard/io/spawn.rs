@@ -662,13 +662,14 @@ pub(crate) fn spawn_spinner_style_save(
 /// answers arrive.
 pub(crate) fn spawn_project_source_resolution(
     session_id: String,
+    session_name: &str,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
     let reported_session_id = session_id.clone();
     spawn_cancellable_io(
         tracker,
-        format!("resolving project for {}", short_id(&session_id)),
+        format!("resolving project for {session_name}"),
         updates,
         move |_cancelled| {
             mj_core::runtime::block_on(async {
@@ -691,6 +692,8 @@ pub(crate) use mj_controller::controller::config_only_controller;
 /// What every session lifecycle operation needs to run off the loop.
 pub(crate) struct LifecycleOperationRequest {
     pub(crate) session_id: String,
+    /// The session's name as notices give it, for the operation's label.
+    pub(crate) session_name: String,
     pub(crate) kind: SessionOperationKind,
     pub(crate) cancelled: Arc<AtomicBool>,
     pub(crate) updates: UnboundedSender<DashboardLifecycleUpdate>,
@@ -707,15 +710,15 @@ pub(crate) fn spawn_lifecycle_operation(
 ) {
     let LifecycleOperationRequest {
         session_id,
+        session_name,
         kind,
         cancelled,
         updates,
     } = request;
     let guard = tracker.begin_cancellable(
         format!(
-            "{} session {}",
-            kind.label().to_ascii_lowercase(),
-            short_id(&session_id)
+            "{} session {session_name}",
+            kind.label().to_ascii_lowercase()
         ),
         cancelled.clone(),
     );
@@ -856,6 +859,7 @@ pub(crate) fn spawn_lifecycle_reload(
 
 pub(crate) fn spawn_dashboard_rename(
     session_id: String,
+    session_name: &str,
     title: String,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
@@ -864,7 +868,7 @@ pub(crate) fn spawn_dashboard_rename(
     let requested_title = title.clone();
     spawn_critical_async(
         tracker,
-        format!("renaming session {}", short_id(&session_id)),
+        format!("renaming session {session_name}"),
         updates,
         SAVE_ACK_TIMEOUT,
         async move {
@@ -879,6 +883,7 @@ pub(crate) fn spawn_dashboard_rename(
 
 pub(crate) fn spawn_dashboard_change_workspace(
     session_id: String,
+    session_name: &str,
     workspace_id: String,
     workspace_name: String,
     updates: UnboundedSender<DashboardIoUpdate>,
@@ -887,7 +892,7 @@ pub(crate) fn spawn_dashboard_change_workspace(
     let moved_session_id = session_id.clone();
     spawn_critical_async(
         tracker,
-        format!("moving session {} to a workspace", short_id(&session_id)),
+        format!("moving session {session_name} to a workspace"),
         updates,
         SAVE_ACK_TIMEOUT,
         async move {
@@ -967,13 +972,14 @@ pub(crate) struct ContainerSettingsRequest {
 
 pub(crate) fn spawn_dashboard_container_settings(
     request: ContainerSettingsRequest,
+    session_name: &str,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) {
     let session_id = request.session_id.clone();
     spawn_critical_async(
         tracker,
-        format!("saving container settings for {}", short_id(&session_id)),
+        format!("saving container settings for {session_name}"),
         updates,
         SAVE_ACK_TIMEOUT,
         async move {
@@ -1003,22 +1009,33 @@ pub(crate) fn spawn_dashboard_container_settings(
     );
 }
 
+/// A session by its id and by the name notices give it, for background jobs
+/// whose label names the session they work on.
+pub(crate) struct NamedSession {
+    pub(crate) id: String,
+    pub(crate) name: String,
+}
+
 /// Persist everything one detach produces: the read receipt and the unsent
 /// draft. They describe the same moment and the same row, so one task keeps
 /// them together and gives the quit path a single handle to await.
 pub(crate) fn spawn_detached_session_state_persist(
     client_id: String,
     workspace_id: String,
-    session_id: String,
+    session: NamedSession,
     event_ordinal: u64,
     draft: DetachedSessionDraft,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
+    let NamedSession {
+        id: session_id,
+        name: session_name,
+    } = session;
     let persisted_session_id = session_id.clone();
     spawn_critical_async(
         tracker,
-        format!("saving draft for {}", short_id(&session_id)),
+        format!("saving draft for {session_name}"),
         updates,
         SAVE_ACK_TIMEOUT,
         async move {
@@ -1041,16 +1058,20 @@ pub(crate) fn spawn_detached_session_state_persist(
 pub(crate) fn spawn_read_receipt_persist(
     client_id: String,
     workspace_id: String,
-    session_id: String,
+    session: NamedSession,
     through: u64,
     retry_delay: Duration,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) {
+    let NamedSession {
+        id: session_id,
+        name: session_name,
+    } = session;
     let persisted_session_id = session_id.clone();
     spawn_critical_async(
         tracker,
-        format!("saving read status for {}", short_id(&session_id)),
+        format!("saving read status for {session_name}"),
         updates,
         SAVE_ACK_TIMEOUT,
         async move {

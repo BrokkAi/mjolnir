@@ -658,9 +658,12 @@ impl Adapter for MjolnirAdapter {
                 .unwrap_or_default(),
         };
 
+        // A manual name, harness title, or first-prompt provisional title, as
+        // the session list shows it. Without one the index prefers the
+        // transcript's title over the creation title.
         let title = record
-            .and_then(|record| record.session_title_override.clone())
-            .or_else(|| record.and_then(|record| record.acp_session_title.clone()))
+            .filter(|record| record.has_given_name())
+            .map(|record| record.listed_title().to_owned())
             .or_else(|| snapshot_title.clone())
             .unwrap_or_else(|| {
                 messages

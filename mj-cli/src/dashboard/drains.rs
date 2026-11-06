@@ -97,8 +97,11 @@ impl DashboardContext {
             self.startup_prompts.observe_move(&session, id, terminal);
         }
         self.reconcile_composer_ownership();
-        self.startup_prompts
-            .flush_held(&self.dashboard_io_tx, &self.critical_operations);
+        self.startup_prompts.flush_held(
+            &self.controller.state,
+            &self.dashboard_io_tx,
+            &self.critical_operations,
+        );
         let composer_completed = self.collect_prepared_startup_prompts();
         self.startup_prompts.poll(&self.dashboard_io_tx);
         let pending_completed = self.drain_dashboard_io();
@@ -191,7 +194,10 @@ impl DashboardContext {
         for action in actions {
             if let DashboardAction::QueueStartupPrompt { session_id, prompt } = action {
                 self.startup_prompts.enqueue(
-                    session_id,
+                    io::NamedSession {
+                        name: io::session_notice_name(&self.controller.state, &session_id),
+                        id: session_id,
+                    },
                     prompt,
                     None,
                     self.dashboard_io_tx.clone(),
@@ -207,7 +213,10 @@ impl DashboardContext {
             changed |= !prepared.is_empty();
             for prompt in prepared {
                 self.startup_prompts.enqueue(
-                    session_id.clone(),
+                    io::NamedSession {
+                        name: io::session_notice_name(&self.controller.state, session_id),
+                        id: session_id.clone(),
+                    },
                     prompt,
                     None,
                     self.dashboard_io_tx.clone(),

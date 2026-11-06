@@ -83,7 +83,7 @@ impl DashboardState {
         use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
         let name = self.state.sessions.get(id).map_or_else(
             || id.to_owned(),
-            |session| session.display_title().to_owned(),
+            |session| session.listed_title().to_owned(),
         );
         let title = crate::pane_controls::child_pane_title(
             self,

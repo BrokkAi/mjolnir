@@ -1014,9 +1014,16 @@ impl ApiBackend {
                 })
                 .await?
                 .report_dir;
+                let name = live_child_name(
+                    self.exports
+                        .session_record(&relation.child_session_id)
+                        .as_ref(),
+                    &relation.task_name,
+                );
                 Ok(serde_json::json!({
                     "child_session_id":relation.child_session_id,
                     "task_name":relation.task_name,
+                    "name":name,
                     "profile_id":relation.profile_id,
                     "model":relation.model,
                     "effort":relation.effort,
@@ -1073,9 +1080,11 @@ impl ApiBackend {
                                 progress,
                             ),
                         );
+                        let name = live_child_name(record.as_ref(), &relation.task_name);
                         let mut entry = serde_json::json!({
                             "child_session_id":relation.child_session_id,
                             "task_name":relation.task_name,
+                            "name":name,
                             "profile_id":relation.profile_id,
                             "effort":relation.effort,
                             "state":state,
@@ -1617,6 +1626,8 @@ impl ApiBackend {
             };
             let mut entry =
                 wait_agent_entry(id, &child.state, output, child.finished, &child.progress);
+            entry["child_name"] =
+                live_child_name(child.record.as_ref(), &child.relation.task_name).into();
             entry["task_name"] = child.relation.task_name.into();
             inputs.annotate(id, &mut entry);
             mark_parked(&mut entry, child.record.as_ref());
@@ -2168,6 +2179,16 @@ fn wait_agent_entry(
         agent["failure"] = serde_json::json!({"kind": "provider_failure", "summary": summary});
     }
     agent
+}
+
+/// What the session list calls a child now, bounded to one line, or the task
+/// name it was spawned with when the daemon holds no record. A person may
+/// have renamed the child since it was spawned.
+fn live_child_name(record: Option<&mj_core::state::SessionRecord>, task_name: &str) -> String {
+    record.map_or_else(
+        || mj_core::state::bounded_one_line(task_name, mj_core::state::MESSAGE_NAME_CHARS),
+        mj_core::state::SessionRecord::message_name,
+    )
 }
 
 /// Say in a notification or `list_agents` entry that the child is parked: its turn

@@ -226,6 +226,7 @@ impl StartupPrompts {
     }
     pub(super) fn flush_held(
         &mut self,
+        state: &mj_core::state::State,
         updates: &UnboundedSender<DashboardIoUpdate>,
         tracker: &CriticalOperationTracker,
     ) {
@@ -266,7 +267,10 @@ impl StartupPrompts {
                 .and_then(|entries| entries.remove(&id))
             {
                 self.enqueue(
-                    session_id,
+                    io::NamedSession {
+                        name: io::session_notice_name(state, &session_id),
+                        id: session_id,
+                    },
                     prompt,
                     inherited_draft,
                     updates.clone(),
@@ -346,17 +350,17 @@ impl StartupPrompts {
     }
     pub(super) fn enqueue(
         &mut self,
-        session_id: String,
+        session: io::NamedSession,
         prompt: StartupPrompt,
         inherited_draft: Option<String>,
         updates: UnboundedSender<DashboardIoUpdate>,
         tracker: CriticalOperationTracker,
     ) {
-        self.enqueue_inner(session_id, prompt, inherited_draft, updates, tracker, false);
+        self.enqueue_inner(session, prompt, inherited_draft, updates, tracker, false);
     }
     pub(super) fn resume(
         &mut self,
-        session_id: String,
+        session: io::NamedSession,
         prompt: StartupPrompt,
         inherited_draft: Option<String>,
         updates: UnboundedSender<DashboardIoUpdate>,
@@ -364,23 +368,27 @@ impl StartupPrompts {
     ) {
         if self
             .pending
-            .get(&session_id)
+            .get(&session.id)
             .is_some_and(|entries| entries.contains_key(&prompt.command_id))
         {
             return;
         }
-        self.enqueue_inner(session_id, prompt, inherited_draft, updates, tracker, true);
+        self.enqueue_inner(session, prompt, inherited_draft, updates, tracker, true);
     }
     fn enqueue_inner(
         &mut self,
-        session_id: String,
+        session: io::NamedSession,
         prompt: StartupPrompt,
         inherited_draft: Option<String>,
         updates: UnboundedSender<DashboardIoUpdate>,
         tracker: CriticalOperationTracker,
         recovering: bool,
     ) {
-        let label = format!("queueing a prompt for session {}", short_id(&session_id));
+        let io::NamedSession {
+            id: session_id,
+            name,
+        } = session;
+        let label = format!("queueing a prompt for session {name}");
         let guard = tracker.begin(label.clone());
         let reported_session = session_id.clone();
         let reported_prompt = prompt.clone();
@@ -525,11 +533,15 @@ impl StartupPrompts {
     }
     pub(super) fn withdraw(
         &mut self,
-        session_id: String,
+        session: io::NamedSession,
         prompt: StartupPrompt,
         updates: UnboundedSender<DashboardIoUpdate>,
         tracker: CriticalOperationTracker,
     ) {
+        let io::NamedSession {
+            id: session_id,
+            name,
+        } = session;
         if let Some(TrackedPrompt::Waiting { recalled, .. }) = self
             .pending
             .get_mut(&session_id)
@@ -555,7 +567,7 @@ impl StartupPrompts {
             );
             return;
         }
-        let label = format!("withdrawing a prompt for session {}", short_id(&session_id));
+        let label = format!("withdrawing a prompt for session {name}");
         let guard = tracker.begin(label.clone());
         let reported_session = session_id.clone();
         let command_id = prompt.command_id.clone();
@@ -953,7 +965,10 @@ mod tests {
         let (updates, _received) = tokio::sync::mpsc::unbounded_channel();
         let (tracker, _) = CriticalOperationTracker::new();
         accepted.resume(
-            "session".into(),
+            io::NamedSession {
+                id: "session".into(),
+                name: "Session name".into(),
+            },
             retry_prompt,
             inherited_draft,
             updates,
@@ -1117,14 +1132,17 @@ mod tests {
             move_operation_id: Some("move-a".into()),
         };
         pending.enqueue(
-            "session".into(),
+            io::NamedSession {
+                id: "session".into(),
+                name: "Session name".into(),
+            },
             prompt.clone(),
             None,
             updates.clone(),
             tracker.clone(),
         );
         pending.observe_move("session", "historical-move".into(), Some(true));
-        pending.flush_held(&updates, &tracker);
+        pending.flush_held(&mj_core::state::State::default(), &updates, &tracker);
         assert!(
             received.try_recv().is_err(),
             "a historical Move must not release the new prompt"
@@ -1135,7 +1153,7 @@ mod tests {
             "local admission remains tracked for bounded quit"
         );
         pending.finish_move("session", None);
-        pending.flush_held(&updates, &tracker);
+        pending.flush_held(&mj_core::state::State::default(), &updates, &tracker);
         let DashboardIoUpdate::StartupPromptOutcomes { session_id, result } =
             received.try_recv().unwrap()
         else {
@@ -1170,13 +1188,24 @@ mod tests {
             move_operation_id: Some("move-b".into()),
         };
         pending.enqueue(
-            "session".into(),
+            io::NamedSession {
+                id: "session".into(),
+                name: "Session name".into(),
+            },
             prompt.clone(),
             None,
             updates.clone(),
             tracker.clone(),
         );
-        pending.withdraw("session".into(), prompt, updates.clone(), tracker.clone());
+        pending.withdraw(
+            io::NamedSession {
+                id: "session".into(),
+                name: "Session name".into(),
+            },
+            prompt,
+            updates.clone(),
+            tracker.clone(),
+        );
         assert!(matches!(
             received.try_recv().unwrap(),
             DashboardIoUpdate::StartupPromptWithdrawn {

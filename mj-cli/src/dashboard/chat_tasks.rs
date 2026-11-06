@@ -164,7 +164,10 @@ impl DashboardContext {
                     if let Some(chat) = self.chats.get(&session_id) {
                         let prompt = chat.recalled_startup_prompt(&id, &text);
                         self.startup_prompts.withdraw(
-                            session_id,
+                            io::NamedSession {
+                                name: io::session_notice_name(&self.controller.state, &session_id),
+                                id: session_id,
+                            },
                             prompt,
                             self.dashboard_io_tx.clone(),
                             self.critical_operations.clone(),

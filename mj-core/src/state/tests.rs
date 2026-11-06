@@ -1707,6 +1707,65 @@ fn a_session_nobody_named_is_listed_by_the_title_it_was_created_with() {
     assert_eq!(session.listed_title(), session.id);
 }
 
+/// A name a person typed beats one the harness generated, and neither is
+/// needed for the columns-only helper to agree with the record.
+#[test]
+fn a_typed_name_beats_a_harness_name_and_the_column_helper_agrees() {
+    let mut session = sample_session();
+    session.title = "created with".into();
+    session.session_title_override = None;
+    session.acp_session_title = None;
+    assert!(!session.has_given_name());
+    assert_eq!(session.given_name(), None);
+
+    session.acp_session_title = Some("Harness name".into());
+    assert!(session.has_given_name());
+    assert_eq!(session.given_name(), Some("Harness name"));
+
+    session.session_title_override = Some("Typed name".into());
+    assert_eq!(session.given_name(), Some("Typed name"));
+    assert_eq!(session.listed_title(), "Typed name");
+
+    for (title_override, acp) in [
+        (None, None),
+        (None, Some("Harness name")),
+        (Some("Typed name"), None),
+        (Some("Typed name"), Some("Harness name")),
+    ] {
+        session.session_title_override = title_override.map(str::to_owned);
+        session.acp_session_title = acp.map(str::to_owned);
+        assert_eq!(
+            listed_session_title(&session.id, &session.title, title_override, acp),
+            session.listed_title()
+        );
+    }
+    assert_eq!(listed_session_title("the-id", "  ", None, None), "the-id");
+}
+
+#[test]
+fn a_message_names_a_session_on_one_bounded_line() {
+    let mut session = sample_session();
+    session.session_title_override = None;
+    session.acp_session_title = None;
+    session.title = "Fix the parser\n\nThen the long tail of the prompt follows here, in paragraphs, until it runs well past the limit for a name in a message header.".into();
+    let name = session.message_name();
+    assert!(!name.contains('\n'));
+    assert!(name.starts_with("Fix the parser Then the long tail"));
+    assert!(name.ends_with('…'));
+    assert!(name.chars().count() <= MESSAGE_NAME_CHARS);
+
+    session.session_title_override = Some("Renamed".into());
+    assert_eq!(session.message_name(), "Renamed");
+
+    // The creation title is stored as typed, so a terminal control in it
+    // must not reach a message header.
+    session.session_title_override = None;
+    session.title = "Copy \u{1b}]52;c;QQ==\u{7}this".into();
+    let name = session.message_name();
+    assert!(!name.chars().any(char::is_control), "{name:?}");
+    assert!(name.starts_with("Copy "));
+}
+
 #[test]
 fn active_sessions_allow_creation_defaults_but_protect_their_profile_installation() {
     let state = sample_state();

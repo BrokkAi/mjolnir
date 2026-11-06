@@ -236,7 +236,8 @@ impl ViewerSnapshot {
                     publication_state: session.publication_state(),
                     managed_checkout_kind: checkout.managed_worktree().map(|owned| owned.kind),
                     workspace_id: session.workspace_id.clone(),
-                    title: public_title(session),
+                    title: session.listed_title().to_owned(),
+                    given_title: session.given_name().map(str::to_owned),
                     subagent_parent_id: subagent.map(|child| child.parent_session_id.clone()),
                     subagent_task_name: subagent.map(|child| child.task_name.clone()),
                     subagent_session_ids,
@@ -530,6 +531,11 @@ pub struct ViewerSession {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub workspace_id: String,
     pub title: String,
+    /// The name a person or the harness gave the session, which a rename
+    /// prompt starts from. Absent while the listed `title` is only the title
+    /// the session was created with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub given_title: Option<String>,
     /// Parent ownership for a borrowed-target child session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_parent_id: Option<String>,
@@ -1225,14 +1231,6 @@ pub enum ViewerLifecycleCategory {
 /// start is still connecting its worker. Its record says disconnected, which
 /// reads as a fault while it is only launching (F-12).
 pub const LAUNCHING_STATE: &str = "launching";
-
-/// The name a published session goes by. It is the display title, except
-/// that a session the harness has not named yet and nobody renamed would
-/// otherwise be named by its id, which every listing already prints beside
-/// it (F-12); the title it was created with says more.
-fn public_title(session: &mj_core::state::SessionRecord) -> String {
-    session.listed_title().to_owned()
-}
 
 impl ViewerLifecycleCategory {
     pub const fn of(state: SessionState) -> Self {

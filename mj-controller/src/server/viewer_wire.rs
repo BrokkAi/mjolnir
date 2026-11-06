@@ -40,7 +40,7 @@ pub(super) const METADATA_FIELDS: [&str; 16] = [
 pub(super) struct MetadataDigests(pub(super) [Option<[u8; 32]>; METADATA_FIELDS.len()]);
 
 /// Summary rows retain exactly these serialized session fields: `id`,
-/// `workspace_id`, `bundle_id`, `title`, `subagent_parent_id`,
+/// `workspace_id`, `bundle_id`, `title`, `given_title`, `subagent_parent_id`,
 /// `subagent_session_ids`, `publication_state`, `profile_id`, `target_id`,
 /// `state`, `container_upgrade_supported`, `created_at`, `updated_at`, `has_error`, `configuration_issue`,
 /// `launch_error`, `storage_problem`, `project_label`, `display_location`,
@@ -57,6 +57,7 @@ const SUMMARY_FIELDS: &[&str] = &[
     "workspace_id",
     "bundle_id",
     "title",
+    "given_title",
     "subagent_parent_id",
     "subagent_session_ids",
     "publication_state",

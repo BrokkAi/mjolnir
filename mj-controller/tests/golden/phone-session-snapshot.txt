@@ -93,6 +93,7 @@
   "publication_state": "unknown",
   "workspace_id": "default",
   "title": "Phone launch",
+  "given_title": "Phone launch",
   "subagent_session_ids": [
     "child-1"
   ],
@@ -193,6 +194,7 @@
     "publication_state": "unknown",
     "workspace_id": "default",
     "title": "Phone launch",
+    "given_title": "Phone launch",
     "subagent_session_ids": [
       "child-1"
     ],
@@ -283,6 +285,7 @@
   "publication_state": "unknown",
   "workspace_id": "default",
   "title": "Phone launch",
+  "given_title": "Phone launch",
   "subagent_session_ids": [
     "child-1"
   ],
@@ -371,6 +374,7 @@
       "publication_state": "unknown",
       "workspace_id": "default",
       "title": "Phone launch",
+      "given_title": "Phone launch",
       "subagent_session_ids": [
         "child-1"
       ],
@@ -468,6 +472,7 @@
       "publication_state": "unknown",
       "workspace_id": "default",
       "title": "Phone launch",
+      "given_title": "Phone launch",
       "subagent_session_ids": [
         "child-1"
       ],
@@ -562,6 +567,7 @@
     "publication_state": "unknown",
     "workspace_id": "default",
     "title": "Phone launch",
+    "given_title": "Phone launch",
     "subagent_session_ids": [
       "child-1"
     ],
@@ -645,6 +651,7 @@
     "publication_state": "unknown",
     "workspace_id": "default",
     "title": "Phone launch",
+    "given_title": "Phone launch",
     "subagent_parent_id": "session-1",
     "subagent_task_name": "piece",
     "harness_kind": "codex",
@@ -732,6 +739,7 @@
   "publication_state": "unknown",
   "workspace_id": "default",
   "title": "Phone launch",
+  "given_title": "Phone launch",
   "subagent_session_ids": [
     "child-1"
   ],
@@ -832,6 +840,7 @@
   "publication_state": "unknown",
   "workspace_id": "default",
   "title": "Phone launch",
+  "given_title": "Phone launch",
   "subagent_session_ids": [
     "child-1"
   ],
@@ -904,6 +913,7 @@
     "publication_state": "unknown",
     "workspace_id": "default",
     "title": "Phone launch",
+    "given_title": "Phone launch",
     "subagent_session_ids": [
       "child-1"
     ],
@@ -964,6 +974,7 @@
   "publication_state": "unknown",
   "workspace_id": "default",
   "title": "Phone launch",
+  "given_title": "Phone launch",
   "harness_kind": "codex",
   "profile_id": "codex",
   "bundle_id": "project",
@@ -1042,6 +1053,7 @@
   "publication_state": "unknown",
   "workspace_id": "default",
   "title": "Phone launch",
+  "given_title": "Phone launch",
   "harness_kind": "codex",
   "profile_id": "codex",
   "bundle_id": "project",
@@ -1118,6 +1130,7 @@
   "publication_state": "unknown",
   "workspace_id": "default",
   "title": "Phone launch",
+  "given_title": "Phone launch",
   "harness_kind": "codex",
   "profile_id": "codex",
   "bundle_id": "project",
@@ -1191,6 +1204,7 @@
     "publication_state": "unknown",
     "workspace_id": "default",
     "title": "Phone launch",
+    "given_title": "Phone launch",
     "harness_kind": "codex",
     "profile_id": "codex",
     "bundle_id": "project",
