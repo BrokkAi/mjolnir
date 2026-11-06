@@ -2033,8 +2033,12 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
                         && !project.chars().any(char::is_whitespace)
                         && !profile.chars().any(char::is_whitespace)
                 }) {
+                    // Advance updated_at as a rename does, so SessionWiki's
+                    // change token moves and an indexed archive is refreshed.
                     transaction.execute(
-                        "UPDATE sessions SET session_title_override = NULL WHERE session_id = ?1",
+                        "UPDATE sessions SET session_title_override = NULL,
+                             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                         WHERE session_id = ?1",
                         [id],
                     )?;
                 }
@@ -2760,6 +2764,18 @@ mod reader_tests {
                 ("words".into(), Some("a b via c".into()))
             ]
         );
+        let mut statement = connection
+            .prepare(
+                "SELECT session_id FROM sessions WHERE updated_at <> 'now' ORDER BY session_id",
+            )
+            .unwrap();
+        let touched = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        drop(statement);
+        assert_eq!(touched, ["bundle", "moved", "project"]);
         let schema = read_schema_state(&connection).unwrap();
         assert_eq!(schema.revision, 111);
         assert_eq!(schema.minimum_compatible, Some(110));
