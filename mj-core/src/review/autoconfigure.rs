@@ -16,6 +16,29 @@ pub struct Autoconfigured {
     pub adjusted: Vec<EffortAdjustment>,
 }
 
+/// Use the closest offered effort below the requested one, or the lowest
+/// offered effort if every choice is higher.
+pub fn fallback_effort(requested: &str, choices: &[SessionConfigChoice]) -> Option<String> {
+    let rank = |value: &str| {
+        ["minimal", "low", "medium", "high", "xhigh", "max"]
+            .iter()
+            .position(|item| *item == value)
+    };
+    if choices.iter().any(|choice| choice.value == requested) {
+        return Some(requested.to_owned());
+    }
+    let requested_rank = rank(requested)?;
+    let ranked = choices
+        .iter()
+        .filter_map(|choice| rank(&choice.value).map(|rank| (rank, &choice.value)));
+    ranked
+        .clone()
+        .filter(|(rank, _)| *rank < requested_rank)
+        .max_by_key(|(rank, _)| *rank)
+        .or_else(|| ranked.min_by_key(|(rank, _)| *rank))
+        .map(|(_, value)| value.clone())
+}
+
 /// Choose review slots from the union of enabled profiles' model choices.
 pub fn autoconfigure(
     models: &[SessionConfigChoice],
@@ -54,27 +77,8 @@ pub fn autoconfigure(
     let choice = |index: usize, effort: &str, adjusted: &mut Vec<EffortAdjustment>| {
         let model = selected[index].as_ref().unwrap().1.clone();
         let offered = efforts(&model);
-        let rank = |value: &str| {
-            ["minimal", "low", "medium", "high", "xhigh", "max"]
-                .iter()
-                .position(|item| *item == value)
-        };
         let used = offered
-            .map(|choices| {
-                if choices.iter().any(|choice| choice.value == effort) {
-                    return Some(effort.to_owned());
-                }
-                let requested_rank = rank(effort).expect("preset effort has a rank");
-                let ranked = choices
-                    .iter()
-                    .filter_map(|choice| rank(&choice.value).map(|rank| (rank, &choice.value)));
-                ranked
-                    .clone()
-                    .filter(|(rank, _)| *rank < requested_rank)
-                    .max_by_key(|(rank, _)| *rank)
-                    .or_else(|| ranked.min_by_key(|(rank, _)| *rank))
-                    .map(|(_, value)| value.clone())
-            })
+            .map(|choices| fallback_effort(effort, &choices))
             .unwrap_or_else(|| Some(effort.to_owned()));
         if used.as_deref() != Some(effort) {
             adjusted.push(EffortAdjustment {

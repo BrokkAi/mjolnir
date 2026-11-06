@@ -106,6 +106,15 @@ pub trait SubagentBackend: Send + Sync {
     fn reviewer_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
         Box::pin(async { anyhow::bail!("reviewer profiles are unavailable") })
     }
+    fn reviewer_candidates_for_model(
+        &self,
+        _model: String,
+    ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        self.reviewer_candidates()
+    }
+    fn reviewer_autoconfigure_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        self.reviewer_candidates()
+    }
     fn reviewer_ready_candidates(
         &self,
         _model: String,

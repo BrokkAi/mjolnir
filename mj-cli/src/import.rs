@@ -316,6 +316,7 @@ fn import_native(
         .get_mut(&imported.session_id)
         .context("import did not add its session to controller state")?;
     session.workspace_id = workspace_id.to_owned();
+    let (review, review_notice) = import_review(&config, review);
     session.review = review;
     persist_imported_session(
         session,
@@ -325,7 +326,49 @@ fn import_native(
         }),
     )?;
     println!("{}", import_success_message(&imported));
+    if let Some(notice) = review_notice {
+        crate::api_commands::write_start_notice(std::io::stderr().lock(), notice)?;
+    }
     Ok(Some(imported.session_id))
+}
+
+fn import_review(
+    config: &Config,
+    review: Option<mj_core::config::SessionReview>,
+) -> (Option<mj_core::config::SessionReview>, Option<&'static str>) {
+    if mj_core::review::settings::no_reviewers_turns_review_off(config, review.as_ref()) {
+        (
+            Some(mj_core::config::SessionReview::Off),
+            Some(mj_core::review::settings::NO_REVIEWERS_REVIEW_OFF),
+        )
+    } else {
+        (review, None)
+    }
+}
+
+#[cfg(test)]
+mod import_review_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_import_review_without_reviewers_reports_session_review_off() {
+        let config = Config::default();
+        let (review, notice) = import_review(
+            &config,
+            Some(mj_core::config::SessionReview::Push { reviewers: None }),
+        );
+        assert_eq!(review, Some(mj_core::config::SessionReview::Off));
+        assert_eq!(
+            notice,
+            Some(mj_core::review::settings::NO_REVIEWERS_REVIEW_OFF)
+        );
+        let mut output = Vec::new();
+        crate::api_commands::write_start_notice(&mut output, notice.unwrap()).unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!("{}\n", mj_core::review::settings::NO_REVIEWERS_REVIEW_OFF)
+        );
+    }
 }
 
 fn import_success_message(imported: &ImportedClaudeSession) -> String {

@@ -118,6 +118,24 @@ pub fn can_review(
 /// What every surface says about a session whose folder has no Git commits.
 pub const PLAIN_DIRECTORY_REVIEW_OFF: &str = "Code review is off for this session: its folder has no Git commits, and review finds changes through Git history.";
 
+pub const NO_REVIEWERS_REVIEW_OFF: &str = "Review is off for this session: no reviewers are configured. Choose reviewers in Settings › Code Review, or pass --reviewer.";
+
+/// An explicit armed session trigger cannot run with an empty current
+/// reviewer list. Legacy Auto is resolved during review preparation.
+pub fn no_reviewers_turns_review_off(
+    config: &crate::config::Config,
+    session: Option<&crate::config::SessionReview>,
+) -> bool {
+    matches!(
+        session,
+        Some(
+            crate::config::SessionReview::Turn { reviewers: None }
+                | crate::config::SessionReview::Push { reviewers: None }
+        )
+    ) && !config.review.is_legacy()
+        && config.review.reviewers.is_empty()
+}
+
 /// Whether a session created in a folder without a committed Git checkout
 /// gets review turned off. Review cannot run there, so the session is created
 /// with review off rather than refused. The answer is no when review would
@@ -128,4 +146,32 @@ pub fn plain_directory_turns_review_off(
 ) -> bool {
     config.review.for_session(session).trigger != crate::config::ReviewTrigger::Off
         && can_review(config, session)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ReviewTrigger, SessionReview};
+
+    #[test]
+    fn explicit_session_review_without_global_reviewers_turns_off_only_that_session() {
+        let mut config = crate::config::Config::default();
+        config.review.trigger = ReviewTrigger::Off;
+        assert!(no_reviewers_turns_review_off(
+            &config,
+            Some(&SessionReview::Turn { reviewers: None })
+        ));
+        assert!(!no_reviewers_turns_review_off(&config, None));
+        assert!(!no_reviewers_turns_review_off(
+            &config,
+            Some(&SessionReview::Turn {
+                reviewers: Some(vec![])
+            })
+        ));
+        config.review = crate::config::ReviewConfig::legacy_default();
+        assert!(!no_reviewers_turns_review_off(
+            &config,
+            Some(&SessionReview::Push { reviewers: None })
+        ));
+    }
 }

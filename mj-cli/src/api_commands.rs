@@ -1232,7 +1232,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let client = ApiClient::connect().await?;
     let response = client.start(&request).await.map_err(name_launch_flags)?;
     if let Some(notice) = &response.notice {
-        eprintln!("{}", sanitize_terminal_text(notice));
+        write_start_notice(std::io::stderr().lock(), notice)?;
     }
     if args.json {
         return print_json(&response);
@@ -1242,6 +1242,13 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         println!("turn {turn_id}");
     }
     Ok(())
+}
+
+pub(crate) fn write_start_notice(
+    mut output: impl std::io::Write,
+    notice: &str,
+) -> std::io::Result<()> {
+    writeln!(output, "{}", sanitize_terminal_text(notice))
 }
 
 /// Name the command-line flags where a refused start names the API's fields.

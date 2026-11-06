@@ -896,14 +896,17 @@ fn registration_records_a_plain_local_directory_as_its_project() {
     let explicit = controller
         .register_session_reporting_review("codex", "project", "local", "plain", options)
         .unwrap();
-    assert!(!explicit.review_turned_off);
+    assert!(explicit.review_notice.is_none());
 
     let mut options = launch_options(Vec::new());
     options.project_directory = Some(workspace.path().to_owned());
     let registration = controller
         .register_session_reporting_review("codex", "project", "local", "plain", options)
         .unwrap();
-    assert!(registration.review_turned_off);
+    assert_eq!(
+        registration.review_notice,
+        Some(mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF)
+    );
     let id = registration.id;
 
     let stored = &controller.state.sessions[&id];
@@ -917,6 +920,21 @@ fn registration_records_a_plain_local_directory_as_its_project() {
         Some(expected.as_path())
     );
     project.key().unwrap();
+    controller.config.review.reviewers.clear();
+    let mut options = launch_options(Vec::new());
+    options.project_directory = Some(workspace.path().to_owned());
+    options.review = Some(mj_core::config::SessionReview::Turn { reviewers: None });
+    let no_reviewers = controller
+        .register_session_reporting_review("codex", "project", "local", "plain", options)
+        .unwrap();
+    assert_eq!(
+        no_reviewers.review_notice,
+        Some(mj_core::review::settings::NO_REVIEWERS_REVIEW_OFF)
+    );
+    assert_eq!(
+        controller.state.sessions[&no_reviewers.id].review,
+        Some(mj_core::config::SessionReview::Off)
+    );
 }
 
 #[test]

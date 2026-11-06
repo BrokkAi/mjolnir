@@ -141,7 +141,8 @@ impl ReviewSettingsDialog {
             self.suggested_adjustments.clear();
         }
         if let Some((draft, started)) = &self.pending_autoconfigure {
-            let ready = draft.iter().all(|choice| {
+            let pending_choices = self.suggested.as_ref().unwrap_or(draft);
+            let ready = pending_choices.iter().all(|choice| {
                 snapshot
                     .options(config, Some(&choice.model))
                     .is_some_and(|options| {
@@ -246,6 +247,12 @@ impl ReviewSettingsDialog {
 
     pub(crate) fn checking_efforts(&self) -> bool {
         self.pending_autoconfigure.is_some()
+    }
+
+    pub(crate) fn pending_autoconfigure_choices(&self) -> Option<&[SubagentChoice]> {
+        self.pending_autoconfigure
+            .as_ref()
+            .map(|(draft, _)| self.suggested.as_deref().unwrap_or(draft))
     }
 
     fn suggested(&self) -> Option<Vec<SubagentChoice>> {

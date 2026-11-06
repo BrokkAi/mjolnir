@@ -85,7 +85,7 @@ pub(crate) async fn resolve(
                 main: ReviewModelSettings {
                     model: Some(selected.model),
                     effort: selected.effort,
-                    fast_mode: selected.fast_mode,
+                    fast_mode: false,
                 },
                 autoconfigured,
             })
@@ -135,8 +135,13 @@ async fn configured_choices(
                 vec![(profile.clone(), choices)]
             }
         } else {
-            let candidates = if ready.offered.is_empty() {
-                await_or_cancel(cancelled, backend.reviewer_candidates()).await??
+            let ready_models = ready
+                .offered
+                .iter()
+                .flat_map(|candidate| candidate.choices.models.iter().cloned())
+                .collect::<Vec<_>>();
+            let candidates = if autoconfigure(&ready_models, |_| None).is_none() {
+                await_or_cancel(cancelled, backend.reviewer_autoconfigure_candidates()).await??
             } else {
                 ready
             };
@@ -213,15 +218,25 @@ where
                 .and_then(Result::ok)
                 .map(|choices| choices.efforts)
         };
-        let effort = legacy
+        let effort = legacy.effort.as_ref().and_then(|requested| {
+            efforts.as_ref().map_or_else(
+                || Some(requested.clone()),
+                |items| mj_core::review::autoconfigure::fallback_effort(requested, items),
+            )
+        });
+        let adjustments = legacy
             .effort
             .as_ref()
-            .filter(|effort| {
-                efforts
-                    .as_ref()
-                    .is_some_and(|items| items.iter().any(|item| &item.value == *effort))
-            })
-            .cloned();
+            .filter(|requested| effort.as_ref() != Some(*requested))
+            .map(
+                |requested| mj_core::review::autoconfigure::EffortAdjustment {
+                    model: model.clone(),
+                    requested: requested.clone(),
+                    used: effort.clone(),
+                },
+            )
+            .into_iter()
+            .collect();
         let count = legacy
             .count
             .map_or(2, |count| count.get())
@@ -229,7 +244,7 @@ where
         return Ok((
             vec![SubagentChoice { model, effort }; count],
             efforts.is_some(),
-            Vec::new(),
+            adjustments,
         ));
     }
     let (choices, known) = autoconfigure_with_efforts(available, probe, cancelled).await?;
@@ -385,7 +400,7 @@ mod tests {
         let legacy = LegacyReview {
             count: std::num::NonZeroUsize::new(3),
             profile: Some("claude".into()),
-            effort: Some("high".into()),
+            effort: Some("xhigh".into()),
         };
         let available = vec![(
             "claude".into(),
@@ -404,12 +419,15 @@ mod tests {
                 observed_at: 1,
             },
         )];
-        let (choices, known, _) =
+        let (choices, known, adjusted) =
             upgrade_reviewers(&legacy, &available, |_, _| async { unreachable!() }, None)
                 .await
                 .unwrap();
         assert!(known);
         assert_eq!(choices.len(), 3);
+        assert_eq!(adjusted.len(), 1);
+        assert_eq!(adjusted[0].requested, "xhigh");
+        assert_eq!(adjusted[0].used.as_deref(), Some("high"));
         assert!(
             choices
                 .iter()
@@ -450,7 +468,7 @@ mod tests {
         assert!(
             choices
                 .iter()
-                .all(|choice| choice.model == "haiku" && choice.effort.is_none())
+                .all(|choice| choice.model == "haiku" && choice.effort.as_deref() == Some("high"))
         );
     }
     #[tokio::test]

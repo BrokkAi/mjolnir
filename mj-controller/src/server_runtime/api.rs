@@ -2822,6 +2822,76 @@ impl SubagentBackend for ApiBackend {
         Box::pin(ApiBackend::reviewer_candidates(self))
     }
 
+    fn reviewer_candidates_for_model(
+        &self,
+        model: String,
+    ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
+        Box::pin(async move {
+            use futures::StreamExt;
+            let mut pending = futures::stream::FuturesUnordered::new();
+            for (id, _) in self.profile_catalog.candidates()? {
+                let catalog = &self.profile_catalog;
+                pending.push(async move {
+                    let result = catalog.capabilities(std::slice::from_ref(&id)).await;
+                    (id, result)
+                });
+            }
+            while let Some((_id, result)) = pending.next().await {
+                if let Ok(choices) = result
+                    && choices
+                        .iter()
+                        .any(|choice| choice.models.iter().any(|item| item.value == model))
+                {
+                    drop(pending);
+                    return self.reviewer_ready_candidates(model).await;
+                }
+            }
+            anyhow::bail!("no enabled reviewer profile offers model {model:?}")
+        })
+    }
+
+    fn reviewer_autoconfigure_candidates(
+        &self,
+    ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
+        Box::pin(async move {
+            use futures::StreamExt;
+            let ids = self.profile_catalog.candidates()?;
+            let mut pending = futures::stream::FuturesUnordered::new();
+            for (id, _) in &ids {
+                let id = id.clone();
+                let catalog = &self.profile_catalog;
+                pending.push(async move {
+                    let result = catalog.capabilities(std::slice::from_ref(&id)).await;
+                    (id, result)
+                });
+            }
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+            let mut answered = Vec::new();
+            let mut models = Vec::new();
+            while let Ok(Some((id, result))) =
+                tokio::time::timeout_at(deadline, pending.next()).await
+            {
+                if let Ok(choices) = result {
+                    for choice in choices {
+                        models.extend(choice.models);
+                    }
+                    answered.push(id);
+                    if mj_core::review::autoconfigure::autoconfigure(&models, |_| None).is_some() {
+                        break;
+                    }
+                }
+            }
+            drop(pending);
+            self.discover_profile_candidates(
+                ids.into_iter()
+                    .filter(|(id, _)| answered.contains(id))
+                    .collect(),
+                "reviewer",
+            )
+            .await
+        })
+    }
+
     fn reviewer_ready_candidates(
         &self,
         model: String,

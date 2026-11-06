@@ -268,7 +268,11 @@ async fn resolve_model_profile_selection_matching(
 ) -> Result<SubagentSelection, ApiFailure> {
     let candidates = match source {
         ModelProfileCandidateSource::Session { .. } => backend.session_profile_candidates().await?,
-        ModelProfileCandidateSource::Reviewers => backend.reviewer_candidates().await?,
+        ModelProfileCandidateSource::Reviewers => {
+            backend
+                .reviewer_candidates_for_model(model.to_owned())
+                .await?
+        }
         ModelProfileCandidateSource::ReviewersReady => {
             backend.reviewer_ready_candidates(model.to_owned()).await?
         }
@@ -358,6 +362,9 @@ async fn resolve_model_profile_selection_matching(
         String,
         Result<Vec<mj_core::acp::SessionConfigChoice>, ApiFailure>,
     > = std::collections::HashMap::new();
+    // The grace starts when a later candidate can serve the slot. It belongs
+    // to the slot, not to each earlier candidate in the draw order.
+    let mut later_ready_deadline: Option<tokio::time::Instant> = None;
     let all_offered = offered.clone();
     let mut matching_model = false;
     let mut offered_any_effort = false;
@@ -389,8 +396,10 @@ async fn resolve_model_profile_selection_matching(
                         })
                 });
                 if later_ready {
-                    candidate_deadline = candidate_deadline
-                        .min(tokio::time::Instant::now() + std::time::Duration::from_secs(2));
+                    let grace = *later_ready_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(2)
+                    });
+                    candidate_deadline = candidate_deadline.min(grace);
                 }
                 match tokio::time::timeout_at(candidate_deadline, probes.join_next()).await {
                     Ok(Some(Ok((id, result)))) => {
@@ -407,9 +416,10 @@ async fn resolve_model_profile_selection_matching(
                             });
                         ready_results.insert(id, result);
                         if later_qualifies {
-                            candidate_deadline = candidate_deadline.min(
-                                tokio::time::Instant::now() + std::time::Duration::from_secs(2),
-                            );
+                            let grace = *later_ready_deadline.get_or_insert_with(|| {
+                                tokio::time::Instant::now() + std::time::Duration::from_secs(2)
+                            });
+                            candidate_deadline = candidate_deadline.min(grace);
                         }
                     }
                     Ok(Some(Err(error))) => {
@@ -1629,11 +1639,10 @@ mod tests {
             discovery_fails: false,
             config: Default::default(),
             candidates: SubagentCandidates {
-                offered: vec![
-                    candidate("stalled-first", Some(80), &["fixed"]),
-                    candidate("stalled-second", Some(80), &["fixed"]),
-                    ready,
-                ],
+                offered: (0..10)
+                    .map(|index| candidate(&format!("stalled-{index}"), Some(80), &["fixed"]))
+                    .chain(std::iter::once(ready))
+                    .collect(),
                 unavailable: Vec::new(),
             },
         });
@@ -1651,7 +1660,7 @@ mod tests {
         assert_eq!(selected.profile_id, "ready-third");
         assert_eq!(
             tokio::time::Instant::now().duration_since(start),
-            std::time::Duration::from_secs(4)
+            std::time::Duration::from_secs(2)
         );
     }
 

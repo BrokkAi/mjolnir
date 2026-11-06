@@ -524,3 +524,37 @@ fn partial_discovery_does_not_reject_configured_reviewer_on_save() {
             .is_none()
     );
 }
+
+#[test]
+fn autoconfigure_warms_newly_selected_model_within_existing_wait() {
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let initial = catalog(&dashboard.config, &["claude-haiku-5-5"]);
+    dashboard.set_profile_capabilities(initial);
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    let editor = setup.review_editor.as_mut().unwrap();
+    editor.pending_autoconfigure = Some((
+        vec![SubagentChoice {
+            model: "claude-haiku-5-5".into(),
+            effort: Some("xhigh".into()),
+        }],
+        Instant::now(),
+    ));
+    let mut revised = catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]);
+    for entry in revised.profiles.values_mut() {
+        entry.efforts.remove("gpt-6-terra");
+        entry.efforts.remove("gpt-6-sol");
+    }
+    dashboard.set_profile_capabilities(revised);
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    assert!(setup.review_editor.as_ref().unwrap().checking_efforts());
+    assert!(matches!(
+        dashboard.take_profile_hydration(),
+        Some(DashboardAction::WarmProfileCapabilities { .. })
+    ));
+}

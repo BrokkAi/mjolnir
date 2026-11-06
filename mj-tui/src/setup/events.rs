@@ -195,7 +195,12 @@ impl DashboardState {
         let Mode::Setup(dialog) = &self.mode else {
             return None;
         };
-        let config = config_from_draft(dialog.draft.clone()).ok()?;
+        let mut config = config_from_draft(dialog.draft.clone()).ok()?;
+        if let Some(review) = dialog.review_editor.as_ref()
+            && let Some(choices) = review.pending_autoconfigure_choices()
+        {
+            config.review.reviewers = choices.to_vec();
+        }
         // A selected model's efforts are discovered only once it is selected,
         // so a draft choosing another model is warmed like a new profile.
         let key = config.capability_demand_key();
