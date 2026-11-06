@@ -850,11 +850,13 @@ impl QuotaConfig {
     }
 }
 
-/// `Auto` runs the checks in the image of an enabled local Podman runtime,
-/// else an enabled local Docker runtime, when its engine is installed, and
-/// otherwise on the host. `Podman` and `Docker` insist on that engine (with
-/// its runtime's image, or the release's agent-dev image without one); `Host`
-/// never uses a container.
+/// `Auto` runs a check on the host when the host already has the harness it
+/// starts (Codex's managed installation, `grok`, or `claude`). Otherwise it
+/// runs the check in the image of an enabled local Podman runtime, else an
+/// enabled local Docker runtime, when its engine is installed, and on the host
+/// when there is no such runtime. `Podman` and `Docker` insist on that engine
+/// (with its runtime's image, or the release's agent-dev image without one),
+/// whether or not the host has the harness; `Host` never uses a container.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QuotaRuntimeChoice {
