@@ -1281,7 +1281,7 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
-    record.review = Some(mj_core::config::SessionReview::Turn {
+    record.review = Some(mj_core::config::SessionReview::Push {
         reviewers: Some(vec![mj_core::config::SubagentChoice {
             model: "gpt-6-astra".into(),
             effort: Some("high".into()),
@@ -1294,7 +1294,7 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let loaded = load_state_from(&database).unwrap();
     assert_eq!(
         loaded.sessions["session-1"].review,
-        Some(mj_core::config::SessionReview::Turn {
+        Some(mj_core::config::SessionReview::Push {
             reviewers: Some(vec![mj_core::config::SubagentChoice {
                 model: "gpt-6-astra".into(),
                 effort: Some("high".into())
@@ -1302,6 +1302,53 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
         }),
         "writes omit the legacy tier while preserving the review choice"
     );
+}
+
+/// Per-turn review was removed. A session stored with the `turn` mode (or the
+/// older `on`) by an earlier build loads as before-push review with the same
+/// reviewers, and the next write stores `push`.
+#[test]
+fn a_session_stored_with_turn_review_loads_as_push_and_is_rewritten_as_push() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let reviewers = r#"[{"model":"gpt-6-astra","effort":"high"}]"#;
+    let stored = [
+        format!(r#"{{"mode":"turn","reviewers":{reviewers}}}"#),
+        format!(r#"{{"mode":"on","reviewers":{reviewers}}}"#),
+    ];
+    let expected = mj_core::config::SessionReview::Push {
+        reviewers: Some(vec![mj_core::config::SubagentChoice {
+            model: "gpt-6-astra".into(),
+            effort: Some("high".into()),
+        }]),
+    };
+    for json in stored {
+        let mut record = session("session-1", "project-1");
+        record.review = Some(expected.clone());
+        save_session_to(&database, &record).unwrap();
+        Connection::open(&database)
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET review_json = ?1 WHERE session_id = 'session-1'",
+                [&json],
+            )
+            .unwrap();
+        let loaded = load_state_from(&database).unwrap();
+        assert_eq!(
+            loaded.sessions["session-1"].review.as_ref(),
+            Some(&expected)
+        );
+        save_session_to(&database, &loaded.sessions["session-1"]).unwrap();
+        let rewritten: String = Connection::open(&database)
+            .unwrap()
+            .query_row(
+                "SELECT review_json FROM sessions WHERE session_id = 'session-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(rewritten.contains(r#""mode":"push""#), "{rewritten}");
+    }
 }
 
 // Hard-won: 06cfc1cfe: reviewer-only flags replaced before-push review with end-of-turn.
@@ -1337,18 +1384,24 @@ fn inherited_session_review_survives_lifecycle_writes_and_keeps_trigger_inherita
             ]),
         }
     );
-    for trigger in [
-        mj_core::config::ReviewTrigger::Off,
-        mj_core::config::ReviewTrigger::Turn,
-        mj_core::config::ReviewTrigger::Push,
+    // The session inherits whether review is on: reviewers alone do not
+    // switch it on, and a global that is on stays on.
+    for (global_reviewers, trigger) in [
+        (Vec::new(), mj_core::config::ReviewTrigger::Off),
+        (
+            vec![mj_core::config::SubagentChoice {
+                model: "gpt-6-sol".into(),
+                effort: None,
+            }],
+            mj_core::config::ReviewTrigger::Push,
+        ),
     ] {
         let global = mj_core::config::ReviewConfig {
-            legacy: None,
-            trigger,
+            reviewers: global_reviewers,
             ..mj_core::config::ReviewConfig::default()
         };
         let effective = global.for_session(Some(review));
-        assert_eq!(effective.trigger, trigger);
+        assert_eq!(effective.trigger(), trigger);
         assert_eq!(effective.reviewers.len(), 3);
     }
 }

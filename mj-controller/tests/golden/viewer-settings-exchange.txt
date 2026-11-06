@@ -99,7 +99,7 @@
                   "review"
                 ],
                 "label": "Code Review",
-                "help": "Review triggers and reviewers. An empty reviewer list means no reviewers are configured.",
+                "help": "Reviewers for code review before push. With no reviewers, review is off.",
                 "control": "page",
                 "summary": "Off"
               },
@@ -440,7 +440,7 @@
                   "review"
                 ],
                 "label": "Code Review",
-                "help": "Review triggers and reviewers. An empty reviewer list means no reviewers are configured.",
+                "help": "Reviewers for code review before push. With no reviewers, review is off.",
                 "control": "page",
                 "summary": "Off"
               },
@@ -791,7 +791,7 @@
                   "review"
                 ],
                 "label": "Code Review",
-                "help": "Review triggers and reviewers. An empty reviewer list means no reviewers are configured.",
+                "help": "Reviewers for code review before push. With no reviewers, review is off.",
                 "control": "page",
                 "summary": "Off"
               },

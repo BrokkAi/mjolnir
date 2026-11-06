@@ -843,7 +843,7 @@ fn armed(_profile: Option<&str>) -> ReviewConfigSource {
 fn armed_count(count: usize) -> ReviewConfigSource {
     Arc::new(move |_| ReviewConfig {
         legacy: None,
-        trigger: mj_core::config::ReviewTrigger::Turn,
+        disabled: false,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "test-reviewer".into(),
@@ -929,9 +929,10 @@ async fn an_unreviewable_project_is_refused_before_the_worker_is_asked_to_captur
     host.shutdown().await.unwrap();
 }
 
-/// Drives a session from running to idle, which is the edge that arms an
-/// automatic review. The daemon observes each view as it publishes it, so
-/// the fake does both too.
+/// Drives a session from running to idle and starts a review of the turn by
+/// hand. The end of a turn no longer arms a review, so the manual start is the
+/// remaining way into the turn pipeline these tests exercise. The daemon
+/// observes each view as it publishes it, so the fake does both too.
 async fn finish_a_turn(manager: &FakeManager, host: &TurnReviewHost) {
     for execution in [
         mj_core::state::MaterializedExecutionState::Running { started_at_ms: 0 },
@@ -944,68 +945,11 @@ async fn finish_a_turn(manager: &FakeManager, host: &TurnReviewHost) {
             .await;
         host.observe(&manager.session, &published);
     }
-}
-
-/// A turn the harness starts on its own also runs and then goes idle.
-/// Reviewing those is a separate decision, so the automatic edge ignores
-/// one and still arms on the next turn that answers a prompt.
-#[tokio::test]
-async fn a_self_started_turn_does_not_arm_an_automatic_review() {
-    let session = session_id("selfstarted0");
-    let session = session.as_str();
-    let mut manager = FakeManager::new(session).await;
-    let environment = FakeEnvironment::new();
-    let host = TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment.clone());
-
-    for execution in [
-        MaterializedExecutionState::Running { started_at_ms: 0 },
-        MaterializedExecutionState::Idle,
-    ] {
-        host.observe(session, &view_of(session, execution, false));
-    }
-    assert!(
-        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
-            .await
-            .is_err(),
-        "a turn the harness started on its own arms nothing"
-    );
-
-    // The next prompt-driven turn prepares an Auto reviewer.
-    finish_a_turn(&manager, &host).await;
-    assert!(
-        matches!(manager.next().await, RemoteSessionRequest::Reviewer { .. }),
-        "a prompt-driven turn still reaches the automatic edge"
-    );
-    host.shutdown().await.expect("shutdown the host");
-}
-
-/// I2-9: a Mjolnir sub-agent's turn is reviewed through its parent's turn.
-/// Reviewing the child on its own raced the parent's lifecycle operations
-/// and posted their internal refusals into the child's transcript.
-// Hard-won: 1f754710: sub-agent turns incorrectly triggered their own review lifecycle
-#[tokio::test]
-async fn a_subagent_turn_is_not_reviewed_on_its_own() {
-    let session = session_id("subagent000");
-    let mut manager = FakeManager::new(&session).await;
-    let environment = FakeEnvironment::new();
-    environment
-        .subagent
-        .store(true, std::sync::atomic::Ordering::Release);
-    let host = TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment);
-    finish_a_turn(&manager, &host).await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
-            .await
-            .is_err(),
-        "a sub-agent's turn asks its worker for nothing"
-    );
-    let view = host.view(&session);
-    assert!(
-        view.as_ref()
-            .is_none_or(|view| !view.status.contains("did not start")),
-        "{view:?}"
-    );
-    host.shutdown().await.unwrap();
+    let host = host.clone();
+    let session = manager.session.clone();
+    tokio::spawn(async move {
+        let _ = host.start(&session, true).await;
+    });
 }
 
 /// Resolutions are gated on the verdict the review actually reached, in
@@ -1235,7 +1179,7 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
     let environment = FakeEnvironment::new();
     let config: ReviewConfigSource = Arc::new(|_| ReviewConfig {
         legacy: None,
-        trigger: mj_core::config::ReviewTrigger::Off,
+        disabled: false,
         reviewers: vec![mj_core::config::SubagentChoice {
             model: "test-reviewer".into(),
             effort: None,
@@ -1435,18 +1379,7 @@ async fn a_review_open_at_a_restart_keeps_its_child_and_baseline() {
     let child = wait_for_child(&environment, &old, session).await;
     assert!(environment.state().active.is_some());
 
-    // Two more completed turns while the review is open coalesce into one
-    // durable follow-up. Restart before the first verdict is delivered.
-    finish_a_turn(&manager, &old).await;
-    finish_a_turn(&manager, &old).await;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !environment.state().pending_followup {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the follow-up is durable before restart");
-
+    // Restart before the first verdict is delivered.
     old.shutdown().await.unwrap();
 
     let new = TurnReviewHost::spawn_in(
@@ -1477,44 +1410,16 @@ async fn a_review_open_at_a_restart_keeps_its_child_and_baseline() {
     assert_eq!(
         state.baselines[&PathBuf::from("/workspace/app")],
         "before-turn",
-        "the baseline did not advance, so the next review covers both turns"
+        "the baseline did not advance"
     );
     finish_child(&new, &environment, session, &child, Some("No findings.")).await;
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
-        .await;
-    reply
-        .send(Ok(ReviewerOutcome::Delta {
-            repositories: vec![mj_core::relay::RepoDelta {
-                root: PathBuf::from("/workspace/app"),
-                baseline_tree: Some("after-turn".into()),
-                current_tree: "latest".into(),
-                patch: "+later".into(),
-                changed_lines: 1,
-                diffstat: "1 file changed".into(),
-                ..Default::default()
-            }],
-        }))
-        .unwrap();
-    let followup_child = wait_for_child(&environment, &new, session).await;
-    assert_ne!(followup_child, child);
-    assert!(!environment.state().pending_followup);
-    finish_child(
-        &new,
-        &environment,
-        session,
-        &followup_child,
-        Some("No findings."),
-    )
-    .await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while new.view(session).is_some() {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("the one coalesced follow-up closes");
-    assert_eq!(environment.children.lock().unwrap().len(), 2);
+    .expect("the review closes");
     new.shutdown().await.unwrap();
 }
 
@@ -1689,132 +1594,6 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
     assert!(state.pending_forward.is_none());
     assert_eq!(state.baselines[&PathBuf::from("/workspace/app")], "new");
     assert!(environment.children.lock().unwrap().is_empty());
-    host.shutdown().await.unwrap();
-}
-
-// Hard-won: f47500b6c: a turn ending during preparation lost its follow-up
-#[tokio::test]
-async fn turn_finishing_during_review_preparation_starts_one_followup() {
-    let session = session_id("prepfollowup");
-    let mut manager = FakeManager::new(&session).await;
-    let environment = FakeEnvironment::new();
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-    finish_a_turn(&manager, &host).await;
-    let (_, _, first_capture) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
-        .await;
-    finish_a_turn(&manager, &host).await;
-    finish_a_turn(&manager, &host).await;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !environment.state().pending_followup {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("follow-up is durable during preparation");
-    first_capture
-        .send(Ok(ReviewerOutcome::Delta {
-            repositories: vec![mj_core::relay::RepoDelta {
-                root: PathBuf::from("/workspace/app"),
-                baseline_tree: Some("base".into()),
-                current_tree: "first".into(),
-                patch: "+first".into(),
-                changed_lines: 1,
-                diffstat: "1 file changed".into(),
-                ..Default::default()
-            }],
-        }))
-        .unwrap();
-    let child = wait_for_child(&environment, &host, &session).await;
-    finish_child(&host, &environment, &session, &child, Some("No findings.")).await;
-    let (_, _, second_capture) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
-        .await;
-    second_capture
-        .send(Ok(ReviewerOutcome::Delta {
-            repositories: vec![mj_core::relay::RepoDelta {
-                root: PathBuf::from("/workspace/app"),
-                baseline_tree: Some("first".into()),
-                current_tree: "second".into(),
-                patch: "+second".into(),
-                changed_lines: 1,
-                diffstat: "1 file changed".into(),
-                ..Default::default()
-            }],
-        }))
-        .unwrap();
-    let child = wait_for_child(&environment, &host, &session).await;
-    finish_child(&host, &environment, &session, &child, Some("No findings.")).await;
-    assert_eq!(environment.children.lock().unwrap().len(), 2);
-    host.shutdown().await.unwrap();
-}
-
-// Hard-won: f47500b6c: the live queued-prompt snapshot refused review with a spurious notice
-#[tokio::test]
-async fn queued_prompts_do_not_hold_a_review_back() {
-    let session = session_id("queued00000");
-    let session = session.as_str();
-    let mut manager = FakeManager::new(session).await;
-    let environment = FakeEnvironment::new();
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-
-    let mut queued = view(session, mj_core::state::MaterializedExecutionState::Idle);
-    if let Some(snapshot) = queued.snapshot.as_mut() {
-        snapshot.materialized.queued_prompts = vec![mj_core::state::MaterializedQueuedPrompt {
-            accepted_ordinal: None,
-            command_id: "queued-1".to_owned(),
-            kind: mj_core::state::QueuedCommandKind::Prompt,
-            content: vec![serde_json::json!({"type": "text", "text": "next"})],
-            queued_at_ms: 0,
-        }];
-    }
-    host.observe(
-        session,
-        &view(
-            session,
-            mj_core::state::MaterializedExecutionState::Running { started_at_ms: 0 },
-        ),
-    );
-    manager
-        .publisher
-        .publish(session.to_owned(), queued.clone())
-        .await
-        .unwrap();
-    host.observe(session, &queued);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !environment.state().pending_followup {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("queued turn retains durable follow-up");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), manager.requests.recv())
-            .await
-            .is_err(),
-        "queued prompts must not emit a refusal notice or start capture"
-    );
-    let idle = view(session, mj_core::state::MaterializedExecutionState::Idle);
-    manager
-        .publisher
-        .publish(session.to_owned(), idle.clone())
-        .await
-        .unwrap();
-    host.observe(session, &idle);
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
-        .await;
-    let _ = reply.send(Ok(ReviewerOutcome::Delta {
-        repositories: Vec::new(),
-    }));
     host.shutdown().await.unwrap();
 }
 
@@ -2172,7 +1951,7 @@ async fn parallel_findings_keep_launch_order_when_children_finish_out_of_order()
     ];
     let config: ReviewConfigSource = Arc::new(move |_| ReviewConfig {
         legacy: None,
-        trigger: mj_core::config::ReviewTrigger::Turn,
+        disabled: false,
         reviewers: choices.clone(),
     });
     let host = TurnReviewHost::spawn_in(manager.control.clone(), config, environment.clone());
@@ -2888,17 +2667,25 @@ async fn a_reviewer_without_a_handback_fails_without_advancing_the_baseline() {
     host.shutdown().await.unwrap();
 }
 
+/// Per-turn review was removed: a turn that answers a prompt, or that the
+/// harness starts on its own, arms nothing.
 #[tokio::test]
-async fn push_trigger_does_not_arm_review_at_the_end_of_a_turn() {
-    let session = session_id("pushtrigger");
+async fn the_end_of_a_turn_arms_no_review() {
+    let session = session_id("noturnarm");
     let mut manager = FakeManager::new(&session).await;
-    let config: ReviewConfigSource = Arc::new(|_| ReviewConfig {
-        legacy: None,
-        trigger: mj_core::config::ReviewTrigger::Push,
-        ..Default::default()
-    });
-    let host = TurnReviewHost::spawn_in(manager.control.clone(), config, FakeEnvironment::new());
-    finish_a_turn(&manager, &host).await;
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        push_config(),
+        FakeEnvironment::new(),
+    );
+    for prompt_driven in [true, false] {
+        for execution in [
+            MaterializedExecutionState::Running { started_at_ms: 0 },
+            MaterializedExecutionState::Idle,
+        ] {
+            host.observe(&session, &view_of(&session, execution, prompt_driven));
+        }
+    }
     assert!(
         tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
             .await
@@ -2911,7 +2698,7 @@ async fn push_trigger_does_not_arm_review_at_the_end_of_a_turn() {
 fn push_config() -> ReviewConfigSource {
     Arc::new(|_| ReviewConfig {
         legacy: None,
-        trigger: mj_core::config::ReviewTrigger::Push,
+        disabled: false,
         reviewers: vec![mj_core::config::SubagentChoice {
             model: "test-reviewer".into(),
             effort: None,
@@ -2922,7 +2709,7 @@ fn push_config() -> ReviewConfigSource {
 fn push_config_count(count: usize) -> ReviewConfigSource {
     Arc::new(move |_| ReviewConfig {
         legacy: None,
-        trigger: mj_core::config::ReviewTrigger::Push,
+        disabled: false,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "test-reviewer".into(),
@@ -3379,14 +3166,10 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
                 .baselines
                 .insert(PathBuf::from("/workspace/lib"), "libtree".into());
         }
-        let trigger = match name {
-            "manualoff" | "manualchild" => mj_core::config::ReviewTrigger::Off,
-            "manualturn" => mj_core::config::ReviewTrigger::Turn,
-            _ => mj_core::config::ReviewTrigger::Push,
-        };
+        let disabled = matches!(name, "manualoff" | "manualchild");
         let config: ReviewConfigSource = Arc::new(move |_| ReviewConfig {
             legacy: None,
-            trigger,
+            disabled,
             reviewers: vec![mj_core::config::SubagentChoice {
                 model: "test-reviewer".into(),
                 effort: None,

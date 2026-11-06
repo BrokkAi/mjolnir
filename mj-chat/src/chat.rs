@@ -123,13 +123,12 @@ pub use attachments::{CHAT_DRAFT_PREFIX, PromptImage, PromptPayload};
 
 /// What `/review status` reports, on every surface.
 ///
-/// It answers the two questions a person actually has: is every turn reviewed,
-/// and is one being reviewed right now.
+/// It answers the two questions a person actually has: does review run before
+/// push, and is one being reviewed right now.
 #[must_use]
 pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) -> String {
-    let armed = match review.trigger {
+    let armed = match review.trigger() {
         mj_core::config::ReviewTrigger::Push => "Review trigger is before push",
-        mj_core::config::ReviewTrigger::Turn => "Reviewing every completed turn",
         mj_core::config::ReviewTrigger::Off => "Automatic review is off; /review reviews one turn",
     };
     let count = review.reviewers.len();

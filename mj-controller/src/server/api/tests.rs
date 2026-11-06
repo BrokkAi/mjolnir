@@ -6427,10 +6427,41 @@ async fn session_review_api_rejects_the_legacy_on_mode() {
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let message = String::from_utf8_lossy(&body);
-    for value in ["inherit", "off", "turn", "push"] {
+    for value in ["inherit", "off", "push"] {
         assert!(message.contains(value), "{message}");
     }
     assert!(actions.is_empty());
+}
+
+/// Per-turn review was removed. A public request for it is refused with the
+/// way to proceed, while a stored action that still says `turn` reads as push.
+#[tokio::test]
+async fn session_review_api_refuses_turn_and_says_what_to_use() {
+    let (app, actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(start_request(start_body(
+            r#", "review":{"mode":"turn","reviewers":[]}"#,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let message = String::from_utf8_lossy(&body);
+    assert!(message.contains("Per-turn review was removed"), "{message}");
+    assert!(message.contains("push"), "{message}");
+    assert!(actions.is_empty());
+
+    let stored: ControllerAction = serde_json::from_str(
+        r#"{"action":"new","profile_id":"codex-1","bundle_id":"project","target_id":"raw","review":{"mode":"turn"}}"#,
+    )
+    .unwrap();
+    let ControllerAction::New { review, .. } = stored else {
+        panic!("expected new-session action");
+    };
+    assert_eq!(
+        review,
+        Some(mj_core::config::SessionReview::Push { reviewers: None })
+    );
 }
 
 #[tokio::test]
@@ -6438,7 +6469,7 @@ async fn session_review_api_rejects_stored_legacy_fields() {
     let (app, actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = app
         .oneshot(start_request(start_body(
-            r#", "review":{"mode":"turn","model":"gpt-6-astra","count":2}"#,
+            r#", "review":{"mode":"push","model":"gpt-6-astra","count":2}"#,
         )))
         .await
         .unwrap();
@@ -6450,7 +6481,7 @@ async fn session_review_api_rejects_stored_legacy_fields() {
 async fn session_review_api_forwards_an_explicitly_empty_reviewer_list() {
     let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = tokio::spawn(app.oneshot(start_request(start_body(
-        r#", "review":{"mode":"turn","reviewers":[]}"#,
+        r#", "review":{"mode":"push","reviewers":[]}"#,
     ))));
     let request = actions.recv().await.unwrap();
     let ControllerAction::New { review, .. } = request.action else {
@@ -6458,7 +6489,7 @@ async fn session_review_api_forwards_an_explicitly_empty_reviewer_list() {
     };
     assert_eq!(
         review,
-        Some(mj_core::config::SessionReview::Turn {
+        Some(mj_core::config::SessionReview::Push {
             reviewers: Some(Vec::new()),
         })
     );

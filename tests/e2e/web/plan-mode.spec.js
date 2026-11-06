@@ -439,20 +439,20 @@ test('golden_viewer_conversation', async ({ context }) => {
   await expect(page.locator('#conversation-feed')).toContainText('Available commands:');
   await captureConversationState(output, page, 'help lists Mjolnir and harness commands', state);
 
-  state.snapshot.review_config = { trigger: "turn", profile: 'reviewer' };
+  state.snapshot.review_config = { trigger: "push", reviewers: [{ model: 'reviewer' }] };
   state.snapshot.sessions[0].turn_review = null;
   await publishSnapshotDelta(page, state);
   await page.locator('#prompt-text').fill('/review status');
   await page.locator('#send-button').click();
   await expect(page.locator('#conversation-error')).toHaveText(
-    'Reviewing every completed turn with [review] profile "reviewer"',
+    'Review trigger is before push; 1 reviewer',
   );
   await captureConversationState(output, page, 'review status describes automatic review', state);
   state.snapshot.sessions[0].review_trigger = 'push';
   await publishSnapshotDelta(page, state);
   await page.locator('#prompt-text').fill('/review status');
   await page.locator('#send-button').click();
-  await expect(page.locator('#conversation-error')).toHaveText('Review trigger is before push');
+  await expect(page.locator('#conversation-error')).toHaveText('Review trigger is before push; 1 reviewer');
 
   await page.close();
 

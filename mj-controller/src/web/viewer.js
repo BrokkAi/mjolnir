@@ -7568,8 +7568,7 @@ function sessionReviewStatusConfig(snapshot, session) {
 function reviewStatusLine(review, open) {
   const trigger = review?.trigger;
   const armed = trigger === "push" ? "Review trigger is before push"
-    : trigger === "turn" ? "Reviewing every completed turn"
-      : "Automatic review is off; /review reviews one turn";
+    : "Automatic review is off; /review reviews one turn";
   const count = review?.count ?? review?.reviewers?.length ?? 0;
   const status = count === 0 ? `${armed}; no reviewers`
     : `${armed}; ${count} reviewer${count === 1 ? '' : 's'}`;
@@ -7687,9 +7686,9 @@ async function runLocalCommand(text) {
         return true;
       }
       if (scope === 'on' || scope === 'off') {
-        // Arming review is configuration, not a session gesture.
+        // Review runs when reviewers are configured: not a session gesture.
         error.textContent =
-          'automatic review is configured in config.toml: [review] trigger';
+          'review runs before push when reviewers are set in Settings › Code Review';
         setComposerText('');
         return true;
       }

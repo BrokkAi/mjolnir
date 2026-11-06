@@ -125,6 +125,7 @@ pub(super) enum HostEvent {
     },
     RestoreGroups {
         groups: Vec<(String, TurnReviewState)>,
+        #[expect(dead_code, reason = "stored follow-ups are no longer acted on")]
         pending_followups: Vec<String>,
         abandoned_children: Vec<String>,
     },
@@ -303,6 +304,7 @@ pub(super) enum PreparingOperation {
 pub(super) struct SessionWatch {
     pub(super) execution: MaterializedExecutionState,
     /// Whether the view had a prompt of ours in flight.
+    #[expect(dead_code, reason = "only the turn-end review arming read it")]
     pub(super) prompt_driven: bool,
     pub(super) materialized: Option<Box<MaterializedSession>>,
 }

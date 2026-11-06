@@ -309,9 +309,9 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
 
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
-  │Trigger     Off ▾                                                                             │
   │  Add reviewer     Autoconfigure                                                              │
   │Loading review models…                                                                        │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │

@@ -682,7 +682,7 @@ impl Controller {
             self.config
                 .review
                 .for_session(session.review.as_ref())
-                .trigger
+                .trigger()
         } else {
             Default::default()
         };

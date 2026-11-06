@@ -82,39 +82,29 @@ def open_review_settings(tmux):
     tmux.wait_for("Code Review")
     click(tmux, "Code Review")
     tmux.send_key("Enter")
-    tmux.wait_for("Trigger")
+    tmux.wait_for("Add reviewer")
 
 
 def save_review_settings(lab, tmux, evidence):
+    """Review runs before push exactly when reviewers are configured."""
     original = lab.snapshot()["review_config"]
+    if original["reviewers"]:
+        raise ScenarioFailure("the review settings scenario starts without reviewers")
     open_review_settings(tmux)
-    expected = "turn" if original["trigger"] == "off" else "off"
-    click(tmux, "Trigger")
-    tmux.send_key("Home")
-    if expected == "turn":
-        tmux.send_key("Down")
-    tmux.send_key("Enter")
-    if expected == "turn" and not original["reviewers"]:
-        click(tmux, "Autoconfigure")
+    click(tmux, "Autoconfigure")
     click(tmux, "Save Settings")
     absent(tmux, "× Setup")
-    lab.wait_snapshot(lambda value: value["review_config"]["trigger"] == expected, "review setting persisted")
+    lab.wait_snapshot(lambda value: value["review_config"]["trigger"] == "push", "review turned on by its reviewers")
     record(
         tmux,
         evidence,
         "review-save-dismissed",
-        "toggle automatic review and click Save",
-        "settings close and automatic review setting changes",
+        "Autoconfigure reviewers and click Save",
+        "settings close and review runs before push",
     )
     open_review_settings(tmux)
-    click(tmux, "Trigger")
-    tmux.send_key("Home")
-    for _ in range({"off": 0, "turn": 1, "push": 2}[original["trigger"]]):
-        tmux.send_key("Down")
-    tmux.send_key("Enter")
-    if not original["reviewers"]:
-        for _ in lab.snapshot()["review_config"]["reviewers"]:
-            click(tmux, "Remove")
+    for _ in lab.snapshot()["review_config"]["reviewers"]:
+        click(tmux, "Remove")
     click(tmux, "Save Settings")
     absent(tmux, "× Setup")
     lab.wait_snapshot(lambda value: value["review_config"] == original, "original review settings restored")
