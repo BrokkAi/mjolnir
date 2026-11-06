@@ -112,15 +112,10 @@ fn documentation_dashboard() -> DashboardState {
     config.profiles.insert(
         "kimi-1".into(),
         HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Kimi,
-            home: PathBuf::from("/profiles/kimi"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-            muse_auto_review: None,
-            codex_profile: None,
+            ..mj_core::config::HarnessProfile::new(
+                HarnessKind::Kimi,
+                PathBuf::from("/profiles/kimi"),
+            )
         },
     );
 
@@ -209,6 +204,7 @@ fn documentation_dashboard() -> DashboardState {
     let mut dashboard = DashboardState::new(
         config,
         State {
+            last_oracle_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),

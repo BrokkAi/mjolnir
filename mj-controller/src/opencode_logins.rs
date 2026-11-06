@@ -344,14 +344,14 @@ mod tests {
         .unwrap();
         let profile = HarnessProfile {
             enabled: true,
-            kind: HarnessKind::OpenCode,
-            home,
             environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            models: Default::default(),
             legacy_subagents: None,
+            ..mj_core::config::HarnessProfile::new(HarnessKind::OpenCode, home)
         };
 
         let logins = profile_logins(&profile).unwrap().unwrap();

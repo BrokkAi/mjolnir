@@ -200,6 +200,7 @@ fn unavailable_import_explains_why_and_copies_its_id_without_closing() {
 
 fn state_with(sessions: Vec<SessionRecord>) -> State {
     State {
+        last_oracle_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         subagents: Default::default(),
@@ -226,6 +227,8 @@ fn incomplete_move() -> MoveOperation {
         source_checkpoint_only: false,
         operation_id: "move-1".into(),
         selection: mj_core::state::MoveSelection {
+            oracle: None,
+            oracle_choice: None,
             subagents: None,
             workspace: Default::default(),
             clear_resource_allocation: false,

@@ -211,6 +211,7 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
 
 fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
+        oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,

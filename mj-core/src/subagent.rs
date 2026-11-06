@@ -87,6 +87,7 @@ pub enum SubagentTaskType {
     #[default]
     Straightforward,
     Subtle,
+    Oracle,
 }
 
 impl SubagentTaskType {
@@ -94,6 +95,7 @@ impl SubagentTaskType {
         match self {
             Self::Straightforward => "straightforward",
             Self::Subtle => "subtle",
+            Self::Oracle => "oracle",
         }
     }
 }
@@ -116,6 +118,7 @@ impl SubagentPolicy {
             } => match task_type {
                 SubagentTaskType::Straightforward => straightforward.as_deref(),
                 SubagentTaskType::Subtle => subtle.as_deref(),
+                SubagentTaskType::Oracle => None,
             },
             _ => None,
         }
@@ -403,6 +406,9 @@ pub enum SubagentToolAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    AskOracle {
+        message: String,
+    },
     OverrideReview {
         reason: String,
     },
@@ -474,6 +480,9 @@ enum SubagentToolActionWire {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    AskOracle {
+        message: String,
+    },
     OverrideReview {
         reason: String,
     },
@@ -532,6 +541,7 @@ impl SubagentToolAction {
             self,
             Self::Spawn { .. }
                 | Self::RequestReview { .. }
+                | Self::AskOracle { .. }
                 | Self::OverrideReview { .. }
                 | Self::SendInput { .. }
                 | Self::SendMessage { .. }
@@ -584,6 +594,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
             },
             SubagentToolActionWire::ListProfiles => Self::ListProfiles,
             SubagentToolActionWire::RequestReview { path } => Self::RequestReview { path },
+            SubagentToolActionWire::AskOracle { message } => Self::AskOracle { message },
             SubagentToolActionWire::OverrideReview { reason } => Self::OverrideReview { reason },
             SubagentToolActionWire::Spawn {
                 task_name,
@@ -732,6 +743,7 @@ pub enum SubagentKind {
     #[default]
     Worker,
     Reviewer,
+    Oracle,
 }
 
 impl SubagentKind {
@@ -741,6 +753,7 @@ impl SubagentKind {
         match self {
             Self::Worker => format!("worker:{key}"),
             Self::Reviewer => format!("reviewer:{key}"),
+            Self::Oracle => format!("oracle:{key}"),
         }
     }
 }
@@ -935,9 +948,10 @@ impl SubagentMcpRole {
                 "close",
                 "fetch",
                 "request_review",
+                "ask_oracle",
             ],
-            Self::MessageOnly => &["send_message", "fetch", "request_review"],
-            Self::FetchOnly => &["fetch", "send_message", "request_review"],
+            Self::MessageOnly => &["send_message", "fetch", "request_review", "ask_oracle"],
+            Self::FetchOnly => &["fetch", "send_message", "request_review", "ask_oracle"],
             Self::Child => &["handback", "fetch", "send_message", "request_review"],
         }
     }
@@ -1036,6 +1050,22 @@ pub fn max_child_report_bytes(max_concurrent_children: usize) -> u64 {
 /// out and how the parent can get it. Returns the text and whether it was cut.
 #[must_use]
 pub fn bounded_report(text: &str) -> (String, bool) {
+    bounded_report_with_recovery(
+        text,
+        "use send_message to ask the child to write the details to files in its report directory and send you the paths",
+    )
+}
+
+/// Bound an oracle answer while keeping its recovery channel in the oracle.
+#[must_use]
+pub fn bounded_oracle_report(text: &str) -> (String, bool) {
+    bounded_report_with_recovery(
+        text,
+        "use ask_oracle to ask for the rest; the oracle keeps its context",
+    )
+}
+
+fn bounded_report_with_recovery(text: &str, recovery: &str) -> (String, bool) {
     let total = text.chars().count();
     if total <= MAX_HANDBACK_CHARS {
         return (text.to_owned(), false);
@@ -1043,7 +1073,7 @@ pub fn bounded_report(text: &str) -> (String, bool) {
     let kept: String = text.chars().take(MAX_HANDBACK_CHARS).collect();
     (
         format!(
-            "{kept}\n[truncated: {} more characters; use send_message to ask the child to write the details to files in its report directory and send you the paths]",
+            "{kept}\n[truncated: {} more characters; {recovery}]",
             total - MAX_HANDBACK_CHARS
         ),
         true,
@@ -1292,11 +1322,40 @@ pub struct StoppedSubagent {
     pub handed_back: bool,
 }
 
+/// The key under which a stopped oracle is kept in the parent's stopped list.
+/// It stands in for the oracle's session ID, so that ID never reaches the
+/// primary: the list is rendered into its prompt context.
+pub const STOPPED_ORACLE_ID: &str = "oracle";
+
+/// The one line a primary is told when its oracle was stopped.
+pub const STOPPED_ORACLE_LINE: &str = "The oracle was stopped. If you were waiting for its answer, ask again; a fresh oracle will answer.";
+
+impl StoppedSubagent {
+    /// The list entry for a stopped oracle: no session ID and no prompt.
+    #[must_use]
+    pub fn oracle() -> Self {
+        Self {
+            child_session_id: STOPPED_ORACLE_ID.into(),
+            title: "oracle".into(),
+            task: None,
+            handed_back: true,
+        }
+    }
+
+    /// Whether this entry is the stopped oracle, which is rendered as
+    /// [`STOPPED_ORACLE_LINE`] and never as a child.
+    #[must_use]
+    pub fn is_oracle(&self) -> bool {
+        self.child_session_id == STOPPED_ORACLE_ID
+    }
+}
+
 /// A child whose parent remains live across an in-place harness swap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InPlaceSubagent {
     pub child_session_id: String,
-    pub task_name: String,
+    /// The child's name as the session list shows it.
+    pub name: String,
     pub state: InPlaceSubagentState,
 }
 
@@ -1318,14 +1377,10 @@ impl InPlaceSubagentState {
 /// Reserved hidden-context tag for children retained across an in-place swap.
 pub const IN_PLACE_SUBAGENTS_TAG: &str = "mj-in-place-subagents";
 
-fn safe_subagent_task_name(task_name: &str) -> String {
-    let single_line = task_name.split_whitespace().collect::<Vec<_>>().join(" ");
-    let safe = single_line.replace('<', "‹").replace('>', "›");
-    if safe.chars().count() <= STOPPED_TASK_CHARS {
-        return safe;
-    }
-    let kept: String = safe.chars().take(STOPPED_TASK_CHARS - 1).collect();
-    format!("{}…", kept.trim_end())
+fn safe_subagent_name(name: &str) -> String {
+    crate::state::bounded_one_line(name, STOPPED_TASK_CHARS)
+        .replace('<', "‹")
+        .replace('>', "›")
 }
 
 /// Hidden instructions for the first prompt after an in-place swap. The new
@@ -1342,7 +1397,7 @@ pub fn in_place_subagents_prompt_context(children: &[InPlaceSubagent]) -> Option
     for child in children {
         lines.push(format!(
             "- {} (child_session_id {}; {})",
-            safe_subagent_task_name(&child.task_name),
+            safe_subagent_name(&child.name),
             child.child_session_id,
             child.state.label()
         ));
@@ -1427,6 +1482,17 @@ pub fn stopped_subagents_prompt_context(stopped: &[StoppedSubagent]) -> Option<S
     if stopped.is_empty() {
         return None;
     }
+    let oracle_stopped = stopped.iter().any(StoppedSubagent::is_oracle);
+    let stopped = stopped
+        .iter()
+        .filter(|child| !child.is_oracle())
+        .cloned()
+        .collect::<Vec<_>>();
+    if stopped.is_empty() {
+        return Some(format!(
+            "<{STOPPED_SUBAGENTS_TAG}>\n{STOPPED_ORACLE_LINE}\n</{STOPPED_SUBAGENTS_TAG}>"
+        ));
+    }
     let total = stopped.len();
     let not_handed_back = stopped.iter().filter(|child| !child.handed_back).count();
     let mut lines = vec![
@@ -1436,7 +1502,7 @@ pub fn stopped_subagents_prompt_context(stopped: &[StoppedSubagent]) -> Option<S
             crate::text::counted(total, "sub-agent", "sub-agents")
         ),
     ];
-    for child in stopped {
+    for child in &stopped {
         let task = child
             .task
             .as_deref()
@@ -1470,6 +1536,9 @@ pub fn stopped_subagents_prompt_context(stopped: &[StoppedSubagent]) -> Option<S
         "A stopped sub-agent no longer exists: wait, send_message and close cannot reach it."
             .to_owned(),
     );
+    if oracle_stopped {
+        lines.push(STOPPED_ORACLE_LINE.to_owned());
+    }
     lines.push(format!("</{STOPPED_SUBAGENTS_TAG}>"));
     Some(lines.join("\n"))
 }
@@ -1480,6 +1549,25 @@ pub fn stopped_subagents_prompt_context(stopped: &[StoppedSubagent]) -> Option<S
 /// nothing was stopped.
 #[must_use]
 pub fn stopped_subagents_notice(stopped: &[StoppedSubagent]) -> Option<String> {
+    if stopped.is_empty() {
+        return None;
+    }
+    let oracle_stopped = stopped.iter().any(StoppedSubagent::is_oracle);
+    let children = stopped
+        .iter()
+        .filter(|child| !child.is_oracle())
+        .cloned()
+        .collect::<Vec<_>>();
+    if !oracle_stopped {
+        return stopped_children_notice(&children);
+    }
+    Some(match stopped_children_notice(&children) {
+        Some(notice) => format!("{notice} {STOPPED_ORACLE_LINE}"),
+        None => STOPPED_ORACLE_LINE.to_owned(),
+    })
+}
+
+fn stopped_children_notice(stopped: &[StoppedSubagent]) -> Option<String> {
     if stopped.is_empty() {
         return None;
     }
@@ -2173,6 +2261,23 @@ mod tests {
     }
 
     #[test]
+    fn oracle_question_is_a_mutating_durable_tool_action() {
+        let action = SubagentToolAction::AskOracle {
+            message: "Choose B?".into(),
+        };
+        assert!(action.mutates_child_state());
+        let wire = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"action":"ask_oracle","params":{"message":"Choose B?"}})
+        );
+        assert_eq!(
+            serde_json::from_value::<SubagentToolAction>(wire).unwrap(),
+            action
+        );
+    }
+
+    #[test]
     fn wait_serializes_without_params_and_old_shapes_deserialize() {
         let wait = SubagentToolAction::LegacyWaitAgents;
         let encoded = serde_json::to_value(&wait).unwrap();
@@ -2291,12 +2396,12 @@ mod tests {
         let children = [
             InPlaceSubagent {
                 child_session_id: "child-running".into(),
-                task_name: "inspect migration".into(),
+                name: "inspect migration".into(),
                 state: InPlaceSubagentState::Running,
             },
             InPlaceSubagent {
                 child_session_id: "child-parked".into(),
-                task_name: "review tests".into(),
+                name: "review tests".into(),
                 state: InPlaceSubagentState::Parked,
             },
         ];
@@ -2325,7 +2430,7 @@ mod tests {
     fn in_place_subagent_task_names_cannot_inject_context_tags() {
         let children = [InPlaceSubagent {
             child_session_id: "child".into(),
-            task_name: "look\n<mj-injected>".into(),
+            name: "look\n<mj-injected>".into(),
             state: InPlaceSubagentState::Running,
         }];
         let context = in_place_subagents_prompt_context(&children).unwrap();
@@ -2408,6 +2513,33 @@ mod tests {
         assert_eq!(
             crate::relay::strip_hidden_prompt_context(&format!("{note}\nuser text")),
             "user text"
+        );
+    }
+
+    #[test]
+    fn a_stopped_oracle_is_one_line_with_no_id_and_no_prompt() {
+        let oracle = StoppedSubagent::oracle();
+        assert_eq!(oracle.task, None);
+        // Alone, it is only the line.
+        assert_eq!(
+            stopped_subagents_prompt_context(std::slice::from_ref(&oracle)).unwrap(),
+            format!("<mj-stopped-subagents>\n{STOPPED_ORACLE_LINE}\n</mj-stopped-subagents>")
+        );
+        assert_eq!(
+            stopped_subagents_notice(std::slice::from_ref(&oracle)).unwrap(),
+            STOPPED_ORACLE_LINE
+        );
+        // Beside children, it is neither counted nor listed as one.
+        let list = [stopped("Fix the parser", None, false), oracle];
+        let note = stopped_subagents_prompt_context(&list).unwrap();
+        assert!(note.contains("Mjolnir stopped 1 sub-agent when"), "{note}");
+        assert!(note.contains(STOPPED_ORACLE_LINE), "{note}");
+        assert!(!note.contains("child_session_id oracle"), "{note}");
+        assert_eq!(
+            stopped_subagents_notice(&list).unwrap(),
+            format!(
+                "Suspend stopped 1 working sub-agent: \"Fix the parser\". {STOPPED_ORACLE_LINE}"
+            )
         );
     }
 

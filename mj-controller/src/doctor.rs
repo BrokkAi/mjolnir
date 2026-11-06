@@ -30,6 +30,9 @@ use mj_core::config::{
 use mj_core::credentials::login_command;
 use mj_core::local_git::{MINIMUM_GIT_VERSION, parse_git_version};
 
+mod catalog;
+pub use catalog::{Catalogs, LARGE_CATALOG, catalog_checks, catalog_profile_ids};
+
 // Only the image for the Apple container smoke test when the config has no
 // apple-container target. This intentionally stays a small stock image rather
 // than setup::DEFAULT_IMAGE: the check just proves the runtime can start a

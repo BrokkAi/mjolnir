@@ -13,7 +13,7 @@ mod api_activity;
 pub(crate) mod profile_catalog;
 mod publication;
 
-use mj_core::config::{Config, HarnessProfile, PhoneConfig, is_bare_project_target};
+use mj_core::config::{Config, PhoneConfig, is_bare_project_target};
 use mj_core::refusal::Refusal;
 use mj_core::remote_git::display_url;
 use mj_core::state::{MaterializedSession, ProjectSourceIdentity, SessionRecord, State};

@@ -558,7 +558,7 @@ impl DashboardState {
             .unwrap_or_default();
         let editor = ContainerEditor {
             session_id: session.id.clone(),
-            session_name: session.display_title().to_owned(),
+            session_name: session.listed_title().to_owned(),
             cpus: session.container_cpus.clone().unwrap_or_default().into(),
             memory: session.container_memory.clone().unwrap_or_default().into(),
             mounts: session.additional_mounts.clone(),

@@ -16,12 +16,29 @@ pub(super) fn forward_subagent_question_with(
     }
     let relation: Option<(String, Option<String>, String)> = tx
         .query_row(
-            "SELECT a.parent_session_id, p.state, c.title FROM subagent_sessions a
+            "SELECT a.parent_session_id, p.state, c.title, c.session_title_override,
+                    c.acp_session_title FROM subagent_sessions a
          JOIN sessions c ON c.session_id=a.child_session_id
          LEFT JOIN sessions p ON p.session_id=a.parent_session_id
          WHERE a.child_session_id=?1",
             [child],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| {
+                let title: String = row.get(2)?;
+                let title_override: Option<String> = row.get(3)?;
+                let acp_title: Option<String> = row.get(4)?;
+                // The name the session list shows, bounded to one line.
+                let name = mj_core::state::listed_session_title(
+                    child,
+                    &title,
+                    title_override.as_deref(),
+                    acp_title.as_deref(),
+                );
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    mj_core::state::bounded_one_line(name, mj_core::state::MESSAGE_NAME_CHARS),
+                ))
+            },
         )
         .optional()?;
     let Some((parent, state, title)) = relation else {
@@ -36,7 +53,7 @@ pub(super) fn forward_subagent_question_with(
         return Ok(false);
     }
     let key = format!("subagent-question-{child}-{seq}");
-    // The first capture owns the title and payload even if the session is renamed.
+    // The first capture owns the name and payload even if the session is renamed.
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",
         [&key],

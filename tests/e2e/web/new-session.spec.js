@@ -458,6 +458,8 @@ test('golden_viewer_new_session', async ({ context }) => {
   ]) {
     await withNewSessionPage(context, {}, output, `delegation ${label}`, async (page, state) => {
       state.snapshot.subagents_configured = configured;
+      state.snapshot.oracle_configured = configured;
+      state.snapshot.last_oracle_choices = { alpha: false };
       state.snapshot.last_subagent_policies = { alpha: { mode: remembered } };
       await refresh(page, state);
       // Restart the draft so the remembered policy is read for this creation.
@@ -468,6 +470,8 @@ test('golden_viewer_new_session', async ({ context }) => {
       await page.getByRole('button', { name: 'existing', exact: true }).click();
       await expect(page.locator('#new-step')).not.toContainText('Checking project');
       const delegation = page.locator('#new-subagents');
+      await expect(page.locator('#new-oracle')).toHaveCount(configured ? 1 : 0);
+      if (configured) await expect(page.locator('#new-oracle')).toHaveValue('disabled');
       await expect(delegation.locator('option[value="mjolnir"]')).toHaveJSProperty('disabled', !configured);
       if (!configured) {
         await expect(delegation).toHaveValue(remembered === 'none' ? 'none' : 'native');
@@ -513,12 +517,14 @@ test('golden_viewer_new_session', async ({ context }) => {
 
   await withNewSessionPage(context, {}, output, 'harness without subagent support', async (page, state) => {
     state.snapshot.subagents_configured = true;
+    state.snapshot.oracle_configured = true;
     await refresh(page, state);
     await page.locator('#new-profile').selectOption('gamma');
     await projectStep(page, 'container');
     await page.getByRole('button', { name: 'existing', exact: true }).click();
     await expect(page.locator('#new-step')).not.toContainText('Checking project');
     await expect(page.locator('#new-subagents option[value="mjolnir"]')).toHaveJSProperty('disabled', true);
+    await expect(page.locator('#new-oracle')).toHaveValue('enabled');
     await captureNewSessionState(output, page, 'review for harness without subagent support', state);
     return startHeldLaunch(page, state);
   });

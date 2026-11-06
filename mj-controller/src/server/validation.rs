@@ -435,6 +435,8 @@ fn validate_action_against(
             review,
             no_project_memory: _,
             no_github_events: _,
+            oracle: _,
+            oracle_choice: _,
         } => {
             if let Some(review) = review {
                 let reviewers = match review {
@@ -659,9 +661,14 @@ fn validate_action_against(
                     ))
                 })?;
             if !option.choices.iter().any(|choice| choice.value == *value) {
-                return Err(ApiError::bad_request(
-                    "this agent does not offer that value for that setting",
-                ));
+                return Err(ApiError::bad_request(if key == "model" {
+                    format!(
+                        "this agent does not offer that model; check profile {:?}'s models setting",
+                        session.profile_id
+                    )
+                } else {
+                    "this agent does not offer that value for that setting".to_owned()
+                }));
             }
         }
         ControllerAction::SetPlanMode { session_id, .. } => {

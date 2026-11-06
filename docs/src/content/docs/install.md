@@ -13,7 +13,7 @@ The release installer is the simplest route. The npm package installs the same n
 curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash
 ```
 
-The installer selects the release for the current Linux or macOS architecture, verifies the downloaded artifacts when checksum sidecars are available, and installs them in `~/.local/bin` by default. A release bundle contains:
+The installer selects the release for the current Linux or macOS architecture, verifies the downloaded artifacts against their published checksum sidecars (a release without them is refused), and installs them in `~/.local/bin` by default. A release bundle contains:
 
 - `mj`, the terminal controller and CLI
 - `mj-desktop`, used by `mj app`

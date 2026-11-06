@@ -18,12 +18,18 @@ impl RuntimeState {
     }
 
     /// Register and start a child worker on its parent's existing target.
+    ///
+    /// Once the registration has committed, any failure before the worker's
+    /// own lifecycle takes over leaves a `Provisioning` child that nothing
+    /// owns. One match on that stretch moves such a child to `Error`, so the
+    /// parent sees a failed child and the oracle's one-live-oracle rule frees
+    /// its slot.
     pub async fn start_subagent_session(
         self: &Arc<Self>,
         request: crate::controller::RegisterSubagentRequest,
     ) -> Result<mj_core::subagent::SubagentRecord> {
         let _upgrade_work = crate::upgrade::activity("subagent admission")?;
-        let (relation, needs_provisioning) = blocking(move || {
+        let (relation, needs_provisioning, registered_here) = blocking(move || {
             let mut controller = Controller::load()?;
             if let Some(existing) = crate::database::lookup_subagent_request(
                 &request.parent_session_id,
@@ -42,7 +48,7 @@ impl RuntimeState {
                         request.fast_mode,
                     )?;
                 }
-                return Ok((existing, needs_provisioning));
+                return Ok((existing, needs_provisioning, false));
             }
             let mut request = request;
             // The parent's report root is made before the child exists, so the
@@ -58,11 +64,52 @@ impl RuntimeState {
             }
             controller
                 .register_subagent(request)
-                .map(|relation| (relation, true))
+                .map(|relation| (relation, true, true))
         })
         .await?;
+        if let Err(error) = self
+            .start_registered_subagent(&relation, needs_provisioning)
+            .await
+        {
+            if registered_here {
+                self.fail_unstarted_subagent(&relation.child_session_id, &error)
+                    .await;
+            }
+            if let Err(reload_error) = self.reload_controller().await {
+                tracing::warn!(
+                    child_session_id = %relation.child_session_id,
+                    error = format!("{reload_error:#}"),
+                    "could not reload the controller after a sub-agent failed to start"
+                );
+            }
+            if let Err(prompt_error) = self
+                .reconcile_parent_reports(&relation.parent_session_id)
+                .await
+            {
+                tracing::warn!(
+                    child_session_id = %relation.child_session_id,
+                    parent_session_id = %relation.parent_session_id,
+                    error = format!("{prompt_error:#}"),
+                    "could not enqueue the parent's finished child reports after provisioning failure"
+                );
+            }
+            return Err(error);
+        }
         self.reload_controller().await?;
-        if relation.kind == mj_core::subagent::SubagentKind::Worker {
+        Ok(relation)
+    }
+
+    /// Everything a registered child needs before its own lifecycle owns it:
+    /// publishing the registration, queueing its first delivery, and admitting
+    /// the lifecycle that provisions it. The lifecycle records its own
+    /// failures.
+    async fn start_registered_subagent(
+        self: &Arc<Self>,
+        relation: &mj_core::subagent::SubagentRecord,
+        needs_provisioning: bool,
+    ) -> Result<()> {
+        self.reload_controller().await?;
+        if relation.kind != mj_core::subagent::SubagentKind::Reviewer {
             let id = relation.child_session_id.clone();
             if let Some(delivery) =
                 blocking(move || crate::database::next_startup_delivery(&id)).await?
@@ -71,12 +118,12 @@ impl RuntimeState {
             }
         }
         if !needs_provisioning {
-            return Ok(relation);
+            return Ok(());
         }
         let session_id = relation.child_session_id.clone();
         let parent_session_id = relation.parent_session_id.clone();
         let control = LifecycleControl::default();
-        let started = self.start_or_join_lifecycle_controlled(
+        self.start_or_join_lifecycle_controlled(
             session_id.clone(),
             LifecycleKind::Create,
             None,
@@ -125,24 +172,31 @@ impl RuntimeState {
                 }
                 Ok(DaemonLifecycleResult::Done)
             },
-        );
-        if let Err(error) = started {
-            self.reload_controller().await?;
-            if let Err(prompt_error) = self
-                .reconcile_parent_reports(&relation.parent_session_id)
-                .await
-            {
-                tracing::warn!(
-                    child_session_id = %relation.child_session_id,
-                    parent_session_id = %relation.parent_session_id,
-                    error = format!("{prompt_error:#}"),
-                    "could not enqueue the parent's finished child reports after provisioning failure"
-                );
-            }
-            return Err(error);
+        )?;
+        Ok(())
+    }
+
+    /// Record, through the ordinary lifecycle write, that a child registered by
+    /// this call failed before its lifecycle started. A child that has already
+    /// left `Provisioning` is not touched.
+    async fn fail_unstarted_subagent(
+        self: &Arc<Self>,
+        child_session_id: &str,
+        error: &anyhow::Error,
+    ) {
+        let cause = format!("sub-agent startup failed: {error:#}");
+        let written = blocking({
+            let child_session_id = child_session_id.to_owned();
+            move || Controller::load()?.fail_interrupted_lifecycle(&child_session_id, &cause)
+        })
+        .await;
+        if let Err(write_error) = written {
+            tracing::warn!(
+                child_session_id,
+                error = format!("{write_error:#}"),
+                "could not record a sub-agent that failed to start"
+            );
         }
-        self.reload_controller().await?;
-        Ok(relation)
     }
 
     pub(crate) async fn start_reviewer_child(self: &Arc<Self>, child: &str) -> Result<()> {
@@ -302,7 +356,7 @@ impl RuntimeState {
         let path_cancelled = control.cancelled.clone();
         let remember_launch_choices = request.remember_launch_choices;
         let preferences_owner = self.clone();
-        let (registered, review_turned_off) = blocking(move || {
+        let (registered, review_notice, oracle_notice) = blocking(move || {
             let mut controller = Controller::load()?;
             let path_executor = crate::targets::CancellableProcessExecutor::new(path_cancelled)
                 .with_deadline(Duration::from_secs(30));
@@ -331,6 +385,8 @@ impl RuntimeState {
                     base: request.base,
                     no_later_history: request.no_later_history,
                     subagents: request.subagents,
+                    oracle: request.oracle,
+                    oracle_choice: request.oracle_choice,
                     review: request.review,
                     no_project_memory: request.no_project_memory,
                     no_github_events: request.no_github_events,
@@ -401,10 +457,16 @@ impl RuntimeState {
                     remembered_container_size,
                 },
                 registration.review_notice,
+                registration.oracle_notice,
             ))
         })
         .await?;
-        let capacity_warning = _container_admission.warning.clone();
+        let capacity_warning = [oracle_notice, _container_admission.warning.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let capacity_warning = (!capacity_warning.is_empty()).then_some(capacity_warning);
         drop(_container_admission);
         let session_id = registered.session.id.clone();
         self.start_or_join_lifecycle_controlled(
@@ -466,7 +528,7 @@ impl RuntimeState {
             },
         )?;
         self.reload_controller().await?;
-        Ok((registered, review_turned_off, capacity_warning))
+        Ok((registered, review_notice, capacity_warning))
     }
 
     pub async fn wait_create_session(&self, session_id: &str) -> Result<()> {
@@ -560,15 +622,11 @@ mod delegation_replay_tests {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: mj_core::config::data_dir().join("unused-profile-home"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
                 legacy_subagents: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    mj_core::config::data_dir().join("unused-profile-home"),
+                )
             },
         );
         config.targets.insert(
@@ -590,6 +648,8 @@ mod delegation_replay_tests {
                 .unwrap()
                 .last_subagent_policy_for("codex");
             let request = mj_client::daemon::CreateSessionRequest {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: remember,
                 remember_container_size: false,
                 create_managed_worktree: Some(false),
@@ -698,15 +758,11 @@ mod delegation_replay_tests {
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: mj_core::config::data_dir().join("missing-profile-home"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                guardian_review_model: None,
-                codex_profile: None,
-                muse_auto_review: None,
                 legacy_subagents: None,
+                ..mj_core::config::HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    mj_core::config::data_dir().join("missing-profile-home"),
+                )
             },
         );
         config.save().unwrap();
@@ -723,6 +779,8 @@ mod delegation_replay_tests {
         crate::database::save_session(&legacy).unwrap();
         let runtime = crate::daemon::tests::test_runtime_state();
         let request = mj_client::daemon::CreateSessionRequest {
+            oracle: None,
+            oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: false,
             create_managed_worktree: None,

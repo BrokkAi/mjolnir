@@ -2438,6 +2438,8 @@ mod tests {
             source_unavailable: false,
             conversion: None,
             selection: mj_core::state::MoveSelection {
+                oracle: None,
+                oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
                 session_id: "session-1".into(),

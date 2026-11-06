@@ -398,7 +398,6 @@ impl DashboardState {
         .unwrap_or_default()
         .to_lowercase();
         [
-            session.display_title().to_lowercase(),
             session.listed_title().to_lowercase(),
             branch,
             session.id.to_lowercase(),
@@ -1094,6 +1093,7 @@ impl DashboardState {
                 .entry(workspace_id.to_owned())
                 .or_insert_with(|| WorkspaceViewState {
                     sessions_scroll: 0,
+                    sessions_wheel_scrolled_from: None,
                     targets_scroll: 0,
                     quota_scroll: 0,
                     capacity_index: 0,
@@ -1397,6 +1397,8 @@ impl DashboardState {
         self.recenter_on_selection.set(None);
         if focus == Focus::Sessions {
             self.set_session_action_focus(None);
+            // Choosing a row, even the current one, shows it again.
+            self.sessions_wheel_scrolled_from.take();
         }
         match focus {
             Focus::Sessions => {
@@ -1446,6 +1448,17 @@ impl DashboardState {
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
         self.scroll_selection_for(self.focus, delta);
+    }
+
+    /// Scrolls the Sessions list by `delta` rows without moving the selection.
+    /// The renderer clamps the offset to the list and leaves it alone until
+    /// the selection changes.
+    pub(crate) fn scroll_sessions_view(&mut self, delta: isize) {
+        self.recenter_on_selection.set(None);
+        *self.sessions_wheel_scrolled_from.borrow_mut() =
+            self.selected_session_id().map(str::to_owned);
+        self.sessions_scroll
+            .set(self.sessions_scroll.get().saturating_add_signed(delta));
     }
 
     pub(crate) fn scroll_selection_for(&mut self, focus: Focus, delta: isize) {

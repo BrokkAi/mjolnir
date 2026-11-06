@@ -171,8 +171,29 @@ impl RuntimeState {
                         crate::controller::stopped_subagent(&controller.state, child_id)
                     })
                     .collect::<Result<Vec<_>>>()?;
-                if !stopped.is_empty() {
-                    crate::database::record_stopped_subagents(&parent_session_id, &stopped)?;
+                // The primary hears that its oracle was stopped, but never its
+                // session ID or prompt: the oracle is listed by a fixed entry.
+                let mut announced = Vec::new();
+                let mut oracle_stopped = false;
+                for child in &stopped {
+                    let oracle = controller
+                        .state
+                        .subagents
+                        .get(&child.child_session_id)
+                        .is_some_and(|relation| {
+                            relation.kind == mj_core::subagent::SubagentKind::Oracle
+                        });
+                    if oracle {
+                        oracle_stopped = true;
+                    } else {
+                        announced.push(child.clone());
+                    }
+                }
+                if oracle_stopped {
+                    announced.push(mj_core::subagent::StoppedSubagent::oracle());
+                }
+                if !announced.is_empty() {
+                    crate::database::record_stopped_subagents(&parent_session_id, &announced)?;
                 }
                 Ok(stopped)
             }

@@ -577,6 +577,7 @@ fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
 pub struct SessionRegistration {
     pub id: String,
     pub review_notice: Option<&'static str>,
+    pub oracle_notice: Option<String>,
 }
 
 pub struct SessionLaunchOptions {
@@ -595,6 +596,8 @@ pub struct SessionLaunchOptions {
     /// only; see `ExactCheckout::no_later_history`.
     pub no_later_history: bool,
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
+    pub oracle: Option<bool>,
+    pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     /// Turn review for this session; `None` follows `[review]`.
     pub review: Option<mj_core::config::SessionReview>,
     /// Start with no project memory; see `SessionRecord::no_project_memory`.
@@ -902,6 +905,7 @@ impl Controller {
         options: SessionLaunchOptions,
         executor: &impl CommandExecutor,
     ) -> Result<SessionRegistration> {
+        let options_oracle_explicit = options.oracle_choice.is_some();
         let SessionLaunchOptions {
             remember_launch_choices,
             remember_container_size,
@@ -911,6 +915,8 @@ impl Controller {
             base,
             no_later_history,
             subagents,
+            oracle,
+            mut oracle_choice,
             mut review,
             no_project_memory,
             no_github_events,
@@ -1067,7 +1073,26 @@ impl Controller {
         let now = now();
         let subagents = subagents
             .unwrap_or_else(|| mj_core::subagent::SubagentPolicy::default_for(profile.kind));
+        let mut oracle_enabled = oracle.unwrap_or_else(|| {
+            oracle_choice.is_some() || self.state.last_oracle_choice_for(profile_id)
+        });
+        let mut oracle_notice = None;
+        // Only an explicit request is turned off here; an implicit one keeps
+        // the stored and remembered values for when a model is configured.
+        if oracle_enabled
+            && (oracle == Some(true) || options_oracle_explicit)
+            && oracle_choice
+                .as_ref()
+                .or(self.config.subagents.oracle.as_ref())
+                .is_none_or(|choice| choice.model.trim().is_empty())
+        {
+            oracle_enabled = false;
+            oracle_choice = None;
+            oracle_notice = Some(mj_core::state::ORACLE_UNAVAILABLE_NOTICE.to_owned());
+        }
         let record = SessionRecord {
+            oracle_choice,
+            oracle: oracle_enabled,
             project,
             target_runtime: Some(template.into()),
             build_cache: None,
@@ -1127,6 +1152,11 @@ impl Controller {
                 .last_subagent_policies
                 .insert(profile_id.to_owned(), policy);
         }
+        if remember_launch_choices {
+            self.state
+                .last_oracle_choices
+                .insert(profile_id.to_owned(), record.oracle);
+        }
         self.state.sessions.insert(id.clone(), record);
         if let Some((host, size)) = selected_container_size {
             self.state.remember_container_size(&host, size);
@@ -1144,7 +1174,11 @@ impl Controller {
                 ),
             }
         }
-        Ok(SessionRegistration { id, review_notice })
+        Ok(SessionRegistration {
+            id,
+            review_notice,
+            oracle_notice,
+        })
     }
 
     pub fn rename_session(&mut self, session_id: &str, title: &str) -> Result<String> {
@@ -1271,6 +1305,11 @@ impl Controller {
                 .get_mut(&id)
                 .expect("collected session")
                 .last_profile = new_id.to_owned();
+        }
+        if let Some(oracle) = self.state.last_oracle_choices.remove(old_id) {
+            self.state
+                .last_oracle_choices
+                .insert(new_id.to_owned(), oracle);
         }
         if let Some(policy) = self.state.last_subagent_policies.remove(old_id) {
             self.state

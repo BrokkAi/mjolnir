@@ -3,6 +3,27 @@ use super::*;
 
 use crate::targets::tests::unwrapped_remote_line;
 
+#[test]
+fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
+    let mut session = crate::controller::test_support::checkpoint_test_session("primary");
+    let mut choices = mj_core::config::SubagentConfig::default();
+    let choice = mj_core::config::SubagentChoice {
+        model: "strong".into(),
+        effort: Some("high".into()),
+    };
+    session.oracle = true;
+    assert!(!oracle_launch_enabled(&session, false, &choices));
+    choices.oracle = Some(choice.clone());
+    assert!(oracle_launch_enabled(&session, false, &choices));
+    assert!(!oracle_launch_enabled(&session, true, &choices));
+    session.oracle = false;
+    assert!(!oracle_launch_enabled(&session, false, &choices));
+    session.oracle = true;
+    session.oracle_choice = Some(choice);
+    choices.oracle = None;
+    assert!(oracle_launch_enabled(&session, false, &choices));
+}
+
 fn stamped_worker(body: &[u8]) -> Vec<u8> {
     let mut bytes = body.to_vec();
     bytes.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
@@ -555,19 +576,12 @@ fn node_preflight_accepts_a_managed_runtime_when_node_is_missing() {
         &format!("#!/bin/sh\ncase \"$1\" in -s) echo {system} ;; -m) echo {machine} ;; esac\n"),
     );
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: directory.path().into(),
         environment: std::collections::BTreeMap::from([(
             "PATH".into(),
             directory.path().to_string_lossy().into_owned(),
         )])
         .into(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, directory.path().to_path_buf())
     };
     preflight_harness(
         &mj_core::config::TargetTemplate::LocalBare,
@@ -582,19 +596,12 @@ fn node_preflight_accepts_a_managed_runtime_when_node_is_missing() {
 fn node_preflight_explains_when_the_target_has_no_managed_runtime() {
     let directory = tempfile::tempdir().unwrap();
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: directory.path().into(),
         environment: std::collections::BTreeMap::from([(
             "PATH".into(),
             directory.path().to_string_lossy().into_owned(),
         )])
         .into(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, directory.path().to_path_buf())
     };
     let error = format!(
         "{:#}",
@@ -625,19 +632,12 @@ fn dsh_preflight_accepts_only_its_native_binary_without_node_or_curl() {
     );
     mj_core::test_hooks::install_fake_command(directory.path(), "dsh-acp", &current);
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Dsh,
-        home: directory.path().into(),
         environment: std::collections::BTreeMap::from([(
             "PATH".into(),
             directory.path().to_string_lossy().into_owned(),
         )])
         .into(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Dsh, directory.path().to_path_buf())
     };
 
     preflight_harness(
@@ -745,15 +745,10 @@ fn blank_claude_auth_environment_values_do_not_count_as_logins() {
     use mj_core::credentials::CLAUDE_OAUTH_TOKEN_ENV;
 
     let mut profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Claude,
-        home: std::path::PathBuf::from("claude"),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            HarnessKind::Claude,
+            std::path::PathBuf::from("claude"),
+        )
     };
     let mut environment = BTreeMap::from([
         (CLAUDE_OAUTH_TOKEN_ENV.to_owned(), " \n ".to_owned()),
@@ -823,15 +818,7 @@ fn an_apple_container_takes_macs_claude_keychain_login_unless_a_setup_token_does
     let staged = directory.path().join("profile");
     std::fs::create_dir(&staged).unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Claude,
-        home: directory.path().join("claude"),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, directory.path().join("claude"))
     };
     let backend = targets::TargetLocator::AppleContainer {
         borrowed_from: None,
@@ -2350,16 +2337,9 @@ fn dsh_launch_uses_native_agents_md_without_duplicate_system_prompt() {
     std::fs::create_dir_all(&home).unwrap();
     let own = home.join("AGENTS.md");
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Dsh,
-        home: home.clone(),
         environment: BTreeMap::from([("DEEPSEEK_API_KEY".to_owned(), "sk-dummy".to_owned())])
             .into(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Dsh, home.clone())
     };
     let refusal = |error: anyhow::Error| {
         let refusal = mj_core::refusal::Refusal::of(&error).expect("a refusal for the client");
@@ -2595,14 +2575,17 @@ fn a_session_without_project_memory_launches_without_memory() {
         };
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
-            kind,
-            home: directory.path().join(format!("{}-home", kind.id())),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                kind,
+                directory.path().join(format!("{}-home", kind.id())),
+            )
         };
         let launch = |no_project_memory: bool| {
             let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
@@ -2677,14 +2660,17 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
         };
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
-            kind,
-            home: directory.path().join(format!("{}-home", kind.id())),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(
+                kind,
+                directory.path().join(format!("{}-home", kind.id())),
+            )
         };
         let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
         session.harness_kind = kind;
@@ -2768,6 +2754,7 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         environment: BTreeMap::from([("ZAI_API_KEY".to_owned(), "coding-plan-key".to_owned())])
             .into(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
@@ -2787,15 +2774,7 @@ fn staging_a_muse_profile_hands_its_saved_model_list_to_the_session_data_directo
     std::fs::create_dir_all(saved.parent().unwrap()).unwrap();
     std::fs::write(&saved, br#"{"schema_version":2,"rows":[]}"#).unwrap();
     let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Muse,
-        home: home.clone(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Muse, home.clone())
     };
     let staged = tempfile::tempdir().unwrap();
     let staged_home = staged.path().join("muse");
@@ -3078,6 +3057,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         environment: BTreeMap::from([("DEEPSEEK_API_KEY".to_owned(), "deepseek-key".to_owned())])
             .into(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
@@ -3153,15 +3133,10 @@ fn an_inline_token_provider_stages_its_catalog_and_guardian_reviewer() {
     .unwrap();
     // No `env_key` and an empty environment: the key is only in `config.toml`.
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Codex,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            home.path().to_path_buf(),
+        )
     };
     let asked = std::cell::RefCell::new(Vec::new());
 
@@ -3220,15 +3195,10 @@ fn stage_grok_profile_copies_authentication_and_agent_identity() {
     std::fs::write(home.path().join("sessions/session_search.sqlite"), "x").unwrap();
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Grok,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Grok,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3254,15 +3224,10 @@ fn stage_claude_profile_preserves_rollout_identity() {
     std::fs::write(home.path().join(".claude.json"), identity).unwrap();
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Claude,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Claude,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3301,15 +3266,10 @@ fn stage_claude_profile_follows_symlinked_entries() {
 
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Claude,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Claude,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3343,15 +3303,10 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
 
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Claude,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Claude,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3456,14 +3411,14 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
         let staged = tempfile::tempdir().unwrap();
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
-            kind,
-            home: home.path().to_path_buf(),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -3536,15 +3491,10 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
 
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Claude,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Claude,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3600,15 +3550,10 @@ fn stage_claude_profile_skips_dangling_allowlist_symlinks() {
     std::fs::write(home.path().join("settings.json"), "{}").unwrap();
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Claude,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Claude,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3822,6 +3767,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         ])
         .into(),
         context_window_bytes: None,
+        models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
@@ -3974,15 +3920,7 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
     }
 
     let claude = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Claude,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf())
     };
     for (target, launch) in launches_on_every_target(&claude) {
         if target == "localhost" {
@@ -4111,15 +4049,8 @@ fn a_bedrock_codex_launch_passes_aws_settings_to_every_target() {
         ("AWS_EC2_METADATA_DISABLED".to_owned(), "false".to_owned()),
     ]);
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: home.path().to_path_buf(),
         environment: aws_environment.clone().into(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, home.path().to_path_buf())
     };
 
     for (target, launch) in launches_on_every_target(&profile) {
@@ -4363,15 +4294,7 @@ fn raw_local_muse_launches_with_guardian_approvals() {
         worker_root: "/home/me/.local/share/hel/workers/session-muse".into(),
     });
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Muse,
-        home: PathBuf::from("/profiles/muse"),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Muse, PathBuf::from("/profiles/muse"))
     };
 
     let (launch, _, _) = worker_launch_config(
@@ -4411,15 +4334,10 @@ fn stage_kimi_profile_preserves_device_identity() {
     .unwrap();
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Kimi,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Kimi,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -4446,15 +4364,10 @@ fn staged_kimi_profile_binds_history_tools_to_the_target_runtime() {
     std::fs::write(home.path().join("mcp.json"), &original_body).unwrap();
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Kimi,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Kimi,
+            home.path().to_path_buf(),
+        )
     };
     stage_profile(&profile, staged.path()).unwrap();
     let memory = ProjectMemoryLaunchConfig {
@@ -4543,15 +4456,10 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
     std::fs::write(home.path().join("SYSTEM.md"), system_override).unwrap();
     let staged = tempfile::tempdir().unwrap();
     let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Kimi,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        legacy_subagents: Default::default(),
-        guardian_review_model: None,
-        codex_profile: None,
-        muse_auto_review: None,
+        ..mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Kimi,
+            home.path().to_path_buf(),
+        )
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -4735,6 +4643,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         commands: RefCell::new(Vec::new()),
     };
     let launch = WorkerLaunchConfig {
+        oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
@@ -4872,6 +4781,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         borrowed_from: None,
     };
     let launch = WorkerLaunchConfig {
+        oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         goal_resume_request: None,
@@ -4979,6 +4889,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         launch: RefCell::new(None),
     };
     let launch = WorkerLaunchConfig {
+        oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
@@ -5417,14 +5328,14 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
         }
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
-            kind,
-            home: home.path().to_path_buf(),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -5574,14 +5485,14 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
         let home = directory.path().join(format!("{}-home", kind.id()));
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
-            kind,
-            home: home.clone(),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(kind, home.clone())
         };
         let canonical = profile.authentication_marker();
         let database = home.join(".data/opencode/opencode.db");
@@ -5724,14 +5635,14 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
         let home = directory.path().join(format!("{}-home", kind.id()));
         let profile = mj_core::config::HarnessProfile {
             enabled: true,
-            kind,
-            home: home.clone(),
             environment: Default::default(),
             context_window_bytes: None,
+            models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            ..mj_core::config::HarnessProfile::new(kind, home.clone())
         };
         let marker = profile.authentication_marker();
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();

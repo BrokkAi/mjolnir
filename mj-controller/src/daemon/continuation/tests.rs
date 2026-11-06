@@ -95,7 +95,7 @@ async fn continuation_checks_run_concurrently_and_defer_review_until_each_settle
             .collect(),
     );
     let log_dir = tempfile::tempdir().unwrap();
-    let decision_log = mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap();
+    let decision_log = mj_core::jev::DecisionLog::open(log_dir.path().to_path_buf()).unwrap();
     let reviews = Arc::new(Mutex::new(Vec::new()));
     let enabled = Arc::new(AtomicBool::new(true));
     let environment = Environment {
@@ -233,7 +233,7 @@ async fn continuation_does_not_revive_old_idle_sessions_and_new_input_cancels_a_
         Box::pin(async move { rx.await.context("fake classifier cancelled")? })
     });
     let log_dir = tempfile::tempdir().unwrap();
-    let log = mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap();
+    let log = mj_core::jev::DecisionLog::open(log_dir.path().to_path_buf()).unwrap();
     let environment = Environment {
         start_quota_move: Arc::new(|_, _, _| {
             Box::pin(async { anyhow::bail!("unexpected Move start") })
@@ -313,7 +313,7 @@ async fn continuation_submits_a_guarded_prompt_and_reviews_only_after_the_chain(
             project_memory: None,
         }]);
         let log_dir = tempfile::tempdir().unwrap();
-        let log = mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap();
+        let log = mj_core::jev::DecisionLog::open(log_dir.path().to_path_buf()).unwrap();
         let reviews = Arc::new(Mutex::new(Vec::new()));
         let environment = Environment {
             start_quota_move: Arc::new(|_, _, _| {
@@ -752,7 +752,7 @@ async fn a_due_recovery_that_cannot_be_submitted_says_which_fact_refused_it() {
         start_quota_move: Arc::new(|_, _, _| {
             Box::pin(async { anyhow::bail!("unexpected Move start") })
         }),
-        log: Some(mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap()),
+        log: Some(mj_core::jev::DecisionLog::open(log_dir.path().to_path_buf()).unwrap()),
         control: remote.control,
         allowed: Arc::new(|_| true),
         claim: Arc::new(|_| Claim::Allowed),
@@ -865,7 +865,7 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
             project_memory: None,
         }]);
         let log_dir = tempfile::tempdir().unwrap();
-        let log = mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap();
+        let log = mj_core::jev::DecisionLog::open(log_dir.path().to_path_buf()).unwrap();
         let environment = Environment {
             start_quota_move: Arc::new(|_, _, _| {
                 Box::pin(async { anyhow::bail!("unexpected Move start") })
@@ -1023,7 +1023,7 @@ async fn background_work_defers_continuation_and_its_end_brings_a_fresh_check() 
         project_memory: None,
     }]);
     let log_dir = tempfile::tempdir().unwrap();
-    let log = mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap();
+    let log = mj_core::jev::DecisionLog::open(log_dir.path().to_path_buf()).unwrap();
     let environment = Environment {
         start_quota_move: Arc::new(|_, _, _| {
             Box::pin(async { anyhow::bail!("unexpected Move start") })
@@ -1425,14 +1425,14 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
             id.into(),
             HarnessProfile {
                 enabled: true,
-                kind,
-                home: Default::default(),
                 environment: Default::default(),
                 context_window_bytes: None,
+                models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                ..mj_core::config::HarnessProfile::new(kind, PathBuf::default())
             },
         );
         let model = if id == "wrong-model" {
@@ -1468,6 +1468,7 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
                 "api" => CandidateQuota::UsagePriced,
                 "unknown" => CandidateQuota::Unknown,
                 _ => CandidateQuota::Subscription {
+                    refreshed_at_epoch_seconds: 0,
                     paid_credits: if matches!(id, "paid" | "unhealthy") {
                         mj_client::quota::PaidCredits::limited(75.0)
                     } else {

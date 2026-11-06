@@ -73,11 +73,13 @@ impl DashboardState {
         let profile_id = profile_id.as_str();
         let remembered = self.state.last_subagent_policy_for(profile_id);
         let mut delegation = subagents::SubagentDraft::new(remembered.clone());
+        delegation.oracle = self.state.last_oracle_choice_for(profile_id);
         delegation.refresh_create(
             profile_id,
             &self.config,
             &self.profile_capabilities,
             &remembered,
+            self.state.last_oracle_choice_for(profile_id),
         );
         self.mode = Mode::New(NewWizard {
             subagents: Box::new(delegation),
@@ -157,13 +159,14 @@ impl DashboardState {
             .unwrap_or(0);
         let target = self.offered_target_index_or_first(&session.target_template_id);
         self.mode = Mode::Resume(ResumeWizard {
-            subagents: Box::new(subagents::SubagentDraft::new(
-                session.subagents.clone().unwrap_or_default(),
-            )),
+            subagents: Box::new(
+                subagents::SubagentDraft::new(session.subagents.clone().unwrap_or_default())
+                    .with_oracle(session.oracle, session.oracle_choice.clone()),
+            ),
             files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
-            title: session.display_title().to_owned(),
+            title: session.listed_title().to_owned(),
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             moving: false,
             preparation: None,
@@ -298,13 +301,14 @@ impl DashboardState {
             .unwrap_or(0);
         let target = self.offered_target_index_or_first(&session.target_template_id);
         self.mode = Mode::Resume(ResumeWizard {
-            subagents: Box::new(subagents::SubagentDraft::new(
-                session.subagents.clone().unwrap_or_default(),
-            )),
+            subagents: Box::new(
+                subagents::SubagentDraft::new(session.subagents.clone().unwrap_or_default())
+                    .with_oracle(session.oracle, session.oracle_choice.clone()),
+            ),
             files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
-            title: session.display_title().to_owned(),
+            title: session.listed_title().to_owned(),
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             moving: true,
             preparation: None,
@@ -390,7 +394,7 @@ impl DashboardState {
             files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
-            title: session.display_title().to_owned(),
+            title: session.listed_title().to_owned(),
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             moving: true,
             preparation: None,
