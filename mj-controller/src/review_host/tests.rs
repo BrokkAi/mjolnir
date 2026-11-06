@@ -235,9 +235,14 @@ fn answer_for(action: &ReviewerAction) -> Result<ReviewerOutcome, String> {
         ReviewerAction::CaptureDelta { .. } => Ok(ReviewerOutcome::Delta {
             repositories: Vec::new(),
         }),
-        ReviewerAction::AdvanceBaseline { .. } | ReviewerAction::RecordReviewed { .. } => {
-            Ok(ReviewerOutcome::BaselineAdvanced)
-        }
+        ReviewerAction::AdvanceBaseline { .. }
+        | ReviewerAction::RecordReviewed { .. }
+        | ReviewerAction::RecordOverridden { .. } => Ok(ReviewerOutcome::BaselineAdvanced),
+        ReviewerAction::SetReviewBase { path, commit } => Ok(ReviewerOutcome::ReviewBaseSet {
+            root: path.clone().unwrap_or_else(|| "/workspace/app".into()),
+            commit: commit.clone(),
+            tree: "settree".into(),
+        }),
     }
 }
 
@@ -261,6 +266,8 @@ fn view_of(
     materialized.execution = execution;
     materialized.applied_event_ordinal = 12;
     let mut operational = operational();
+    // Sessions run the current worker unless a test publishes an older one.
+    operational.relay_protocol_version = Some(mj_core::relay::RELAY_PROTOCOL_VERSION);
     if prompt_driven
         && matches!(
             execution,
@@ -3034,7 +3041,6 @@ async fn open_push(
     assert!(matches!(
         action,
         ReviewerAction::CaptureDelta {
-            repositories: None,
             scope: mj_core::relay::CaptureScope::PushableCommits,
             ..
         }
@@ -3623,7 +3629,6 @@ async fn answer_override_capture(
     assert!(matches!(
         action,
         ReviewerAction::CaptureDelta {
-            repositories: None,
             scope: mj_core::relay::CaptureScope::PushableCommits,
             ..
         }
@@ -3634,6 +3639,15 @@ async fn answer_override_capture(
 }
 
 async fn finish_override_worker_actions(manager: &mut FakeManager, expected_notice: &str) {
+    finish_override_worker_actions_for(manager, expected_notice, false).await
+}
+
+/// `old_worker` is a session whose worker predates `RecordOverridden`.
+async fn finish_override_worker_actions_for(
+    manager: &mut FakeManager,
+    expected_notice: &str,
+    old_worker: bool,
+) {
     match manager.next().await {
         RemoteSessionRequest::Submit {
             command: RelayCommand::RecordNotice { text },
@@ -3663,8 +3677,14 @@ async fn finish_override_worker_actions(manager: &mut FakeManager, expected_noti
             other.session_id()
         ),
     };
-    assert!(
-        matches!(action, ReviewerAction::RecordReviewed { ref trees } if trees[&PathBuf::from("/workspace/app")] == ("newtree".into(), "bbbbbbb456".into()))
+    let trees = match &action {
+        ReviewerAction::RecordOverridden { trees } if !old_worker => trees,
+        ReviewerAction::RecordReviewed { trees } if old_worker => trees,
+        other => panic!("unexpected record action {other:?}"),
+    };
+    assert_eq!(
+        trees[&PathBuf::from("/workspace/app")],
+        ("newtree".to_owned(), "bbbbbbb456".to_owned())
     );
     reply.send(answer_for(&action)).unwrap();
     assert!(
@@ -3939,6 +3959,231 @@ async fn push_override_retries_after_reviewed_ref_was_recorded_but_state_save_fa
     host.shutdown().await.unwrap();
 }
 
+async fn publish_relay_protocol(manager: &FakeManager, session: &str, version: u32) {
+    let mut older = view(session, MaterializedExecutionState::Idle);
+    older
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(version);
+    manager
+        .publisher
+        .publish(session.to_owned(), older)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn push_override_on_an_old_worker_records_reviewed_and_says_the_base_moved() {
+    let session = session_id("override-old-worker");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    pending_push_findings(&environment);
+    publish_relay_protocol(
+        &manager,
+        &session,
+        mj_core::relay::RELAY_REVIEW_BASE_PROTOCOL - 1,
+    )
+    .await;
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let request = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            host.override_push(&session, one_override("false positive"))
+                .await
+        })
+    };
+    answer_override_capture(&mut manager, vec![push_delta("/workspace/app", "newtree")]).await;
+    finish_override_worker_actions_for(&mut manager, "false positive", true).await;
+    let reply = request.await.unwrap().unwrap();
+    assert_eq!(reply["accepted"], true);
+    let message = reply["message"].as_str().unwrap();
+    assert!(
+        message.contains("worker is older") && message.contains("review base moved"),
+        "{message}"
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn push_override_on_a_current_worker_says_the_base_is_unchanged() {
+    let session = session_id("override-current-worker");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    pending_push_findings(&environment);
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let request = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            host.override_push(&session, one_override("false positive"))
+                .await
+        })
+    };
+    answer_override_capture(&mut manager, vec![push_delta("/workspace/app", "newtree")]).await;
+    finish_override_worker_actions(&mut manager, "false positive").await;
+    let reply = request.await.unwrap().unwrap();
+    assert!(
+        reply["message"]
+            .as_str()
+            .unwrap()
+            .contains("review base is unchanged"),
+        "{reply}"
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn set_review_baseline_moves_the_base_and_clears_the_declined_list() {
+    let session = session_id("set-base");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    pending_push_findings(&environment);
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let request = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            host.set_push_base(&session, "abc1234".into(), Some("../linked".into()))
+                .await
+        })
+    };
+    let (_, action, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::SetReviewBase { .. }))
+        .await;
+    assert!(matches!(
+        &action,
+        ReviewerAction::SetReviewBase { path: Some(path), commit }
+            if path == &PathBuf::from("../linked") && commit == "abc1234"
+    ));
+    reply
+        .send(Ok(ReviewerOutcome::ReviewBaseSet {
+            root: "/workspace/linked".into(),
+            commit: "abc1234ffff".into(),
+            tree: "settree".into(),
+        }))
+        .unwrap();
+    let reply = request.await.unwrap().unwrap();
+    assert_eq!(reply["accepted"], true);
+    assert_eq!(reply["commit"], "abc1234ffff");
+    let message = reply["message"].as_str().unwrap();
+    assert!(
+        message.contains("/workspace/linked") && message.contains("start from commit abc1234ffff"),
+        "{message}"
+    );
+    let state = environment.state();
+    assert!(state.declined_findings.is_empty());
+    assert!(
+        state.push_findings.is_some(),
+        "a pending findings verdict stays overridable"
+    );
+    assert!(state.baselines.is_empty(), "push review keeps no baselines");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), manager.requests.recv())
+            .await
+            .is_err()
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn set_review_baseline_keeps_the_declined_list_when_the_worker_refuses() {
+    let session = session_id("set-base-refused");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    pending_push_findings(&environment);
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let request = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move { host.set_push_base(&session, "abc1234".into(), None).await })
+    };
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::SetReviewBase { .. }))
+        .await;
+    reply
+        .send(Err(
+            "commit abc1234 was never reviewed or overridden; call request_review first".into(),
+        ))
+        .unwrap();
+    let error = request.await.unwrap().unwrap_err();
+    assert!(error.0.contains("call request_review first"), "{}", error.0);
+    assert_eq!(environment.state().declined_findings.len(), 1);
+    assert!(
+        environment.writes().is_empty(),
+        "a refused base move saves nothing"
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn set_review_baseline_refuses_an_old_worker_and_a_running_review() {
+    let session = session_id("set-base-refusals");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    pending_push_findings(&environment);
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+
+    // An override in flight holds the session's review slot.
+    let busy = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            host.override_push(&session, one_override("false positive"))
+                .await
+        })
+    };
+    let (_, _, capture) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    let error = host
+        .set_push_base(&session, "abc1234".into(), None)
+        .await
+        .unwrap_err();
+    assert!(
+        error.0.contains("review is open") && error.0.contains("try again"),
+        "{}",
+        error.0
+    );
+    capture
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![push_delta("/workspace/app", "newtree")],
+        }))
+        .unwrap();
+    finish_override_worker_actions(&mut manager, "false positive").await;
+    busy.await.unwrap().unwrap();
+
+    publish_relay_protocol(
+        &manager,
+        &session,
+        mj_core::relay::RELAY_REVIEW_BASE_PROTOCOL - 1,
+    )
+    .await;
+    let error = host
+        .set_push_base(&session, "abc1234".into(), None)
+        .await
+        .unwrap_err();
+    assert!(
+        error.0.contains("restart the session") && error.0.contains("older"),
+        "{}",
+        error.0
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), manager.requests.recv())
+            .await
+            .is_err(),
+        "a refused base move reaches no worker"
+    );
+    host.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn push_override_load_waits_for_cancelled_review_open_clear_save() {
     let session = session_id("override-load-barrier");
@@ -3998,7 +4243,7 @@ async fn push_override_load_waits_for_cancelled_review_open_clear_save() {
     );
     clear_gate.release();
     answer_override_capture(&mut manager, vec![push_delta("/workspace/app", "newtree")]).await;
-    finish_override_worker_actions(&mut manager, "incorrect").await;
+    finish_override_worker_actions_for(&mut manager, "incorrect", true).await;
     assert_eq!(override_request.await.unwrap().unwrap()["accepted"], true);
     assert!(environment.state().push_findings.is_none());
     host.shutdown().await.unwrap();

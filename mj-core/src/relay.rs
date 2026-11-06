@@ -99,7 +99,10 @@ pub const RELAY_DISMISS_QUESTION_PROTOCOL: u32 = 48;
 pub const RELAY_WORKTREE_REVIEW_PROTOCOL: u32 = 49;
 /// 50 carries a warning when merged-work review is skipped on old Git.
 pub const RELAY_MERGED_REVIEW_WARNING_PROTOCOL: u32 = 50;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_MERGED_REVIEW_WARNING_PROTOCOL;
+/// 51 adds RecordOverridden and SetReviewBase: an override that allows a push
+/// without moving the review base, and an explicit move of that base.
+pub const RELAY_REVIEW_BASE_PROTOCOL: u32 = 51;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_REVIEW_BASE_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

@@ -1504,6 +1504,22 @@ pub fn record_reviewed_tree(
     )
 }
 
+/// Records an overridden review of `tree` at `commit`. A push of the tree is
+/// allowed, but capture never takes the commit as the base of the next review.
+pub fn record_overridden_tree(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    tree: &str,
+    commit: &str,
+) -> Result<()> {
+    pin_review_tree(
+        runner,
+        repository,
+        &format!("refs/mj/overridden/{tree}"),
+        commit,
+    )
+}
+
 /// The empty tree of this repository's object format, read from Git rather
 /// than hardcoded so a SHA-256 repository works as well as a SHA-1 one.
 pub fn empty_tree_id(runner: &dyn GitCommandRunner, repository: &Path) -> Result<String> {
@@ -2174,7 +2190,9 @@ pub(crate) fn restore_git_snapshot_for_session(
                     String::new()
                 };
                 if !old.is_empty() {
-                    if name.starts_with("refs/mj/reviewed/") {
+                    if name.starts_with("refs/mj/reviewed/")
+                        || name.starts_with("refs/mj/overridden/")
+                    {
                         continue;
                     }
                     let owned_start = session.is_some_and(|session| {

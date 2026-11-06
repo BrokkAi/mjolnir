@@ -558,6 +558,58 @@ pub(crate) fn checked_git(
     Ok(output.stdout)
 }
 
+/// Makes `revision` the base of the next push review of `root`. The commit's
+/// tree must already be recorded as reviewed or overridden, which is what lets
+/// the agent move the base only to work a review has seen. Returns the commit
+/// and tree.
+pub fn set_review_base(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    revision: &str,
+) -> Result<(String, String)> {
+    anyhow::ensure!(
+        !revision.is_empty() && !revision.starts_with('-'),
+        "{revision:?} is not a commit; pass a commit hash from a review verdict"
+    );
+    let resolve = |suffix: &str| -> Result<String> {
+        checked_git_text(
+            runner,
+            root,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{revision}{suffix}"),
+            ],
+        )
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "{revision} is not a commit in {}; pass a commit hash from a review verdict",
+                root.display()
+            )
+        })
+    };
+    let commit = resolve("^{commit}")?;
+    let tree = resolve("^{tree}")?;
+    let recorded = checked_git_text(
+        runner,
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            &format!("refs/mj/reviewed/{tree}"),
+            &format!("refs/mj/overridden/{tree}"),
+        ],
+    )?;
+    anyhow::ensure!(
+        !recorded.is_empty(),
+        "commit {commit} was never reviewed or overridden in {}; call request_review first, then call set_review_baseline once the verdict is clean or you have overridden it",
+        root.display()
+    );
+    mj_checkpoint::archive::record_reviewed_tree(runner, root, &tree, &commit)?;
+    Ok((commit, tree))
+}
+
 fn checked_git_text(runner: &dyn GitCommandRunner, root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(checked_git(runner, root, args)?)?
         .trim()
@@ -2620,6 +2672,109 @@ pub(super) mod push_tests {
         assert_eq!(
             capture(&root, &start).base.commit(),
             Some(reviewed.as_str())
+        );
+    }
+
+    // An overridden tree is pushable but is not a review point, so the next
+    // review still covers the whole change.
+    #[test]
+    fn push_capture_ignores_overridden_commits_as_a_base() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        let overridden = commit(&root, "overridden");
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        mj_checkpoint::archive::record_overridden_tree(&SystemGit, &root, &tree, &overridden)
+            .unwrap();
+        commit(&root, "fix");
+        let capture = capture(&root, &start);
+        assert_eq!(
+            capture.base.commit(),
+            Some(start.as_str()),
+            "the base stays at the merge base, not the overridden commit"
+        );
+        assert!(
+            capture.delta.patch.contains("+overridden") || capture.delta.patch.contains("+fix")
+        );
+        assert!(git(&root, &["for-each-ref", "refs/mj/reviewed/"]).is_empty());
+    }
+
+    #[test]
+    fn set_review_base_accepts_reviewed_and_overridden_trees_and_refuses_others() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let start = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["checkout", "-qb", "feature"]);
+        let reviewed = commit(&root, "reviewed");
+        let reviewed_tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        record_reviewed_tree(&SystemGit, &root, &reviewed_tree, &reviewed).unwrap();
+        commit(&root, "overridden");
+        // Review points are ordered by committer date, which has one-second
+        // resolution; give the overridden commit a clearly later one.
+        let amended = SystemGit
+            .run(
+                &root,
+                &GitCommand {
+                    arguments: ["commit", "--amend", "--no-edit", "-q"]
+                        .map(Into::into)
+                        .to_vec(),
+                    stdin: Vec::new(),
+                    env: vec![("GIT_COMMITTER_DATE".into(), "2030-01-01T00:00:00Z".into())],
+                },
+            )
+            .unwrap();
+        assert_eq!(amended.status, 0);
+        let overridden = git(&root, &["rev-parse", "HEAD"]);
+        let overridden_tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        mj_checkpoint::archive::record_overridden_tree(
+            &SystemGit,
+            &root,
+            &overridden_tree,
+            &overridden,
+        )
+        .unwrap();
+        let unreviewed = commit(&root, "unreviewed");
+
+        let error = set_review_base(&SystemGit, &root, &unreviewed).unwrap_err();
+        assert!(
+            error.to_string().contains("call request_review first"),
+            "{error}"
+        );
+        let error = set_review_base(&SystemGit, &root, "no-such-revision").unwrap_err();
+        assert!(error.to_string().contains("is not a commit"), "{error}");
+        let error = set_review_base(&SystemGit, &root, "--output=x").unwrap_err();
+        assert!(error.to_string().contains("is not a commit"), "{error}");
+        assert!(
+            git(&root, &["for-each-ref", "refs/mj/reviewed/"])
+                .lines()
+                .count()
+                == 1
+        );
+
+        // Any revision works: HEAD~1 is the overridden commit. It becomes a
+        // review point and the next capture starts there.
+        assert_eq!(
+            set_review_base(&SystemGit, &root, "HEAD~1").unwrap(),
+            (overridden.clone(), overridden_tree.clone())
+        );
+        assert_eq!(
+            git(
+                &root,
+                &["rev-parse", &format!("refs/mj/reviewed/{overridden_tree}")]
+            ),
+            overridden
+        );
+        assert_eq!(
+            capture(&root, &start).base.commit(),
+            Some(overridden.as_str())
+        );
+        // An abbreviated hash names a reviewed commit as well.
+        assert_eq!(
+            set_review_base(&SystemGit, &root, &reviewed[..10])
+                .unwrap()
+                .0,
+            reviewed
         );
     }
 

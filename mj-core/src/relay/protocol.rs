@@ -285,6 +285,20 @@ pub enum ReviewerRequest {
     AdvanceBaseline {
         trees: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
+    /// Record `trees` as overridden: a push of that tree is allowed, but unlike
+    /// `RecordReviewed` it does not become the base of the next push review.
+    RecordOverridden {
+        trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
+    },
+    /// Make `commit` the base of the next push review of one repository. The
+    /// worker resolves `path` like a scoped capture (the working directory when
+    /// absent) and `commit` as any revision, and refuses unless the commit's
+    /// tree was recorded as reviewed or overridden.
+    SetReviewBase {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<std::path::PathBuf>,
+        commit: String,
+    },
 }
 
 /// What one repository contributed to a cumulative review delta.
@@ -359,6 +373,8 @@ impl ReviewerRequest {
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
             Self::RecordReviewed { .. } => "reviewer_record_reviewed",
+            Self::RecordOverridden { .. } => "reviewer_record_overridden",
+            Self::SetReviewBase { .. } => "reviewer_set_review_base",
         }
     }
 }
@@ -449,6 +465,11 @@ impl RelayRequest {
                     },
                 ..
             } => super::RELAY_WORKTREE_REVIEW_PROTOCOL,
+            Self::Reviewer {
+                request:
+                    ReviewerRequest::RecordOverridden { .. } | ReviewerRequest::SetReviewBase { .. },
+                ..
+            } => super::RELAY_REVIEW_BASE_PROTOCOL,
             Self::Reviewer {
                 request:
                     ReviewerRequest::RecordReviewed { .. }
@@ -693,6 +714,12 @@ pub enum RelayResponsePayload {
     },
     /// The review baselines now name the trees the controller sent.
     ReviewBaselineAdvanced,
+    /// The repository, commit and tree `SetReviewBase` made the review base.
+    ReviewBaseSet {
+        root: std::path::PathBuf,
+        commit: String,
+        tree: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

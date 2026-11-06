@@ -62,6 +62,27 @@ impl ReviewCapture {
             mj_core::relay::ReviewerRequest::AdvanceBaseline { trees } => {
                 self.advance_baseline(trees).await
             }
+            mj_core::relay::ReviewerRequest::RecordOverridden { trees } => {
+                tokio::task::spawn_blocking(move || -> Result<()> {
+                    for (root, (tree, commit)) in trees {
+                        mj_checkpoint::archive::record_overridden_tree(
+                            &mj_checkpoint::archive::SystemGit,
+                            &root,
+                            &tree,
+                            &commit,
+                        )?;
+                    }
+                    Ok(())
+                })
+                .await
+                .context("overridden-tree recording task stopped")??;
+                Ok(RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::ReviewBaselineAdvanced,
+                })
+            }
+            mj_core::relay::ReviewerRequest::SetReviewBase { path, commit } => {
+                self.set_review_base(path, commit).await
+            }
         }
     }
     fn roots(&self) -> Vec<PathBuf> {
@@ -144,6 +165,33 @@ impl ReviewCapture {
         .map_err(|error| anyhow::anyhow!("the review capture stopped: {error}"))??;
         Ok(RelayResponseBody::Ok {
             payload: RelayResponsePayload::ReviewDelta { repositories },
+        })
+    }
+
+    /// Makes a reviewed or overridden commit the base of the next push review.
+    async fn set_review_base(
+        &self,
+        path: Option<PathBuf>,
+        commit: String,
+    ) -> Result<RelayResponseBody> {
+        let roots = self.roots();
+        let cwd = self.cwd.clone();
+        let (root, commit, tree) = tokio::task::spawn_blocking(move || {
+            let git = &mj_checkpoint::archive::SystemGit;
+            let discovered = crate::review::capture::discover_repositories(git, &roots);
+            let (repositories, _) =
+                scoped_repositories(&cwd, &discovered, &[path.unwrap_or_else(|| cwd.clone())])?;
+            let root = repositories
+                .into_iter()
+                .next()
+                .context("the path names no repository")?;
+            let (commit, tree) = crate::review::capture::set_review_base(git, &root, &commit)?;
+            Ok::<_, anyhow::Error>((root, commit, tree))
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("the review base update stopped: {error}"))??;
+        Ok(RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ReviewBaseSet { root, commit, tree },
         })
     }
 
@@ -526,6 +574,105 @@ mod tests {
             vec!["solo.rs"]
         );
         assert!(delta.patch.contains("+solo"), "{}", delta.patch);
+    }
+
+    #[tokio::test]
+    async fn an_override_pins_only_the_overridden_ref_and_set_review_base_promotes_it() {
+        use crate::test_support::git;
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().canonicalize().unwrap().join("repository");
+        std::fs::create_dir(&repository).unwrap();
+        git(&repository, &["init", "-q", "-b", "main"]);
+        git(&repository, &["config", "user.name", "Review Test"]);
+        git(
+            &repository,
+            &["config", "user.email", "review@example.invalid"],
+        );
+        std::fs::write(repository.join("tracked.rs"), "before\n").unwrap();
+        git(&repository, &["add", "tracked.rs"]);
+        git(&repository, &["commit", "-qm", "base"]);
+        std::fs::write(repository.join("tracked.rs"), "after\n").unwrap();
+        git(&repository, &["commit", "-qam", "change"]);
+        let head = git(&repository, &["rev-parse", "HEAD"]);
+        let tree = git(&repository, &["rev-parse", "HEAD^{tree}"]);
+        let worker = temp.path().join("worker");
+        std::fs::create_dir(&worker).unwrap();
+        let capture = Arc::new(ReviewCapture {
+            session_id: "override-test".into(),
+            cwd: repository.clone(),
+            additional_directories: Vec::new(),
+            review_capture: true,
+            untracked_at_start: Default::default(),
+            primary_relay: Arc::new(Mutex::new(
+                DurableRelay::open(&worker, "override-test", "1.0.0").unwrap(),
+            )),
+            operation: tokio::sync::Mutex::new(()),
+        });
+        let refused = capture
+            .handle(ReviewerRequest::SetReviewBase {
+                path: None,
+                commit: head.trim().to_owned(),
+            })
+            .await
+            .unwrap_err();
+        assert!(refused.to_string().contains("call request_review first"));
+        capture
+            .handle(ReviewerRequest::RecordOverridden {
+                trees: std::collections::BTreeMap::from([(
+                    repository.clone(),
+                    (tree.clone(), head.trim().to_owned()),
+                )]),
+            })
+            .await
+            .unwrap();
+        assert!(git(&repository, &["for-each-ref", "refs/mj/reviewed/"]).is_empty());
+        assert_eq!(
+            git(
+                &repository,
+                &["rev-parse", &format!("refs/mj/overridden/{tree}")]
+            ),
+            head.trim()
+        );
+        let result = capture
+            .handle(ReviewerRequest::SetReviewBase {
+                path: None,
+                commit: "HEAD".into(),
+            })
+            .await
+            .unwrap();
+        let RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ReviewBaseSet {
+                    root,
+                    commit,
+                    tree: set,
+                },
+        } = result
+        else {
+            panic!("set_review_base did not answer with the base");
+        };
+        assert_eq!(
+            (root, commit.as_str(), set),
+            (repository.clone(), head.trim(), tree.clone())
+        );
+        assert_eq!(
+            git(
+                &repository,
+                &["rev-parse", &format!("refs/mj/reviewed/{tree}")]
+            ),
+            head.trim()
+        );
+        let outside = capture
+            .handle(ReviewerRequest::SetReviewBase {
+                path: Some(temp.path().to_path_buf()),
+                commit: "HEAD".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            outside.to_string().contains("not in a Git repository"),
+            "{outside}"
+        );
     }
 
     #[tokio::test]

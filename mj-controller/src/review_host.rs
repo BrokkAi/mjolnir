@@ -71,6 +71,7 @@ mod override_push;
 mod persist;
 mod resolve;
 mod roles;
+mod set_base;
 mod slots;
 use slots::*;
 mod recovery;

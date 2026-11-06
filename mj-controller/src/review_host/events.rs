@@ -25,6 +25,12 @@ pub(super) enum HostEvent {
         overrides: Vec<ReviewOverride>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     },
+    SetPushBase {
+        session_id: String,
+        commit: String,
+        path: Option<String>,
+        reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
+    },
     OverrideValidated {
         session_id: String,
         permit: oneshot::Sender<Result<crate::upgrade::Work, StartRefusal>>,

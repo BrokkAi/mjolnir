@@ -204,6 +204,26 @@ impl TurnReviewHost {
             .map_err(|_| StartRefusal("the review host stopped".into()))?
     }
 
+    pub async fn set_push_base(
+        &self,
+        session_id: &str,
+        commit: String,
+        path: Option<String>,
+    ) -> Result<serde_json::Value, StartRefusal> {
+        let (reply, answer) = oneshot::channel();
+        self.events
+            .send(HostEvent::SetPushBase {
+                session_id: session_id.to_owned(),
+                commit,
+                path,
+                reply,
+            })
+            .map_err(|_| StartRefusal("the review host stopped".into()))?;
+        answer
+            .await
+            .map_err(|_| StartRefusal("the review host stopped".into()))?
+    }
+
     /// Reviews the turn that just finished, on request.
     pub async fn start(&self, session_id: &str, manual: bool) -> Result<(), StartRefusal> {
         let (reply, answer) = oneshot::channel();

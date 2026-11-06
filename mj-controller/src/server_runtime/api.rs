@@ -63,6 +63,15 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { bail!("push review is unavailable") })
     }
 
+    fn set_review_baseline(
+        &self,
+        _session_id: String,
+        _commit: String,
+        _path: Option<String>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        Box::pin(async { bail!("push review is unavailable") })
+    }
+
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         Default::default()
     }
@@ -249,6 +258,20 @@ impl ExportRuntime for RuntimeState {
                 .override_push(&session_id, overrides)
                 .await
                 .map_err(|error| anyhow!("override_review refused: {}", error.0))
+        })
+    }
+
+    fn set_review_baseline(
+        &self,
+        session_id: String,
+        commit: String,
+        path: Option<String>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        Box::pin(async move {
+            self.review_host()
+                .set_push_base(&session_id, commit, path)
+                .await
+                .map_err(|error| anyhow!("set_review_baseline refused: {}", error.0))
         })
     }
 
@@ -922,8 +945,10 @@ impl ApiBackend {
                     .override_review(parent_session_id.to_owned(), overrides.clone())
                     .await
             }
-            SubagentToolAction::SetReviewBaseline { .. } => {
-                anyhow::bail!("set_review_baseline is not available yet")
+            SubagentToolAction::SetReviewBaseline { commit, path } => {
+                self.exports
+                    .set_review_baseline(parent_session_id.to_owned(), commit.clone(), path.clone())
+                    .await
             }
             SubagentToolAction::ListProfiles => {
                 anyhow::bail!("list_profiles is no longer available")

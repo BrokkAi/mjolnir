@@ -137,9 +137,20 @@ struct RecordingExports {
     parent: SessionRecord,
     registered: std::sync::Mutex<Option<crate::controller::RegisterSubagentRequest>>,
     override_call: std::sync::Mutex<Option<(String, Vec<mj_core::subagent::ReviewOverride>)>>,
+    base_call: std::sync::Mutex<Option<(String, String, Option<String>)>>,
 }
 
 impl ExportRuntime for RecordingExports {
+    fn set_review_baseline(
+        &self,
+        session_id: String,
+        commit: String,
+        path: Option<String>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        *self.base_call.lock().unwrap() = Some((session_id, commit, path));
+        Box::pin(async { Ok(serde_json::json!({"accepted": true})) })
+    }
+
     fn override_review(
         &self,
         session_id: String,
@@ -192,6 +203,10 @@ impl RecordingExports {
             .expect("the spawn reached registration")
     }
 
+    fn base_call(&self) -> Option<(String, String, Option<String>)> {
+        self.base_call.lock().unwrap().clone()
+    }
+
     fn override_call(&self) -> Option<(String, Vec<mj_core::subagent::ReviewOverride>)> {
         self.override_call.lock().unwrap().clone()
     }
@@ -239,6 +254,7 @@ async fn selection_backend_refusing(
         parent: parent_record("parent-1", "parent"),
         registered: std::sync::Mutex::new(None),
         override_call: std::sync::Mutex::new(None),
+        base_call: std::sync::Mutex::new(None),
     });
     let backend = Arc::new(
         ApiBackend::new(
@@ -378,6 +394,34 @@ async fn override_review_dispatch_forwards_parent_and_pairs_to_export() {
                 finding: "F".into(),
                 reason: "finding is unreasonable".into(),
             }]
+        ))
+    );
+}
+
+#[tokio::test]
+async fn set_review_baseline_dispatch_forwards_parent_commit_and_path_to_export() {
+    let (backend, exports) = selection_backend(SAME_MODELS, None).await;
+    let result = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "set-review-baseline".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::SetReviewBaseline {
+                    commit: "abc1234".into(),
+                    path: Some("/workspace/linked".into()),
+                },
+            },
+        )
+        .await;
+    assert!(!result.is_error, "{}", result.message);
+    assert_eq!(
+        exports.base_call(),
+        Some((
+            "parent-1".into(),
+            "abc1234".into(),
+            Some("/workspace/linked".into())
         ))
     );
 }

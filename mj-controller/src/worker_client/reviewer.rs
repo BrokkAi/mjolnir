@@ -52,6 +52,49 @@ impl RelayClient {
         }
     }
 
+    /// Record trees as overridden: a push of them is allowed, but they do not
+    /// become the base of the next push review.
+    pub async fn record_overridden(
+        &mut self,
+        role: Option<&str>,
+        trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
+    ) -> Result<()> {
+        let request = self.reviewer_request(role, ReviewerRequest::RecordOverridden { trees })?;
+        anyhow::ensure!(
+            request.supported_at(self.protocol_version),
+            "the session's worker predates overridden-tree records; restart the session"
+        );
+        match self
+            .call_with_timeout(request, REVIEW_CAPTURE_TIMEOUT)
+            .await?
+        {
+            RelayResponsePayload::ReviewBaselineAdvanced => Ok(()),
+            _ => bail!("relay returned an unexpected overridden-tree response"),
+        }
+    }
+
+    /// Make a reviewed or overridden commit the base of the next push review.
+    pub async fn set_review_base(
+        &mut self,
+        role: Option<&str>,
+        path: Option<std::path::PathBuf>,
+        commit: String,
+    ) -> Result<(std::path::PathBuf, String, String)> {
+        let request =
+            self.reviewer_request(role, ReviewerRequest::SetReviewBase { path, commit })?;
+        anyhow::ensure!(
+            request.supported_at(self.protocol_version),
+            "the session's worker predates set_review_baseline; restart the session"
+        );
+        match self
+            .call_with_timeout(request, REVIEW_CAPTURE_TIMEOUT)
+            .await?
+        {
+            RelayResponsePayload::ReviewBaseSet { root, commit, tree } => Ok((root, commit, tree)),
+            _ => bail!("relay returned an unexpected review base response"),
+        }
+    }
+
     /// Record the trees a completed review reviewed through, so the next
     /// review starts from them.
     pub async fn advance_review_baseline(

@@ -14,7 +14,9 @@ impl HostState {
                 return Box::pin(self.handle_without_startup_failure(event)).await;
             }
             match event {
-                HostEvent::StartPush { reply, .. } | HostEvent::OverridePush { reply, .. } => {
+                HostEvent::StartPush { reply, .. }
+                | HostEvent::OverridePush { reply, .. }
+                | HostEvent::SetPushBase { reply, .. } => {
                     let _ = reply.send(Err(StartRefusal(reason.clone())));
                     return false;
                 }
@@ -42,6 +44,7 @@ impl HostState {
                 &event,
                 HostEvent::StartPush { .. }
                     | HostEvent::OverridePush { .. }
+                    | HostEvent::SetPushBase { .. }
                     | HostEvent::Start { .. }
                     | HostEvent::Resolve { .. }
                     | HostEvent::QuestionTarget { .. }
@@ -67,6 +70,12 @@ impl HostState {
                 overrides,
                 reply,
             } => self.override_push(session_id, overrides, reply),
+            HostEvent::SetPushBase {
+                session_id,
+                commit,
+                path,
+                reply,
+            } => self.set_push_base(session_id, commit, path, reply),
             HostEvent::OverrideValidated { session_id, permit } => {
                 self.override_validated(&session_id, permit)
             }
@@ -271,7 +280,8 @@ impl HostState {
                 for event in std::mem::take(&mut self.deferred_admissions) {
                     match event {
                         HostEvent::StartPush { reply, .. }
-                        | HostEvent::OverridePush { reply, .. } => {
+                        | HostEvent::OverridePush { reply, .. }
+                        | HostEvent::SetPushBase { reply, .. } => {
                             let _ = reply.send(Err(StartRefusal(format!(
                                 "review startup recovery failed: {error}"
                             ))));

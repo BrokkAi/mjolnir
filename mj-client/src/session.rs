@@ -63,6 +63,15 @@ pub enum ReviewerAction {
     AdvanceBaseline {
         trees: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
+    /// Record trees as overridden: pushable, but not the next review base.
+    RecordOverridden {
+        trees: std::collections::BTreeMap<std::path::PathBuf, (String, String)>,
+    },
+    /// Make a reviewed or overridden commit the next push review base.
+    SetReviewBase {
+        path: Option<std::path::PathBuf>,
+        commit: String,
+    },
 }
 
 impl ReviewerAction {
@@ -71,6 +80,8 @@ impl ReviewerAction {
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
             Self::RecordReviewed { .. } => "reviewer_record_reviewed",
+            Self::RecordOverridden { .. } => "reviewer_record_overridden",
+            Self::SetReviewBase { .. } => "reviewer_set_review_base",
         }
     }
 }
@@ -78,8 +89,15 @@ impl ReviewerAction {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewerOutcome {
-    Delta { repositories: Vec<RepoDelta> },
+    Delta {
+        repositories: Vec<RepoDelta>,
+    },
     BaselineAdvanced,
+    ReviewBaseSet {
+        root: std::path::PathBuf,
+        commit: String,
+        tree: String,
+    },
 }
 
 /// Preserve whether a submit failed before delivery or lost its acknowledgement.
