@@ -1,7 +1,8 @@
 //! Bounded cursor history over immutable owner snapshots.
 use super::*;
 use mj_client::runtime_feed::{
-    RuntimeCursor, RuntimeDelta, RuntimeFrame, RuntimeMetadata, RuntimeProjection, SessionTailReply,
+    RuntimeCursor, RuntimeDelta, RuntimeFrame, RuntimeMetadata, RuntimeProjection,
+    ScopedProjection, SessionTailReply,
 };
 use mj_core::native_agent::NativeAgentSummary;
 use mj_core::snapshot_map::SnapshotMap;
@@ -19,7 +20,13 @@ pub(super) struct RuntimeHistory {
     bytes: usize,
     native_owners: NativeOwners,
     full: RuntimeProjection,
+    /// Family-scoped views recently served, oldest first. A terminal's next
+    /// poll finds its base here and scopes only the changes since.
+    scoped: VecDeque<(u64, Arc<ScopedProjection>)>,
 }
+
+/// Scoped views kept for reuse; one per terminal scope covers the usual case.
+const SCOPED_VIEWS: usize = 32;
 
 impl RuntimeHistory {
     fn cursor(&self) -> RuntimeCursor {
@@ -83,42 +90,81 @@ impl RuntimeHistory {
     }
 
     #[cfg(test)]
-    fn frame(&self, requested: Option<&RuntimeCursor>) -> RuntimeFrame {
+    fn frame(&mut self, requested: Option<&RuntimeCursor>) -> RuntimeFrame {
         self.frame_for_subagent_parents(requested, &BTreeSet::new())
     }
 
+    fn snapshot(&self, sequence: u64) -> Option<&RuntimeProjection> {
+        self.snapshots
+            .iter()
+            .find(|(held, _, _)| *held == sequence)
+            .map(|(_, projection, _)| projection)
+    }
+
+    /// The retained publication at `sequence` scoped to `parents`. A view
+    /// served earlier is reused; otherwise the newest earlier view for the same
+    /// parents is advanced, and only a scope never served is filtered whole.
+    fn scoped(
+        &mut self,
+        sequence: u64,
+        parents: &BTreeSet<String>,
+    ) -> Option<Arc<ScopedProjection>> {
+        self.snapshot(sequence)?;
+        let same_scope = |view: &ScopedProjection| view.projection.subagent_parents == *parents;
+        if let Some((_, view)) = self
+            .scoped
+            .iter()
+            .find(|(held, view)| *held == sequence && same_scope(view))
+        {
+            return Some(Arc::clone(view));
+        }
+        let after = self.snapshot(sequence)?;
+        let base = self
+            .scoped
+            .iter()
+            .rev()
+            .filter(|(held, view)| *held < sequence && same_scope(view))
+            .find_map(|(held, view)| Some((view, self.snapshot(*held)?)));
+        let view = Arc::new(match base {
+            Some((view, before)) => view.advance(before, after),
+            None => ScopedProjection::new(after, parents.clone()),
+        });
+        self.scoped.push_back((sequence, Arc::clone(&view)));
+        if self.scoped.len() > SCOPED_VIEWS {
+            self.scoped.pop_front();
+        }
+        Some(view)
+    }
+
     fn frame_for_subagent_parents(
-        &self,
+        &mut self,
         requested: Option<&RuntimeCursor>,
         parents: &BTreeSet<String>,
     ) -> RuntimeFrame {
         let mut cursor = self.cursor();
         cursor.subagent_parents = parents.clone();
-        let (_, current, _) = self.snapshots.back().expect("captured projection");
-        let current = current.for_subagent_parents(parents);
+        let sequence = self.snapshots.back().expect("captured projection").0;
         let requested = requested.filter(|requested| requested.subagent_parents == *parents);
-        let Some(requested) = requested else {
-            return RuntimeFrame::Snapshot {
+        // Scope the client's base first so the current view can advance from it.
+        let before = requested
+            .filter(|requested| requested.incarnation == self.incarnation)
+            .and_then(|requested| self.scoped(requested.sequence, parents));
+        let current = self.scoped(sequence, parents).expect("captured projection");
+        match (requested, before) {
+            (None, _) => RuntimeFrame::Snapshot {
                 cursor,
-                projection: Box::new(current),
-            };
-        };
-        if requested.incarnation == self.incarnation
-            && let Some((_, before, _)) = self
-                .snapshots
-                .iter()
-                .find(|(sequence, _, _)| *sequence == requested.sequence)
-        {
-            return RuntimeFrame::Delta {
+                projection: Box::new(current.projection.clone()),
+            },
+            (Some(requested), Some(before)) => RuntimeFrame::Delta {
                 from: requested.clone(),
                 cursor,
                 changes: Box::new(RuntimeDelta::between(
-                    &before.for_subagent_parents(parents),
-                    &current,
+                    &before.projection,
+                    &current.projection,
                 )),
-            };
+            },
+            (Some(_), None) => RuntimeFrame::ResetRequired,
         }
-        RuntimeFrame::ResetRequired
     }
 }
 
@@ -738,6 +784,169 @@ mod tests {
             ["other"]
         );
         assert_eq!(replica.projection.subagents.len(), 1199);
+    }
+
+    /// A terminal following its family scope through deltas holds exactly
+    /// what scoping each publication from scratch gives, while the daemon
+    /// scopes only what changed between polls.
+    #[test]
+    fn advancing_a_scoped_view_matches_scoping_from_scratch() {
+        let agent_of = |owner: &str| {
+            let agent = mj_core::native_agent::NativeAgent {
+                owner_session_id: owner.into(),
+                session_id: "explore".into(),
+                parent_session_id: None,
+                name: "Explore".into(),
+                task: "Map the code".into(),
+                capabilities: Default::default(),
+                state: mj_core::native_agent::NativeAgentState::Completed,
+                availability: Default::default(),
+                availability_reason: None,
+                stable_id: None,
+            };
+            (
+                agent.view_id(),
+                NativeAgentSummary {
+                    generation_ordinal: 1,
+                    agent,
+                    projection_ordinal: 0,
+                    projection_digest: String::new(),
+                },
+            )
+        };
+        let cpu = |reason: &str| mj_client::runtime_feed::SessionCpuView::Unavailable {
+            reason: reason.into(),
+        };
+        let lifecycle = |id: &str| RuntimeLifecycleView {
+            operation_id: format!("resume-{id}"),
+            move_operation_id: None,
+            cancellable: true,
+            session_id: id.into(),
+            kind: RuntimeLifecycleKind::Resume,
+            started_at_epoch_seconds: 0,
+            active_stages: vec![],
+            resume_destination: None,
+            notice: None,
+        };
+        let mut full = RuntimeProjection::default();
+        for (id, state) in [
+            ("grandparent", SessionState::Stopped),
+            ("parent", SessionState::Running),
+            ("stopped", SessionState::Stopped),
+            ("child", SessionState::Stopped),
+            ("other", SessionState::Running),
+        ] {
+            full.records.insert(id.into(), record(id, state));
+            full.session_cpu.insert(id.into(), cpu(id));
+        }
+        full.subagents.insert(
+            "child".into(),
+            super::super::tests::runtime_test_subagent("child", "parent").into(),
+        );
+        let (stopped_agent, summary) = agent_of("stopped");
+        full.native_agents.insert(stopped_agent.clone(), summary);
+
+        type Step = Box<dyn Fn(&mut RuntimeProjection)>;
+        let steps: Vec<(&str, Step)> = vec![
+            ("unrelated revision", Box::new(|full| full.revision += 1)),
+            (
+                "an out-of-scope row changes",
+                Box::new(move |full| {
+                    full.session_cpu
+                        .insert("stopped".into(), cpu("still stopped"));
+                }),
+            ),
+            (
+                "a stopped session resumes",
+                Box::new(|full| {
+                    full.records.get_mut("stopped").unwrap().state = SessionState::Running;
+                }),
+            ),
+            (
+                "a lifecycle holds a stopped session in view",
+                Box::new(move |full| {
+                    full.records.get_mut("stopped").unwrap().state = SessionState::Stopped;
+                    full.metadata.lifecycles = vec![lifecycle("stopped")];
+                }),
+            ),
+            (
+                "the lifecycle ends",
+                Box::new(|full| full.metadata.lifecycles.clear()),
+            ),
+            (
+                "the opened parent gains a parent",
+                Box::new(|full| {
+                    full.subagents.insert(
+                        "parent".into(),
+                        super::super::tests::runtime_test_subagent("parent", "grandparent").into(),
+                    );
+                }),
+            ),
+            (
+                "a child joins the opened family",
+                Box::new(|full| {
+                    full.subagents.insert(
+                        "stopped".into(),
+                        super::super::tests::runtime_test_subagent("stopped", "parent").into(),
+                    );
+                }),
+            ),
+            (
+                "a child is archived",
+                Box::new(|full| full.records.get_mut("child").unwrap().archived = true),
+            ),
+            (
+                "a session is deleted",
+                Box::new(|full| {
+                    full.records.remove("other");
+                    full.session_cpu.remove("other");
+                }),
+            ),
+            (
+                "a live session's row changes",
+                Box::new(move |full| {
+                    full.session_cpu.insert("parent".into(), cpu("busy"));
+                }),
+            ),
+        ];
+
+        let scopes = [BTreeSet::new(), BTreeSet::from(["parent".to_owned()])];
+        let mut history = RuntimeHistory::default();
+        history.publish(full.clone()).unwrap();
+        let mut replicas = scopes
+            .iter()
+            .map(|_| mj_client::runtime_feed::RuntimeReplica::default())
+            .collect::<Vec<_>>();
+        let mut views = scopes
+            .iter()
+            .map(|parents| ScopedProjection::new(&full, parents.clone()))
+            .collect::<Vec<_>>();
+        for (label, step) in steps {
+            let before = full.clone();
+            step(&mut full);
+            history.publish(full.clone()).unwrap();
+            for ((parents, replica), view) in scopes.iter().zip(&mut replicas).zip(&mut views) {
+                let expected = full.for_subagent_parents(parents);
+                *view = view.advance(&before, &full);
+                assert_eq!(
+                    view.projection, expected,
+                    "{label}: advanced view, scope {parents:?}"
+                );
+                let frame = history.frame_for_subagent_parents(replica.cursor.as_ref(), parents);
+                replica.apply(frame).unwrap();
+                assert_eq!(
+                    replica.projection, expected,
+                    "{label}: client replica, scope {parents:?}"
+                );
+            }
+        }
+        let family = &replicas[1].projection;
+        assert!(family.records.contains_key("grandparent"));
+        assert!(family.records.contains_key("stopped"));
+        assert!(family.native_agents.contains_key(&stopped_agent));
+        assert!(!family.subagents.contains_key("child"));
+        assert!(!replicas[0].projection.records.contains_key("stopped"));
+        assert!(replicas[0].projection.native_agents.is_empty());
     }
 
     fn record(id: &str, state: SessionState) -> SessionRecord {
